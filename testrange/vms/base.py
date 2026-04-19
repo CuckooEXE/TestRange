@@ -1,0 +1,330 @@
+"""Abstract base class for virtual machine definitions."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from testrange.communication.base import AbstractCommunicator, ExecResult
+from testrange.exceptions import VMBuildError
+
+if TYPE_CHECKING:
+    from testrange._run import RunDir
+    from testrange.cache import CacheManager
+    from testrange.credentials import Credential
+    from testrange.orchestrator_base import AbstractOrchestrator
+
+
+class AbstractVM(ABC):
+    """Abstract interface for a virtual machine instance.
+
+    Concrete subclasses must implement the runtime communication methods.
+    Before any of these methods can be called, the VM must be started and
+    its communicator initialised (done automatically by
+    :class:`~testrange.backends.libvirt.Orchestrator`).
+
+    Subclass this to support alternative hypervisors or provisioning mechanisms.
+    """
+
+    _communicator: AbstractCommunicator | None = None
+    """Active communicator instance; ``None`` until the VM is started."""
+
+    # ------------------------------------------------------------------
+    # Spec attributes subclasses populate in their __init__.  Declared
+    # here so the shared ``_make_communicator`` / helpers can read them
+    # without mypy gymnastics.
+    # ------------------------------------------------------------------
+    users: list[Credential]
+    """Credentials to configure on / pass through to the guest."""
+
+    communicator: str
+    """Transport kind: ``"guest-agent"``, ``"ssh"``, or ``"winrm"``."""
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """The VM's human-readable name as specified at construction.
+
+        :returns: VM name string.
+        """
+
+    def _require_communicator(self) -> AbstractCommunicator:
+        """Return the active communicator or raise an error.
+
+        :returns: The active :class:`~testrange.communication.base.AbstractCommunicator`.
+        :raises VMNotRunningError: If the VM has not been started yet.
+        """
+        from testrange.exceptions import VMNotRunningError
+        if self._communicator is None:
+            raise VMNotRunningError(
+                f"VM {self.name!r} is not running. "
+                "Start the Orchestrator before calling VM methods."
+            )
+        return self._communicator
+
+    def hostname(self) -> str:
+        """Return the VM's hostname as reported by the guest OS.
+
+        Equivalent to running ``hostname`` inside the VM.
+
+        :returns: Hostname string.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises CommunicationError: On communication failure.
+        """
+        return self._require_communicator().hostname()
+
+    def exec(
+        self,
+        argv: list[str],
+        env: dict[str, str] | None = None,
+        timeout: int = 60,
+    ) -> ExecResult:
+        """Execute a command inside the VM.
+
+        :param argv: Command and arguments list (e.g. ``['uname', '-r']``).
+        :param env: Optional extra environment variables.
+        :param timeout: Maximum seconds to wait for the command to finish.
+        :returns: :class:`~testrange.communication.base.ExecResult` with exit
+            code and captured output.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises VMTimeoutError: If the command exceeds *timeout*.
+        :raises CommunicationError: On communication errors.
+        """
+        return self._require_communicator().exec(argv, env=env, timeout=timeout)
+
+    def get_file(self, path: str) -> bytes:
+        """Read a file from the VM's filesystem.
+
+        :param path: Absolute path inside the VM (e.g. ``'/etc/os-release'``).
+        :returns: Raw file contents as bytes.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises CommunicationError: If the file cannot be read.
+        """
+        return self._require_communicator().get_file(path)
+
+    def put_file(self, path: str, data: bytes) -> None:
+        """Write *data* to *path* inside the VM.
+
+        :param path: Absolute destination path inside the VM.
+        :param data: Raw bytes to write.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises CommunicationError: If the file cannot be written.
+        """
+        self._require_communicator().put_file(path, data)
+
+    def read_text(self, path: str, encoding: str = "utf-8") -> str:
+        """Read a text file from the VM and decode it.
+
+        Thin wrapper over :meth:`get_file` that decodes the returned bytes.
+
+        :param path: Absolute path inside the VM.
+        :param encoding: Text encoding. Defaults to ``utf-8``.
+        :returns: Decoded file contents.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises CommunicationError: If the file cannot be read.
+        :raises UnicodeDecodeError: If the file is not valid for *encoding*.
+        """
+        return self.get_file(path).decode(encoding)
+
+    def write_text(
+        self,
+        path: str,
+        text: str,
+        encoding: str = "utf-8",
+    ) -> None:
+        """Write *text* to *path* inside the VM.
+
+        Thin wrapper over :meth:`put_file` that encodes *text* first.
+
+        :param path: Absolute destination path inside the VM.
+        :param text: String to write.
+        :param encoding: Text encoding. Defaults to ``utf-8``.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises CommunicationError: If the file cannot be written.
+        """
+        self.put_file(path, text.encode(encoding))
+
+    def download(self, remote_path: str, local_path: str | Path) -> Path:
+        """Copy a file from the VM to the host.
+
+        Parent directories on the host are created automatically so tests
+        can point at throwaway ``tmp_path`` subpaths without boilerplate.
+
+        :param remote_path: Absolute path inside the VM.
+        :param local_path: Destination on the host. Accepts ``str`` or
+            :class:`pathlib.Path`.
+        :returns: The resolved host path the bytes were written to.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises CommunicationError: If the remote file cannot be read.
+        :raises OSError: If the local path cannot be written.
+        """
+        dest = Path(local_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self.get_file(remote_path))
+        return dest
+
+    def upload(self, local_path: str | Path, remote_path: str) -> None:
+        """Copy a file from the host to the VM.
+
+        :param local_path: Source file on the host. Accepts ``str`` or
+            :class:`pathlib.Path`.
+        :param remote_path: Absolute destination path inside the VM.
+        :raises VMNotRunningError: If the VM is not running.
+        :raises FileNotFoundError: If *local_path* does not exist.
+        :raises CommunicationError: If the remote file cannot be written.
+        """
+        self.put_file(remote_path, Path(local_path).read_bytes())
+
+    # ------------------------------------------------------------------
+    # Communicator factory — shared SSH / WinRM construction lives here
+    # so each backend only has to implement the one piece it controls:
+    # the guest-agent transport.  SSH and WinRM are hypervisor-neutral
+    # (they need an IP and credentials, nothing else).
+    # ------------------------------------------------------------------
+
+    def _resolve_communicator_host(
+        self,
+        mac_ip_pairs: list[tuple[str, str, str, str]],
+    ) -> str:
+        """Return the first non-empty static IP from *mac_ip_pairs*.
+
+        The v1 SSH / WinRM paths require a static IP via a
+        :class:`~testrange.devices.VirtualNetworkRef`.  Future
+        DHCP-lease discovery plugs in here by replacing / extending
+        this method — no other caller inspects ``mac_ip_pairs`` for
+        host resolution.
+        """
+        for _, ip_cidr, _, _ in mac_ip_pairs:
+            if ip_cidr:
+                return ip_cidr.split("/", 1)[0]
+        raise VMBuildError(
+            f"VM {self.name!r}: communicator={self.communicator!r} "
+            "requires a static IP on at least one VirtualNetworkRef "
+            "(e.g. VirtualNetworkRef('Net', ip='10.0.0.10')). "
+            "DHCP-only discovery is not supported in v1."
+        )
+
+    def _make_communicator(
+        self,
+        mac_ip_pairs: list[tuple[str, str, str, str]],
+    ) -> AbstractCommunicator:
+        """Construct the configured communicator for this VM.
+
+        Handles the hypervisor-neutral transports (SSH, WinRM) inline
+        and delegates the backend-specific ``"guest-agent"`` path to
+        :meth:`_make_guest_agent_communicator`.
+        """
+        if self.communicator == "guest-agent":
+            return self._make_guest_agent_communicator()
+        if self.communicator == "ssh":
+            from testrange.communication.ssh import SSHCommunicator
+            host = self._resolve_communicator_host(mac_ip_pairs)
+            # Prefer a credential that brought its own SSH key; otherwise
+            # fall back to the first credential (password auth).
+            cred = next((c for c in self.users if c.ssh_key), self.users[0])
+            return SSHCommunicator(
+                host=host,
+                username=cred.username,
+                password=cred.password or None,
+            )
+        if self.communicator == "winrm":
+            from testrange.communication.winrm import WinRMCommunicator
+            host = self._resolve_communicator_host(mac_ip_pairs)
+            # Windows' built-in Administrator account is represented as
+            # the root Credential (see
+            # WindowsUnattendedBuilder._admin_password).  Prefer it
+            # because it has WinRM access baked in; fall back to the
+            # first credential so BYOI images with a non-root admin
+            # still work.
+            cred = next(
+                (c for c in self.users if c.is_root()), self.users[0]
+            )
+            admin_name = (
+                "Administrator" if cred.is_root() else cred.username
+            )
+            return WinRMCommunicator(
+                host=host,
+                username=admin_name,
+                password=cred.password,
+            )
+        raise VMBuildError(
+            f"VM {self.name!r}: unknown communicator="
+            f"{self.communicator!r}"
+        )
+
+    def _make_guest_agent_communicator(self) -> AbstractCommunicator:
+        """Construct the backend's native guest-agent communicator.
+
+        The default raises :class:`VMBuildError` — backends that do not
+        ship a guest-agent path should let this stand.  Backends that
+        do (libvirt's virtio-serial channel, Proxmox's REST
+        ``/agent`` endpoint) override this method to return their
+        native implementation.
+        """
+        raise VMBuildError(
+            f"VM {self.name!r}: communicator='guest-agent' is not "
+            f"implemented on the {type(self).__name__} backend.  "
+            "Use communicator='ssh' (Linux) or communicator='winrm' "
+            "(Windows) instead, or install a backend that ships a "
+            "guest-agent communicator."
+        )
+
+    @abstractmethod
+    def build(
+        self,
+        context: AbstractOrchestrator,
+        cache: CacheManager,
+        run: RunDir,
+        install_network_name: str,
+        install_network_mac: str,
+    ) -> Path:
+        """Produce (or fetch from cache) a runnable disk image.
+
+        Called once per VM by the orchestrator during ``__enter__``.
+        Install-phase builders boot a one-off domain against the
+        context's backend and snapshot the result; no-op builders just
+        stage a caller-supplied image.
+
+        :param context: The orchestrator driving this run; concrete VM
+            implementations downcast to pick up their backend handle.
+        :param cache: Active :class:`~testrange.cache.CacheManager`.
+        :param run: Scratch dir for this test run.
+        :param install_network_name: Backend-specific name of the
+            install-phase network (empty when the VM's builder skips
+            the install phase).
+        :param install_network_mac: MAC address for the install NIC
+            (empty when the VM's builder skips the install phase).
+        :returns: Absolute path to the runnable disk image.
+        :raises VMBuildError: If the install phase fails or times out.
+        """
+
+    @abstractmethod
+    def start_run(
+        self,
+        context: AbstractOrchestrator,
+        run: RunDir,
+        installed_disk: Path,
+        network_entries: list[tuple[str, str]],
+        mac_ip_pairs: list[tuple[str, str, str, str]],
+    ) -> None:
+        """Create an overlay, start the run-phase domain, attach
+        the configured communicator.
+
+        :param context: The orchestrator driving this run.
+        :param run: Scratch dir for this test run.
+        :param installed_disk: Disk image returned by :meth:`build`.
+        :param network_entries: ``(backend_network_name, mac)`` pairs,
+            one per NIC.
+        :param mac_ip_pairs: ``(mac, ip_with_cidr, gateway, nameserver)``
+            per NIC.  Empty ``ip_with_cidr`` means DHCP.
+        :raises VMBuildError: If the domain cannot start.
+        :raises VMTimeoutError: If the communicator never responds.
+        """
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Gracefully shut down the VM.
+
+        :raises VMNotRunningError: If the VM is not currently running.
+        """

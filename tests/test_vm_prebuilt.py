@@ -1,0 +1,324 @@
+"""Unit tests for the NoOpBuilder (BYOI / prebuilt) flow through the VM API.
+
+These exercise the public surface: construct a VM with
+``builder=NoOpBuilder()`` and assert the VM + builder interact correctly
+(communicator defaults, image staging, build dispatch, domain XML).
+Low-level NoOpBuilder unit tests live in ``tests/test_builders.py``.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from testrange import VM, Credential, NoOpBuilder
+from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
+from testrange.cache import CacheManager
+from testrange.communication.ssh import SSHCommunicator
+from testrange.devices import HardDrive, VirtualNetworkRef
+from testrange.exceptions import VMBuildError
+
+
+def _writable_qcow2(path: Path) -> Path:
+    path.write_bytes(b"QFI\xfbfake-qcow2-stub")
+    return path
+
+
+def _noop_vm(
+    tmp_path: Path,
+    *,
+    users: list[Credential] | None = None,
+    windows: bool = False,
+    communicator: str | None = None,
+    devices: list | None = None,
+    name: str = "byoi",
+) -> VM:
+    """Build a NoOpBuilder-backed VM with a writable fake qcow2."""
+    src = _writable_qcow2(tmp_path / f"{name}.qcow2")
+    return VM(
+        name=name,
+        iso=str(src),
+        users=users or [Credential("deploy", "pw")],
+        devices=devices or [VirtualNetworkRef("Net", ip="10.0.0.5")],
+        builder=NoOpBuilder(windows=windows),
+        communicator=communicator,
+    )
+
+
+class TestNoOpDefaults:
+    def test_default_communicator_linux(self, tmp_path: Path) -> None:
+        vm = _noop_vm(tmp_path)
+        assert vm.communicator == "guest-agent"
+
+    def test_default_communicator_windows(self, tmp_path: Path) -> None:
+        vm = _noop_vm(tmp_path, windows=True)
+        assert vm.communicator == "winrm"
+
+    def test_explicit_communicator_wins(self, tmp_path: Path) -> None:
+        vm = _noop_vm(tmp_path, communicator="ssh")
+        assert vm.communicator == "ssh"
+
+    def test_rejects_unknown_communicator(self, tmp_path: Path) -> None:
+        with pytest.raises(VMBuildError, match="communicator="):
+            _noop_vm(tmp_path, communicator="bogus")
+
+
+class TestReadyImage:
+    """Tests for NoOpBuilder.ready_image() via VM.build()."""
+
+    def test_copies_when_outside_cache_root(
+        self,
+        tmp_path: Path,
+        tmp_cache_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = tmp_path / "outside" / "golden.qcow2"
+        src.parent.mkdir()
+        src.write_bytes(b"PREBUILT_CONTENTS")
+        vm = VM(
+            name="byoi",
+            iso=str(src),
+            users=[Credential("deploy", "pw")],
+            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            builder=NoOpBuilder(),
+        )
+        cache = CacheManager(root=tmp_cache_root)
+
+        from testrange.vms.builders import noop as noop_mod
+        monkeypatch.setattr(
+            noop_mod._qemu_img, "info",
+            lambda _: {"format": "qcow2"},
+        )
+
+        dest = vm.builder.ready_image(vm, cache)
+
+        assert dest.exists()
+        assert dest.parent == cache.vms_dir
+        assert dest.name.startswith("byoi-")
+        assert dest.suffix == ".qcow2"
+        assert dest.read_bytes() == b"PREBUILT_CONTENTS"
+        # Manifest sidecar written
+        manifest = dest.with_suffix(".json")
+        assert manifest.exists()
+        meta = json.loads(manifest.read_text())
+        assert meta["prebuilt"] is True
+        assert meta["source_path"] == str(src.resolve())
+        # World-readable so the qemu daemon can open it.
+        assert dest.stat().st_mode & 0o044
+
+    def test_idempotent_second_call(
+        self,
+        tmp_path: Path,
+        tmp_cache_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = _writable_qcow2(tmp_path / "golden.qcow2")
+        vm = VM(
+            name="byoi",
+            iso=str(src),
+            users=[Credential("deploy", "pw")],
+            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            builder=NoOpBuilder(),
+        )
+        cache = CacheManager(root=tmp_cache_root)
+        from testrange.vms.builders import noop as noop_mod
+        monkeypatch.setattr(
+            noop_mod._qemu_img, "info",
+            lambda _: {"format": "qcow2"},
+        )
+
+        first = vm.builder.ready_image(vm, cache)
+        first_mtime = first.stat().st_mtime_ns
+        second = vm.builder.ready_image(vm, cache)
+
+        assert first == second
+        assert second.stat().st_mtime_ns == first_mtime  # no re-copy
+
+    def test_uses_path_in_place_when_inside_cache_root(
+        self,
+        tmp_cache_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache = CacheManager(root=tmp_cache_root)
+        # Place a source file under the cache root.
+        src = cache.vms_dir / "user-staged.qcow2"
+        src.write_bytes(b"PREBUILT_CONTENTS")
+        vm = VM(
+            name="byoi",
+            iso=str(src),
+            users=[Credential("deploy", "pw")],
+            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            builder=NoOpBuilder(),
+        )
+        from testrange.vms.builders import noop as noop_mod
+        monkeypatch.setattr(
+            noop_mod._qemu_img, "info",
+            lambda _: {"format": "qcow2"},
+        )
+
+        dest = vm.builder.ready_image(vm, cache)
+        assert dest == src  # no copy happened
+
+    def test_missing_file_raises(self, tmp_cache_root: Path) -> None:
+        vm = VM(
+            name="byoi",
+            iso="/nonexistent/path/ghost.qcow2",
+            users=[Credential("root", "pw")],
+            builder=NoOpBuilder(),
+        )
+        cache = CacheManager(root=tmp_cache_root)
+        with pytest.raises(VMBuildError, match="not found"):
+            vm.builder.ready_image(vm, cache)
+
+    def test_wrong_format_raises(
+        self,
+        tmp_path: Path,
+        tmp_cache_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        src = _writable_qcow2(tmp_path / "golden.qcow2")
+        vm = VM(
+            name="byoi",
+            iso=str(src),
+            users=[Credential("deploy", "pw")],
+            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            builder=NoOpBuilder(),
+        )
+        cache = CacheManager(root=tmp_cache_root)
+        from testrange.vms.builders import noop as noop_mod
+        monkeypatch.setattr(
+            noop_mod._qemu_img, "info",
+            lambda _: {"format": "raw"},
+        )
+
+        with pytest.raises(VMBuildError, match="not qcow2"):
+            vm.builder.ready_image(vm, cache)
+
+
+class TestResolveCommunicatorHost:
+    def _make_vm(self, **overrides) -> VM:
+        defaults = dict(
+            name="x",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+        )
+        defaults.update(overrides)
+        return VM(**defaults)
+
+    def test_returns_first_static_ip(self) -> None:
+        vm = self._make_vm()
+        pairs = [
+            ("aa:bb:cc:dd:ee:01", "", "", ""),
+            ("aa:bb:cc:dd:ee:02", "10.0.0.5/24", "10.0.0.1", "10.0.0.1"),
+            ("aa:bb:cc:dd:ee:03", "10.0.1.5/24", "", ""),
+        ]
+        assert vm._resolve_communicator_host(pairs) == "10.0.0.5"
+
+    def test_raises_when_no_static_ip(self) -> None:
+        vm = self._make_vm()
+        pairs = [
+            ("aa:bb:cc:dd:ee:01", "", "", ""),
+            ("aa:bb:cc:dd:ee:02", "", "", ""),
+        ]
+        with pytest.raises(VMBuildError, match="static IP"):
+            vm._resolve_communicator_host(pairs)
+
+
+class TestMakeCommunicator:
+    def test_guest_agent(self, tmp_path: Path) -> None:
+        vm = _noop_vm(tmp_path, communicator="guest-agent")
+        vm._domain = MagicMock()
+        comm = vm._make_communicator([])
+        assert isinstance(comm, GuestAgentCommunicator)
+
+    def test_ssh_uses_first_credential_and_static_ip(self, tmp_path: Path) -> None:
+        vm = _noop_vm(
+            tmp_path,
+            users=[Credential("deploy", "secret")],
+            communicator="ssh",
+        )
+        pairs = [("aa:bb:cc:dd:ee:02", "10.0.0.7/24", "10.0.0.1", "10.0.0.1")]
+        comm = vm._make_communicator(pairs)
+        assert isinstance(comm, SSHCommunicator)
+        assert comm._host == "10.0.0.7"
+        assert comm._username == "deploy"
+        assert comm._password == "secret"
+
+    def test_ssh_prefers_credential_with_ssh_key(self, tmp_path: Path) -> None:
+        vm = _noop_vm(
+            tmp_path,
+            users=[
+                Credential("root", "rootpw"),
+                Credential("deploy", "deploypw", ssh_key="ssh-ed25519 AAA"),
+            ],
+            communicator="ssh",
+        )
+        pairs = [("aa:bb:cc:dd:ee:02", "10.0.0.7/24", "10.0.0.1", "10.0.0.1")]
+        comm = vm._make_communicator(pairs)
+        assert comm._username == "deploy"
+
+
+class TestBaseDomainXmlSeedOptional:
+    def test_no_cdrom_when_seed_iso_is_none(self, tmp_path: Path) -> None:
+        import xml.etree.ElementTree as ET
+
+        vm = _noop_vm(
+            tmp_path,
+            devices=[HardDrive(10), VirtualNetworkRef("Net", ip="10.0.0.5")],
+            communicator="ssh",
+        )
+        xml = vm._base_domain_xml(
+            domain_name="tr-byoi-xxxx",
+            disk_path=Path("/tmp/overlay.qcow2"),
+            seed_iso_path=None,
+            network_entries=[("tr-test", "aa:bb:cc:dd:ee:01")],
+            run_id="deadbeef",
+        )
+        root = ET.fromstring(xml)
+        cdroms = root.findall(".//disk[@device='cdrom']")
+        assert cdroms == []
+
+    def test_cdrom_present_when_seed_iso_passed(self) -> None:
+        import xml.etree.ElementTree as ET
+
+        vm = VM(
+            name="cloud",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[HardDrive(10), VirtualNetworkRef("Net")],
+        )
+        xml = vm._base_domain_xml(
+            domain_name="tr-cloud-xxxx",
+            disk_path=Path("/tmp/overlay.qcow2"),
+            seed_iso_path=Path("/tmp/seed.iso"),
+            network_entries=[("tr-test", "aa:bb:cc:dd:ee:01")],
+            run_id="deadbeef",
+        )
+        root = ET.fromstring(xml)
+        cdroms = root.findall(".//disk[@device='cdrom']")
+        assert len(cdroms) == 1
+        assert cdroms[0].find("source").get("file") == "/tmp/seed.iso"
+
+
+class TestBuildDispatchesNoOp:
+    def test_build_calls_ready_image(self, tmp_path: Path) -> None:
+        """build() for a NoOp VM must invoke builder.ready_image and
+        bypass the install-phase entirely."""
+        vm = _noop_vm(tmp_path)
+        cache = MagicMock()
+        sentinel = tmp_path / "sentinel.qcow2"
+        sentinel.write_bytes(b"x")
+        vm.builder.ready_image = MagicMock(return_value=sentinel)  # type: ignore[method-assign]
+
+        result = vm.build(
+            context=MagicMock(),
+            cache=cache,
+            run=MagicMock(),
+            install_network_name="",
+            install_network_mac="",
+        )
+        assert result == sentinel
+        vm.builder.ready_image.assert_called_once_with(vm, cache)

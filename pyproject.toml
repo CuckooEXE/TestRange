@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testrange"
+version = "0.1.0"
+description = "VM-based test environment orchestrator using KVM/QEMU/libvirt"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["testing", "virtualization", "kvm", "qemu", "libvirt"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Emulators",
+]
+dependencies = [
+    "libvirt-python>=10.0.0",
+    "lxml>=5.0",
+    "requests>=2.31",
+    "PyYAML>=6.0",
+    "pycdlib>=1.14",
+    "tqdm>=4.66",
+    "passlib[bcrypt]>=1.7",
+    "click>=8.1",
+    "filelock>=3.12",
+]
+
+[project.optional-dependencies]
+docs = [
+    "sphinx>=7.0",
+    "furo>=2024.1",
+    "sphinx-autodoc-typehints>=1.25",
+]
+ssh = [
+    "paramiko>=3.0",
+]
+winrm = [
+    "pywinrm>=0.5",
+]
+repl = [
+    "ipython>=8.0",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "mypy>=1.8",
+    "black>=24.3",
+    "ruff>=0.3",
+    "paramiko>=3.0",
+    "pywinrm>=0.5",
+]
+
+[project.scripts]
+testrange = "testrange._cli:main"
+
+[project.urls]
+"Documentation" = "https://testrange.readthedocs.io"
+"Issue Tracker" = "https://github.com/example/testrange/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["testrange*"]
+
+[tool.setuptools.package-data]
+testrange = ["py.typed"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ["py311", "py312", "py313"]
+
+# Formatting is handled by black; ruff is used only for `ruff check` linting.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",    # line length is black's job
+    "SIM105",  # `try/except/pass` is clearer than contextlib.suppress for short teardowns
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "regression: guards against previously-fixed bugs",
+    "integration: requires a real libvirt daemon",
+]
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+]

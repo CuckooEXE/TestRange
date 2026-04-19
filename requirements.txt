@@ -1,0 +1,9 @@
+libvirt-python>=10.0.0
+lxml>=5.0
+requests>=2.31
+PyYAML>=6.0
+pycdlib>=1.14
+tqdm>=4.66
+passlib[bcrypt]>=1.7
+click>=8.1
+filelock>=3.12
