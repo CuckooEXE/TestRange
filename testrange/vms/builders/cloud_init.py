@@ -12,7 +12,6 @@ reinstalling packages).
 from __future__ import annotations
 
 import io
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -130,17 +129,23 @@ class CloudInitBuilder(Builder):
         run: RunDir,
         cache: CacheManager,
     ) -> InstallDomain:
-        base_image = resolve_image(vm.iso, cache)
+        # 1. Resolve source (URL → local outer-host path); 2. stage to
+        # backend (no-op for local libvirt, SFTP upload for remote);
+        # 3. create the install overlay on the backend.
+        local_base = resolve_image(vm.iso, cache)
+        base_ref = cache.stage_source(local_base, run.storage)
         work_disk = run.create_install_disk(
-            vm.name, base_image, vm._primary_disk_size()
+            vm.name, base_ref, vm._primary_disk_size()
         )
-        seed_iso = run.seed_iso_path(vm.name, install=True)
-        write_seed_iso(
-            seed_iso,
-            meta_data=self.install_meta_data(vm, self.cache_key(vm)),
-            user_data=self.install_user_data(vm),
+        seed_ref = run.seed_iso_path(vm.name, install=True)
+        run.storage.write_bytes(
+            seed_ref,
+            build_seed_iso_bytes(
+                meta_data=self.install_meta_data(vm, self.cache_key(vm)),
+                user_data=self.install_user_data(vm),
+            ),
         )
-        return InstallDomain(work_disk=work_disk, seed_iso=seed_iso)
+        return InstallDomain(work_disk=work_disk, seed_iso=seed_ref)
 
     def install_manifest(
         self,
@@ -165,14 +170,16 @@ class CloudInitBuilder(Builder):
         run: RunDir,
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> RunDomain:
-        seed_iso = run.seed_iso_path(vm.name, install=False)
-        write_seed_iso(
-            seed_iso,
-            meta_data=self.run_meta_data(vm, run.run_id),
-            user_data=self.run_user_data(vm),
-            network_config=self.run_network_config(mac_ip_pairs),
+        seed_ref = run.seed_iso_path(vm.name, install=False)
+        run.storage.write_bytes(
+            seed_ref,
+            build_seed_iso_bytes(
+                meta_data=self.run_meta_data(vm, run.run_id),
+                user_data=self.run_user_data(vm),
+                network_config=self.run_network_config(mac_ip_pairs),
+            ),
         )
-        return RunDomain(seed_iso=seed_iso)
+        return RunDomain(seed_iso=seed_ref)
 
     # ------------------------------------------------------------------
     # YAML generation — kept public so tests and debuggers can inspect
@@ -459,17 +466,22 @@ def _insecure_write_files(
     return entries
 
 
-def write_seed_iso(
-    output_path: Path,
+def build_seed_iso_bytes(
     meta_data: str,
     user_data: str,
     network_config: str | None = None,
-) -> None:
-    """Write a cloud-init NoCloud seed ISO to *output_path*.
+) -> bytes:
+    """Return the raw bytes of a cloud-init NoCloud seed ISO.
 
     Uses :mod:`pycdlib` for pure-Python ISO 9660 creation (no external
     ``genisoimage`` / ``xorriso`` dependency).  The volume ID is
     ``cidata``, as required by the cloud-init NoCloud datasource.
+
+    Returning bytes rather than writing to a path keeps seed ISO
+    generation backend-agnostic — the caller hands the bytes to
+    whichever :class:`~testrange.storage.AbstractStorageBackend` is in
+    play (local filesystem, SFTP to a remote libvirtd host, put_file
+    into a nested VM's guest agent, …).
     """
     iso = PyCdlib()
     iso.new(interchange_level=3, joliet=3, vol_ident="cidata")
@@ -483,16 +495,18 @@ def write_seed_iso(
             joliet_path=f"/{joliet_name}",
         )
 
+    buf = io.BytesIO()
     try:
         _add(meta_data, "META_DATA", "meta-data")
         _add(user_data, "USER_DATA", "user-data")
         if network_config:
             _add(network_config, "NETWORK_CONFIG", "network-config")
-        iso.write(str(output_path))
+        iso.write_fp(buf)
+        return buf.getvalue()
     except Exception as exc:
         raise CloudInitError(f"Failed to write seed ISO: {exc}") from exc
     finally:
         iso.close()
 
 
-__all__ = ["CloudInitBuilder", "write_seed_iso"]
+__all__ = ["CloudInitBuilder", "build_seed_iso_bytes"]

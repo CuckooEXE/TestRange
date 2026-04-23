@@ -128,8 +128,9 @@ class TestCloudInitPrepareRunDomain:
     def test_seed_iso_always_written(self, tmp_path: Path) -> None:
         from testrange._run import RunDir
         from testrange.cache import CacheManager
+        from testrange.storage import LocalStorageBackend
 
-        run = RunDir(root=tmp_path)
+        run = RunDir(LocalStorageBackend(tmp_path))
         vm = _linux_vm()
 
         spec = CloudInitBuilder().prepare_run_domain(
@@ -139,7 +140,9 @@ class TestCloudInitPrepareRunDomain:
 
         assert isinstance(spec, RunDomain)
         assert spec.seed_iso is not None
-        assert spec.seed_iso.exists()
+        # Seed ISO now a backend-local ref (string); for local backend
+        # it's the absolute path we can Path() and stat.
+        assert Path(spec.seed_iso).exists()
         assert spec.uefi is False
         assert spec.windows is False
 
@@ -162,17 +165,21 @@ class TestWindowsUnattendedBuilderPrepareInstallDomain:
         """Windows install mandates UEFI + windows hints + CD-ROM boot
         order.  Those flags are the entire reason this builder exists."""
         from testrange._run import RunDir
+        from testrange.storage import LocalStorageBackend
 
-        run = RunDir(root=tmp_path)
+        run = RunDir(LocalStorageBackend(tmp_path))
         vm = _windows_vm()
 
         cache = MagicMock()
         cache.stage_local_iso.return_value = tmp_path / "iso-fake.iso"
         cache.get_virtio_win_iso.return_value = tmp_path / "virtio-win.iso"
+        # stage_source passes through for a local backend — we return
+        # the source path as a string so downstream code sees a ref.
+        cache.stage_source.side_effect = lambda p, _b: str(p)
 
-        # Avoid the real pycdlib write by stubbing write_autounattend_iso.
+        # Avoid the real pycdlib write by stubbing build_autounattend_iso_bytes.
         import testrange.vms.builders.unattend as un
-        monkeypatch.setattr(un, "write_autounattend_iso", MagicMock())
+        monkeypatch.setattr(un, "build_autounattend_iso_bytes", lambda _x: b"iso")
 
         # Pretend resolve_image returns the iso path as-is.
         monkeypatch.setattr(un, "resolve_image", lambda iso, _cache: Path(iso))
@@ -184,15 +191,16 @@ class TestWindowsUnattendedBuilderPrepareInstallDomain:
         assert spec.windows is True
         assert spec.boot_cdrom is True
         # Primary disk is the blank qcow2, not the install ISO.
-        assert spec.work_disk.parent == run.path
+        assert Path(spec.work_disk).parent == Path(run.path)
         # Extra CD-ROMs: install ISO + virtio-win ISO.
         assert len(spec.extra_cdroms) == 2
         run.cleanup()
 
     def test_run_domain_has_uefi_windows_no_seed(self, tmp_path: Path) -> None:
         from testrange._run import RunDir
+        from testrange.storage import LocalStorageBackend
 
-        run = RunDir(root=tmp_path)
+        run = RunDir(LocalStorageBackend(tmp_path))
         spec = WindowsUnattendedBuilder().prepare_run_domain(
             _windows_vm(), run, mac_ip_pairs=[]
         )

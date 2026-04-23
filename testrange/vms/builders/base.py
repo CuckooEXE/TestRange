@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -44,14 +43,23 @@ class InstallDomain:
     """Instructions :class:`~testrange.backends.libvirt.VM` needs to build
     the install-phase libvirt domain XML.
 
-    :param work_disk: Absolute path to the primary disk the install
-        domain will boot and write to.  Cloud-init uses an overlay on
-        the resolved base image; autounattend uses a blank qcow2.
-    :param seed_iso: Optional seed CD-ROM (cloud-init or autounattend
-        seed) attached as the first CD-ROM device.
-    :param extra_cdroms: Additional CD-ROMs, in SATA-target order after
-        the seed.  Used by Windows to surface the install ISO and the
-        ``virtio-win.iso`` driver disc.
+    All disk-like fields are **backend-local refs** — strings that the
+    hypervisor's host can open directly.  For the default
+    :class:`~testrange.storage.LocalStorageBackend` these are absolute
+    outer-host paths (behaviourally identical to the pre-backend
+    code); for remote backends they are paths on the remote host
+    where the uploaded qcow2s live.
+
+    :param work_disk: Backend-local ref to the primary disk the
+        install domain will boot and write to.  Cloud-init uses an
+        overlay on the resolved base image; autounattend uses a blank
+        qcow2.
+    :param seed_iso: Optional backend-local ref to the seed CD-ROM
+        (cloud-init or autounattend seed) attached as the first
+        CD-ROM device.
+    :param extra_cdroms: Additional CD-ROM refs, in SATA-target order
+        after the seed.  Used by Windows to surface the install ISO
+        and the ``virtio-win.iso`` driver disc.
     :param uefi: If ``True``, emit ``<loader>`` + ``<nvram>`` OVMF
         references.  Windows requires this for GPT installs.
     :param windows: If ``True``, use device models with built-in
@@ -61,9 +69,9 @@ class InstallDomain:
         off the qcow2.
     """
 
-    work_disk: Path
-    seed_iso: Path | None = None
-    extra_cdroms: tuple[Path, ...] = ()
+    work_disk: str
+    seed_iso: str | None = None
+    extra_cdroms: tuple[str, ...] = ()
     uefi: bool = False
     windows: bool = False
     boot_cdrom: bool = False
@@ -74,16 +82,16 @@ class RunDomain:
     """Instructions :class:`~testrange.backends.libvirt.VM` needs to build
     the run-phase libvirt domain XML.
 
-    :param seed_iso: Optional run-phase seed (phase-2 cloud-init).
-        ``None`` for Windows + NoOp — neither needs to inject anything
-        on re-boot.
+    :param seed_iso: Optional backend-local ref to the run-phase seed
+        (phase-2 cloud-init).  ``None`` for Windows + NoOp — neither
+        needs to inject anything on re-boot.
     :param uefi: Firmware family; same semantics as
         :attr:`InstallDomain.uefi`.  Must match whatever the install
         phase used or the cached disk won't boot.
     :param windows: Same semantics as :attr:`InstallDomain.windows`.
     """
 
-    seed_iso: Path | None = None
+    seed_iso: str | None = None
     uefi: bool = False
     windows: bool = False
 
@@ -196,9 +204,14 @@ class Builder(ABC):
         self,
         vm: VM,
         cache: CacheManager,
-    ) -> Path:
+        run: RunDir,
+    ) -> str:
         """For :meth:`needs_install_phase`-``False`` builders, return
-        the path to a disk that is already ready to boot.
+        the backend-local ref for a disk that is already ready to boot.
+
+        The *run* parameter exposes the storage backend (via
+        ``run.storage``) so implementations can stage bring-your-own
+        images onto remote backends.
 
         The default implementation raises — install-phase builders
         should never hit this path.

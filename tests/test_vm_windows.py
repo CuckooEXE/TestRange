@@ -154,7 +154,7 @@ class TestBuildRoutesWindows:
             return tmp_cache_root / "fake-cached.qcow2"
 
         vm._run_install_phase = _fake_install  # type: ignore[method-assign]
-        monkeypatch.setattr(cache, "get_vm", lambda _h: None)
+        monkeypatch.setattr(cache, "get_vm", lambda _h, _s: None)
 
         result = vm.build(
             context=MagicMock(),
@@ -177,7 +177,7 @@ class TestBuildRoutesWindows:
         cached = tmp_cache_root / "vms" / "cached.qcow2"
         cached.parent.mkdir(exist_ok=True)
         cached.write_bytes(b"cached")
-        monkeypatch.setattr(cache, "get_vm", lambda _h: cached)
+        monkeypatch.setattr(cache, "get_vm", lambda _h, _s: cached)
 
         # Trip wire: the install path must NOT run.
         def _explode(**_):

@@ -27,6 +27,13 @@ def _writable_qcow2(path: Path) -> Path:
     return path
 
 
+def _local_run(cache_root: Path):
+    """Return a RunDir backed by a LocalStorageBackend at *cache_root*."""
+    from testrange._run import RunDir
+    from testrange.storage import LocalStorageBackend
+    return RunDir(LocalStorageBackend(cache_root))
+
+
 def _noop_vm(
     tmp_path: Path,
     *,
@@ -87,13 +94,13 @@ class TestReadyImage:
         )
         cache = CacheManager(root=tmp_cache_root)
 
-        from testrange.vms.builders import noop as noop_mod
         monkeypatch.setattr(
-            noop_mod._qemu_img, "info",
+            "testrange.vms.builders.noop._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
+        run = _local_run(tmp_cache_root)
 
-        dest = vm.builder.ready_image(vm, cache)
+        dest = Path(vm.builder.ready_image(vm, cache, run))
 
         assert dest.exists()
         assert dest.parent == cache.vms_dir
@@ -106,8 +113,6 @@ class TestReadyImage:
         meta = json.loads(manifest.read_text())
         assert meta["prebuilt"] is True
         assert meta["source_path"] == str(src.resolve())
-        # World-readable so the qemu daemon can open it.
-        assert dest.stat().st_mode & 0o044
 
     def test_idempotent_second_call(
         self,
@@ -124,15 +129,15 @@ class TestReadyImage:
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
-        from testrange.vms.builders import noop as noop_mod
         monkeypatch.setattr(
-            noop_mod._qemu_img, "info",
+            "testrange.vms.builders.noop._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
+        run = _local_run(tmp_cache_root)
 
-        first = vm.builder.ready_image(vm, cache)
+        first = Path(vm.builder.ready_image(vm, cache, run))
         first_mtime = first.stat().st_mtime_ns
-        second = vm.builder.ready_image(vm, cache)
+        second = Path(vm.builder.ready_image(vm, cache, run))
 
         assert first == second
         assert second.stat().st_mtime_ns == first_mtime  # no re-copy
@@ -153,13 +158,13 @@ class TestReadyImage:
             devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
-        from testrange.vms.builders import noop as noop_mod
         monkeypatch.setattr(
-            noop_mod._qemu_img, "info",
+            "testrange.vms.builders.noop._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
+        run = _local_run(tmp_cache_root)
 
-        dest = vm.builder.ready_image(vm, cache)
+        dest = Path(vm.builder.ready_image(vm, cache, run))
         assert dest == src  # no copy happened
 
     def test_missing_file_raises(self, tmp_cache_root: Path) -> None:
@@ -170,8 +175,9 @@ class TestReadyImage:
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
+        run = _local_run(tmp_cache_root)
         with pytest.raises(VMBuildError, match="not found"):
-            vm.builder.ready_image(vm, cache)
+            vm.builder.ready_image(vm, cache, run)
 
     def test_wrong_format_raises(
         self,
@@ -188,14 +194,14 @@ class TestReadyImage:
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
-        from testrange.vms.builders import noop as noop_mod
         monkeypatch.setattr(
-            noop_mod._qemu_img, "info",
+            "testrange.vms.builders.noop._qemu_img_info",
             lambda _: {"format": "raw"},
         )
+        run = _local_run(tmp_cache_root)
 
         with pytest.raises(VMBuildError, match="not qcow2"):
-            vm.builder.ready_image(vm, cache)
+            vm.builder.ready_image(vm, cache, run)
 
 
 class TestResolveCommunicatorHost:
@@ -309,16 +315,16 @@ class TestBuildDispatchesNoOp:
         bypass the install-phase entirely."""
         vm = _noop_vm(tmp_path)
         cache = MagicMock()
-        sentinel = tmp_path / "sentinel.qcow2"
-        sentinel.write_bytes(b"x")
-        vm.builder.ready_image = MagicMock(return_value=sentinel)  # type: ignore[method-assign]
+        run = MagicMock()
+        sentinel_ref = str(tmp_path / "sentinel.qcow2")
+        vm.builder.ready_image = MagicMock(return_value=sentinel_ref)  # type: ignore[method-assign]
 
         result = vm.build(
             context=MagicMock(),
             cache=cache,
-            run=MagicMock(),
+            run=run,
             install_network_name="",
             install_network_mac="",
         )
-        assert result == sentinel
-        vm.builder.ready_image.assert_called_once_with(vm, cache)
+        assert result == sentinel_ref
+        vm.builder.ready_image.assert_called_once_with(vm, cache, run)

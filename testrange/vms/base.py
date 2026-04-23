@@ -278,7 +278,7 @@ class AbstractVM(ABC):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
-    ) -> Path:
+    ) -> str:
         """Produce (or fetch from cache) a runnable disk image.
 
         Called once per VM by the orchestrator during ``__enter__``.
@@ -295,7 +295,9 @@ class AbstractVM(ABC):
             the install phase).
         :param install_network_mac: MAC address for the install NIC
             (empty when the VM's builder skips the install phase).
-        :returns: Absolute path to the runnable disk image.
+        :returns: Backend-local ref to the runnable disk image
+            (outer-host path for local libvirt; remote-host path for
+            ``qemu+ssh://`` / other remote backends).
         :raises VMBuildError: If the install phase fails or times out.
         """
 
@@ -304,7 +306,7 @@ class AbstractVM(ABC):
         self,
         context: AbstractOrchestrator,
         run: RunDir,
-        installed_disk: Path,
+        installed_disk: str,
         network_entries: list[tuple[str, str]],
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> None:
@@ -313,7 +315,8 @@ class AbstractVM(ABC):
 
         :param context: The orchestrator driving this run.
         :param run: Scratch dir for this test run.
-        :param installed_disk: Disk image returned by :meth:`build`.
+        :param installed_disk: Backend-local ref returned by
+            :meth:`build`.
         :param network_entries: ``(backend_network_name, mac)`` pairs,
             one per NIC.
         :param mac_ip_pairs: ``(mac, ip_with_cidr, gateway, nameserver)``

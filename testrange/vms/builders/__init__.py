@@ -49,12 +49,12 @@ from collections.abc import Callable
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
 from testrange.vms.builders.cloud_init import (
     CloudInitBuilder,
-    write_seed_iso,
+    build_seed_iso_bytes,
 )
 from testrange.vms.builders.noop import NoOpBuilder
 from testrange.vms.builders.unattend import (
     WindowsUnattendedBuilder,
-    write_autounattend_iso,
+    build_autounattend_iso_bytes,
 )
 from testrange.vms.images import is_windows_image
 
@@ -118,8 +118,8 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
-    "write_seed_iso",
-    "write_autounattend_iso",
+    "build_seed_iso_bytes",
+    "build_autounattend_iso_bytes",
     "BUILDER_REGISTRY",
     "register_builder",
     "auto_select_builder",

@@ -77,6 +77,11 @@ from testrange.exceptions import (
 from testrange.networks.base import AbstractVirtualNetwork
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.packages import Apt, Dnf, Homebrew, Pip, Winget
+from testrange.storage import (
+    AbstractStorageBackend,
+    LocalStorageBackend,
+    SSHStorageBackend,
+)
 from testrange.test import Test, TestResult, run_tests
 from testrange.vms.base import AbstractVM
 from testrange.vms.builders import (
@@ -104,6 +109,10 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
+    # Storage backends
+    "AbstractStorageBackend",
+    "LocalStorageBackend",
+    "SSHStorageBackend",
     # Networks
     "VirtualNetwork",
     "AbstractVirtualNetwork",

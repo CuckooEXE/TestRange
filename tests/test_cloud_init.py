@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +16,7 @@ from testrange.vms.builders.cloud_init import (
     _native_packages,
     _runcmd_entries,
     _user_entry,
-    write_seed_iso,
+    build_seed_iso_bytes,
 )
 
 
@@ -395,41 +394,43 @@ class TestRunNetworkConfig:
         assert len(data["ethernets"]) == 2
 
 
-class TestWriteSeedIso:
+class TestBuildSeedIsoBytes:
     def test_writes_all_three_files_when_network_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import testrange.vms.builders.cloud_init as ci
 
         iso_obj = MagicMock()
         monkeypatch.setattr(ci, "PyCdlib", lambda: iso_obj)
 
-        write_seed_iso(
-            tmp_path / "seed.iso",
+        result = build_seed_iso_bytes(
             meta_data="iid: x",
             user_data="#cloud-config\n",
             network_config="version: 2",
         )
         # add_fp called 3 times (meta, user, network)
         assert iso_obj.add_fp.call_count == 3
+        # Returns bytes-shaped value (MagicMock returns MagicMock here;
+        # the key invariant is "called write_fp" not "returned real bytes").
+        iso_obj.write_fp.assert_called_once()
+        assert isinstance(result, (bytes, MagicMock))
 
     def test_writes_two_files_without_network_config(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import testrange.vms.builders.cloud_init as ci
 
         iso_obj = MagicMock()
         monkeypatch.setattr(ci, "PyCdlib", lambda: iso_obj)
 
-        write_seed_iso(
-            tmp_path / "seed.iso",
+        build_seed_iso_bytes(
             meta_data="iid: x",
             user_data="#cloud-config\n",
         )
         assert iso_obj.add_fp.call_count == 2
 
     def test_wraps_errors_in_cloud_init_error(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import testrange.vms.builders.cloud_init as ci
 
@@ -437,9 +438,9 @@ class TestWriteSeedIso:
             def new(self, **_): pass
             def add_fp(self, *_, **__): raise RuntimeError("boom")
             def close(self): pass
-            def write(self, *_): pass
+            def write_fp(self, *_): pass
 
         monkeypatch.setattr(ci, "PyCdlib", BadIso)
 
         with pytest.raises(CloudInitError):
-            write_seed_iso(tmp_path / "seed.iso", "m", "u")
+            build_seed_iso_bytes("m", "u")

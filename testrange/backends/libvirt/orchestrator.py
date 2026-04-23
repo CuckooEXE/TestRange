@@ -39,6 +39,11 @@ from testrange.backends.libvirt.network import (
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
+from testrange.storage import (
+    AbstractStorageBackend,
+    LocalStorageBackend,
+    SSHStorageBackend,
+)
 
 _log = get_logger(__name__)
 
@@ -65,7 +70,25 @@ class Orchestrator(AbstractOrchestrator):
         pass a full libvirt URI (e.g. ``'qemu+ssh://user@host/system'``).
     :param networks: Virtual networks to create for this test.
     :param vms: Virtual machines to provision and start.
-    :param cache_root: Override the default cache directory.
+    :param cache_root: Override the default cache directory (outer host).
+    :param storage_backend: Override the auto-selected
+        :class:`~testrange.storage.AbstractStorageBackend`.  Defaults:
+        ``qemu:///system`` → :class:`LocalStorageBackend`,
+        ``qemu+ssh://[user@]host/system`` → :class:`SSHStorageBackend`.
+        Pass explicitly when the auto-selection logic can't guess the
+        right thing (custom cache dirs on the remote, tunnelled
+        connections, a test harness wanting a fake backend, etc.).
+
+    Remote hosts
+    ------------
+
+    When *host* resolves to an SSH-backed libvirt URI, disk images are
+    staged to ``/var/tmp/testrange/<ssh_user>/`` on the remote host
+    over SFTP and all ``qemu-img`` work runs there — no silent-failure
+    "path doesn't exist on the remote".  The remote must have
+    ``qemu-utils`` + ``libvirt-daemon-system`` installed and the SSH
+    user must be able to run ``qemu-img`` (usually via the ``libvirt``
+    group).
 
     Example::
 
@@ -76,6 +99,10 @@ class Orchestrator(AbstractOrchestrator):
         )
         with orchestrator as orch:
             result = orch.vms["server"].exec(["uname", "-r"])
+
+        # Same API against a remote libvirtd:
+        with Orchestrator(host="qemu+ssh://kvm.example.com/system", vms=[...]):
+            ...
     """
 
     _host: str
@@ -108,11 +135,16 @@ class Orchestrator(AbstractOrchestrator):
         networks: Sequence[VirtualNetwork] | None = None,
         vms: Sequence[VM] | None = None,
         cache_root: Path | None = None,
+        storage_backend: AbstractStorageBackend | None = None,
     ) -> None:
         self._host = host
         self._networks = list(networks) if networks else []
         self._vm_list = list(vms) if vms else []
         self._cache = CacheManager(root=cache_root) if cache_root else CacheManager()
+        # Explicit override wins.  When ``None``, _select_storage_backend
+        # inspects the libvirt URI at __enter__ and picks LocalStorage
+        # for ``qemu:///system`` or SSHStorage for ``qemu+ssh://…``.
+        self._storage: AbstractStorageBackend | None = storage_backend
 
         # Populated after __enter__
         self.vms = {}
@@ -137,6 +169,44 @@ class Orchestrator(AbstractOrchestrator):
             return self._host
         return f"qemu+ssh://{self._host}/system"
 
+    def _select_storage_backend(self) -> AbstractStorageBackend:
+        """Pick a storage backend based on the libvirt URI.
+
+        Local URIs (``qemu:///system``) → :class:`LocalStorageBackend`
+        rooted at the outer cache root.  ``qemu+ssh://[user@]host/…``
+        URIs → :class:`SSHStorageBackend` connecting to the same host.
+        Explicit overrides via ``storage_backend=`` win; anything else
+        falls through to local so unknown URI shapes fail loud at
+        domain-define time rather than silently-corrupt some path.
+        """
+        if self._storage is not None:
+            return self._storage
+
+        if self._host in ("localhost", "127.0.0.1", "::1"):
+            return LocalStorageBackend(self._cache.root)
+
+        # Parse ``qemu+ssh://[user@]host[:port]/system`` — we only use
+        # the user, host, and port to build the SSH connection; the
+        # libvirt connection itself is handled by libvirt's own URI
+        # parser via libvirt.open().
+        if "://" in self._host:
+            _, _, rest = self._host.partition("://")
+            hostpart, _, _ = rest.partition("/")
+        else:
+            hostpart = self._host
+        user: str | None = None
+        if "@" in hostpart:
+            user, _, hostpart = hostpart.partition("@")
+        port = 22
+        if ":" in hostpart:
+            hostpart, _, port_s = hostpart.partition(":")
+            try:
+                port = int(port_s)
+            except ValueError:
+                pass
+
+        return SSHStorageBackend(host=hostpart, username=user, port=port)
+
     def __enter__(self) -> Orchestrator:
         """Open libvirt connection, provision all networks and VMs.
 
@@ -153,7 +223,20 @@ class Orchestrator(AbstractOrchestrator):
                 f"Cannot connect to libvirt at {uri!r}: {exc}"
             ) from exc
 
-        self._run = RunDir()
+        # Build the storage backend that matches the libvirt connection.
+        # Failure here (e.g. SSH auth rejected) closes the libvirt
+        # connection we just opened so teardown doesn't leak it.
+        if self._storage is None:
+            try:
+                self._storage = self._select_storage_backend()
+            except Exception:
+                try:
+                    self._conn.close()
+                finally:
+                    self._conn = None
+                raise
+
+        self._run = RunDir(self._storage)
 
         try:
             self._provision(self._run)
@@ -232,8 +315,11 @@ class Orchestrator(AbstractOrchestrator):
                 ):
                     self._install_network.start(self)
 
-        # 2. Build (or retrieve from cache) installed disk images
-        installed_disks: dict[str, Path] = {}
+        # 2. Build (or retrieve from cache) installed disk images.
+        # Refs are backend-local strings — for LocalStorageBackend
+        # these are outer-host paths identical to the pre-backend
+        # behaviour; for SSH backends they're paths on the remote.
+        installed_disks: dict[str, str] = {}
         with log_duration(_log, f"install phase for {len(self._vm_list)} VM(s)"):
             for vm in self._vm_list:
                 if vm.builder.needs_install_phase():
@@ -529,6 +615,22 @@ class Orchestrator(AbstractOrchestrator):
         except Exception:
             pass
         self._conn = None
+
+        # Close the storage backend (SSH connection, if any).  Local
+        # backends no-op; SSH backends actually tear down paramiko
+        # channels, which matters for long-running processes that
+        # create and destroy many orchestrators.
+        if self._storage is not None:
+            close = getattr(self._storage, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    _log.debug(
+                        "storage backend close raised (ignored): %s", exc,
+                    )
+            self._storage = None
+
         self.vms = {}
         _log.info("teardown complete")
 

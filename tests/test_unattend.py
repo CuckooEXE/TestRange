@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
 
@@ -13,7 +12,7 @@ from testrange.exceptions import CloudInitError
 from testrange.packages import Winget
 from testrange.vms.builders.unattend import (
     WindowsUnattendedBuilder,
-    write_autounattend_iso,
+    build_autounattend_iso_bytes,
 )
 
 
@@ -199,33 +198,31 @@ class TestValidation:
             builder.build_xml(vm)
 
 
-class TestWriteAutounattendIso:
+class TestBuildAutounattendIsoBytes:
     def test_writes_one_file_as_autounattend_xml(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The ISO must contain exactly one file: autounattend.xml at root."""
-        # PyCdlib is imported lazily inside write_autounattend_iso via
-        # ``from pycdlib import PyCdlib`` — patch the real pycdlib module
-        # so the local import picks up our stub.
+        # PyCdlib is imported lazily inside build_autounattend_iso_bytes
+        # via ``from pycdlib import PyCdlib`` — patch the real pycdlib
+        # module so the local import picks up our stub.
         import pycdlib
 
         iso_obj = MagicMock()
         monkeypatch.setattr(pycdlib, "PyCdlib", lambda: iso_obj)
 
-        write_autounattend_iso(tmp_path / "unatt.iso", "<unattend/>")
+        build_autounattend_iso_bytes("<unattend/>")
 
         iso_obj.new.assert_called_once()
         assert iso_obj.add_fp.call_count == 1
         kwargs = iso_obj.add_fp.call_args.kwargs
         assert kwargs["joliet_path"] == "/autounattend.xml"
         assert kwargs["iso_path"] == "/AUTOUNATT.XML;1"
-        iso_obj.write.assert_called_once_with(str(tmp_path / "unatt.iso"))
+        iso_obj.write_fp.assert_called_once()
 
     def test_wraps_errors_in_cloud_init_error(
         self,
-        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         import pycdlib
@@ -238,4 +235,4 @@ class TestWriteAutounattendIso:
         monkeypatch.setattr(pycdlib, "PyCdlib", lambda: BadIso())
 
         with pytest.raises(CloudInitError, match="boom"):
-            write_autounattend_iso(tmp_path / "bad.iso", "<unattend/>")
+            build_autounattend_iso_bytes("<unattend/>")
