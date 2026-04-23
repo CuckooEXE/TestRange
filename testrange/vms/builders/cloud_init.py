@@ -25,6 +25,30 @@ from testrange.packages import Homebrew
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
 from testrange.vms.images import resolve_image
 
+# Sentinel file written at the end of the install runcmd script iff every
+# step succeeded.  ``power_state.condition`` only fires a poweroff when
+# this file exists, so any install failure (apt, dpkg verify, pip, user
+# post-install cmd) leaves the VM up until libvirt hits its build
+# timeout — which surfaces as :class:`~testrange.exceptions.VMBuildError`
+# instead of silently caching a broken image.
+_INSTALL_OK_SENTINEL = "/var/lib/testrange/install_ok"
+
+# Dropped in via ``write_files:`` whenever any ``Apt(..., insecure=True)``
+# is in the package list.  Disables TLS peer/host verification for every
+# APT operation on the install boot — covers cloud-init's native
+# ``packages:`` install when the mirror's CA isn't on the VM yet.
+_APT_INSECURE_CONF = (
+    'Acquire::https::Verify-Peer "false";\n'
+    'Acquire::https::Verify-Host "false";\n'
+)
+
+# Same idea for DNF, appended to ``/etc/dnf/dnf.conf``.  Default
+# ``dnf.conf`` files ship with just a ``[main]`` section, so appending
+# lands inside ``[main]`` — which is where ``sslverify`` belongs.  We
+# use ``append: true`` (not an overwrite) to preserve whatever distro
+# defaults already live in the file.
+_DNF_INSECURE_CONF = "\nsslverify=False\n"
+
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.backends.libvirt.vm import VM
@@ -47,10 +71,35 @@ def _hash_password(plaintext: str) -> str:
 class CloudInitBuilder(Builder):
     """Cloud-init install + run strategy.
 
-    Stateless: every method takes the :class:`~testrange.backends.libvirt.VM`
-    as an argument.  One builder instance can serve any number of
-    Linux VMs.
+    One builder instance can serve any number of Linux VMs — VM-specific
+    state (users, packages, post-install cmds) is read from each VM
+    argument.  Session-wide knobs (TLS trust for APT/DNF mirrors) live
+    here on the builder because APT and DNF config is process-wide for
+    the install boot: a "per-package" switch would be a lie.
+
+    :param apt_insecure: If ``True``, the install boot drops an APT
+        config snippet that disables HTTPS peer/host verification.
+        Useful when the Debian/Ubuntu VM's package mirror is a private
+        server whose CA isn't in the VM's default trust store.
+        Defaults to ``False``.
+    :param dnf_insecure: If ``True``, the install boot appends
+        ``sslverify=False`` to ``/etc/dnf/dnf.conf`` for the same
+        reason on RHEL-family VMs.  Defaults to ``False``.
     """
+
+    apt_insecure: bool
+    """If ``True``, APT is configured to skip TLS verification during install."""
+
+    dnf_insecure: bool
+    """If ``True``, DNF is configured with ``sslverify=False`` during install."""
+
+    def __init__(
+        self,
+        apt_insecure: bool = False,
+        dnf_insecure: bool = False,
+    ) -> None:
+        self.apt_insecure = apt_insecure
+        self.dnf_insecure = dnf_insecure
 
     def default_communicator(self) -> str:
         """Linux images default to the QEMU guest agent channel.
@@ -134,27 +183,40 @@ class CloudInitBuilder(Builder):
     def install_user_data(self, vm: VM) -> str:
         """Return the phase-1 ``user-data`` YAML string.
 
-        The VM powers off after cloud-init completes so the installed
-        disk can be snapshotted and cached.
+        The VM only powers off when every install step succeeded — see
+        :data:`_INSTALL_OK_SENTINEL`.  Any failure (apt, dpkg, pip, user
+        cmd) leaves the VM up and the install-phase timeout surfaces
+        the error instead of silently caching a broken image.
         """
+        native_pkgs = _native_packages(vm.pkgs)
         doc: dict[str, Any] = {
             "hostname": vm.name,
             "fqdn": f"{vm.name}.local",
             "manage_etc_hosts": True,
             "users": [_user_entry(c) for c in vm.users],
             "ssh_pwauth": True,
-            "packages": _native_packages(vm.pkgs),
+            "packages": native_pkgs,
             "package_update": True,
             "package_upgrade": False,
-            "runcmd": _runcmd_entries(vm.pkgs, vm.users, vm.post_install_cmds),
+            "runcmd": _runcmd_entries(
+                vm.pkgs, vm.users, vm.post_install_cmds, native_pkgs
+            ),
             "datasource_list": ["NoCloud", "None"],
             "power_state": {
                 "mode": "poweroff",
                 "message": "TestRange install phase complete",
                 "timeout": 30,
-                "condition": True,
+                # Shell-form condition — only power off when runcmd wrote
+                # the sentinel.  List syntax avoids quoting pitfalls.
+                "condition": ["test", "-f", _INSTALL_OK_SENTINEL],
             },
         }
+        write_files = _insecure_write_files(
+            apt_insecure=self.apt_insecure,
+            dnf_insecure=self.dnf_insecure,
+        )
+        if write_files:
+            doc["write_files"] = write_files
         return "#cloud-config\n" + yaml.dump(doc, default_flow_style=False)
 
     def install_meta_data(self, vm: VM, config_hash: str) -> str:
@@ -288,15 +350,48 @@ def _runcmd_entries(
     packages: list[AbstractPackage],
     users: list[Credential],
     post_install_cmds: list[str],
+    native_packages: list[str],
 ) -> list[str]:
     """Return shell commands to append to cloud-init ``runcmd:``.
 
-    Handles Homebrew and other non-native package managers, then
-    appends the caller's ``post_install_cmds``.
+    Runs under ``#!/bin/sh`` with ``set -e`` so any failure aborts the
+    script, the sentinel is never written, and
+    :attr:`CloudInitBuilder.install_user_data`'s ``power_state.condition``
+    skips the poweroff — leaving the VM up until the build-phase timeout
+    fires.  Caller-supplied ``post_install_cmds`` are subject to the same
+    fail-fast discipline.
     """
     cmds: list[str] = []
 
-    cmds.append("systemctl enable --now qemu-guest-agent || true")
+    # Fail-fast discipline for the rest of the script.  cloud-init
+    # concatenates every runcmd entry into a single ``/bin/sh`` script
+    # (dash on Debian, bash-in-POSIX on RHEL), so we stick to POSIX:
+    # ``set -e`` to bail on the first failure and explicit ``echo`` +
+    # ``exit 1`` on the checks that have something useful to log.
+    # ``trap ... ERR`` would be nicer but isn't POSIX — dash rejects it.
+    cmds.append("set -e")
+
+    # Verify cloud-init actually installed every native package.  If apt
+    # (or dnf) hit a cert/mirror error, the ``packages:`` module logs
+    # and moves on — without this check we'd cache a broken image and
+    # then hang in the run phase waiting on qemu-guest-agent.
+    if native_packages:
+        pkgs_sh = " ".join(_sh_quote(p) for p in native_packages)
+        cmds.append(
+            "if command -v dpkg >/dev/null 2>&1; then _tr_check=\"dpkg -s\"; "
+            'elif command -v rpm >/dev/null 2>&1; then _tr_check="rpm -q"; '
+            'else echo "TESTRANGE: no dpkg or rpm — cannot verify packages" >&2; '
+            "exit 1; fi; "
+            f"for _tr_pkg in {pkgs_sh}; do "
+            '$_tr_check "$_tr_pkg" >/dev/null 2>&1 || { '
+            'echo "TESTRANGE: package \'$_tr_pkg\' failed to install" >&2; '
+            "exit 1; }; done"
+        )
+
+    cmds.append(
+        "systemctl enable --now qemu-guest-agent || { "
+        'echo "TESTRANGE: failed to enable qemu-guest-agent" >&2; exit 1; }'
+    )
 
     brew_pkgs = [p for p in packages if isinstance(p, Homebrew)]
     if brew_pkgs:
@@ -318,7 +413,50 @@ def _runcmd_entries(
             cmds.extend(pkg.install_commands())
 
     cmds.extend(post_install_cmds)
+
+    # Everything above succeeded — drop the sentinel so the
+    # power_state.condition fires and the VM shuts down cleanly.
+    cmds.append(f"mkdir -p {_sh_quote(_INSTALL_OK_SENTINEL.rsplit('/', 1)[0])}")
+    cmds.append(f"touch {_sh_quote(_INSTALL_OK_SENTINEL)}")
+    cmds.append("sync")
     return cmds
+
+
+def _sh_quote(value: str) -> str:
+    """Return *value* single-quoted for safe embedding in a /bin/sh script."""
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+def _insecure_write_files(
+    apt_insecure: bool, dnf_insecure: bool
+) -> list[dict[str, Any]]:
+    """Return cloud-init ``write_files:`` entries for mirrors whose CA
+    isn't in the VM's trust store.
+
+    Both entries land before cloud-init's ``packages:`` module runs, so
+    the native install itself picks up the relaxed TLS config.
+    """
+    entries: list[dict[str, Any]] = []
+    if apt_insecure:
+        entries.append(
+            {
+                "path": "/etc/apt/apt.conf.d/99testrange-insecure",
+                "permissions": "0644",
+                "owner": "root:root",
+                "content": _APT_INSECURE_CONF,
+            }
+        )
+    if dnf_insecure:
+        entries.append(
+            {
+                "path": "/etc/dnf/dnf.conf",
+                "permissions": "0644",
+                "owner": "root:root",
+                "content": _DNF_INSECURE_CONF,
+                "append": True,
+            }
+        )
+    return entries
 
 
 def write_seed_iso(

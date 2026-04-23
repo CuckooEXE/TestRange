@@ -48,7 +48,12 @@ def test_brew_packages_require_non_root_user() -> None:
     """Homebrew refuses to run as root; we must validate at config-gen time."""
     from testrange.exceptions import CloudInitError
     with pytest.raises(CloudInitError):
-        _runcmd_entries([Homebrew("gh")], [Credential("root", "pw")], [])
+        _runcmd_entries(
+            [Homebrew("gh")],
+            [Credential("root", "pw")],
+            [],
+            ["qemu-guest-agent"],
+        )
 
 
 def test_brew_isinstance_not_string_compare() -> None:
@@ -63,6 +68,7 @@ def test_brew_isinstance_not_string_compare() -> None:
         [Apt("nginx"), Homebrew("gh")],
         [Credential("alice", "pw")],
         [],
+        ["nginx", "qemu-guest-agent"],
     ))
     assert "brew install gh" in cmds
     # Apt shouldn't be picked up by the Homebrew handler

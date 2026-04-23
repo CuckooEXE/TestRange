@@ -73,16 +73,60 @@ class TestNativePackages:
 
 class TestRuncmdEntries:
     def test_empty_for_native_only(self) -> None:
-        cmds = _runcmd_entries([Apt("nginx")], [], [])
+        cmds = _runcmd_entries([Apt("nginx")], [], [], ["nginx", "qemu-guest-agent"])
         # Expect only the GA-enablement line
         assert any("qemu-guest-agent" in c for c in cmds)
 
+    def test_starts_with_set_e(self) -> None:
+        # Without this, a failed apt install would still let the runcmd
+        # script fall through to the success-sentinel and cache a broken
+        # image.  Must be POSIX sh — cloud-init shellify emits #!/bin/sh
+        # (dash on Debian), so we can't use bash-only constructs like
+        # ``trap ... ERR``.
+        cmds = _runcmd_entries([], [], [], ["qemu-guest-agent"])
+        assert cmds[0] == "set -e"
+
+    def test_verifies_each_native_package(self) -> None:
+        cmds = _runcmd_entries(
+            [Apt("nginx"), Apt("curl")],
+            [],
+            [],
+            ["curl", "nginx", "qemu-guest-agent"],
+        )
+        joined = "\n".join(cmds)
+        # All three names must appear inside the verification loop.
+        assert "'nginx'" in joined
+        assert "'curl'" in joined
+        assert "'qemu-guest-agent'" in joined
+        assert "dpkg -s" in joined and "rpm -q" in joined
+
+    def test_systemctl_enable_is_fail_fast(self) -> None:
+        # Regression: old runcmd swallowed systemctl errors with '|| true'.
+        # That masked a non-working guest-agent — the run phase would then
+        # hang forever.  Must be strict now.
+        cmds = _runcmd_entries([], [], [], ["qemu-guest-agent"])
+        joined = "\n".join(cmds)
+        assert "systemctl enable --now qemu-guest-agent" in joined
+        assert "systemctl enable --now qemu-guest-agent || true" not in joined
+
+    def test_success_sentinel_last(self) -> None:
+        cmds = _runcmd_entries([], [], ["echo hello"], ["qemu-guest-agent"])
+        # The sentinel + sync must be at the very end — any later step
+        # that fails has to prevent the sentinel from being written.
+        assert cmds[-1] == "sync"
+        assert "touch" in cmds[-2] and "install_ok" in cmds[-2]
+        # User post-install cmd lands before the sentinel.
+        assert "echo hello" in cmds[-4]
+
     def test_post_install_appended(self) -> None:
-        cmds = _runcmd_entries([], [], ["echo hello"])
-        assert cmds[-1] == "echo hello"
+        cmds = _runcmd_entries([], [], ["echo hello"], ["qemu-guest-agent"])
+        # Now appears between install_commands and the success sentinel.
+        assert "echo hello" in cmds
 
     def test_pip_install_included(self) -> None:
-        cmds = _runcmd_entries([Pip("requests")], [], [])
+        cmds = _runcmd_entries(
+            [Pip("requests")], [], [], ["qemu-guest-agent"]
+        )
         assert any("pip3 install requests" in c for c in cmds)
 
     def test_homebrew_requires_non_root_user(self) -> None:
@@ -91,6 +135,7 @@ class TestRuncmdEntries:
                 [Homebrew("gh")],
                 [Credential("root", "pw")],
                 [],
+                ["qemu-guest-agent"],
             )
 
     def test_homebrew_uses_first_non_root_user(self) -> None:
@@ -102,6 +147,7 @@ class TestRuncmdEntries:
                 Credential("bob", "pw"),
             ],
             [],
+            ["qemu-guest-agent"],
         )
         joined = "\n".join(cmds)
         assert " alice" in joined
@@ -112,6 +158,7 @@ class TestRuncmdEntries:
             [Homebrew("gh"), Homebrew("hello")],
             [Credential("alice", "pw")],
             [],
+            ["qemu-guest-agent"],
         )
         joined = "\n".join(cmds)
         assert "install.sh" in joined  # Homebrew bootstrap
@@ -126,6 +173,7 @@ class TestRuncmdEntries:
             [Winget("Git.Git")],
             [],
             [],
+            ["qemu-guest-agent"],
         )
         assert any("winget install" in c for c in cmds)
 
@@ -193,6 +241,61 @@ class TestInstallUserData:
         text = builder.install_user_data(vm)
         data = yaml.safe_load(text.split("\n", 1)[1])
         assert data["datasource_list"] == ["NoCloud", "None"]
+
+    def test_power_state_gated_on_sentinel(
+        self, builder: CloudInitBuilder, vm: VM
+    ) -> None:
+        # Regression: previously power_state unconditionally poweroff'd,
+        # so an apt failure left the VM in a "clean" shutoff state and
+        # we cached the broken image.  Condition must be a shell test
+        # against the sentinel written only at runcmd's tail.
+        text = builder.install_user_data(vm)
+        data = yaml.safe_load(text.split("\n", 1)[1])
+        cond = data["power_state"]["condition"]
+        assert isinstance(cond, list)
+        assert cond[0] == "test"
+        assert cond[1] == "-f"
+        assert cond[2].endswith("install_ok")
+
+    def test_no_write_files_without_insecure(
+        self, builder: CloudInitBuilder, vm: VM
+    ) -> None:
+        text = builder.install_user_data(vm)
+        data = yaml.safe_load(text.split("\n", 1)[1])
+        assert "write_files" not in data
+
+    def test_apt_insecure_emits_apt_conf_dropin(self, vm: VM) -> None:
+        # Builder-level flag — APT trust is process-wide, so a
+        # per-package switch would be a lie.  apt_insecure=True drops an
+        # apt.conf.d snippet so cloud-init's own packages: call picks up
+        # relaxed TLS verification.
+        b = CloudInitBuilder(apt_insecure=True)
+        data = yaml.safe_load(b.install_user_data(vm).split("\n", 1)[1])
+        paths = [f["path"] for f in data["write_files"]]
+        assert "/etc/apt/apt.conf.d/99testrange-insecure" in paths
+        apt_entry = next(
+            f for f in data["write_files"]
+            if f["path"].endswith("99testrange-insecure")
+        )
+        assert "Verify-Peer" in apt_entry["content"]
+        assert "Verify-Host" in apt_entry["content"]
+
+    def test_dnf_insecure_appends_to_dnf_conf(self, vm: VM) -> None:
+        b = CloudInitBuilder(dnf_insecure=True)
+        data = yaml.safe_load(b.install_user_data(vm).split("\n", 1)[1])
+        dnf_entry = next(
+            f for f in data["write_files"] if f["path"] == "/etc/dnf/dnf.conf"
+        )
+        assert dnf_entry.get("append") is True
+        assert "sslverify=False" in dnf_entry["content"]
+
+    def test_insecure_flags_independent(self, vm: VM) -> None:
+        # Enabling one doesn't smuggle in the other.
+        b = CloudInitBuilder(apt_insecure=True)
+        data = yaml.safe_load(b.install_user_data(vm).split("\n", 1)[1])
+        paths = [f["path"] for f in data.get("write_files", [])]
+        assert any("apt.conf.d" in p for p in paths)
+        assert not any(p == "/etc/dnf/dnf.conf" for p in paths)
 
 
 class TestInstallMetaData:

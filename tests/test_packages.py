@@ -90,6 +90,39 @@ class TestPip:
     def test_repr_user_install(self) -> None:
         assert repr(Pip("requests", user_install=True)) == "Pip('requests', user_install=True)"
 
+    def test_insecure_defaults_false(self) -> None:
+        assert Pip("requests").insecure is False
+
+    def test_insecure_stored(self) -> None:
+        assert Pip("requests", insecure=True).insecure is True
+
+    def test_insecure_install_command_trusts_configured_mirror(self) -> None:
+        cmds = Pip("numpy", insecure=True).install_commands()
+        assert len(cmds) == 1
+        cmd = cmds[0]
+        # Derives the configured mirror host at install time.
+        assert "pip3 config get global.index-url" in cmd
+        # Falls back to common PyPI hosts so default resolution works even
+        # without a user-set index-url.
+        assert "--trusted-host pypi.org" in cmd
+        assert "--trusted-host files.pythonhosted.org" in cmd
+        # Only emits --trusted-host for the derived host when the
+        # extraction succeeded — otherwise the space/quoting would
+        # produce a bare --trusted-host with no value.
+        assert '${_tr_pip_host:+--trusted-host "$_tr_pip_host"}' in cmd
+
+    def test_insecure_combined_with_user_install(self) -> None:
+        cmd = Pip("numpy", user_install=True, insecure=True).install_commands()[0]
+        assert "pip3 install --user" in cmd
+        assert "--trusted-host" in cmd
+
+    def test_repr_insecure(self) -> None:
+        assert repr(Pip("numpy", insecure=True)) == "Pip('numpy', insecure=True)"
+        assert (
+            repr(Pip("numpy", user_install=True, insecure=True))
+            == "Pip('numpy', user_install=True, insecure=True)"
+        )
+
 
 class TestWinget:
     def test_package_manager(self) -> None:
