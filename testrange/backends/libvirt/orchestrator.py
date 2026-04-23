@@ -24,7 +24,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from xml.etree import ElementTree as ET
 
 import libvirt
@@ -57,6 +57,31 @@ The orchestrator picks the first one not already claimed by another
 libvirt network at start-up time, so stale state from a crashed prior
 run (or an unrelated libvirt network) does not wedge new runs.
 """
+
+
+def _list_network_names(
+    conn: libvirt.virConnect, *, defined_only: bool = False,
+) -> list[str]:
+    """Return libvirt network names as a proper ``list[str]``.
+
+    Works around libvirt-python's inaccurate type stubs: both
+    :meth:`virConnect.listNetworks` and
+    :meth:`virConnect.listDefinedNetworks` are annotated as returning
+    ``str`` but actually return ``list[str]`` (or ``None`` on some
+    older builds).  We normalise ``None`` → ``[]`` and cast so the
+    rest of the code is statically clean.
+
+    :param conn: Open libvirt connection.
+    :param defined_only: If ``True``, return only inactive (defined-
+        but-not-running) networks.  If ``False`` (default), return
+        the union of active and inactive names.
+    """
+    if defined_only:
+        return cast(list[str], conn.listDefinedNetworks() or [])
+    active = cast(list[str], conn.listNetworks() or [])
+    defined = cast(list[str], conn.listDefinedNetworks() or [])
+    return active + defined
+
 
 class Orchestrator(AbstractOrchestrator):
     """libvirt / KVM / QEMU implementation of
@@ -409,7 +434,7 @@ class Orchestrator(AbstractOrchestrator):
         """
         assert self._conn is not None
         try:
-            defined = self._conn.listDefinedNetworks() or []
+            defined = _list_network_names(self._conn, defined_only=True)
         except libvirt.libvirtError:
             return
 
@@ -444,9 +469,7 @@ class Orchestrator(AbstractOrchestrator):
         assert self._conn is not None
         used: list[ipaddress.IPv4Network] = []
         try:
-            names = (self._conn.listNetworks() or []) + (
-                self._conn.listDefinedNetworks() or []
-            )
+            names = _list_network_names(self._conn)
         except libvirt.libvirtError:
             names = []
 
