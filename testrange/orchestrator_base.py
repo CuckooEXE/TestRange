@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from testrange._run import RunDir
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
 
@@ -48,7 +49,36 @@ class AbstractOrchestrator(ABC):
     """
 
     vms: dict[str, AbstractVM]
-    """Running VMs keyed by name.  Populated by :meth:`__enter__`."""
+    """Running VMs keyed by name.  Populated by :meth:`__enter__`.
+
+    Callers are expected to treat this as read-only; backends mutate
+    it via their own internal code paths.  We declare ``dict`` rather
+    than :class:`~collections.abc.Mapping` because Pyright's strict
+    override rule requires identical types for mutable members —
+    using ``Mapping`` here would force concrete backends to use
+    ``Mapping`` too, which prevents their own internal ``__setitem__``
+    calls.  ``dict[str, AbstractVM]`` on both sides satisfies both
+    concerns: the ABC type matches concrete types exactly, and
+    concrete code can populate the dict normally.
+    """
+
+    # ------------------------------------------------------------------
+    # Protected state shared by all backends.  Declared here (not just
+    # on concrete subclasses) so cross-backend code — ``testrange._cli``
+    # reaching into an arbitrary orchestrator's configured networks
+    # when swapping backends, ``testrange._repl`` inspecting the run
+    # dir — type-checks cleanly.  Leading underscore signals "internal
+    # to backend implementations" but still publicly typed.
+    # ------------------------------------------------------------------
+
+    _vm_list: list[AbstractVM]
+    """The VM specs this orchestrator was constructed with."""
+
+    _networks: list[AbstractVirtualNetwork]
+    """The network specs this orchestrator was constructed with."""
+
+    _run: RunDir | None
+    """Scratch directory for the current run; ``None`` outside one."""
 
     @classmethod
     @abstractmethod

@@ -52,7 +52,10 @@ class WinRMCommunicator(AbstractCommunicator):
     _transport: str
     """WinRM auth transport identifier passed to :class:`winrm.Session`."""
 
-    _session: winrm.Session | None
+    # pywinrm's type stubs don't export ``Session`` on the top-level
+    # module even though it's the public entry point everyone uses.
+    # The runtime attribute exists; ignore the stub's lie.
+    _session: winrm.Session | None  # pyright: ignore[reportAttributeAccessIssue]
     """Active pywinrm session; ``None`` until :meth:`wait_ready` succeeds."""
 
     def __init__(
@@ -70,7 +73,7 @@ class WinRMCommunicator(AbstractCommunicator):
         self._transport = transport
         self._session = None
 
-    def _require_session(self) -> winrm.Session:
+    def _require_session(self) -> winrm.Session:  # pyright: ignore[reportAttributeAccessIssue]
         """Return the active session or raise if :meth:`wait_ready` never ran.
 
         :returns: The live :class:`winrm.Session`.
@@ -95,7 +98,7 @@ class WinRMCommunicator(AbstractCommunicator):
         last_exc: Exception | None = None
 
         while time.monotonic() < deadline:
-            session = winrm.Session(
+            session = winrm.Session(  # pyright: ignore[reportAttributeAccessIssue]
                 self._endpoint,
                 auth=(self._username, self._password),
                 transport=self._transport,

@@ -20,6 +20,7 @@ import os
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
@@ -306,14 +307,14 @@ class VM(AbstractVM):
     def _base_domain_xml(
         self,
         domain_name: str,
-        disk_path: str,
-        seed_iso_path: str | None,
+        disk_path: str | Path,
+        seed_iso_path: str | Path | None,
         network_entries: list[tuple[str, str]],  # (libvirt_net_name, mac)
         run_id: str,
-        extra_cdroms: list[str] | None = None,
+        extra_cdroms: list[str] | list[Path] | None = None,
         boot_cdrom: bool = False,
         uefi: bool = False,
-        nvram_path: str | None = None,
+        nvram_path: str | Path | None = None,
         windows: bool = False,
     ) -> str:
         """Build a libvirt domain XML string.

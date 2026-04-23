@@ -15,7 +15,7 @@ import io
 from typing import TYPE_CHECKING, Any
 
 import yaml
-from passlib.hash import sha512_crypt
+from passlib.hash import sha512_crypt  # pyright: ignore[reportAttributeAccessIssue]
 from pycdlib import PyCdlib  # type: ignore[attr-defined]
 
 from testrange.cache import vm_config_hash

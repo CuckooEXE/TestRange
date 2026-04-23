@@ -26,8 +26,8 @@ pytestmark = pytest.mark.regression
 
 def _vm(
     users: list[Credential],
-    pkgs: list = None,
-    post: list[str] = None,
+    pkgs: list | None = None,
+    post: list[str] | None = None,
 ) -> VM:
     """Build a Linux VM spec for builder-invariant regression checks."""
     return VM(

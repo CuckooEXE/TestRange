@@ -128,8 +128,11 @@ class TestDomainXml:
             "name", Path("/t/d.qcow2"), Path("/t/s.iso"), [], "r",
         )
         root = ET.fromstring(xml)
-        assert root.find("vcpu").text == "8"
-        assert int(root.find("memory").text) == 16 * 1024 * 1024
+        vcpu = root.find("vcpu")
+        mem = root.find("memory")
+        assert vcpu is not None and mem is not None
+        assert vcpu.text == "8"
+        assert mem.text is not None and int(mem.text) == 16 * 1024 * 1024
 
     def test_nvme_disk_uses_nvme_bus(self) -> None:
         vm = VM("a", "b", [], devices=[HardDrive("20GB", nvme=True)])
@@ -138,14 +141,20 @@ class TestDomainXml:
         )
         root = ET.fromstring(xml)
         primary_disk = root.find(".//devices/disk[@device='disk']")
-        assert primary_disk.find("target").attrib["bus"] == "nvme"
+        assert primary_disk is not None
+        target = primary_disk.find("target")
+        assert target is not None
+        assert target.attrib["bus"] == "nvme"
 
     def test_virtio_disk_default(self) -> None:
         vm = VM("a", "b", [], devices=[HardDrive()])
         xml = vm._base_domain_xml("n", Path("/d.qcow2"), Path("/s.iso"), [], "r")
         root = ET.fromstring(xml)
         primary_disk = root.find(".//devices/disk[@device='disk']")
-        assert primary_disk.find("target").attrib["bus"] == "virtio"
+        assert primary_disk is not None
+        target = primary_disk.find("target")
+        assert target is not None
+        assert target.attrib["bus"] == "virtio"
 
     def test_multiple_nics_emitted(self) -> None:
         vm = VM("a", "b", [])
@@ -273,7 +282,7 @@ class TestInstallPhaseCleanup:
 
     def _patch_install(
         self, vm: VM, monkeypatch: pytest.MonkeyPatch
-    ) -> MagicMock:
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
         """Stub out enough of the install-phase pipeline that
         ``_run_install_phase`` runs against pure mocks."""
         from testrange._run import RunDir
@@ -293,8 +302,8 @@ class TestInstallPhaseCleanup:
         run.nvram_path.return_value = Path("/tmp/vars.fd")
 
         install_spec = InstallDomain(
-            work_disk=Path("/tmp/winbox-install.qcow2"),
-            seed_iso=Path("/tmp/winbox-unattend.iso"),
+            work_disk="/tmp/winbox-install.qcow2",
+            seed_iso="/tmp/winbox-unattend.iso",
             extra_cdroms=(),
             uefi=False,
             windows=False,

@@ -133,16 +133,29 @@ class Orchestrator(AbstractOrchestrator):
     _host: str
     """libvirt connection target: ``'localhost'``, a hostname, or a full URI."""
 
-    _networks: list[VirtualNetwork]
+    # Narrowed to the concrete libvirt types because only this class
+    # ever populates these collections.  Pyright's strict override
+    # rule rejects narrowing a mutable ``list[AbstractVM]`` base
+    # attribute to ``list[VM]``; the per-symbol ignore is scoped to
+    # just this declaration, which is safe because external code
+    # reads through the ABC attribute (typed as ``list[AbstractVM]``)
+    # and internal code genuinely only stores the concrete type.
+    _networks: list[VirtualNetwork]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Test networks to create for this run."""
 
-    _vm_list: list[VM]
+    _vm_list: list[VM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """VM specifications to provision."""
 
     _cache: CacheManager
     """Disk-image cache manager used for this run."""
 
-    vms: dict[str, VM]
+    # Same story as _vm_list / _networks above: only this class
+    # populates the dict, so it's always ``VM`` at runtime.  Narrowing
+    # the declared type tightens checks inside this module; the
+    # per-symbol ignore suppresses Pyright's strict-override rule
+    # which doesn't accept a narrower mutable override even though
+    # nothing external mutates this attribute.
+    vms: dict[str, VM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Running VMs keyed by name; populated after :meth:`__enter__`."""
 
     _conn: libvirt.virConnect | None
@@ -163,8 +176,13 @@ class Orchestrator(AbstractOrchestrator):
         storage_backend: AbstractStorageBackend | None = None,
     ) -> None:
         self._host = host
-        self._networks = list(networks) if networks else []
-        self._vm_list = list(vms) if vms else []
+        # The narrower concrete types declared in the class body are
+        # what internal code relies on.  Pyright re-checks the type
+        # of the assignment against the ABC's declaration on each
+        # assignment too; ignore per-line here for the same reason
+        # we ignored the class-body declarations above.
+        self._networks = list(networks) if networks else []  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._vm_list = list(vms) if vms else []  # pyright: ignore[reportIncompatibleVariableOverride]
         self._cache = CacheManager(root=cache_root) if cache_root else CacheManager()
         # Explicit override wins.  When ``None``, _select_storage_backend
         # inspects the libvirt URI at __enter__ and picks LocalStorage
@@ -172,7 +190,7 @@ class Orchestrator(AbstractOrchestrator):
         self._storage: AbstractStorageBackend | None = storage_backend
 
         # Populated after __enter__
-        self.vms = {}
+        self.vms = {}  # pyright: ignore[reportIncompatibleVariableOverride]
         self._conn = None
         self._run = None
         self._install_network = None
@@ -679,7 +697,7 @@ class Orchestrator(AbstractOrchestrator):
                     )
             self._storage = None
 
-        self.vms = {}
+        self.vms = {}  # pyright: ignore[reportIncompatibleVariableOverride]
         _log.info("teardown complete")
 
 

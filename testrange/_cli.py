@@ -311,7 +311,6 @@ def _print_test(test: Test) -> None:
     for i, net in enumerate(networks):
         last = i == len(networks) - 1
         trunk = "│   " if not last else "    "
-        branch = "│   └──" if not last else "└───────"
         # Spacing to align with the network block below
         click.echo(f"│   {'└──' if last else '├──'} {click.style(net.name, fg='cyan', bold=True)}")
         rows = [

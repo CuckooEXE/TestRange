@@ -120,8 +120,11 @@ class GuestAgentCommunicator(AbstractCommunicator):
                 f"(domain: {self._dom.name()!r})"
             )
         finally:
-            # Restore libvirt's default stderr error handler.
-            libvirt.registerErrorHandler(None, None)
+            # Restore libvirt's default stderr error handler by
+            # passing ``None`` — libvirt's stub annotates the
+            # ``f`` parameter as a required callback, but ``None``
+            # is the documented way to reset.
+            libvirt.registerErrorHandler(None, None)  # pyright: ignore[reportArgumentType]
 
     def exec(
         self,

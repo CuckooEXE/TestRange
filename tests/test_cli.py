@@ -357,6 +357,12 @@ class TestBackendUrlDispatch:
             self._fake_original(),
         )
         assert orch is not None
+        # ``_token`` is typed as ``object`` on the ProxmoxOrchestrator;
+        # pyright can't tell it's a dict without narrowing.  assert it
+        # here and then index.
+        from testrange.backends.proxmox import ProxmoxOrchestrator
+        assert isinstance(orch, ProxmoxOrchestrator)
+        assert isinstance(orch._token, dict)
         assert orch._token["token"] == "root!auto"
         assert orch._storage == "local-lvm"
 

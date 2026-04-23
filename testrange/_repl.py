@@ -174,11 +174,7 @@ def print_keep_summary(orch: Orchestrator) -> None:
 
     :param orch: The orchestrator being intentionally left running.
     """
-    run_dir = (
-        str(orch._run.path)
-        if getattr(orch, "_run", None)
-        else "(none)"
-    )
+    run_dir = str(orch._run.path) if orch._run is not None else "(none)"
 
     hints = orch.keep_alive_hints()
 
@@ -188,7 +184,7 @@ def print_keep_summary(orch: Orchestrator) -> None:
         lines.append("Suggested:")
         for cmd in hints:
             lines.append(f"  {cmd}")
-        if getattr(orch, "_run", None):
+        if orch._run is not None:
             lines.append(f"  rm -rf {run_dir}")
 
     # stdout, not the logger, so it always shows even at --log-level ERROR.

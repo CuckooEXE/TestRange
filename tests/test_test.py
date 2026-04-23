@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -92,6 +93,12 @@ class TestRun:
 
 class TestRunTests:
     def _mock_test(self, name: str, passed: bool) -> Test:
+        # Typed as ``Test`` so callers can pass the list straight to
+        # ``run_tests``; at runtime it's a MagicMock, which exposes
+        # ``.run.side_effect`` for test authors.  Pyright complains
+        # about mutating ``.run.side_effect`` through a ``Test``-typed
+        # reference — the targeted per-line ignore on those call
+        # sites scopes the lie precisely.
         t = MagicMock(spec=Test)
         t.name = name
         t.run.return_value = TestResult(
@@ -154,7 +161,7 @@ class TestRunTests:
 
         tests = [self._mock_test(f"t{i}", True) for i in range(4)]
         for t in tests:
-            t.run.side_effect = _slow_run
+            cast(MagicMock, t.run).side_effect = _slow_run
         run_tests(tests, verbose=False, concurrency=1)
         assert peak == 1, f"expected serial execution, saw peak={peak}"
 
@@ -177,7 +184,7 @@ class TestRunTests:
 
         tests = [self._mock_test(f"t{i}", True) for i in range(4)]
         for t in tests:
-            t.run.side_effect = _slow_run
+            cast(MagicMock, t.run).side_effect = _slow_run
         run_tests(tests, verbose=False, concurrency=3)
         assert peak >= 2, (
             f"expected at least 2 tests in flight with concurrency=3, "
@@ -198,8 +205,8 @@ class TestRunTests:
                 )
             return _inner
 
-        for t, s in zip(tests, sleeps):
-            t.run.side_effect = _run_with_sleep(s)
+        for t, s in zip(tests, sleeps, strict=True):
+            cast(MagicMock, t.run).side_effect = _run_with_sleep(s)
 
         results = run_tests(tests, verbose=False, concurrency=5)
         # Completion-order would produce [t3, t1, t4, t2, t0]; we want

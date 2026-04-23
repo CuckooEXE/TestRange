@@ -17,6 +17,7 @@ in the manual-QA examples, not the unit suite.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -138,17 +139,24 @@ class TestLocalFileTransportRunTool:
 
 
 class _FakeTransport:
-    """Minimal AbstractFileTransport stand-in: records run_tool calls,
-    returns whatever was queued."""
+    """Minimal :class:`AbstractFileTransport` stand-in: records
+    ``run_tool`` calls and returns queued responses.  Only implements
+    what :class:`Qcow2DiskFormat` actually uses; cast to
+    :class:`AbstractFileTransport` at the call site since Pyright
+    can't tell from ``run_tool`` alone."""
 
     def __init__(self, exit_code: int = 0, stderr: bytes = b"") -> None:
         self.calls: list[list[str]] = []
         self.exit_code = exit_code
         self.stderr = stderr
 
-    def run_tool(self, argv, timeout=60.0):
+    def run_tool(
+        self, argv: list[str], timeout: float = 60.0,
+    ) -> tuple[int, bytes, bytes]:
         self.calls.append(list(argv))
         return self.exit_code, b"", self.stderr
+
+
 
 
 class TestQcow2DiskFormat:
@@ -158,7 +166,9 @@ class TestQcow2DiskFormat:
 
     def test_create_overlay_invokes_qemu_img_create(self) -> None:
         t = _FakeTransport()
-        Qcow2DiskFormat(t).create_overlay("/t/base.qcow2", "/t/ov.qcow2")
+        Qcow2DiskFormat(cast(AbstractFileTransport, t)).create_overlay(
+            "/t/base.qcow2", "/t/ov.qcow2",
+        )
         assert t.calls == [[
             "qemu-img", "create",
             "-f", "qcow2",
@@ -169,19 +179,25 @@ class TestQcow2DiskFormat:
 
     def test_create_blank_sends_expected_argv(self) -> None:
         t = _FakeTransport()
-        Qcow2DiskFormat(t).create_blank("/t/blank.qcow2", "40G")
+        Qcow2DiskFormat(cast(AbstractFileTransport, t)).create_blank(
+            "/t/blank.qcow2", "40G",
+        )
         assert t.calls == [
             ["qemu-img", "create", "-f", "qcow2", "/t/blank.qcow2", "40G"]
         ]
 
     def test_resize_sends_expected_argv(self) -> None:
         t = _FakeTransport()
-        Qcow2DiskFormat(t).resize("/t/d.qcow2", "64G")
+        Qcow2DiskFormat(cast(AbstractFileTransport, t)).resize(
+            "/t/d.qcow2", "64G",
+        )
         assert t.calls == [["qemu-img", "resize", "/t/d.qcow2", "64G"]]
 
     def test_compress_sends_expected_argv(self) -> None:
         t = _FakeTransport()
-        Qcow2DiskFormat(t).compress("/t/s.qcow2", "/t/d.qcow2")
+        Qcow2DiskFormat(cast(AbstractFileTransport, t)).compress(
+            "/t/s.qcow2", "/t/d.qcow2",
+        )
         assert t.calls == [[
             "qemu-img", "convert",
             "-f", "qcow2",
@@ -197,7 +213,9 @@ class TestQcow2DiskFormat:
         see a raw nonzero exit surfaced as a plain tuple."""
         t = _FakeTransport(exit_code=1, stderr=b"disk full")
         with pytest.raises(CacheError, match="disk full"):
-            Qcow2DiskFormat(t).resize("/t/d.qcow2", "1P")
+            Qcow2DiskFormat(cast(AbstractFileTransport, t)).resize(
+                "/t/d.qcow2", "1P",
+            )
 
 
 # ===========================================================================
@@ -469,6 +487,7 @@ class TestOrchestratorBackendSelection:
         monkeypatch.setenv("USER", "local")
         orch = Orchestrator(host="qemu+ssh://kvm.example.com/system")
         b = orch._select_storage_backend()
+        assert isinstance(b.transport, SSHFileTransport)
         assert b.transport._user == "local"
 
     def test_explicit_storage_backend_wins(self) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -205,8 +206,8 @@ class TestReadyImage:
 
 
 class TestResolveCommunicatorHost:
-    def _make_vm(self, **overrides) -> VM:
-        defaults = dict(
+    def _make_vm(self, **overrides: Any) -> VM:
+        defaults: dict[str, Any] = dict(
             name="x",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
@@ -264,6 +265,7 @@ class TestMakeCommunicator:
         )
         pairs = [("aa:bb:cc:dd:ee:02", "10.0.0.7/24", "10.0.0.1", "10.0.0.1")]
         comm = vm._make_communicator(pairs)
+        assert isinstance(comm, SSHCommunicator)
         assert comm._username == "deploy"
 
 
@@ -306,7 +308,9 @@ class TestBaseDomainXmlSeedOptional:
         root = ET.fromstring(xml)
         cdroms = root.findall(".//disk[@device='cdrom']")
         assert len(cdroms) == 1
-        assert cdroms[0].find("source").get("file") == "/tmp/seed.iso"
+        source = cdroms[0].find("source")
+        assert source is not None
+        assert source.get("file") == "/tmp/seed.iso"
 
 
 class TestBuildDispatchesNoOp:

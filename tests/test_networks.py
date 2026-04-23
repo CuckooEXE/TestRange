@@ -123,7 +123,9 @@ class TestXmlGeneration:
 
     def test_xml_contains_network_name(self, net: VirtualNetwork) -> None:
         root = ET.fromstring(net.to_xml())
-        assert root.find("name").text == net.backend_name()
+        name_el = root.find("name")
+        assert name_el is not None
+        assert name_el.text == net.backend_name()
 
     def test_nat_forward_when_internet(self, net: VirtualNetwork) -> None:
         root = ET.fromstring(net.to_xml())

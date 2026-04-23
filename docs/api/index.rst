@@ -18,5 +18,6 @@ individual members.
    packages
    communication
    cache
+   storage
    cloud_init
    exceptions

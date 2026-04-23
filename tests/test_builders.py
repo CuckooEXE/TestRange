@@ -10,6 +10,7 @@ NoOp-specific ``ready_image`` flow.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,8 +26,10 @@ from testrange import (
 from testrange.vms.builders.base import InstallDomain, RunDomain
 
 
-def _linux_vm(**overrides) -> VM:
-    defaults = dict(
+def _linux_vm(**overrides: Any) -> VM:
+    # dict[str, Any] so pyright doesn't infer a narrow union from
+    # the literal values and fail to reconcile with VM(**…) params.
+    defaults: dict[str, Any] = dict(
         name="deb",
         iso="https://example.com/debian.qcow2",
         users=[Credential("root", "pw")],
@@ -35,8 +38,8 @@ def _linux_vm(**overrides) -> VM:
     return VM(**defaults)
 
 
-def _windows_vm(**overrides) -> VM:
-    defaults = dict(
+def _windows_vm(**overrides: Any) -> VM:
+    defaults: dict[str, Any] = dict(
         name="winbox",
         iso="/srv/iso/Win10_21H1_English_x64.iso",
         users=[

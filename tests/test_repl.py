@@ -207,7 +207,7 @@ class TestPrintKeepSummary:
 # ---------------------------------------------------------------------------
 
 
-def _make_test(name: str) -> Test:
+def _make_test(name: str) -> MagicMock:
     t = MagicMock(spec=Test)
     t.name = name
     t.run.return_value = TestResult(passed=True, error=None, duration=0.0)

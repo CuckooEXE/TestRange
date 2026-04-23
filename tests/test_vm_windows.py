@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 from xml.etree import ElementTree as ET
 
@@ -16,8 +17,8 @@ from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
 from testrange.exceptions import VMBuildError
 
 
-def _win_vm(**overrides) -> VM:
-    defaults = dict(
+def _win_vm(**overrides: Any) -> VM:
+    defaults: dict[str, Any] = dict(
         name="win",
         iso="/srv/iso/Win10_21H1_English_x64.iso",
         users=[
@@ -105,6 +106,7 @@ class TestWindowsDomainXml:
         disks = root.findall(".//disk[@device='disk']")
         assert len(disks) == 1
         target = disks[0].find("target")
+        assert target is not None
         assert target.get("bus") == "sata"
         assert target.get("dev") == "sda"
 
@@ -112,7 +114,11 @@ class TestWindowsDomainXml:
         """Primary disk owns sda → CD-ROMs start at sdb."""
         root = self._render(_win_vm())
         cdroms = root.findall(".//disk[@device='cdrom']")
-        targets = [cd.find("target").get("dev") for cd in cdroms]
+        targets: list[str | None] = []
+        for cd in cdroms:
+            target = cd.find("target")
+            assert target is not None
+            targets.append(target.get("dev"))
         assert targets == ["sdb", "sdc", "sdd"]
 
     def test_bootable_cdrom_is_first(self) -> None:
@@ -122,7 +128,11 @@ class TestWindowsDomainXml:
         seed is just attached so Setup finds it by volume scan."""
         root = self._render(_win_vm())
         cdroms = root.findall(".//disk[@device='cdrom']")
-        sources = [cd.find("source").get("file") for cd in cdroms]
+        sources: list[str | None] = []
+        for cd in cdroms:
+            source = cd.find("source")
+            assert source is not None
+            sources.append(source.get("file"))
         assert sources[0] == "/tmp/Win10.iso"
         assert "/tmp/unattend.iso" in sources
 
@@ -130,7 +140,9 @@ class TestWindowsDomainXml:
         root = self._render(_win_vm())
         iface = root.find(".//interface")
         assert iface is not None
-        assert iface.find("model").get("type") == "e1000e"
+        model = iface.find("model")
+        assert model is not None
+        assert model.get("type") == "e1000e"
 
 
 class TestBuildRoutesWindows:
@@ -213,6 +225,7 @@ class TestWinRMCommunicatorFactory:
         vm._domain = MagicMock()
         pairs = [("52:54:00:12:34:56", "10.50.0.10/24", "", "")]
         comm = vm._make_communicator(pairs)
+        assert isinstance(comm, WinRMCommunicator)
         assert comm._username == "alice"
 
     def test_winrm_requires_static_ip(self) -> None:

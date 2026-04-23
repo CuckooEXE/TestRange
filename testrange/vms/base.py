@@ -13,7 +13,10 @@ if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.cache import CacheManager
     from testrange.credentials import Credential
+    from testrange.devices import AbstractDevice
     from testrange.orchestrator_base import AbstractOrchestrator
+    from testrange.packages import AbstractPackage
+    from testrange.vms.builders.base import Builder
 
 
 class AbstractVM(ABC):
@@ -33,14 +36,38 @@ class AbstractVM(ABC):
 
     # ------------------------------------------------------------------
     # Spec attributes subclasses populate in their __init__.  Declared
-    # here so the shared ``_make_communicator`` / helpers can read them
-    # without mypy gymnastics.
+    # here so shared helpers and builders (which type ``vm`` as
+    # :class:`AbstractVM`) can read them without Pyright complaining
+    # about attribute-access issues.  Concrete backends override with
+    # compatible types.
     # ------------------------------------------------------------------
     users: list[Credential]
     """Credentials to configure on / pass through to the guest."""
 
     communicator: str
     """Transport kind: ``"guest-agent"``, ``"ssh"``, or ``"winrm"``."""
+
+    iso: str
+    """Source image reference — URL or absolute local path to a
+    cloud image / installer ISO / prebuilt qcow2.  See
+    :func:`testrange.vms.images.resolve_image`."""
+
+    pkgs: list[AbstractPackage]
+    """Packages to install during the install phase.  Empty for
+    builders that don't provision packages (e.g.
+    :class:`~testrange.vms.builders.NoOpBuilder`)."""
+
+    post_install_cmds: list[str]
+    """Shell commands run after package installation during the
+    install phase.  Empty for builders that have no install phase."""
+
+    devices: list[AbstractDevice]
+    """Virtual hardware attached to this VM — vCPU count, memory
+    allocation, hard drives, NIC references."""
+
+    builder: Builder
+    """Provisioning strategy.  Reads this VM's spec and produces the
+    install- and run-phase domain descriptions the backend consumes."""
 
     @property
     @abstractmethod
@@ -49,6 +76,19 @@ class AbstractVM(ABC):
 
         :returns: VM name string.
         """
+
+    def _primary_disk_size(self) -> str:
+        """Return the primary (OS) disk's size as a qcow2-compatible
+        string (e.g. ``'64G'``).
+
+        Default implementation: the first
+        :class:`~testrange.devices.HardDrive` in :attr:`devices`, or
+        ``'20G'`` when no drive is declared.  Backends that need a
+        different default override this.
+        """
+        from testrange.devices import HardDrive
+        drives = [d for d in self.devices if isinstance(d, HardDrive)]
+        return drives[0].qemu_size if drives else "20G"
 
     def _require_communicator(self) -> AbstractCommunicator:
         """Return the active communicator or raise an error.

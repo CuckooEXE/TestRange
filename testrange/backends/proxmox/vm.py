@@ -38,7 +38,6 @@ post-install disk so subsequent runs boot from an overlay.
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from testrange.backends.libvirt.vm import VM as _LibvirtVM
@@ -84,17 +83,23 @@ class ProxmoxVM(AbstractVM):
         read credentials without the VM growing its own storage."""
         return self._spec.users
 
+    # pyright flags these as "property overrides attribute" against
+    # AbstractVM's plain-attribute declarations.  They're a deliberate
+    # proxy pattern (ProxmoxVM wraps an internal _spec and forwards
+    # reads); the ignore scope is exactly the override.
     @property
-    def communicator(self) -> str:
+    def communicator(self) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
         """Forward to the underlying spec (see :attr:`users`)."""
         return self._spec.communicator
 
     @property
-    def _communicator(self) -> AbstractCommunicator | None:  # type: ignore[override]
+    def _communicator(self) -> AbstractCommunicator | None:  # pyright: ignore[reportIncompatibleVariableOverride]
         return self._spec._communicator
 
     @_communicator.setter
-    def _communicator(self, value: AbstractCommunicator | None) -> None:
+    def _communicator(  # pyright: ignore[reportIncompatibleVariableOverride]
+        self, value: AbstractCommunicator | None,
+    ) -> None:
         self._spec._communicator = value
 
     def build(
@@ -104,7 +109,7 @@ class ProxmoxVM(AbstractVM):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
-    ) -> Path:
+    ) -> str:
         # TODO: if self.builder.needs_install_phase() is False, stage
         # the prebuilt qcow2 via self.builder.ready_image(...).  The
         # Proxmox twist: also need to import it into the Proxmox
@@ -125,7 +130,7 @@ class ProxmoxVM(AbstractVM):
         self,
         context: AbstractOrchestrator,
         run: RunDir,
-        installed_disk: Path,
+        installed_disk: str,
         network_entries: list[tuple[str, str]],
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> None:
