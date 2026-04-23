@@ -122,8 +122,19 @@ class TestHardDrive:
     def test_nvme_bus(self) -> None:
         assert HardDrive(nvme=True).bus == "nvme"
 
-    def test_virtio_bus_default(self) -> None:
-        assert HardDrive().bus == "virtio"
+    def test_default_bus_is_none_for_backend_to_pick(self) -> None:
+        # Regression: the documented contract is that ``bus=None`` lets
+        # the backend choose — libvirt picks virtio on Linux guests and
+        # sata on Windows (so Windows Setup doesn't need virtio-win
+        # drivers pre-threaded).  Forcing a default here would break
+        # the Windows install path.
+        assert HardDrive().bus is None
+
+    def test_explicit_virtio_bus(self) -> None:
+        # Callers who want to pin virtio across backends do so
+        # explicitly — the default path (bus=None) intentionally
+        # declines to answer on behalf of the backend.
+        assert HardDrive(bus="virtio").bus == "virtio"
 
     def test_invalid_size_rejected_at_construction(self) -> None:
         with pytest.raises(ValueError):
