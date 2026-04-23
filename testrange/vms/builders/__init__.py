@@ -1,7 +1,7 @@
-"""Provisioning strategies for :class:`~testrange.backends.libvirt.VM`.
+"""Provisioning strategies — how TestRange goes from a user's
+``iso=`` input to a runnable disk image.
 
-Each concrete :class:`Builder` encodes one way of getting from a
-user-supplied ``iso=`` to a runnable disk image:
+Each concrete :class:`Builder` encodes one install pipeline:
 
 - :class:`CloudInitBuilder` — boot a Linux cloud image under a NoCloud
   seed ISO and let cloud-init customise it.
@@ -13,7 +13,9 @@ user-supplied ``iso=`` to a runnable disk image:
 
 Subclass :class:`Builder` to support a new provisioning pipeline
 (preseed, Kickstart, Ignition, sysprep'd Windows, …) and pass the
-instance as ``builder=...`` to :class:`~testrange.backends.libvirt.VM`.
+instance as ``builder=...`` on a VM spec.  Builders are
+hypervisor-neutral — any backend consumes the same
+:class:`InstallDomain` / :class:`RunDomain` data classes they emit.
 
 Auto-selection
 --------------
@@ -49,12 +51,12 @@ from collections.abc import Callable
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
 from testrange.vms.builders.cloud_init import (
     CloudInitBuilder,
-    write_seed_iso,
+    build_seed_iso_bytes,
 )
 from testrange.vms.builders.noop import NoOpBuilder
 from testrange.vms.builders.unattend import (
     WindowsUnattendedBuilder,
-    write_autounattend_iso,
+    build_autounattend_iso_bytes,
 )
 from testrange.vms.images import is_windows_image
 
@@ -118,8 +120,8 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
-    "write_seed_iso",
-    "write_autounattend_iso",
+    "build_seed_iso_bytes",
+    "build_autounattend_iso_bytes",
     "BUILDER_REGISTRY",
     "register_builder",
     "auto_select_builder",

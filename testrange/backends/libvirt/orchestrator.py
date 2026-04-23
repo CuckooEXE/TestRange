@@ -24,7 +24,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from xml.etree import ElementTree as ET
 
 import libvirt
@@ -39,6 +39,11 @@ from testrange.backends.libvirt.network import (
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
+from testrange.storage import (
+    AbstractStorageBackend,
+    LocalStorageBackend,
+    SSHStorageBackend,
+)
 
 _log = get_logger(__name__)
 
@@ -53,6 +58,31 @@ libvirt network at start-up time, so stale state from a crashed prior
 run (or an unrelated libvirt network) does not wedge new runs.
 """
 
+
+def _list_network_names(
+    conn: libvirt.virConnect, *, defined_only: bool = False,
+) -> list[str]:
+    """Return libvirt network names as a proper ``list[str]``.
+
+    Works around libvirt-python's inaccurate type stubs: both
+    :meth:`virConnect.listNetworks` and
+    :meth:`virConnect.listDefinedNetworks` are annotated as returning
+    ``str`` but actually return ``list[str]`` (or ``None`` on some
+    older builds).  We normalise ``None`` → ``[]`` and cast so the
+    rest of the code is statically clean.
+
+    :param conn: Open libvirt connection.
+    :param defined_only: If ``True``, return only inactive (defined-
+        but-not-running) networks.  If ``False`` (default), return
+        the union of active and inactive names.
+    """
+    if defined_only:
+        return cast(list[str], conn.listDefinedNetworks() or [])
+    active = cast(list[str], conn.listNetworks() or [])
+    defined = cast(list[str], conn.listDefinedNetworks() or [])
+    return active + defined
+
+
 class Orchestrator(AbstractOrchestrator):
     """libvirt / KVM / QEMU implementation of
     :class:`~testrange.orchestrator_base.AbstractOrchestrator`.
@@ -65,7 +95,25 @@ class Orchestrator(AbstractOrchestrator):
         pass a full libvirt URI (e.g. ``'qemu+ssh://user@host/system'``).
     :param networks: Virtual networks to create for this test.
     :param vms: Virtual machines to provision and start.
-    :param cache_root: Override the default cache directory.
+    :param cache_root: Override the default cache directory (outer host).
+    :param storage_backend: Override the auto-selected
+        :class:`~testrange.storage.AbstractStorageBackend`.  Defaults:
+        ``qemu:///system`` → :class:`LocalStorageBackend`,
+        ``qemu+ssh://[user@]host/system`` → :class:`SSHStorageBackend`.
+        Pass explicitly when the auto-selection logic can't guess the
+        right thing (custom cache dirs on the remote, tunnelled
+        connections, a test harness wanting a fake backend, etc.).
+
+    Remote hosts
+    ------------
+
+    When *host* resolves to an SSH-backed libvirt URI, disk images are
+    staged to ``/var/tmp/testrange/<ssh_user>/`` on the remote host
+    over SFTP and all ``qemu-img`` work runs there — no silent-failure
+    "path doesn't exist on the remote".  The remote must have
+    ``qemu-utils`` + ``libvirt-daemon-system`` installed and the SSH
+    user must be able to run ``qemu-img`` (usually via the ``libvirt``
+    group).
 
     Example::
 
@@ -76,21 +124,38 @@ class Orchestrator(AbstractOrchestrator):
         )
         with orchestrator as orch:
             result = orch.vms["server"].exec(["uname", "-r"])
+
+        # Same API against a remote libvirtd:
+        with Orchestrator(host="qemu+ssh://kvm.example.com/system", vms=[...]):
+            ...
     """
 
     _host: str
     """libvirt connection target: ``'localhost'``, a hostname, or a full URI."""
 
-    _networks: list[VirtualNetwork]
+    # Narrowed to the concrete libvirt types because only this class
+    # ever populates these collections.  Pyright's strict override
+    # rule rejects narrowing a mutable ``list[AbstractVM]`` base
+    # attribute to ``list[VM]``; the per-symbol ignore is scoped to
+    # just this declaration, which is safe because external code
+    # reads through the ABC attribute (typed as ``list[AbstractVM]``)
+    # and internal code genuinely only stores the concrete type.
+    _networks: list[VirtualNetwork]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Test networks to create for this run."""
 
-    _vm_list: list[VM]
+    _vm_list: list[VM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """VM specifications to provision."""
 
     _cache: CacheManager
     """Disk-image cache manager used for this run."""
 
-    vms: dict[str, VM]
+    # Same story as _vm_list / _networks above: only this class
+    # populates the dict, so it's always ``VM`` at runtime.  Narrowing
+    # the declared type tightens checks inside this module; the
+    # per-symbol ignore suppresses Pyright's strict-override rule
+    # which doesn't accept a narrower mutable override even though
+    # nothing external mutates this attribute.
+    vms: dict[str, VM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Running VMs keyed by name; populated after :meth:`__enter__`."""
 
     _conn: libvirt.virConnect | None
@@ -108,14 +173,24 @@ class Orchestrator(AbstractOrchestrator):
         networks: Sequence[VirtualNetwork] | None = None,
         vms: Sequence[VM] | None = None,
         cache_root: Path | None = None,
+        storage_backend: AbstractStorageBackend | None = None,
     ) -> None:
         self._host = host
-        self._networks = list(networks) if networks else []
-        self._vm_list = list(vms) if vms else []
+        # The narrower concrete types declared in the class body are
+        # what internal code relies on.  Pyright re-checks the type
+        # of the assignment against the ABC's declaration on each
+        # assignment too; ignore per-line here for the same reason
+        # we ignored the class-body declarations above.
+        self._networks = list(networks) if networks else []  # pyright: ignore[reportIncompatibleVariableOverride]
+        self._vm_list = list(vms) if vms else []  # pyright: ignore[reportIncompatibleVariableOverride]
         self._cache = CacheManager(root=cache_root) if cache_root else CacheManager()
+        # Explicit override wins.  When ``None``, _select_storage_backend
+        # inspects the libvirt URI at __enter__ and picks LocalStorage
+        # for ``qemu:///system`` or SSHStorage for ``qemu+ssh://…``.
+        self._storage: AbstractStorageBackend | None = storage_backend
 
         # Populated after __enter__
-        self.vms = {}
+        self.vms = {}  # pyright: ignore[reportIncompatibleVariableOverride]
         self._conn = None
         self._run = None
         self._install_network = None
@@ -124,6 +199,31 @@ class Orchestrator(AbstractOrchestrator):
     def backend_type(cls) -> str:
         """Return ``"libvirt"``."""
         return "libvirt"
+
+    def keep_alive_hints(self) -> list[str]:
+        """Emit ``virsh`` commands the user would run to clean up
+        domains and networks left behind by ``--keep``.
+
+        The domain/network names come straight off the live orchestrator
+        state — same names the normal teardown path would target.
+        """
+        hints: list[str] = []
+        run_id = self._run.run_id if self._run else ""
+        for vm in self._vm_list:
+            domain = f"tr-{vm.name[:10]}-{run_id[:8]}"
+            hints.append(
+                f"sudo virsh destroy {domain} && sudo virsh undefine {domain}"
+            )
+        for net in self._networks:
+            try:
+                net_name = net.backend_name()
+            except Exception:
+                net_name = net.name
+            hints.append(
+                f"sudo virsh net-destroy {net_name} "
+                f"&& sudo virsh net-undefine {net_name}"
+            )
+        return hints
 
     def _build_uri(self) -> str:
         """Translate :attr:`host` into a libvirt connection URI.
@@ -136,6 +236,44 @@ class Orchestrator(AbstractOrchestrator):
             # Already a full URI
             return self._host
         return f"qemu+ssh://{self._host}/system"
+
+    def _select_storage_backend(self) -> AbstractStorageBackend:
+        """Pick a storage backend based on the libvirt URI.
+
+        Local URIs (``qemu:///system``) → :class:`LocalStorageBackend`
+        rooted at the outer cache root.  ``qemu+ssh://[user@]host/…``
+        URIs → :class:`SSHStorageBackend` connecting to the same host.
+        Explicit overrides via ``storage_backend=`` win; anything else
+        falls through to local so unknown URI shapes fail loud at
+        domain-define time rather than silently-corrupt some path.
+        """
+        if self._storage is not None:
+            return self._storage
+
+        if self._host in ("localhost", "127.0.0.1", "::1"):
+            return LocalStorageBackend(self._cache.root)
+
+        # Parse ``qemu+ssh://[user@]host[:port]/system`` — we only use
+        # the user, host, and port to build the SSH connection; the
+        # libvirt connection itself is handled by libvirt's own URI
+        # parser via libvirt.open().
+        if "://" in self._host:
+            _, _, rest = self._host.partition("://")
+            hostpart, _, _ = rest.partition("/")
+        else:
+            hostpart = self._host
+        user: str | None = None
+        if "@" in hostpart:
+            user, _, hostpart = hostpart.partition("@")
+        port = 22
+        if ":" in hostpart:
+            hostpart, _, port_s = hostpart.partition(":")
+            try:
+                port = int(port_s)
+            except ValueError:
+                pass
+
+        return SSHStorageBackend(host=hostpart, username=user, port=port)
 
     def __enter__(self) -> Orchestrator:
         """Open libvirt connection, provision all networks and VMs.
@@ -153,7 +291,20 @@ class Orchestrator(AbstractOrchestrator):
                 f"Cannot connect to libvirt at {uri!r}: {exc}"
             ) from exc
 
-        self._run = RunDir()
+        # Build the storage backend that matches the libvirt connection.
+        # Failure here (e.g. SSH auth rejected) closes the libvirt
+        # connection we just opened so teardown doesn't leak it.
+        if self._storage is None:
+            try:
+                self._storage = self._select_storage_backend()
+            except Exception:
+                try:
+                    self._conn.close()
+                finally:
+                    self._conn = None
+                raise
+
+        self._run = RunDir(self._storage)
 
         try:
             self._provision(self._run)
@@ -232,8 +383,11 @@ class Orchestrator(AbstractOrchestrator):
                 ):
                     self._install_network.start(self)
 
-        # 2. Build (or retrieve from cache) installed disk images
-        installed_disks: dict[str, Path] = {}
+        # 2. Build (or retrieve from cache) installed disk images.
+        # Refs are backend-local strings — for LocalStorageBackend
+        # these are outer-host paths identical to the pre-backend
+        # behaviour; for SSH backends they're paths on the remote.
+        installed_disks: dict[str, str] = {}
         with log_duration(_log, f"install phase for {len(self._vm_list)} VM(s)"):
             for vm in self._vm_list:
                 if vm.builder.needs_install_phase():
@@ -298,7 +452,7 @@ class Orchestrator(AbstractOrchestrator):
         """
         assert self._conn is not None
         try:
-            defined = self._conn.listDefinedNetworks() or []
+            defined = _list_network_names(self._conn, defined_only=True)
         except libvirt.libvirtError:
             return
 
@@ -333,9 +487,7 @@ class Orchestrator(AbstractOrchestrator):
         assert self._conn is not None
         used: list[ipaddress.IPv4Network] = []
         try:
-            names = (self._conn.listNetworks() or []) + (
-                self._conn.listDefinedNetworks() or []
-            )
+            names = _list_network_names(self._conn)
         except libvirt.libvirtError:
             names = []
 
@@ -529,7 +681,23 @@ class Orchestrator(AbstractOrchestrator):
         except Exception:
             pass
         self._conn = None
-        self.vms = {}
+
+        # Close the storage backend (SSH connection, if any).  Local
+        # backends no-op; SSH backends actually tear down paramiko
+        # channels, which matters for long-running processes that
+        # create and destroy many orchestrators.
+        if self._storage is not None:
+            close = getattr(self._storage, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    _log.debug(
+                        "storage backend close raised (ignored): %s", exc,
+                    )
+            self._storage = None
+
+        self.vms = {}  # pyright: ignore[reportIncompatibleVariableOverride]
         _log.info("teardown complete")
 
 

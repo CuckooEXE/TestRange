@@ -11,7 +11,6 @@ packages, run any caller ``post_install_cmds``, and finally
 from __future__ import annotations
 
 import io
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from xml.etree import ElementTree as ET
 
@@ -22,10 +21,10 @@ from testrange.vms.images import resolve_image
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
-    from testrange.backends.libvirt.vm import VM
     from testrange.cache import CacheManager
     from testrange.credentials import Credential
     from testrange.packages import AbstractPackage
+    from testrange.vms.base import AbstractVM as VM
 
 
 _NS = "urn:schemas-microsoft-com:unattend"
@@ -64,9 +63,9 @@ class WindowsUnattendedBuilder(Builder):
     """Windows unattended install + run strategy.
 
     Stateless: VM-specific values (hostname, users, packages) are pulled
-    from the :class:`~testrange.backends.libvirt.VM` argument each call.
-    Global knobs — product key, UI language, timezone — live on the
-    builder and apply to every VM that uses this instance.
+    from the VM argument each call.  Global knobs — product key, UI
+    language, timezone — live on the builder and apply to every VM
+    that uses this instance.
 
     :param product_key: Windows product key used for edition selection
         during unattended Setup.  Defaults to the publicly documented
@@ -132,24 +131,35 @@ class WindowsUnattendedBuilder(Builder):
         run: RunDir,
         cache: CacheManager,
     ) -> InstallDomain:
-        # 1. Resolve + stage the Windows ISO into the cache.
-        windows_iso = cache.stage_local_iso(resolve_image(vm.iso, cache))
+        # 1. Resolve + stage the Windows ISO (outer cache), then push
+        # it to whichever host the backend's hypervisor will boot from.
+        local_iso = cache.stage_local_iso(resolve_image(vm.iso, cache))
+        windows_iso_ref = cache.stage_source(local_iso, run.storage)
 
         # 2. Blank OS disk — Setup creates its own GPT partitions.
-        work_disk = run.create_blank_disk(vm.name, vm._primary_disk_size())
+        work_disk_ref = run.create_blank_disk(
+            vm.name, vm._primary_disk_size()
+        )
 
-        # 3. Autounattend seed ISO.
-        unattend_iso = run.unattend_iso_path(vm.name)
-        write_autounattend_iso(unattend_iso, self.build_xml(vm))
+        # 3. Autounattend seed ISO — generated in memory, written via
+        # the storage backend so it lands wherever the hypervisor will
+        # be reading from.
+        unattend_ref = run.unattend_iso_path(vm.name)
+        run.storage.transport.write_bytes(
+            unattend_ref,
+            build_autounattend_iso_bytes(self.build_xml(vm)),
+        )
 
         # 4. virtio-win driver ISO so FirstLogonCommands can install
-        # NetKVM and the qemu-guest-agent MSI.
-        virtio_iso = cache.get_virtio_win_iso()
+        # NetKVM and the qemu-guest-agent MSI.  Same stage-to-backend
+        # dance as the Windows ISO.
+        local_virtio = cache.get_virtio_win_iso()
+        virtio_iso_ref = cache.stage_source(local_virtio, run.storage)
 
         return InstallDomain(
-            work_disk=work_disk,
-            seed_iso=unattend_iso,
-            extra_cdroms=(windows_iso, virtio_iso),
+            work_disk=work_disk_ref,
+            seed_iso=unattend_ref,
+            extra_cdroms=(windows_iso_ref, virtio_iso_ref),
             uefi=True,
             windows=True,
             boot_cdrom=True,
@@ -181,7 +191,7 @@ class WindowsUnattendedBuilder(Builder):
     ) -> RunDomain:
         # Windows run boots come up with no seed ISO — FirstLogonCommands
         # already set the hostname, user accounts, and services during
-        # install.  Static IPs come from libvirt dnsmasq DHCP
+        # install.  Static IPs come from the backend's DHCP
         # reservations (MAC-matched).
         return RunDomain(seed_iso=None, uefi=True, windows=True)
 
@@ -412,8 +422,9 @@ def _first_logon_commands(
     return cmds
 
 
-def write_autounattend_iso(output_path: Path, autounattend_xml: str) -> None:
-    """Write an ISO 9660 seed CD-ROM containing ``autounattend.xml``.
+def build_autounattend_iso_bytes(autounattend_xml: str) -> bytes:
+    """Return the bytes of an ISO 9660 seed CD containing
+    ``autounattend.xml``.
 
     Windows Setup scans every attached FAT/NTFS/CDFS volume for a file
     named ``autounattend.xml`` at the root and uses the first match as
@@ -421,8 +432,11 @@ def write_autounattend_iso(output_path: Path, autounattend_xml: str) -> None:
     next to the Windows install media and the install runs unattended.
 
     Uses :mod:`pycdlib` — same machinery as
-    :func:`testrange.vms.builders.cloud_init.write_seed_iso`, so no
-    external ``genisoimage`` / ``xorriso`` dependency.
+    :func:`testrange.vms.builders.cloud_init.build_seed_iso_bytes`, so
+    no external ``genisoimage`` / ``xorriso`` dependency.  Returning
+    bytes (rather than writing to a path) keeps generation backend-
+    agnostic: the caller hands the bytes to whatever storage backend
+    is in play.
     """
     from pycdlib import PyCdlib  # type: ignore[attr-defined]
 
@@ -430,6 +444,7 @@ def write_autounattend_iso(output_path: Path, autounattend_xml: str) -> None:
     iso.new(interchange_level=3, joliet=3, vol_ident="UNATTEND")
 
     data = autounattend_xml.encode("utf-8")
+    buf = io.BytesIO()
     try:
         iso.add_fp(
             io.BytesIO(data),
@@ -437,13 +452,14 @@ def write_autounattend_iso(output_path: Path, autounattend_xml: str) -> None:
             iso_path="/AUTOUNATT.XML;1",
             joliet_path="/autounattend.xml",
         )
-        iso.write(str(output_path))
+        iso.write_fp(buf)
+        return buf.getvalue()
     except Exception as exc:
         raise CloudInitError(
-            f"Failed to write autounattend ISO: {exc}"
+            f"Failed to build autounattend ISO: {exc}"
         ) from exc
     finally:
         iso.close()
 
 
-__all__ = ["WindowsUnattendedBuilder", "write_autounattend_iso"]
+__all__ = ["WindowsUnattendedBuilder", "build_autounattend_iso_bytes"]

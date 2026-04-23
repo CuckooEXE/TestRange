@@ -307,27 +307,34 @@ class VM(AbstractVM):
     def _base_domain_xml(
         self,
         domain_name: str,
-        disk_path: Path,
-        seed_iso_path: Path | None,
+        disk_path: str | Path,
+        seed_iso_path: str | Path | None,
         network_entries: list[tuple[str, str]],  # (libvirt_net_name, mac)
         run_id: str,
-        extra_cdroms: list[Path] | None = None,
+        extra_cdroms: list[str] | list[Path] | None = None,
         boot_cdrom: bool = False,
         uefi: bool = False,
-        nvram_path: Path | None = None,
+        nvram_path: str | Path | None = None,
         windows: bool = False,
     ) -> str:
         """Build a libvirt domain XML string.
 
+        All disk / ISO / NVRAM arguments are **backend-local refs** —
+        strings valid on whichever host this domain's libvirtd is
+        running on.  For the default local backend those are outer-host
+        absolute paths; for ``qemu+ssh://`` they are paths on the
+        remote host.
+
         :param domain_name: The libvirt domain name.
-        :param disk_path: Path to the primary disk qcow2.
-        :param seed_iso_path: Path to the cloud-init / autounattend seed ISO,
-            or ``None`` to omit the CD-ROM entirely (used by the BYOI /
-            prebuilt flow where cloud-init is not involved).
+        :param disk_path: Backend-local ref to the primary disk qcow2.
+        :param seed_iso_path: Backend-local ref to the cloud-init /
+            autounattend seed ISO, or ``None`` to omit the CD-ROM
+            entirely (used by the BYOI / prebuilt flow where
+            cloud-init is not involved).
         :param network_entries: List of ``(libvirt_network_name, mac_address)``
             pairs, one per NIC.
         :param run_id: Run UUID (for uniqueness in domain name).
-        :param extra_cdroms: Additional read-only CD-ROMs to attach — used
+        :param extra_cdroms: Additional read-only CD-ROM refs — used
             during Windows install to surface the Windows ISO and the
             virtio-win driver ISO alongside the unattend seed ISO.
         :param boot_cdrom: If ``True``, boot from CD-ROM before disk.  The
@@ -335,14 +342,25 @@ class VM(AbstractVM):
             the Windows ISO; the run phase boots from the installed disk.
         :param uefi: If ``True``, emit OVMF (UEFI) firmware references.
             Required for Windows 10+ GPT installs.
-        :param nvram_path: Path to the per-domain NVRAM variables file
-            (OVMF_VARS copy).  Required when ``uefi=True``.
+        :param nvram_path: Backend-local ref to the per-domain NVRAM
+            variables file (OVMF_VARS copy).  Required when
+            ``uefi=True``.
         :param windows: If ``True``, use device models Windows has native
             drivers for: SATA for the primary disk, e1000e for NICs.
             Keeps the install phase working without the virtio-win
             driver ISO needing to be threaded through ``DriverPaths``.
         :returns: libvirt domain XML string.
         """
+        # Tolerate ``pathlib.Path`` as well as backend-local strings —
+        # the tests pass ``Path`` objects directly and the builders
+        # still pass strings.  Both are valid refs for a local backend.
+        disk_path = str(disk_path)
+        if seed_iso_path is not None:
+            seed_iso_path = str(seed_iso_path)
+        if nvram_path is not None:
+            nvram_path = str(nvram_path)
+        extra_cdroms = [str(c) for c in (extra_cdroms or [])]
+
         domain = ET.Element("domain", type="kvm")
 
         ET.SubElement(domain, "name").text = domain_name
@@ -374,7 +392,7 @@ class VM(AbstractVM):
             )
             loader.text = "/usr/share/OVMF/OVMF_CODE_4M.fd"
             nvram = ET.SubElement(os_el, "nvram", template="/usr/share/OVMF/OVMF_VARS_4M.fd")
-            nvram.text = str(nvram_path)
+            nvram.text = nvram_path
         # NOTE: no <cmdline> — qemu rejects -append without -kernel for disk
         # boots. NoCloud is auto-detected from the "cidata" volume label on
         # the seed ISO, so the ds= kernel arg isn't needed here.
@@ -409,7 +427,7 @@ class VM(AbstractVM):
         primary_drive = drives[0] if drives else HardDrive()
         disk_el = ET.SubElement(devices, "disk", type="file", device="disk")
         ET.SubElement(disk_el, "driver", name="qemu", type="qcow2", discard="unmap")
-        ET.SubElement(disk_el, "source", file=str(disk_path))
+        ET.SubElement(disk_el, "source", file=disk_path)
         if primary_drive.nvme:
             ET.SubElement(disk_el, "target", dev="nvme0n1", bus="nvme")
         elif windows:
@@ -419,13 +437,21 @@ class VM(AbstractVM):
         else:
             ET.SubElement(disk_el, "target", dev="vda", bus="virtio")
 
-        # Additional data drives (index 1+)
+        # Additional data drives (index 1+).  They sit alongside the
+        # primary disk in the run dir, so derive the path by string
+        # manipulation on the primary ref (sibling-of semantics work
+        # identically for local absolute paths and remote paths).
+        primary_parent = (
+            disk_path.rsplit("/", 1)[0] if "/" in disk_path else ""
+        )
         for idx, drive in enumerate(drives[1:], start=1):
             d = ET.SubElement(devices, "disk", type="file", device="disk")
             ET.SubElement(d, "driver", name="qemu", type="qcow2")
-            # Data drives use separate qcow2 files named <vm>-data<n>.qcow2
-            data_disk = disk_path.parent / f"{self._name}-data{idx}.qcow2"
-            ET.SubElement(d, "source", file=str(data_disk))
+            data_name = f"{self._name}-data{idx}.qcow2"
+            data_ref = (
+                f"{primary_parent}/{data_name}" if primary_parent else data_name
+            )
+            ET.SubElement(d, "source", file=data_ref)
             if drive.nvme:
                 ET.SubElement(d, "target", dev=f"nvme{idx}n1", bus="nvme")
             else:
@@ -443,7 +469,7 @@ class VM(AbstractVM):
         # media is the Windows ISO (first of extra_cdroms); the seed ISO
         # only needs to be *attached* so Setup picks up autounattend.xml
         # from any mounted volume.  Put extras first in that case.
-        cdrom_sources: list[Path] = []
+        cdrom_sources: list[str] = []
         if boot_cdrom and extra_cdroms:
             cdrom_sources.extend(extra_cdroms)
             if seed_iso_path is not None:
@@ -459,7 +485,7 @@ class VM(AbstractVM):
         for cd_idx, cdrom_path in enumerate(cdrom_sources):
             cdrom = ET.SubElement(devices, "disk", type="file", device="cdrom")
             ET.SubElement(cdrom, "driver", name="qemu", type="raw")
-            ET.SubElement(cdrom, "source", file=str(cdrom_path))
+            ET.SubElement(cdrom, "source", file=cdrom_path)
             ET.SubElement(
                 cdrom, "target",
                 dev=f"sd{_sd_letters[cd_idx + cdrom_letter_offset]}",
@@ -517,7 +543,7 @@ class VM(AbstractVM):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
-    ) -> Path:
+    ) -> str:
         """Produce a runnable disk image for this VM.
 
         Delegates to the VM's :attr:`builder`:
@@ -541,11 +567,14 @@ class VM(AbstractVM):
             network (ignored by builders that don't need one).
         :param install_network_mac: MAC address for the install NIC
             (ignored by builders that don't need one).
-        :returns: Absolute path to the runnable disk image.
+        :returns: Backend-local ref to the runnable disk image.  For a
+            local libvirt this is an outer-host path; for
+            ``qemu+ssh://`` it's the path on the remote where the
+            image now lives.
         :raises VMBuildError: If the install phase fails or times out.
         """
         if not self.builder.needs_install_phase():
-            return self.builder.ready_image(self, cache)
+            return self.builder.ready_image(self, cache, run)
 
         h = self.builder.cache_key(self)
 
@@ -555,7 +584,7 @@ class VM(AbstractVM):
         # path.  Serialise per-hash so the first arrival installs and
         # subsequent arrivals hit the cache.
         with vm_build_lock(h):
-            cached = cache.get_vm(h)
+            cached = cache.get_vm(h, run.storage)
             if cached is not None:
                 _log.info(
                     "VM %r install cache hit (%s) — skipping install phase",
@@ -585,14 +614,14 @@ class VM(AbstractVM):
         install_network_name: str,
         install_network_mac: str,
         h: str,
-    ) -> Path:
+    ) -> str:
         """Boot the builder's install domain and snapshot the result.
 
         Factored out of :meth:`build` so the build lock only wraps the
         check-install-store sequence.
         """
         domain_spec = self.builder.prepare_install_domain(self, run, cache)
-        nvram = (
+        nvram_ref = (
             run.nvram_path(self._name) if domain_spec.uefi else None
         )
 
@@ -606,7 +635,7 @@ class VM(AbstractVM):
             extra_cdroms=list(domain_spec.extra_cdroms),
             boot_cdrom=domain_spec.boot_cdrom,
             uefi=domain_spec.uefi,
-            nvram_path=nvram,
+            nvram_path=nvram_ref,
             windows=domain_spec.windows,
         )
 
@@ -668,7 +697,9 @@ class VM(AbstractVM):
                     )
 
             manifest = self.builder.install_manifest(self, h)
-            return cache.store_vm(h, domain_spec.work_disk, manifest)
+            return cache.store_vm(
+                h, domain_spec.work_disk, manifest, run.storage,
+            )
         finally:
             # Stop the keypress thread before destroying the domain —
             # sendKey on a destroyed domain raises (swallowed) but
@@ -700,7 +731,7 @@ class VM(AbstractVM):
         self,
         context: AbstractOrchestrator,
         run: RunDir,
-        installed_disk: Path,
+        installed_disk: str,
         network_entries: list[tuple[str, str]],  # (lv_net_name, mac)
         mac_ip_pairs: list[tuple[str, str, str, str]],  # (mac, ip/prefix, gateway, nameserver)
     ) -> None:
@@ -712,8 +743,8 @@ class VM(AbstractVM):
         :param context: The libvirt orchestrator; the ``virConnect``
             handle is pulled from it internally.
         :param run: Scratch dir for this test run.
-        :param installed_disk: Path to the cached installed (or prebuilt)
-            disk image.
+        :param installed_disk: Backend-local ref to the cached installed
+            (or prebuilt) disk image.
         :param network_entries: ``(lv_network_name, mac)`` pairs for domain
             XML generation.
         :param mac_ip_pairs: ``(mac, ip_with_cidr, gateway, nameserver)`` for
@@ -725,25 +756,27 @@ class VM(AbstractVM):
         conn = _libvirt_conn(context)
         self._run_id = run.run_id
 
-        # Create overlay on the cached installed (or prebuilt) disk
-        overlay = run.create_overlay(self._name, installed_disk)
+        # Create overlay on the cached installed (or prebuilt) disk —
+        # happens on the backend (local qemu-img locally, remote
+        # qemu-img via SSH for qemu+ssh:// connections).
+        overlay_ref = run.create_overlay(self._name, installed_disk)
 
         # Hand the run-phase domain shape off to the builder.  The
         # builder decides whether to write a phase-2 seed ISO (cloud-init
         # rotates instance-id here; Windows + NoOp don't) and which
         # firmware / device models the run domain needs.
         run_spec = self.builder.prepare_run_domain(self, run, mac_ip_pairs)
-        nvram = run.nvram_path(self._name) if run_spec.uefi else None
+        nvram_ref = run.nvram_path(self._name) if run_spec.uefi else None
 
         domain_name = f"tr-{self._name[:10]}-{run.run_id[:8]}"
         xml = self._base_domain_xml(
             domain_name=domain_name,
-            disk_path=overlay,
+            disk_path=overlay_ref,
             seed_iso_path=run_spec.seed_iso,
             network_entries=network_entries,
             run_id=run.run_id,
             uefi=run_spec.uefi,
-            nvram_path=nvram,
+            nvram_path=nvram_ref,
             windows=run_spec.windows,
         )
 

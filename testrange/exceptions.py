@@ -31,8 +31,8 @@ class VMTimeoutError(TestRangeError):
 class VMNotRunningError(TestRangeError):
     """Raised when a runtime method is called on a VM that is not started.
 
-    Call :meth:`~testrange.backends.libvirt.Orchestrator.__enter__` (or use the
-    orchestrator as a context manager) before accessing VM methods.
+    Call :meth:`~testrange.orchestrator_base.AbstractOrchestrator.__enter__`
+    (or use the orchestrator as a context manager) before accessing VM methods.
     """
 
 
@@ -45,10 +45,11 @@ class CommunicationError(TestRangeError):
 
 
 class GuestAgentError(CommunicationError):
-    """Raised when the QEMU guest agent returns an error response.
+    """Raised when a guest-agent communicator reports an error response.
 
-    The ``message`` attribute contains the raw error string from the guest
-    agent JSON-RPC response.
+    Concrete backends map their native guest-agent transports onto this
+    exception — the ``message`` attribute carries the raw error string
+    the backend observed.
     """
 
 
@@ -74,16 +75,16 @@ class NetworkError(TestRangeError):
 class CacheError(TestRangeError):
     """Raised when a cache operation fails.
 
-    This covers disk I/O errors, ``qemu-img`` subprocess failures, and
-    concurrent-access locking timeouts.
+    This covers disk I/O errors, image-manipulation subprocess
+    failures, and concurrent-access locking timeouts.
     """
 
 
 class ImageNotFoundError(TestRangeError):
     """Raised when a VM image cannot be resolved.
 
-    The ``iso=`` parameter on :class:`~testrange.backends.libvirt.VM` must be
-    either an absolute local path or an ``https://`` URL.
+    The ``iso=`` parameter on a VM spec must be either an absolute
+    local path or an ``https://`` URL.
     """
 
 
@@ -98,6 +99,6 @@ class CloudInitError(TestRangeError):
 class OrchestratorError(TestRangeError):
     """Raised when the orchestrator encounters an unrecoverable error.
 
-    This is the catch-all for libvirt connection failures, unexpected domain
-    states, and teardown errors.
+    This is the catch-all for backend connection failures, unexpected
+    domain states, and teardown errors.
     """

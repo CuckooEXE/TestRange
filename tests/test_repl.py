@@ -166,23 +166,40 @@ class TestInteract:
 
 
 class TestPrintKeepSummary:
-    def test_lists_domains_networks_and_rundir(
+    def test_lists_backend_hints_and_rundir(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        """The REPL's keep summary should delegate command generation
+        to the backend's own ``keep_alive_hints`` — no libvirt-specific
+        strings hardcoded here."""
         orch = _fake_orch(["web", "db"])
-        net = MagicMock()
-        net.backend_name.return_value = "tr-net-abcd"
-        net.name = "net"
-        orch._networks = [net]
+        orch.keep_alive_hints.return_value = [
+            "sudo virsh destroy tr-web-abcdef12 && sudo virsh undefine tr-web-abcdef12",
+            "sudo virsh destroy tr-db-abcdef12 && sudo virsh undefine tr-db-abcdef12",
+            "sudo virsh net-destroy tr-net-abcd && sudo virsh net-undefine tr-net-abcd",
+        ]
 
         print_keep_summary(orch)
         out = capsys.readouterr().out
-        assert "tr-web-abcdef12" in out
-        assert "tr-db-abcdef12" in out
-        assert "tr-net-abcd" in out
+        # Every hint the backend emitted must appear verbatim.
+        for hint in orch.keep_alive_hints.return_value:
+            assert hint in out
+        # Run dir is always listed, regardless of backend.
         assert "/tmp/testrange-run-abcdef12" in out
-        assert "virsh destroy" in out
-        assert "virsh net-destroy" in out
+
+    def test_no_hints_section_when_backend_has_no_cleanup_advice(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Backends that don't override keep_alive_hints return ``[]``;
+        the REPL should still print the run-dir line so the user can
+        at least clean up scratch space."""
+        orch = _fake_orch(["web"])
+        orch.keep_alive_hints.return_value = []
+
+        print_keep_summary(orch)
+        out = capsys.readouterr().out
+        assert "/tmp/testrange-run-abcdef12" in out
+        assert "Suggested:" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +207,7 @@ class TestPrintKeepSummary:
 # ---------------------------------------------------------------------------
 
 
-def _make_test(name: str) -> Test:
+def _make_test(name: str) -> MagicMock:
     t = MagicMock(spec=Test)
     t.name = name
     t.run.return_value = TestResult(passed=True, error=None, duration=0.0)

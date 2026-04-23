@@ -10,6 +10,13 @@ import pytest
 
 from testrange.cache import CacheManager, _sha256_file, vm_config_hash
 from testrange.exceptions import ImageNotFoundError
+from testrange.storage import LocalStorageBackend
+
+
+def _local_backend(cache_root: Path) -> LocalStorageBackend:
+    """Shortcut: backend rooted at *cache_root* — identical to what
+    Orchestrator auto-selects for the default ``qemu:///system`` case."""
+    return LocalStorageBackend(cache_root)
 
 
 class TestVmConfigHash:
@@ -104,18 +111,28 @@ class TestCacheManagerInit:
 class TestGetVm:
     def test_cache_miss(self, tmp_cache_root: Path) -> None:
         c = CacheManager(root=tmp_cache_root)
-        assert c.get_vm("nonexistent") is None
+        b = _local_backend(tmp_cache_root)
+        assert c.get_vm("nonexistent", b) is None
 
     def test_cache_hit_flat_layout(self, tmp_cache_root: Path) -> None:
         c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
         disk = c.vms_dir / "abc123.qcow2"
         disk.write_bytes(b"fake")
-        assert c.get_vm("abc123") == disk
+        # For LocalStorageBackend, the ref is just the absolute path.
+        assert c.get_vm("abc123", b) == str(disk)
 
     def test_vm_paths(self, tmp_cache_root: Path) -> None:
         c = CacheManager(root=tmp_cache_root)
-        assert c.vm_qcow2_path("abc") == tmp_cache_root / "vms" / "abc.qcow2"
-        assert c.vm_manifest_path("abc") == tmp_cache_root / "vms" / "abc.json"
+        b = _local_backend(tmp_cache_root)
+        assert (
+            c.vm_snapshot_ref("abc", b)
+            == str(tmp_cache_root / "vms" / "abc.qcow2")
+        )
+        assert (
+            c.vm_manifest_ref("abc", b)
+            == str(tmp_cache_root / "vms" / "abc.json")
+        )
 
 
 class TestStoreVm:
@@ -125,14 +142,15 @@ class TestStoreVm:
         fake_qemu_img: list[list[str]],
     ) -> None:
         c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
         src = tmp_cache_root / "work.qcow2"
         src.write_bytes(b"x")
         manifest = {"name": "vm1", "iso": "debian-12"}
 
-        dest = c.store_vm("abc123", src, manifest)
+        dest_ref = c.store_vm("abc123", str(src), manifest, b)
+        dest = Path(dest_ref)
 
         assert dest == tmp_cache_root / "vms" / "abc123.qcow2"
-        assert dest.exists()
         assert (tmp_cache_root / "vms" / "abc123.json").exists()
         # No per-hash subdirectory anymore
         assert not (tmp_cache_root / "vms" / "abc123").exists()
@@ -144,6 +162,7 @@ class TestStoreVm:
     ) -> None:
         """The .json must be inspectable and record what built the image."""
         c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
         src = tmp_cache_root / "work.qcow2"
         src.write_bytes(b"x")
         manifest = {
@@ -152,7 +171,7 @@ class TestStoreVm:
             "packages": ["Apt('nginx')"],
             "post_install_cmds": ["systemctl enable nginx"],
         }
-        c.store_vm("abc123", src, manifest)
+        c.store_vm("abc123", str(src), manifest, b)
 
         written = json.loads(
             (tmp_cache_root / "vms" / "abc123.json").read_text()
@@ -165,9 +184,10 @@ class TestStoreVm:
         fake_qemu_img: list[list[str]],
     ) -> None:
         c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
         src = tmp_cache_root / "work.qcow2"
         src.write_bytes(b"x")
-        c.store_vm("abc", src, {"name": "v"})
+        c.store_vm("abc", str(src), {"name": "v"}, b)
         assert any(
             cmd[:5] == ["qemu-img", "convert", "-f", "qcow2", "-O"]
             and "-c" in cmd

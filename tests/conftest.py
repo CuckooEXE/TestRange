@@ -63,7 +63,9 @@ def _install_pycdlib_stub() -> None:
 
 def _install_passlib_stub() -> None:
     try:
-        from passlib.hash import sha512_crypt  # noqa: F401
+        from passlib.hash import (
+            sha512_crypt,  # noqa: F401  # pyright: ignore[reportAttributeAccessIssue]
+        )
         return
     except ImportError:
         pass
@@ -119,7 +121,7 @@ def _install_paramiko_stub() -> None:
 
 def _install_winrm_stub() -> None:
     try:
-        import winrm  # noqa: F401
+        import winrm  # noqa: F401  # pyright: ignore[reportMissingImports]
         return
     except ImportError:
         pass

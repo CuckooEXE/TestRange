@@ -1,34 +1,29 @@
 """No-op :class:`~testrange.vms.builders.base.Builder` for BYOI images.
 
-Used when the caller hands :class:`~testrange.backends.libvirt.VM` a
-qcow2 that is already fully provisioned (produced by Packer, a custom
-build pipeline, or a hand-prepared golden image).  There is no
-install phase — :meth:`NoOpBuilder.needs_install_phase` returns
-``False`` — so :meth:`~testrange.backends.libvirt.VM.build` calls
-:meth:`~Builder.ready_image` and skips straight to creating a run
-overlay on the staged disk.
+Used when the caller hands a VM spec a qcow2 that is already fully
+provisioned (produced by Packer, a custom build pipeline, or a
+hand-prepared golden image).  There is no install phase —
+:meth:`NoOpBuilder.needs_install_phase` returns ``False`` — so the
+backend's ``build()`` calls :meth:`~Builder.ready_image` and skips
+straight to creating a run overlay on the staged disk.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
-import os
-import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from filelock import FileLock
-
-from testrange import _qemu_img
-from testrange._logging import get_logger, log_duration
-from testrange.cache import _sha256_file
+from testrange._logging import get_logger
+from testrange._qemu_img import info as _qemu_img_info
 from testrange.exceptions import VMBuildError
 from testrange.vms.builders.base import Builder, RunDomain
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
-    from testrange.backends.libvirt.vm import VM
     from testrange.cache import CacheManager
+    from testrange.vms.base import AbstractVM as VM
 
 
 _log = get_logger(__name__)
@@ -105,14 +100,20 @@ class NoOpBuilder(Builder):
             windows=self.windows,
         )
 
-    def ready_image(self, vm: VM, cache: CacheManager) -> Path:
-        """Stage the user-supplied qcow2 into the cache under a stable,
-        content-hashed name.
+    def ready_image(
+        self, vm: VM, cache: CacheManager, run: RunDir,
+    ) -> str:
+        """Stage the user-supplied qcow2 into the backend's ``vms/``
+        cache and return its backend-local ref.
 
-        Content-hashes the source and copies it into
-        ``<cache_root>/vms/byoi-<sha256[:24]>.qcow2`` on first use;
-        subsequent VMs with the same file hit the staged copy.  Files
-        already under the cache root are returned unchanged.
+        Validates the source on the outer host (``qemu-img info``),
+        then stages into ``<transport.vms_dir>/byoi-<sha[:24]>.qcow2``
+        with a manifest JSON sidecar.  For the default local backend
+        this is a filesystem copy (identical to the pre-backend
+        behaviour); for SSH / remote backends it's an SFTP upload to
+        the same logical location on the remote host.  Sources that
+        already live under the local backend's cache root are returned
+        in place.
 
         :raises VMBuildError: If the source does not exist, is not a
             qcow2, or if the staging copy fails.
@@ -125,7 +126,7 @@ class NoOpBuilder(Builder):
             ) from exc
 
         try:
-            meta = _qemu_img.info(src)
+            meta = _qemu_img_info(src)
         except Exception as exc:  # noqa: BLE001 — surface as VMBuildError
             raise VMBuildError(
                 f"VM {vm.name!r}: qemu-img info failed on {src}: {exc}"
@@ -136,52 +137,63 @@ class NoOpBuilder(Builder):
                 f"(qemu-img reports format={meta.get('format')!r})."
             )
 
+        transport = run.storage.transport
+
+        # Local fast path — source already under the transport's cache
+        # root on a local filesystem.  Return it unchanged so repeated
+        # runs don't churn the cache with identical-content copies.
         try:
-            src.relative_to(cache.root)
+            src.relative_to(Path(transport.cache_root))
             _log.info(
-                "VM %r prebuilt image %s is already under cache root; reusing",
+                "VM %r prebuilt image %s already under backend cache root; "
+                "reusing in place",
                 vm.name, src,
             )
-            return src
+            return str(src)
         except ValueError:
             pass
 
         sha = _sha256_file(src)[:24]
-        dest = cache.vms_dir / f"byoi-{sha}.qcow2"
-        manifest = cache.vms_dir / f"byoi-{sha}.json"
-        lock = FileLock(str(dest) + ".lock", timeout=1800)
-        with lock:
-            if dest.exists():
-                _log.info(
-                    "VM %r prebuilt cache hit (byoi-%s) — reusing staged copy",
-                    vm.name, sha,
-                )
-                return dest
+        dest_ref = transport._join(transport.vms_dir(), f"byoi-{sha}.qcow2")
+        manifest_ref = transport._join(transport.vms_dir(), f"byoi-{sha}.json")
+
+        if transport.exists(dest_ref):
             _log.info(
-                "VM %r prebuilt cache miss (byoi-%s) — staging %s into cache",
-                vm.name, sha, src,
+                "VM %r prebuilt cache hit (byoi-%s) — reusing staged copy",
+                vm.name, sha,
             )
-            tmp = dest.with_suffix(".part")
-            with log_duration(
-                _log, f"copy prebuilt image for {vm.name!r}"
-            ):
-                shutil.copyfile(src, tmp)
-            os.chmod(tmp, 0o644)
-            tmp.rename(dest)
-            manifest.write_text(
-                json.dumps(
-                    {
-                        "name": vm.name,
-                        "source_path": str(src),
-                        "sha256": _sha256_file(dest),
-                        "prebuilt": True,
-                        "windows": self.windows,
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-        return dest
+            return dest_ref
+
+        _log.info(
+            "VM %r prebuilt cache miss (byoi-%s) — staging %s into backend",
+            vm.name, sha, src,
+        )
+        transport.makedirs(transport.vms_dir())
+        transport.upload(src, dest_ref)
+        transport.write_bytes(
+            manifest_ref,
+            json.dumps(
+                {
+                    "name": vm.name,
+                    "source_path": str(src),
+                    "sha256": sha,
+                    "prebuilt": True,
+                    "windows": self.windows,
+                },
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8"),
+        )
+        return dest_ref
+
+
+def _sha256_file(path: Path) -> str:
+    """Return a 24-char SHA-256 prefix over *path*'s bytes."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 __all__ = ["NoOpBuilder"]

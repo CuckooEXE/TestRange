@@ -1,8 +1,9 @@
 """Test definition and execution primitives.
 
-The :class:`Test` class wraps an :class:`~testrange.backends.libvirt.Orchestrator`
-configuration and a test function.  Calling :meth:`Test.run` provisions all
-VMs, calls the function, and tears everything down — returning a
+The :class:`Test` class wraps an
+:class:`~testrange.orchestrator_base.AbstractOrchestrator` configuration
+and a test function.  Calling :meth:`Test.run` provisions all VMs,
+calls the function, and tears everything down — returning a
 :class:`TestResult`.
 
 Typical usage::
@@ -35,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from testrange.backends.libvirt.orchestrator import Orchestrator
+    from testrange.orchestrator_base import AbstractOrchestrator as Orchestrator
 
 
 @dataclass
@@ -72,11 +73,13 @@ class TestResult:
 class Test:
     """A self-contained, runnable test definition.
 
-    Combines an :class:`~testrange.backends.libvirt.Orchestrator` configuration
-    with a test function.  The test function receives the started orchestrator
-    as its only argument (VMs are accessible via :attr:`Orchestrator.vms`).
-    It should use ``assert`` statements to signal failures; any unhandled
-    exception causes the test to be marked as failed.
+    Combines an
+    :class:`~testrange.orchestrator_base.AbstractOrchestrator`
+    configuration with a test function.  The test function receives the
+    started orchestrator as its only argument (VMs are accessible via
+    ``orchestrator.vms``).  It should use ``assert`` statements to
+    signal failures; any unhandled exception causes the test to be
+    marked as failed.
 
     :param orchestrator: A fully configured (but not yet started) orchestrator.
     :param func: The test function to call.  Signature:
@@ -155,15 +158,16 @@ def run_tests(
     returned in the input order regardless of completion order.
 
     Concurrency is safe when the tests don't share network topology.
-    Each orchestrator opens its own libvirt connection and installs a
+    Each orchestrator opens its own backend connection and installs a
     uniquely-named set of objects (``tr-*-<runid>``), so names never
-    collide.  Install-phase subnet picking is serialised with a
-    file lock (see :mod:`testrange._concurrency`).  User-defined
-    :class:`~testrange.backends.libvirt.VirtualNetwork` subnets are
-    **not** auto-rewritten — two concurrent tests that both declare
-    ``VirtualNetwork("X", "10.0.0.0/24", ...)`` will fail when the
-    second tries to bring up the same bridge.  Give each concurrent
-    test its own subnet range (or run them with ``concurrency=1``).
+    collide.  Install-phase subnet picking is serialised with a file
+    lock (see :mod:`testrange._concurrency`).  User-defined
+    :class:`~testrange.networks.base.AbstractVirtualNetwork` subnets
+    are **not** auto-rewritten — two concurrent tests that both
+    declare the same ``VirtualNetwork("X", "10.0.0.0/24", ...)`` will
+    fail when the second tries to bring up the same bridge.  Give
+    each concurrent test its own subnet range (or run them with
+    ``concurrency=1``).
 
     :param tests: Tests to run.
     :param verbose: If ``True``, print a summary line for each test as it

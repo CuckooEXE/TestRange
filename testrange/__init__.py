@@ -1,8 +1,11 @@
 """TestRange — VM-based test environment orchestrator.
 
-TestRange makes it easy to spin up isolated KVM/QEMU virtual machine
-environments for integration testing, version compatibility testing, and
-any other scenario that requires a real OS.
+TestRange makes it easy to spin up isolated virtual machine environments
+for integration testing, version compatibility testing, and any other
+scenario that requires a real OS.  The top-level API is
+hypervisor-neutral — the same ``Test`` / ``Orchestrator`` / ``VM``
+shape drives every shipped backend (see :mod:`testrange.backends`);
+backend-specific prerequisites are documented alongside each backend.
 
 Quick-start example::
 
@@ -45,11 +48,10 @@ Quick-start example::
         ),
     ]
 
-Prerequisites (system packages, not pip):
-    - ``libvirt-daemon-system`` + ``qemu-kvm``  (or ``qemu-system-x86``)
-    - ``qemu-utils``  (provides ``qemu-img``)
-    - ``libvirt-dev``  (C headers, required by ``libvirt-python`` at install)
-    - User must be in the ``libvirt`` group or run as root
+``Orchestrator`` / ``VM`` / ``VirtualNetwork`` re-exported at the top
+level resolve to the default backend (KVM / QEMU via libvirt).
+Alternative backends can be pulled in directly from
+:mod:`testrange.backends`.
 """
 
 from testrange._version import __version__
@@ -77,6 +79,11 @@ from testrange.exceptions import (
 from testrange.networks.base import AbstractVirtualNetwork
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.packages import Apt, Dnf, Homebrew, Pip, Winget
+from testrange.storage import (
+    AbstractStorageBackend,
+    LocalStorageBackend,
+    SSHStorageBackend,
+)
 from testrange.test import Test, TestResult, run_tests
 from testrange.vms.base import AbstractVM
 from testrange.vms.builders import (
@@ -104,6 +111,10 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
+    # Storage backends
+    "AbstractStorageBackend",
+    "LocalStorageBackend",
+    "SSHStorageBackend",
     # Networks
     "VirtualNetwork",
     "AbstractVirtualNetwork",

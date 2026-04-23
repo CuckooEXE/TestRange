@@ -7,12 +7,13 @@ domain (cloud-init for Linux cloud images, Windows Setup + autounattend
 for Windows install ISOs); the :class:`NoOpBuilder` skips the install
 entirely and just stages a user-supplied qcow2.
 
-:class:`~testrange.backends.libvirt.VM` holds a ``builder`` attribute and
-delegates everything install-pipeline related to it:
+Every VM spec holds a ``builder`` attribute and delegates the
+install-pipeline work to it — backends consume the builder's output
+hypervisor-neutrally:
 
 1. **Disk prep** — :meth:`Builder.prepare_install_domain` returns the
    :class:`InstallDomain` spec (primary disk, optional seed ISO, extra
-   CD-ROMs, and domain-XML hints).
+   CD-ROMs, and firmware hints).
 2. **Post-install caching** — :meth:`Builder.install_manifest` populates
    the sibling JSON manifest stored next to
    ``<cache_root>/vms/<config_hash>.qcow2``.
@@ -30,28 +31,35 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
-    from testrange.backends.libvirt.vm import VM
     from testrange.cache import CacheManager
+    from testrange.vms.base import AbstractVM as VM
 
 
 @dataclass(frozen=True)
 class InstallDomain:
-    """Instructions :class:`~testrange.backends.libvirt.VM` needs to build
-    the install-phase libvirt domain XML.
+    """Instructions a backend needs to build the install-phase domain.
 
-    :param work_disk: Absolute path to the primary disk the install
-        domain will boot and write to.  Cloud-init uses an overlay on
-        the resolved base image; autounattend uses a blank qcow2.
-    :param seed_iso: Optional seed CD-ROM (cloud-init or autounattend
-        seed) attached as the first CD-ROM device.
-    :param extra_cdroms: Additional CD-ROMs, in SATA-target order after
-        the seed.  Used by Windows to surface the install ISO and the
-        ``virtio-win.iso`` driver disc.
+    All disk-like fields are **backend-local refs** — strings that the
+    hypervisor's host can open directly.  For the default
+    :class:`~testrange.storage.LocalStorageBackend` these are absolute
+    outer-host paths (behaviourally identical to the pre-backend
+    code); for remote backends they are paths on the remote host
+    where the uploaded qcow2s live.
+
+    :param work_disk: Backend-local ref to the primary disk the
+        install domain will boot and write to.  Cloud-init uses an
+        overlay on the resolved base image; autounattend uses a blank
+        qcow2.
+    :param seed_iso: Optional backend-local ref to the seed CD-ROM
+        (cloud-init or autounattend seed) attached as the first
+        CD-ROM device.
+    :param extra_cdroms: Additional CD-ROM refs, in SATA-target order
+        after the seed.  Used by Windows to surface the install ISO
+        and the ``virtio-win.iso`` driver disc.
     :param uefi: If ``True``, emit ``<loader>`` + ``<nvram>`` OVMF
         references.  Windows requires this for GPT installs.
     :param windows: If ``True``, use device models with built-in
@@ -61,9 +69,9 @@ class InstallDomain:
         off the qcow2.
     """
 
-    work_disk: Path
-    seed_iso: Path | None = None
-    extra_cdroms: tuple[Path, ...] = ()
+    work_disk: str
+    seed_iso: str | None = None
+    extra_cdroms: tuple[str, ...] = ()
     uefi: bool = False
     windows: bool = False
     boot_cdrom: bool = False
@@ -71,25 +79,24 @@ class InstallDomain:
 
 @dataclass(frozen=True)
 class RunDomain:
-    """Instructions :class:`~testrange.backends.libvirt.VM` needs to build
-    the run-phase libvirt domain XML.
+    """Instructions a backend needs to build the run-phase domain.
 
-    :param seed_iso: Optional run-phase seed (phase-2 cloud-init).
-        ``None`` for Windows + NoOp — neither needs to inject anything
-        on re-boot.
+    :param seed_iso: Optional backend-local ref to the run-phase seed
+        (phase-2 cloud-init).  ``None`` for Windows + NoOp — neither
+        needs to inject anything on re-boot.
     :param uefi: Firmware family; same semantics as
         :attr:`InstallDomain.uefi`.  Must match whatever the install
         phase used or the cached disk won't boot.
     :param windows: Same semantics as :attr:`InstallDomain.windows`.
     """
 
-    seed_iso: Path | None = None
+    seed_iso: str | None = None
     uefi: bool = False
     windows: bool = False
 
 
 class Builder(ABC):
-    """Strategy for provisioning a :class:`~testrange.backends.libvirt.VM`.
+    """Strategy for provisioning a VM.
 
     Concrete implementations live in :mod:`testrange.vms.builders`.
     Subclass this to support a new install mechanism (preseed,
@@ -98,25 +105,26 @@ class Builder(ABC):
     Builders are stateless: everything they need to know about a
     specific VM is passed in through ``vm`` or computed from the
     :class:`~testrange.cache.CacheManager` / :class:`~testrange._run.RunDir`
-    argument.  One builder instance can safely serve many VMs.
+    argument.  One builder instance can safely serve many VMs, across
+    any backend.
     """
 
     @abstractmethod
     def default_communicator(self) -> str:
         """Return the default communicator kind for VMs using this builder.
 
-        Chosen by :class:`~testrange.backends.libvirt.VM` when the caller
-        does not pass ``communicator=``.  Typical values:
-        ``"guest-agent"``, ``"ssh"``, ``"winrm"``.
+        Chosen by the backend's VM class when the caller does not pass
+        ``communicator=``.  Typical values: ``"guest-agent"``,
+        ``"ssh"``, ``"winrm"``.
         """
 
     def needs_install_phase(self) -> bool:
         """Whether to boot a one-off install-phase domain for this VM.
 
         Default is ``True``; :class:`NoOpBuilder`-style implementations
-        override to ``False``.  When ``False``,
-        :meth:`~testrange.backends.libvirt.VM.build` calls
-        :meth:`ready_image` instead of going through the install flow.
+        override to ``False``.  When ``False``, the backend's
+        ``build()`` calls :meth:`ready_image` instead of going through
+        the install flow.
         """
         return True
 
@@ -126,12 +134,11 @@ class Builder(ABC):
         Some install media (notably Windows install ISOs under UEFI)
         show a time-limited "Press any key to boot from CD or DVD..."
         prompt.  A VM has no physical keyboard to press it, so the
-        prompt times out, OVMF falls through to the empty hard disk,
-        and then drops to the EFI shell.  Builders that need boot
-        keypresses override this to ``True`` and
-        :meth:`~testrange.backends.libvirt.VM._run_install_phase`
-        spawns a short-lived thread that sends spacebars via
-        :meth:`virDomain.sendKey` during the early boot window.
+        prompt times out, UEFI falls through to the empty hard disk,
+        and then drops to the firmware shell.  Builders that need
+        boot keypresses override this to ``True`` and the backend
+        spawns a short-lived thread to deliver key events during the
+        early boot window.
 
         Default is ``False``.
         """
@@ -196,9 +203,14 @@ class Builder(ABC):
         self,
         vm: VM,
         cache: CacheManager,
-    ) -> Path:
+        run: RunDir,
+    ) -> str:
         """For :meth:`needs_install_phase`-``False`` builders, return
-        the path to a disk that is already ready to boot.
+        the backend-local ref for a disk that is already ready to boot.
+
+        The *run* parameter exposes the storage backend (via
+        ``run.storage``) so implementations can stage bring-your-own
+        images onto remote backends.
 
         The default implementation raises — install-phase builders
         should never hit this path.

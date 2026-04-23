@@ -20,16 +20,10 @@ import click
 from testrange._logging import configure_root_logger
 from testrange._repl import print_keep_summary, start_repl
 from testrange._version import __version__
+from testrange.backends import cli_build_orchestrator
 from testrange.cache import CacheManager
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.test import Test, run_tests
-
-# Schemes that resolve to the libvirt backend.  Each is passed through
-# to libvirt.open() as-is (libvirt already defines ``qemu://`` and
-# ``qemu+<transport>://`` URIs), except the bare ``libvirt://`` alias
-# which we rewrite to ``qemu+ssh://`` for convenience.
-_LIBVIRT_SCHEMES = frozenset({"qemu", "qemu+ssh", "qemu+tcp", "qemu+tls", "libvirt"})
-_PROXMOX_SCHEMES = frozenset({"proxmox"})
 
 _ORCHESTRATOR_HELP = (
     "Hypervisor backend URL.  Overrides the backend the test factory "
@@ -40,8 +34,8 @@ _ORCHESTRATOR_HELP = (
     "  --orchestrator proxmox://TOKENID:SECRET@pve.example.com/pve01?storage=local-lvm\n"
     "  --orchestrator proxmox://root:hunter2@pve.example.com\n"
     "\n"
-    "Omit to keep the test's own orchestrator "
-    "(defaults to local libvirt / KVM / QEMU)."
+    "Omit to keep the test's own orchestrator.  Each backend in "
+    ":mod:`testrange.backends` self-describes the URL shapes it accepts."
 )
 
 
@@ -56,76 +50,6 @@ def _orchestrator_option(f):
     )(f)
 
 
-def _parse_orchestrator_url(url: str) -> dict[str, object]:
-    """Decode ``--orchestrator URL`` into backend-kwargs.
-
-    Returns a dict with at least ``backend`` set to ``"libvirt"`` or
-    ``"proxmox"``.  Extra keys are backend-specific.
-
-    :raises click.BadParameter: On an unknown scheme or malformed URL.
-    """
-    from urllib.parse import parse_qs, urlparse
-
-    parsed = urlparse(url)
-    scheme = parsed.scheme.lower()
-
-    if scheme in _LIBVIRT_SCHEMES:
-        # libvirt URIs pass through unchanged.  The ``libvirt://``
-        # convenience alias reshapes to ``qemu+ssh://...``; libvirt
-        # itself doesn't define a ``libvirt://`` scheme.
-        uri = (
-            "qemu+ssh://" + url[len("libvirt://"):] + "/system"
-            if scheme == "libvirt"
-            else url
-        )
-        return {"backend": "libvirt", "host": uri}
-
-    if scheme in _PROXMOX_SCHEMES:
-        host = parsed.hostname
-        if not host:
-            raise click.BadParameter(
-                f"proxmox orchestrator URL needs a host: {url!r}"
-            )
-        node = parsed.path.lstrip("/").split("/", 1)[0] or None
-        qs = parse_qs(parsed.query)
-        storage = qs.get("storage", [None])[0]
-
-        # Auth resolution priority:
-        #   1. ?token= query param (unambiguous; allowed to include
-        #      the full ``user@realm!name=secret`` string)
-        #   2. userinfo without a colon → treated as a token
-        #   3. userinfo with a colon → user:password
-        token: str | None = qs.get("token", [None])[0]
-        user: str | None = None
-        password: str | None = None
-        if parsed.username is not None:
-            if parsed.password is not None:
-                user = parsed.username
-                password = parsed.password
-            elif token is None:
-                token = parsed.username
-        if token is None and user is None:
-            raise click.BadParameter(
-                "proxmox orchestrator URL must include either a token "
-                "(``proxmox://TOKEN@host``) or credentials "
-                "(``proxmox://user:password@host``)."
-            )
-        return {
-            "backend": "proxmox",
-            "host": host,
-            "node": node,
-            "storage": storage,
-            "token": token,
-            "user": user,
-            "password": password,
-        }
-
-    raise click.BadParameter(
-        f"unknown orchestrator scheme {scheme!r} in {url!r}.  "
-        "Supported: qemu://, qemu+ssh://, libvirt://, proxmox://."
-    )
-
-
 def _resolve_orchestrator(
     test: Test,
     orchestrator_url: str | None,
@@ -134,43 +58,22 @@ def _resolve_orchestrator(
 
     When *orchestrator_url* is ``None`` the test's own orchestrator
     (whatever the test author constructed) is returned untouched.
+    Otherwise the URL is dispatched through
+    :func:`testrange.backends.cli_build_orchestrator` — the CLI itself
+    knows nothing about which backends exist or what URL shapes they
+    accept.
     """
     if orchestrator_url is None:
         return test._orchestrator
 
-    spec = _parse_orchestrator_url(orchestrator_url)
-    original = test._orchestrator
-    backend = spec["backend"]
-
-    if backend == "libvirt":
-        from testrange.backends.libvirt import Orchestrator as LibvirtOrch
-        return LibvirtOrch(
-            host=spec["host"],  # type: ignore[arg-type]
-            networks=original._networks,
-            vms=original._vm_list,
-            cache_root=original._cache.root,
+    new = cli_build_orchestrator(orchestrator_url, test._orchestrator)
+    if new is None:
+        raise click.BadParameter(
+            f"no backend claims orchestrator URL {orchestrator_url!r}.  "
+            "Check the URL scheme against the backends under "
+            "testrange.backends."
         )
-    if backend == "proxmox":
-        from testrange.backends.proxmox import ProxmoxOrchestrator
-        return ProxmoxOrchestrator(
-            host=spec["host"],  # type: ignore[arg-type]
-            networks=original._networks,
-            vms=original._vm_list,
-            cache_root=original._cache.root,
-            node=spec["node"],  # type: ignore[arg-type]
-            storage=spec["storage"],  # type: ignore[arg-type]
-            # Bundle auth into a single opaque ``token`` dict so the
-            # Proxmox backend doesn't have to grow a credentials-style
-            # type.  user/password fields may be ``None``.
-            token={
-                "token": spec["token"],
-                "user": spec["user"],
-                "password": spec["password"],
-            },
-        )
-    raise click.BadParameter(
-        f"unknown backend {backend!r} from URL {orchestrator_url!r}"
-    )
+    return new
 
 
 @click.group()
@@ -408,7 +311,6 @@ def _print_test(test: Test) -> None:
     for i, net in enumerate(networks):
         last = i == len(networks) - 1
         trunk = "│   " if not last else "    "
-        branch = "│   └──" if not last else "└───────"
         # Spacing to align with the network block below
         click.echo(f"│   {'└──' if last else '├──'} {click.style(net.name, fg='cyan', bold=True)}")
         rows = [
@@ -507,8 +409,8 @@ def _print_test(test: Test) -> None:
     "--keep",
     is_flag=True,
     help=(
-        "Skip teardown on REPL exit; print the libvirt domain/network "
-        "names and run dir so you can keep poking by hand."
+        "Skip teardown on REPL exit; print backend-specific cleanup "
+        "hints and the run dir so you can keep poking by hand."
     ),
 )
 @click.option(

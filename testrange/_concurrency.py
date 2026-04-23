@@ -1,20 +1,20 @@
 """Cross-run coordination primitives.
 
-Most of TestRange is naturally concurrency-safe: each
-:class:`~testrange.backends.libvirt.Orchestrator` opens its own libvirt
-connection, installs a uniquely-named set of objects (``tr-*-<runid>``),
-and cleans them up on exit.  A few places, however, need shared state:
+Most of TestRange is naturally concurrency-safe: each orchestrator
+opens its own backend connection, installs a uniquely-named set of
+objects (``tr-*-<runid>``), and cleans them up on exit.  A few places,
+however, need shared state:
 
-- **Install subnet selection.**  Each run picks a free ``/24`` from
-  ``192.168.240.0/24`` through ``192.168.254.0/24``.  Two runs that
-  probe libvirt at the same instant will both see slot ``.240`` as
-  free and both try to claim it — one wins, the other's ``dnsmasq``
-  fails to bind the bridge IP.  :func:`install_subnet_lock` serialises
-  pick + define + start across runs in the same process *and* across
-  processes (the lock file lives in ``/var/tmp/testrange-locks/``).
+- **Install subnet selection.**  Backends that draw install-phase NAT
+  subnets from a shared pool must serialise the pick/claim step —
+  otherwise two runs probing simultaneously will both see the same
+  slot as free, and one run's dnsmasq will later fail to bind the
+  bridge IP.  :func:`install_subnet_lock` serialises the sequence
+  across runs in the same process *and* across processes (the lock
+  file lives in ``/var/tmp/testrange-locks/``).
 
 The lock is held for the shortest possible span — only long enough to
-claim a subnet and bring the network up in libvirt — so concurrent
+claim a subnet and bring the network up on the backend — so concurrent
 test runs don't queue on each other for install time.
 """
 
@@ -46,8 +46,8 @@ def install_subnet_lock(timeout: float = 300.0) -> FileLock:
     """Return a :class:`~filelock.FileLock` protecting the install subnet pool.
 
     Acquire around the pick-a-subnet / define-network / start-network
-    sequence in :class:`~testrange.backends.libvirt.Orchestrator` so
-    concurrent runs don't race to claim the same ``192.168.24x.0/24``.
+    sequence in any backend that shares its install-subnet pool across
+    concurrent runs, so two tests don't race to claim the same CIDR.
 
     :param timeout: Seconds to wait for the lock before giving up.
     :returns: A :class:`FileLock` ready to be used as a context manager.
@@ -65,8 +65,8 @@ def vm_build_lock(config_hash: str, timeout: float = 3600.0) -> FileLock:
     post-install-commands/disk-size produce the same
     :func:`~testrange.cache.vm_config_hash` and therefore target the
     same cached qcow2 file.  Without coordination they'd both run the
-    full install phase in parallel and then race on the
-    ``qemu-img convert`` write lock.
+    full install phase in parallel and then race on the write side of
+    the snapshot-compress step.
 
     Holding this lock across the cache-check / install / cache-store
     sequence means the first arrival does the install and the second

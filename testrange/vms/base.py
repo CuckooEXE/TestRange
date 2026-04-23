@@ -13,16 +13,20 @@ if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.cache import CacheManager
     from testrange.credentials import Credential
+    from testrange.devices import AbstractDevice
     from testrange.orchestrator_base import AbstractOrchestrator
+    from testrange.packages import AbstractPackage
+    from testrange.vms.builders.base import Builder
 
 
 class AbstractVM(ABC):
     """Abstract interface for a virtual machine instance.
 
     Concrete subclasses must implement the runtime communication methods.
-    Before any of these methods can be called, the VM must be started and
-    its communicator initialised (done automatically by
-    :class:`~testrange.backends.libvirt.Orchestrator`).
+    Before any of these methods can be called, the VM must be started
+    and its communicator initialised (done automatically by an
+    :class:`~testrange.orchestrator_base.AbstractOrchestrator` context
+    manager).
 
     Subclass this to support alternative hypervisors or provisioning mechanisms.
     """
@@ -32,14 +36,38 @@ class AbstractVM(ABC):
 
     # ------------------------------------------------------------------
     # Spec attributes subclasses populate in their __init__.  Declared
-    # here so the shared ``_make_communicator`` / helpers can read them
-    # without mypy gymnastics.
+    # here so shared helpers and builders (which type ``vm`` as
+    # :class:`AbstractVM`) can read them without Pyright complaining
+    # about attribute-access issues.  Concrete backends override with
+    # compatible types.
     # ------------------------------------------------------------------
     users: list[Credential]
     """Credentials to configure on / pass through to the guest."""
 
     communicator: str
     """Transport kind: ``"guest-agent"``, ``"ssh"``, or ``"winrm"``."""
+
+    iso: str
+    """Source image reference — URL or absolute local path to a
+    cloud image / installer ISO / prebuilt qcow2.  See
+    :func:`testrange.vms.images.resolve_image`."""
+
+    pkgs: list[AbstractPackage]
+    """Packages to install during the install phase.  Empty for
+    builders that don't provision packages (e.g.
+    :class:`~testrange.vms.builders.NoOpBuilder`)."""
+
+    post_install_cmds: list[str]
+    """Shell commands run after package installation during the
+    install phase.  Empty for builders that have no install phase."""
+
+    devices: list[AbstractDevice]
+    """Virtual hardware attached to this VM — vCPU count, memory
+    allocation, hard drives, NIC references."""
+
+    builder: Builder
+    """Provisioning strategy.  Reads this VM's spec and produces the
+    install- and run-phase domain descriptions the backend consumes."""
 
     @property
     @abstractmethod
@@ -48,6 +76,19 @@ class AbstractVM(ABC):
 
         :returns: VM name string.
         """
+
+    def _primary_disk_size(self) -> str:
+        """Return the primary (OS) disk's size as a qcow2-compatible
+        string (e.g. ``'64G'``).
+
+        Default implementation: the first
+        :class:`~testrange.devices.HardDrive` in :attr:`devices`, or
+        ``'20G'`` when no drive is declared.  Backends that need a
+        different default override this.
+        """
+        from testrange.devices import HardDrive
+        drives = [d for d in self.devices if isinstance(d, HardDrive)]
+        return drives[0].qemu_size if drives else "20G"
 
     def _require_communicator(self) -> AbstractCommunicator:
         """Return the active communicator or raise an error.
@@ -258,9 +299,9 @@ class AbstractVM(ABC):
 
         The default raises :class:`VMBuildError` — backends that do not
         ship a guest-agent path should let this stand.  Backends that
-        do (libvirt's virtio-serial channel, Proxmox's REST
-        ``/agent`` endpoint) override this method to return their
-        native implementation.
+        do (e.g. a virtio-serial channel through their hypervisor, or
+        a REST ``/agent`` endpoint) override this method to return
+        their native implementation.
         """
         raise VMBuildError(
             f"VM {self.name!r}: communicator='guest-agent' is not "
@@ -278,7 +319,7 @@ class AbstractVM(ABC):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
-    ) -> Path:
+    ) -> str:
         """Produce (or fetch from cache) a runnable disk image.
 
         Called once per VM by the orchestrator during ``__enter__``.
@@ -295,7 +336,9 @@ class AbstractVM(ABC):
             the install phase).
         :param install_network_mac: MAC address for the install NIC
             (empty when the VM's builder skips the install phase).
-        :returns: Absolute path to the runnable disk image.
+        :returns: Backend-local ref to the runnable disk image
+            (outer-host path for a local backend; remote-host path or
+            opaque storage-volume ID for remote ones).
         :raises VMBuildError: If the install phase fails or times out.
         """
 
@@ -304,7 +347,7 @@ class AbstractVM(ABC):
         self,
         context: AbstractOrchestrator,
         run: RunDir,
-        installed_disk: Path,
+        installed_disk: str,
         network_entries: list[tuple[str, str]],
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> None:
@@ -313,7 +356,8 @@ class AbstractVM(ABC):
 
         :param context: The orchestrator driving this run.
         :param run: Scratch dir for this test run.
-        :param installed_disk: Disk image returned by :meth:`build`.
+        :param installed_disk: Backend-local ref returned by
+            :meth:`build`.
         :param network_entries: ``(backend_network_name, mac)`` pairs,
             one per NIC.
         :param mac_ip_pairs: ``(mac, ip_with_cidr, gateway, nameserver)``

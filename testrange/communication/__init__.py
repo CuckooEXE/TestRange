@@ -3,10 +3,10 @@
 :class:`SSHCommunicator` and :class:`WinRMCommunicator` are lazy-loaded
 (PEP 562) so their third-party dependencies stay truly optional.
 
-The libvirt / QEMU guest agent communicator lives with its backend
-at :class:`testrange.backends.libvirt.GuestAgentCommunicator` — it
-speaks QEMU's JSON-RPC protocol through a libvirt-managed
-virtio-serial channel, which ties it to that backend.
+``guest-agent`` communicators are backend-specific — each hypervisor
+backend ships its own implementation alongside the rest of its code,
+because the transport (virtio-serial, REST, named pipes, …) is tied
+to that backend's native control plane.
 """
 
 from __future__ import annotations
