@@ -1,179 +1,147 @@
-"""Abstract storage backend.
+"""Storage backend — the composition of a file transport and a disk
+format.
 
-The backend is the boundary between "outer Python does orchestration
-logic" and "some host reads actual disk bytes for the hypervisor's
-control plane."  When the outer host and the hypervisor's host are
-the same machine (the :class:`LocalStorageBackend` case) the methods
-collapse to direct filesystem + subprocess ops.  When they differ
-(remote hypervisor, nested orchestration, API-driven storage), the
-same signatures route the work over the backend's transport (SFTP /
-SSH exec / REST uploads / …).
+A :class:`StorageBackend` bundles two orthogonal abstractions:
 
-Contract
---------
+- ``transport`` (:class:`~testrange.storage.transport.AbstractFileTransport`)
+  — "which filesystem does the hypervisor read from, and how do I run
+  commands against it?"
+- ``disk`` (:class:`~testrange.storage.disk.AbstractDiskFormat`)
+  — "what image format are those files, and what commands operate on
+  them?"
 
-All ``ref`` arguments and return values are **backend-local strings**
-— typically an absolute filesystem path on the backend's host.
-Callers are expected to treat them as opaque identifiers and never
-``Path()``-parse them: API-driven backends will return volume IDs
-like ``"local-lvm:vm-100-disk-0"`` instead.
+Call sites use either explicitly::
 
-The backend owns three subtrees under its :attr:`cache_root`:
+    # File / exec primitives — transport concerns
+    run.storage.transport.write_bytes(ref, data)
+    run.storage.transport.upload(local_path, ref)
 
-- ``images/`` — source qcow2/img/iso files staged from the outer
-  host.  Keyed by content hash; reused across runs.
-- ``vms/`` — post-install VM snapshots (``<config_hash>.qcow2``) and
-  their manifests (``<config_hash>.json``).  Also keyed for reuse.
-- ``runs/<run_id>/`` — per-run scratch: install-phase work disks,
-  run-phase overlays, seed ISOs, NVRAM files.  Deleted on
-  :meth:`cleanup_run`.
+    # Disk / image primitives — format concerns
+    run.storage.disk.create_overlay(backing_ref, dest_ref)
+    run.storage.disk.resize(ref, "64G")
+
+The split matters because the two axes are genuinely independent.
+Local KVM, remote KVM-over-SSH, and nested KVM-via-communicator all
+share the same disk format (qcow2) but differ entirely in transport;
+a future Hyper-V backend would share the transport story (SSH /
+PSSession / whatever) with one of those but swap the format for
+VHDX.  Keeping them separate means adding a new transport doesn't
+duplicate the per-format tool-argv logic, and adding a new format
+doesn't require knowing whether its target filesystem is local.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from pathlib import Path
 
+from testrange.storage.disk.base import AbstractDiskFormat
+from testrange.storage.disk.qcow2 import Qcow2DiskFormat
+from testrange.storage.transport.base import AbstractFileTransport
+from testrange.storage.transport.local import LocalFileTransport
+from testrange.storage.transport.ssh import SSHFileTransport
 
-class AbstractStorageBackend(ABC):
-    """Primitives the orchestrator needs to put disk bytes where the
-    hypervisor can read them, and to run image-manipulation tooling
-    against them.
 
-    Every method takes and returns **backend-local** strings — paths
-    valid on the host where the backend's hypervisor daemon is running.
+class StorageBackend:
+    """A (transport, disk-format) pair.
+
+    :param transport: File + exec primitives.
+    :param disk: Disk-image manipulation primitives, parameterised
+        over *transport* (so its tool invocations land on the right
+        host).
     """
 
-    # ------------------------------------------------------------------
-    # Cache root + per-run scratch
-    # ------------------------------------------------------------------
+    transport: AbstractFileTransport
+    """File + exec primitives.  Caller uses as ``backend.transport.xxx``."""
 
-    @property
-    @abstractmethod
-    def cache_root(self) -> str:
-        """Backend-local path of the persistent cache root.
+    disk: AbstractDiskFormat
+    """Disk-format primitives.  Caller uses as ``backend.disk.xxx``."""
 
-        Contains ``images/`` (staged sources) and ``vms/`` (install
-        snapshots + manifests).  Durable across runs.
-        """
-
-    @abstractmethod
-    def make_run_dir(self, run_id: str) -> str:
-        """Create and return the backend-local path for this run's
-        ephemeral scratch directory.  Safe to call more than once for
-        the same *run_id*.
-        """
-
-    @abstractmethod
-    def cleanup_run(self, run_id: str) -> None:
-        """Remove the run directory created by :meth:`make_run_dir`.
-
-        Never raises; log-and-swallow semantics are appropriate here
-        (teardown must not mask the original exception).
-        """
-
-    # ------------------------------------------------------------------
-    # File primitives — straight path ops.
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def exists(self, ref: str) -> bool:
-        """True if *ref* exists on the backend."""
-
-    @abstractmethod
-    def size(self, ref: str) -> int:
-        """Size of *ref* in bytes.  Raises :class:`FileNotFoundError`
-        (or backend-equivalent) when missing."""
-
-    @abstractmethod
-    def write_bytes(self, ref: str, data: bytes, mode: int = 0o644) -> None:
-        """Create or overwrite *ref* with *data*, setting permissions to
-        *mode*.  Parent directories are created as needed.
-
-        Intended for small artefacts: cloud-init seed ISOs, unattend
-        ISOs, manifest JSON.  Use :meth:`upload` for multi-GB disks.
-        """
-
-    @abstractmethod
-    def read_bytes(self, ref: str) -> bytes:
-        """Read and return all bytes of *ref*."""
-
-    @abstractmethod
-    def remove(self, ref: str) -> None:
-        """Best-effort remove of a single file.  No-op if missing."""
-
-    @abstractmethod
-    def makedirs(self, ref: str, mode: int = 0o755) -> None:
-        """``mkdir -p`` equivalent with an explicit mode on the final
-        component."""
-
-    # ------------------------------------------------------------------
-    # Bulk transfer — outer host ↔ backend.
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def upload(self, local_path: Path, ref: str) -> None:
-        """Copy *local_path* (outer host) to *ref* (backend).
-
-        Parent directories created as needed.  Optimized for large
-        files — implementations should stream rather than buffer the
-        whole file in memory.
-        """
-
-    @abstractmethod
-    def download(self, ref: str, local_path: Path) -> None:
-        """Copy *ref* (backend) to *local_path* (outer host)."""
-
-    # ------------------------------------------------------------------
-    # ``qemu-img`` primitives — these are the only subprocess work we do.
-    # Each backend runs them on whichever side owns the bytes.
-    # ------------------------------------------------------------------
-
-    @abstractmethod
-    def qemu_img_create_overlay(
-        self, backing_ref: str, dest_ref: str
+    def __init__(
+        self,
+        transport: AbstractFileTransport,
+        disk: AbstractDiskFormat,
     ) -> None:
-        """``qemu-img create -f qcow2 -b <backing> -F qcow2 <dest>``."""
+        self.transport = transport
+        self.disk = disk
 
-    @abstractmethod
-    def qemu_img_create_blank(self, dest_ref: str, size: str) -> None:
-        """``qemu-img create -f qcow2 <dest> <size>`` — no backing."""
+    def close(self) -> None:
+        """Release any transport-level resources.
 
-    @abstractmethod
-    def qemu_img_resize(self, ref: str, size: str) -> None:
-        """``qemu-img resize <ref> <size>``."""
+        Idempotent, never raises.  Delegates to the transport's
+        ``close()`` if it has one (SSH transports have a connection
+        to tear down; local doesn't).
+        """
+        close = getattr(self.transport, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
-    @abstractmethod
-    def qemu_img_convert_compressed(
-        self, src_ref: str, dest_ref: str
+
+# ---------------------------------------------------------------------------
+# Pre-composed convenience subclasses.
+#
+# The vast majority of current users want "local filesystem + qcow2"
+# or "SSH-reachable remote filesystem + qcow2".  Expose those as
+# single-argument constructors so ``Orchestrator(host=…)``'s
+# auto-selection stays a one-liner per URI shape; callers with more
+# exotic pairings (different transport × different format) build a
+# :class:`StorageBackend` directly.
+# ---------------------------------------------------------------------------
+
+
+class LocalStorageBackend(StorageBackend):
+    """Convenience: :class:`LocalFileTransport` + :class:`Qcow2DiskFormat`.
+
+    What ``Orchestrator(host="localhost")`` ends up with by default.
+    Preserves today's behaviour bit-for-bit.
+    """
+
+    def __init__(self, cache_root: Path) -> None:
+        transport = LocalFileTransport(cache_root)
+        super().__init__(
+            transport=transport,
+            disk=Qcow2DiskFormat(transport),
+        )
+
+
+class SSHStorageBackend(StorageBackend):
+    """Convenience: :class:`SSHFileTransport` + :class:`Qcow2DiskFormat`.
+
+    What ``Orchestrator(host="qemu+ssh://...")`` auto-selects.  All
+    keyword args forward to :class:`SSHFileTransport`.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        username: str | None = None,
+        port: int = 22,
+        key_filename: str | None = None,
+        cache_root: str | None = None,
+        connect_timeout: float = 30.0,
     ) -> None:
-        """``qemu-img convert -f qcow2 -O qcow2 -c <src> <dest>``."""
+        transport = SSHFileTransport(
+            host=host,
+            username=username,
+            port=port,
+            key_filename=key_filename,
+            cache_root=cache_root,
+            connect_timeout=connect_timeout,
+        )
+        super().__init__(
+            transport=transport,
+            disk=Qcow2DiskFormat(transport),
+        )
 
-    # ------------------------------------------------------------------
-    # Convenience path helpers (don't touch disk; override is optional).
-    # ------------------------------------------------------------------
 
-    def images_dir(self) -> str:
-        """Return ``<cache_root>/images`` as a backend-local string."""
-        return self._join(self.cache_root, "images")
+# ---------------------------------------------------------------------------
+# Legacy alias for callers that imported the old ABC.
+# ---------------------------------------------------------------------------
 
-    def vms_dir(self) -> str:
-        """Return ``<cache_root>/vms`` as a backend-local string."""
-        return self._join(self.cache_root, "vms")
-
-    def run_dir(self, run_id: str) -> str:
-        """Return ``<cache_root>/runs/<run_id>`` as a backend-local string.
-
-        Pure computation — does not create the directory.  Use
-        :meth:`make_run_dir` to create.
-        """
-        return self._join(self.cache_root, "runs", run_id)
-
-    def _join(self, *parts: str) -> str:
-        """Join backend-local path components with forward slashes.
-
-        Backends that represent refs as POSIX paths can share this
-        default; backends that use a different path convention (URIs,
-        Proxmox volume IDs) must override.
-        """
-        return "/".join(p.rstrip("/") for p in parts)
+AbstractStorageBackend = StorageBackend
+"""Legacy alias preserved so ``from testrange.storage import
+AbstractStorageBackend`` keeps working.  The class is no longer
+``abstract`` in the strict sense — it's a concrete composition —
+but the name is retained for import compatibility."""

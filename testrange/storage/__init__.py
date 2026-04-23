@@ -1,36 +1,57 @@
 """Storage backends — where the hypervisor's disks live.
 
-A :class:`StorageBackend` is the minimal file + image-manipulation
-surface the orchestrator needs to put bytes where a hypervisor can
-read them.
+A :class:`StorageBackend` composes two orthogonal abstractions:
 
-Why this exists
----------------
+- :class:`~testrange.storage.transport.AbstractFileTransport`
+  — "which filesystem is the hypervisor reading from, and how do I
+  run commands against it?"
+- :class:`~testrange.storage.disk.AbstractDiskFormat`
+  — "what image format lives there, and what operations are defined
+  for it?"
 
 Every non-trivial TestRange feature comes back to the same question:
-"where does this qcow2 live, and how do I put one there?"  For a
-local-host hypervisor that's a filesystem path + a local subprocess.
-For an SSH-reachable remote hypervisor it's SFTP + remote exec.  For
-an API-driven one (REST / RPC) it's an upload endpoint + a
-storage-volume identifier.  Pre-:class:`StorageBackend` code assumed
-the local answer everywhere and silently broke for every other shape.
+"where does this image live, and how do I manipulate one?"  Local
+KVM is a filesystem path + ``qemu-img`` subprocess.  Remote KVM is
+SFTP + ``ssh remote qemu-img``.  A future Hyper-V host is SMB /
+PSSession + PowerShell ``New-VHD``.  A future Proxmox backend is a
+REST upload + a storage-volume identifier.  Decomposing into
+(transport, format) means adding a new transport doesn't force every
+format to re-learn it, and adding a new format doesn't force every
+transport to re-learn it.
 
-Implementations
----------------
+Shipped concrete pairings:
 
-- :class:`LocalStorageBackend` — outer host's filesystem + local
-  subprocess.  The default when the orchestrator's control plane
-  lives on the same machine as the Python process.
-- :class:`SSHStorageBackend` — remote host via paramiko SFTP + SSH
-  exec.  Used when the orchestrator talks to a hypervisor over SSH.
+- :class:`LocalStorageBackend` — local filesystem + qcow2.
+- :class:`SSHStorageBackend` — SFTP/SSH + qcow2.
+
+Callers that need a custom pairing build a :class:`StorageBackend`
+directly with the transport and format they want.
 """
 
-from testrange.storage.base import AbstractStorageBackend
-from testrange.storage.local import LocalStorageBackend
-from testrange.storage.ssh import SSHStorageBackend
+from testrange.storage.base import (
+    AbstractStorageBackend,
+    LocalStorageBackend,
+    SSHStorageBackend,
+    StorageBackend,
+)
+from testrange.storage.disk import AbstractDiskFormat, Qcow2DiskFormat
+from testrange.storage.transport import (
+    AbstractFileTransport,
+    LocalFileTransport,
+    SSHFileTransport,
+)
 
 __all__ = [
-    "AbstractStorageBackend",
+    # Composition + convenience pairings
+    "StorageBackend",
     "LocalStorageBackend",
     "SSHStorageBackend",
+    "AbstractStorageBackend",  # legacy alias for StorageBackend
+    # Transport axis
+    "AbstractFileTransport",
+    "LocalFileTransport",
+    "SSHFileTransport",
+    # Disk-format axis
+    "AbstractDiskFormat",
+    "Qcow2DiskFormat",
 ]

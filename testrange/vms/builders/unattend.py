@@ -145,7 +145,7 @@ class WindowsUnattendedBuilder(Builder):
         # the storage backend so it lands wherever the hypervisor will
         # be reading from.
         unattend_ref = run.unattend_iso_path(vm.name)
-        run.storage.write_bytes(
+        run.storage.transport.write_bytes(
             unattend_ref,
             build_autounattend_iso_bytes(self.build_xml(vm)),
         )

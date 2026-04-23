@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest
 
 from testrange._run import RunDir
 from testrange.exceptions import CacheError
-from testrange.storage import LocalStorageBackend
+from testrange.storage import LocalFileTransport, LocalStorageBackend
 
 
 def _make_run(cache_root: Path) -> RunDir:
@@ -81,16 +80,16 @@ class TestCreateOverlay:
     def test_qemu_img_failure_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from testrange import _qemu_img
-
-        def _fail(*_a, **_k):
-            raise subprocess.CalledProcessError(
-                1, ["qemu-img"], stderr="disk full"
-            )
-        monkeypatch.setattr(_qemu_img.subprocess, "run", _fail)
+        # Simulate a qemu-img failure by having the transport return a
+        # non-zero exit code.  Qcow2DiskFormat wraps that as CacheError.
+        monkeypatch.setattr(
+            LocalFileTransport,
+            "run_tool",
+            lambda self, argv, timeout=60.0: (1, b"", b"disk full"),
+        )
 
         run = _make_run(tmp_path)
-        with pytest.raises(CacheError):
+        with pytest.raises(CacheError, match="disk full"):
             run.create_overlay("web01", str(tmp_path / "missing.qcow2"))
 
 

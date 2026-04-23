@@ -50,7 +50,7 @@ from testrange._logging import get_logger, log_duration
 from testrange.exceptions import CacheError, ImageNotFoundError
 
 if TYPE_CHECKING:
-    from testrange.storage.base import AbstractStorageBackend
+    from testrange.storage.base import StorageBackend
 
 _log = get_logger(__name__)
 
@@ -288,7 +288,7 @@ class CacheManager:
     def stage_source(
         self,
         local_path: Path,
-        backend: AbstractStorageBackend,
+        backend: StorageBackend,
     ) -> str:
         """Upload *local_path* to *backend* and return its backend ref.
 
@@ -313,7 +313,8 @@ class CacheManager:
         # ``local_path`` and the file already lives under the backend
         # cache root, skip the copy — it's already where the
         # hypervisor expects it.
-        backend_root = backend.cache_root
+        transport = backend.transport
+        backend_root = transport.cache_root
         try:
             local_path.relative_to(Path(backend_root))
             return str(local_path)
@@ -322,10 +323,10 @@ class CacheManager:
 
         ext = local_path.suffix or ".qcow2"
         digest = _sha256_file(local_path)[:24]
-        dest_ref = backend._join(
-            backend.images_dir(), f"{digest}{ext}"
+        dest_ref = transport._join(
+            transport.images_dir(), f"{digest}{ext}"
         )
-        if backend.exists(dest_ref):
+        if transport.exists(dest_ref):
             _log.debug("backend image cache hit (%s)", digest)
             return dest_ref
         _log.info(
@@ -335,40 +336,42 @@ class CacheManager:
         with log_duration(
             _log, f"upload {local_path.name} to backend"
         ):
-            backend.upload(local_path, dest_ref)
+            transport.upload(local_path, dest_ref)
         return dest_ref
 
     def vm_snapshot_ref(
         self,
         config_hash: str,
-        backend: AbstractStorageBackend,
+        backend: StorageBackend,
     ) -> str:
         """Return the backend-local ref where *config_hash*'s snapshot
         would live.  Does not check existence — see :meth:`get_vm`.
 
         :param config_hash: Hash key from :func:`vm_config_hash`.
         :param backend: Backend whose ``vms/`` dir hosts the snapshot.
-        :returns: ``<backend.vms_dir>/<config_hash>.qcow2``.
+        :returns: ``<transport.vms_dir>/<config_hash>.qcow2``.
         """
-        return backend._join(backend.vms_dir(), f"{config_hash}.qcow2")
+        t = backend.transport
+        return t._join(t.vms_dir(), f"{config_hash}.qcow2")
 
     def vm_manifest_ref(
         self,
         config_hash: str,
-        backend: AbstractStorageBackend,
+        backend: StorageBackend,
     ) -> str:
         """Return the backend-local ref for the manifest sidecar.
 
         :param config_hash: Hash key from :func:`vm_config_hash`.
         :param backend: Backend whose ``vms/`` dir hosts the manifest.
-        :returns: ``<backend.vms_dir>/<config_hash>.json``.
+        :returns: ``<transport.vms_dir>/<config_hash>.json``.
         """
-        return backend._join(backend.vms_dir(), f"{config_hash}.json")
+        t = backend.transport
+        return t._join(t.vms_dir(), f"{config_hash}.json")
 
     def get_vm(
         self,
         config_hash: str,
-        backend: AbstractStorageBackend,
+        backend: StorageBackend,
     ) -> str | None:
         """Return the cached snapshot ref for *config_hash*, or ``None``.
 
@@ -377,41 +380,41 @@ class CacheManager:
         :returns: Backend-local ref on hit, ``None`` on miss.
         """
         ref = self.vm_snapshot_ref(config_hash, backend)
-        return ref if backend.exists(ref) else None
+        return ref if backend.transport.exists(ref) else None
 
     def store_vm(
         self,
         config_hash: str,
         src_ref: str,
         manifest: dict[str, Any],
-        backend: AbstractStorageBackend,
+        backend: StorageBackend,
     ) -> str:
         """Compress *src_ref* into the backend's snapshot cache.
 
-        Uses :meth:`AbstractStorageBackend.qemu_img_convert_compressed`
-        so the compression runs wherever the source lives (remote for
-        SSH backends, local for the default).  A sibling manifest JSON
-        is written via :meth:`AbstractStorageBackend.write_bytes` so it
-        lives next to the snapshot it describes, regardless of
-        backend.
+        Uses the backend's disk-format ``compress`` op so the
+        compression runs wherever the source lives (remote for SSH
+        backends, local for the default).  A sibling manifest JSON is
+        written via the transport so it lives next to the snapshot it
+        describes, regardless of backend.
 
         :param config_hash: Hash key for this VM configuration.
-        :param src_ref: Backend-local ref to the post-install qcow2.
+        :param src_ref: Backend-local ref to the post-install image.
         :param manifest: Build instructions; recorded verbatim in the
             ``.json`` sidecar.
         :param backend: Backend where the snapshot should land.
         :returns: Backend-local ref to the stored snapshot.
-        :raises CacheError: If the backend's compress-convert step fails.
+        :raises CacheError: If the backend's compress step fails.
         """
         dest_ref = self.vm_snapshot_ref(config_hash, backend)
         manifest_ref = self.vm_manifest_ref(config_hash, backend)
-        # Make sure the target dir exists before convert writes into it.
-        backend.makedirs(backend.vms_dir())
+        transport = backend.transport
+        # Make sure the target dir exists before compress writes into it.
+        transport.makedirs(transport.vms_dir())
         with log_duration(
             _log, f"compress installed image for {manifest.get('name', '?')!r}"
         ):
-            backend.qemu_img_convert_compressed(src_ref, dest_ref)
-        backend.write_bytes(
+            backend.disk.compress(src_ref, dest_ref)
+        transport.write_bytes(
             manifest_ref,
             json.dumps(
                 manifest, indent=2, default=str, sort_keys=True,

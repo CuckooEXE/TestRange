@@ -1,41 +1,29 @@
-"""Local storage backend — filesystem + subprocess on the outer host.
+"""Local file transport — filesystem + subprocess on the outer host.
 
 Identity wrapper: every method is the direct filesystem or subprocess
 call the orchestrator used to make inline when it assumed the
-hypervisor ran on the same machine as Python.  Preserves today's
-behaviour bit-for-bit; exists so the rest of the codebase can talk
-to storage through :class:`AbstractStorageBackend` without branching
-on backend type.
+hypervisor ran on the same machine.  Preserves today's behaviour
+bit-for-bit; exists so the rest of the codebase can talk through
+:class:`AbstractFileTransport` without branching on transport type.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
-from testrange._qemu_img import (
-    convert_compressed as _qemu_img_convert_compressed,
-)
-from testrange._qemu_img import (
-    create_blank as _qemu_img_create_blank,
-)
-from testrange._qemu_img import (
-    create_overlay as _qemu_img_create_overlay,
-)
-from testrange._qemu_img import (
-    resize as _qemu_img_resize,
-)
 from testrange.exceptions import CacheError
-from testrange.storage.base import AbstractStorageBackend
+from testrange.storage.transport.base import AbstractFileTransport
 
 
-class LocalStorageBackend(AbstractStorageBackend):
-    """Filesystem-and-subprocess backend for the outer host.
+class LocalFileTransport(AbstractFileTransport):
+    """Outer-host filesystem + local subprocess.
 
-    :param cache_root: Backend cache root.  Defaults to the value
+    :param cache_root: Cache root directory.  Defaults to the value
         :class:`~testrange.cache.CacheManager` resolves — typically
-        ``/var/tmp/testrange/<user>`` or ``$TESTRANGE_CACHE_DIR``.
+        ``/var/tmp/testrange/<user>``.
     """
 
     _cache_root: Path
@@ -107,8 +95,7 @@ class LocalStorageBackend(AbstractStorageBackend):
             pass
 
     # ------------------------------------------------------------------
-    # Bulk transfer — local-to-local is just copy.  Kept distinct from
-    # ``write_bytes`` so we can keep large files out of Python memory.
+    # Bulk transfer — local-to-local is just a file copy.
     # ------------------------------------------------------------------
 
     def upload(self, local_path: Path, ref: str) -> None:
@@ -121,21 +108,27 @@ class LocalStorageBackend(AbstractStorageBackend):
         shutil.copyfile(ref, local_path)
 
     # ------------------------------------------------------------------
-    # qemu-img — delegate to the existing typed wrapper.
+    # Tool execution — subprocess on the outer host.
     # ------------------------------------------------------------------
 
-    def qemu_img_create_overlay(
-        self, backing_ref: str, dest_ref: str
-    ) -> None:
-        _qemu_img_create_overlay(Path(backing_ref), Path(dest_ref))
-
-    def qemu_img_create_blank(self, dest_ref: str, size: str) -> None:
-        _qemu_img_create_blank(Path(dest_ref), size)
-
-    def qemu_img_resize(self, ref: str, size: str) -> None:
-        _qemu_img_resize(Path(ref), size)
-
-    def qemu_img_convert_compressed(
-        self, src_ref: str, dest_ref: str
-    ) -> None:
-        _qemu_img_convert_compressed(Path(src_ref), Path(dest_ref))
+    def run_tool(
+        self,
+        argv: list[str],
+        timeout: float = 60.0,
+    ) -> tuple[int, bytes, bytes]:
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CacheError(
+                f"local tool {argv[0]!r} timed out after {timeout}s"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise CacheError(
+                f"local tool {argv[0]!r} is not installed: {exc}"
+            ) from exc
+        return result.returncode, result.stdout, result.stderr

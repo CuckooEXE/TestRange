@@ -107,7 +107,7 @@ class NoOpBuilder(Builder):
         cache and return its backend-local ref.
 
         Validates the source on the outer host (``qemu-img info``),
-        then stages into ``<backend.vms_dir>/byoi-<sha[:24]>.qcow2``
+        then stages into ``<transport.vms_dir>/byoi-<sha[:24]>.qcow2``
         with a manifest JSON sidecar.  For the default local backend
         this is a filesystem copy (identical to the pre-backend
         behaviour); for SSH / remote backends it's an SFTP upload to
@@ -137,14 +137,13 @@ class NoOpBuilder(Builder):
                 f"(qemu-img reports format={meta.get('format')!r})."
             )
 
-        backend = run.storage
+        transport = run.storage.transport
 
-        # Local fast path — source already under this backend's cache
+        # Local fast path — source already under the transport's cache
         # root on a local filesystem.  Return it unchanged so repeated
         # runs don't churn the cache with identical-content copies.
-        backend_root = Path(backend.cache_root)
         try:
-            src.relative_to(backend_root)
+            src.relative_to(Path(transport.cache_root))
             _log.info(
                 "VM %r prebuilt image %s already under backend cache root; "
                 "reusing in place",
@@ -155,10 +154,10 @@ class NoOpBuilder(Builder):
             pass
 
         sha = _sha256_file(src)[:24]
-        dest_ref = backend._join(backend.vms_dir(), f"byoi-{sha}.qcow2")
-        manifest_ref = backend._join(backend.vms_dir(), f"byoi-{sha}.json")
+        dest_ref = transport._join(transport.vms_dir(), f"byoi-{sha}.qcow2")
+        manifest_ref = transport._join(transport.vms_dir(), f"byoi-{sha}.json")
 
-        if backend.exists(dest_ref):
+        if transport.exists(dest_ref):
             _log.info(
                 "VM %r prebuilt cache hit (byoi-%s) — reusing staged copy",
                 vm.name, sha,
@@ -169,9 +168,9 @@ class NoOpBuilder(Builder):
             "VM %r prebuilt cache miss (byoi-%s) — staging %s into backend",
             vm.name, sha, src,
         )
-        backend.makedirs(backend.vms_dir())
-        backend.upload(src, dest_ref)
-        backend.write_bytes(
+        transport.makedirs(transport.vms_dir())
+        transport.upload(src, dest_ref)
+        transport.write_bytes(
             manifest_ref,
             json.dumps(
                 {

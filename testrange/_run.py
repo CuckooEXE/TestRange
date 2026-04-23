@@ -24,7 +24,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from testrange.storage.base import AbstractStorageBackend
+    from testrange.storage.base import StorageBackend
 
 
 class RunDir:
@@ -45,16 +45,16 @@ class RunDir:
     path: str
     """Backend-local path to the run's scratch directory."""
 
-    _storage: AbstractStorageBackend
+    _storage: StorageBackend
     """Backend that owns the scratch directory."""
 
-    def __init__(self, storage: AbstractStorageBackend) -> None:
+    def __init__(self, storage: StorageBackend) -> None:
         self._storage = storage
         self.run_id = str(uuid.uuid4())
-        self.path = storage.make_run_dir(self.run_id)
+        self.path = storage.transport.make_run_dir(self.run_id)
 
     @property
-    def storage(self) -> AbstractStorageBackend:
+    def storage(self) -> StorageBackend:
         """Return the backend this run dir is backed by."""
         return self._storage
 
@@ -69,7 +69,7 @@ class RunDir:
         :raises CacheError: If the backend's overlay-create step fails.
         """
         overlay = self._join(f"{vm_name}.qcow2")
-        self._storage.qemu_img_create_overlay(backing_ref, overlay)
+        self._storage.disk.create_overlay(backing_ref, overlay)
         return overlay
 
     def create_install_disk(
@@ -89,8 +89,8 @@ class RunDir:
         :raises CacheError: If the backend's image-manipulation step fails.
         """
         work_ref = self._join(f"{vm_name}-install.qcow2")
-        self._storage.qemu_img_create_overlay(base_ref, work_ref)
-        self._storage.qemu_img_resize(work_ref, disk_size)
+        self._storage.disk.create_overlay(base_ref, work_ref)
+        self._storage.disk.resize(work_ref, disk_size)
         return work_ref
 
     def create_blank_disk(self, vm_name: str, disk_size: str) -> str:
@@ -107,7 +107,7 @@ class RunDir:
         :raises CacheError: If the backend's blank-disk-create step fails.
         """
         work_ref = self._join(f"{vm_name}-install.qcow2")
-        self._storage.qemu_img_create_blank(work_ref, disk_size)
+        self._storage.disk.create_blank(work_ref, disk_size)
         return work_ref
 
     def unattend_iso_path(self, vm_name: str) -> str:
@@ -144,7 +144,7 @@ class RunDir:
 
     def cleanup(self) -> None:
         """Remove the run directory.  Safe to call multiple times."""
-        self._storage.cleanup_run(self.run_id)
+        self._storage.transport.cleanup_run(self.run_id)
 
     def _join(self, name: str) -> str:
         """Return a backend-local ref under this run dir."""

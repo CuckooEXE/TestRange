@@ -138,7 +138,7 @@ class CloudInitBuilder(Builder):
             vm.name, base_ref, vm._primary_disk_size()
         )
         seed_ref = run.seed_iso_path(vm.name, install=True)
-        run.storage.write_bytes(
+        run.storage.transport.write_bytes(
             seed_ref,
             build_seed_iso_bytes(
                 meta_data=self.install_meta_data(vm, self.cache_key(vm)),
@@ -171,7 +171,7 @@ class CloudInitBuilder(Builder):
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> RunDomain:
         seed_ref = run.seed_iso_path(vm.name, install=False)
-        run.storage.write_bytes(
+        run.storage.transport.write_bytes(
             seed_ref,
             build_seed_iso_bytes(
                 meta_data=self.run_meta_data(vm, run.run_id),

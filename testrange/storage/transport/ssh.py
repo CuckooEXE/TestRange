@@ -1,44 +1,40 @@
-"""SSH-based storage backend — SFTP + SSH exec to a remote host.
+"""SSH file transport — SFTP + SSH exec to a remote host.
 
 Used by any orchestrator whose hypervisor is reachable over SSH: disk
-images get uploaded over SFTP and image-manipulation tooling is
-executed over SSH on the remote side.  The remote hypervisor daemon
-sees the images on its own filesystem at paths the backend manages
-under ``<remote_cache_root>``.
+images get uploaded over SFTP and tools are executed over SSH on the
+remote side.  The remote hypervisor sees files on its own filesystem
+at paths this transport manages under ``<cache_root>``.
 
 Authentication follows paramiko's default discovery — ``~/.ssh/config``,
 ``ssh-agent``, default key files.  Callers who need non-default auth
-can pass explicit kwargs at construction.
+pass explicit kwargs at construction.
 """
 
 from __future__ import annotations
 
 import os
 import shlex
-import stat as _stat
 from pathlib import Path
 
 import paramiko
 
 from testrange.exceptions import CacheError
-from testrange.storage.base import AbstractStorageBackend
+from testrange.storage.transport.base import AbstractFileTransport
 
 _DEFAULT_REMOTE_CACHE = "/var/tmp/testrange/{user}"
 """Default remote cache root.  ``{user}`` substituted with the SSH login."""
 
 
-class SSHStorageBackend(AbstractStorageBackend):
-    """File + ``qemu-img`` primitives over an SSH connection.
+class SSHFileTransport(AbstractFileTransport):
+    """File + exec primitives over an SSH connection.
 
     :param host: Remote hostname or IP.
     :param username: SSH username.  Defaults to ``$USER``.
     :param port: SSH port.  Defaults to 22.
     :param key_filename: Explicit private-key path.  When ``None``,
-        paramiko walks standard locations (``~/.ssh/id_rsa`` etc.) and
-        tries ssh-agent.
+        paramiko walks standard locations and tries ssh-agent.
     :param cache_root: Remote cache root.  Defaults to
-        ``/var/tmp/testrange/<ssh_user>``.  The directory is created
-        lazily on first use if missing.
+        ``/var/tmp/testrange/<ssh_user>``.
     :param connect_timeout: Seconds to wait for the TCP handshake.
     """
 
@@ -79,11 +75,6 @@ class SSHStorageBackend(AbstractStorageBackend):
         if self._client is not None:
             return self._client
         client = paramiko.SSHClient()
-        # AutoAddPolicy rather than RejectPolicy: the typical workflow
-        # is "user already has this host in known_hosts via interactive
-        # ssh"; surprise-rejecting legitimate connections isn't worth
-        # the added "strict mode" UX.  Users who want strict checking
-        # can pre-populate known_hosts or subclass.
         client.load_system_host_keys()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
@@ -111,7 +102,7 @@ class SSHStorageBackend(AbstractStorageBackend):
         return self._sftp
 
     def close(self) -> None:
-        """Close the SFTP and SSH connections.  Idempotent."""
+        """Close the SFTP and SSH connections.  Idempotent, never raises."""
         if self._sftp is not None:
             try:
                 self._sftp.close()
@@ -125,30 +116,34 @@ class SSHStorageBackend(AbstractStorageBackend):
                 pass
             self._client = None
 
-    def _exec(self, argv: list[str]) -> tuple[int, str, str]:
-        """Run *argv* on the remote host via ``exec_command``.
+    # ------------------------------------------------------------------
+    # Internal exec helpers — used by run_tool + cache_root ops.
+    # ------------------------------------------------------------------
 
-        Returns ``(exit_code, stdout, stderr)``.  Arguments are joined
-        with :func:`shlex.join` so user-supplied paths with spaces
-        survive.
+    def _exec(self, argv: list[str]) -> tuple[int, bytes, bytes]:
+        """Run *argv* remotely via ``exec_command`` and return
+        ``(exit_code, stdout_bytes, stderr_bytes)``.
+
+        Args are joined with :func:`shlex.join` so user-supplied paths
+        with spaces survive.
         """
         client = self._connect()
         cmd = shlex.join(argv)
         _, out, err = client.exec_command(cmd)
-        # Block until the command finishes so the exit code is valid.
         exit_code = out.channel.recv_exit_status()
-        stdout = out.read().decode(errors="replace")
-        stderr = err.read().decode(errors="replace")
-        return exit_code, stdout, stderr
+        return exit_code, out.read(), err.read()
 
     def _exec_check(self, argv: list[str]) -> str:
+        """``_exec`` + raise :class:`CacheError` on non-zero exit.
+        Returns stdout as a decoded string for convenience."""
         code, stdout, stderr = self._exec(argv)
         if code != 0:
             raise CacheError(
                 f"remote command {argv[0]!r} failed "
-                f"(exit {code}): {stderr.strip() or stdout.strip()}"
+                f"(exit {code}): "
+                f"{stderr.decode(errors='replace').strip() or stdout.decode(errors='replace').strip()}"
             )
-        return stdout
+        return stdout.decode(errors="replace")
 
     # ------------------------------------------------------------------
     # Cache root + per-run scratch
@@ -160,17 +155,15 @@ class SSHStorageBackend(AbstractStorageBackend):
 
     def make_run_dir(self, run_id: str) -> str:
         run_path = self.run_dir(run_id)
-        # ``mkdir -p``: idempotent, creates parents.  Chmod to 0755 so
-        # the remote hypervisor process can read disk files inside.
         self._exec_check(["mkdir", "-p", run_path])
         self._exec_check(["chmod", "0755", run_path])
         return run_path
 
     def cleanup_run(self, run_id: str) -> None:
         run_path = self.run_dir(run_id)
-        # ``rm -rf`` is intentional — run dirs are fully owned by us
-        # and always under our cache root, never a user path.  Silence
-        # errors so teardown stays exception-free.
+        # ``rm -rf`` is fine: run dirs are fully owned by us and always
+        # under our cache root, never a user path.  Silence errors so
+        # teardown stays exception-free.
         try:
             self._exec(["rm", "-rf", run_path])
         except Exception:
@@ -188,8 +181,6 @@ class SSHStorageBackend(AbstractStorageBackend):
         except FileNotFoundError:
             return False
         except OSError:
-            # Some paramiko / SFTP servers raise generic IOError on
-            # missing paths — treat as "doesn't exist" and move on.
             return False
 
     def size(self, ref: str) -> int:
@@ -226,7 +217,7 @@ class SSHStorageBackend(AbstractStorageBackend):
             pass
 
     def _ensure_parent(self, ref: str) -> None:
-        """``mkdir -p`` on *ref*'s parent.  Called before every write."""
+        """``mkdir -p`` on *ref*'s parent before a write."""
         parent = ref.rsplit("/", 1)[0] if "/" in ref else ""
         if parent:
             self._exec_check(["mkdir", "-p", parent])
@@ -238,10 +229,7 @@ class SSHStorageBackend(AbstractStorageBackend):
     def upload(self, local_path: Path, ref: str) -> None:
         self._ensure_parent(ref)
         sftp = self._get_sftp()
-        # ``put`` streams — no in-memory buffering of the full file.
         sftp.put(str(local_path), ref)
-        # Preserve read permissions; the remote hypervisor process
-        # needs to be able to open the file.
         try:
             sftp.chmod(ref, 0o644)
         except OSError:
@@ -253,43 +241,20 @@ class SSHStorageBackend(AbstractStorageBackend):
         sftp.get(ref, str(local_path))
 
     # ------------------------------------------------------------------
-    # qemu-img — runs on the remote host.
+    # Tool execution — runs on the remote host.
     # ------------------------------------------------------------------
 
-    def qemu_img_create_overlay(
-        self, backing_ref: str, dest_ref: str
-    ) -> None:
-        self._exec_check(
-            [
-                "qemu-img", "create",
-                "-f", "qcow2",
-                "-b", backing_ref,
-                "-F", "qcow2",
-                dest_ref,
-            ]
-        )
-
-    def qemu_img_create_blank(self, dest_ref: str, size: str) -> None:
-        self._exec_check(
-            ["qemu-img", "create", "-f", "qcow2", dest_ref, size]
-        )
-
-    def qemu_img_resize(self, ref: str, size: str) -> None:
-        self._exec_check(["qemu-img", "resize", ref, size])
-
-    def qemu_img_convert_compressed(
-        self, src_ref: str, dest_ref: str
-    ) -> None:
-        self._exec_check(
-            [
-                "qemu-img", "convert",
-                "-f", "qcow2",
-                "-O", "qcow2",
-                "-c",
-                src_ref,
-                dest_ref,
-            ]
-        )
-
-    # Unused locally — kept for symmetry with paramiko file-mode constants.
-    _STAT = _stat
+    def run_tool(
+        self,
+        argv: list[str],
+        timeout: float = 60.0,
+    ) -> tuple[int, bytes, bytes]:
+        # paramiko's exec_command has its own per-channel timeout
+        # semantics that differ from subprocess; for v1 we let the
+        # caller's timeout guard via channel settings.  Parity with
+        # LocalFileTransport is close enough for tool execution.
+        client = self._connect()
+        cmd = shlex.join(argv)
+        _, out, err = client.exec_command(cmd, timeout=timeout)
+        exit_code = out.channel.recv_exit_status()
+        return exit_code, out.read(), err.read()
