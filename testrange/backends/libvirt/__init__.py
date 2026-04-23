@@ -28,6 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
+from testrange.backends.libvirt.hypervisor import Hypervisor
 from testrange.backends.libvirt.network import VirtualNetwork
 from testrange.backends.libvirt.orchestrator import (
     LibvirtOrchestrator,
@@ -93,5 +94,6 @@ __all__ = [
     "Orchestrator",
     "LibvirtOrchestrator",
     "VM",
+    "Hypervisor",
     "cli_build_orchestrator",
 ]

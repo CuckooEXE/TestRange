@@ -108,6 +108,34 @@ juggle ``open()``:
 These are safe to layer because they go through the same gated
 ``_require_communicator()`` path as the primitives.
 
+Nested: Hypervisor VMs
+----------------------
+
+A :class:`~testrange.Hypervisor` is a VM that also drives an **inner**
+orchestrator.  It carries three extra fields on top of the plain
+:class:`~testrange.VM` surface:
+
+- ``orchestrator`` — an
+  :class:`~testrange.orchestrator_base.AbstractOrchestrator` *class*
+  (not an instance).  The outer orchestrator calls this class's
+  :meth:`~testrange.orchestrator_base.AbstractOrchestrator.root_on_vm`
+  once the hypervisor VM is booted to produce an inner orchestrator
+  rooted on the VM.
+- ``vms`` — :class:`~testrange.VM` specs for the inner layer.
+- ``networks`` — :class:`~testrange.VirtualNetwork` specs for the
+  inner layer.
+
+The libvirt :class:`Hypervisor` concrete class additionally pre-loads
+``libvirt-daemon-system``, ``qemu-kvm``, and ``qemu-utils`` via apt,
+and adds ``systemctl enable --now libvirtd`` plus ``usermod -aG
+libvirt,kvm`` for each declared user to ``post_install_cmds`` —
+enough for the nested ``qemu+ssh://`` URI to connect and drive the
+inner layer.  Caller-supplied ``pkgs`` / ``post_install_cmds`` are
+appended, so the library's steps run first.
+
+Prerequisites and cross-layer behaviour are documented in
+:doc:`/usage/installation`.
+
 Reference
 ---------
 
@@ -116,6 +144,14 @@ Reference
    :show-inheritance:
 
 .. autoclass:: testrange.vms.base.AbstractVM
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.Hypervisor
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.vms.hypervisor_base.AbstractHypervisor
    :members:
    :show-inheritance:
 

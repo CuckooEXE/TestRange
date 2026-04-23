@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
+    from testrange.vms.hypervisor_base import AbstractHypervisor
 
 
 class AbstractOrchestrator(ABC):
@@ -138,6 +139,51 @@ class AbstractOrchestrator(ABC):
         normal teardown flow.
         """
         return []
+
+    @classmethod
+    def root_on_vm(
+        cls,
+        hypervisor: AbstractHypervisor,
+        outer: AbstractOrchestrator,
+    ) -> AbstractOrchestrator:
+        """Return a fresh orchestrator whose control plane lives
+        *inside* ``hypervisor``.
+
+        Called by the outer orchestrator's :meth:`__enter__` once
+        ``hypervisor`` is booted and its communicator is reachable.
+        The returned orchestrator is **not yet entered** — the caller
+        does that via ``ExitStack``.
+
+        Different drivers build this differently:
+
+        - libvirt → ``qemu+ssh://<user>@<vm-ip>/system``, ingesting
+          the hypervisor's SSH key and grabbing its host key
+        - Proxmox → ``https://<vm-ip>:8006`` + API token obtained at
+          first boot
+
+        The *outer* orchestrator passes itself as ``outer`` so the
+        inner driver can reuse shared state (cache root, storage
+        backend factories) without guessing.
+
+        :param hypervisor: The just-booted hypervisor VM.  Its
+            :attr:`~AbstractHypervisor.vms` /
+            :attr:`~AbstractHypervisor.networks` become the inner
+            orchestrator's ``vms`` / ``networks`` inputs.
+        :param outer: The outer orchestrator that booted
+            ``hypervisor``.  Used to source the shared cache root.
+        :returns: A configured (not yet entered) orchestrator
+            instance.
+        :raises NotImplementedError: If this driver does not yet
+            support being rooted on a VM.  Drivers that haven't
+            implemented nested orchestration must leave the default
+            implementation in place.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} does not support nested orchestration "
+            "yet — it cannot be rooted on a hypervisor VM.  Use a "
+            "driver that implements root_on_vm() (currently: "
+            "testrange.backends.libvirt.Orchestrator)."
+        )
 
 
 __all__ = ["AbstractOrchestrator"]

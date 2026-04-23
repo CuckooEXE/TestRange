@@ -57,6 +57,7 @@ Alternative backends can be pulled in directly from
 from testrange._version import __version__
 from testrange.backends.libvirt import (
     VM,
+    Hypervisor,
     LibvirtOrchestrator,
     Orchestrator,
     VirtualNetwork,
@@ -92,6 +93,7 @@ from testrange.vms.builders import (
     NoOpBuilder,
     WindowsUnattendedBuilder,
 )
+from testrange.vms.hypervisor_base import AbstractHypervisor
 
 __all__ = [
     "__version__",
@@ -105,6 +107,8 @@ __all__ = [
     # VM + credentials
     "VM",
     "AbstractVM",
+    "Hypervisor",
+    "AbstractHypervisor",
     "Credential",
     # Builders
     "Builder",

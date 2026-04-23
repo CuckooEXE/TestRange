@@ -87,6 +87,7 @@ from testrange.orchestrator_base import AbstractOrchestrator
 if TYPE_CHECKING:
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
+    from testrange.vms.hypervisor_base import AbstractHypervisor
 
 
 class ProxmoxOrchestrator(AbstractOrchestrator):
@@ -163,4 +164,36 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # TODO: close the proxmoxer client.
         raise NotImplementedError(
             "ProxmoxOrchestrator teardown is not yet implemented."
+        )
+
+    @classmethod
+    def root_on_vm(
+        cls,
+        hypervisor: AbstractHypervisor,
+        outer: AbstractOrchestrator,
+    ) -> AbstractOrchestrator:
+        """Not yet implemented.
+
+        Nested Proxmox-in-libvirt will:
+
+        1. Obtain an API token for the inner cluster by POSTing to
+           ``/api2/json/access/ticket`` with credentials injected by
+           the Proxmox ISO unattended installer.
+        2. Construct a fresh :class:`ProxmoxOrchestrator` pointing at
+           ``https://<hypervisor-ip>:8006`` with the new token.
+        3. Return it so the outer orchestrator can enter it via
+           :class:`ExitStack`.
+
+        Step (1) needs an unattended Proxmox installer (a dedicated
+        :class:`~testrange.vms.builders.base.Builder` subclass) that
+        pre-seeds the cluster's root password and enables HTTPS.
+        That's scheduled as its own track.
+        """
+        del hypervisor, outer
+        raise NotImplementedError(
+            "ProxmoxOrchestrator.root_on_vm is not yet implemented. "
+            "Nested Proxmox-in-libvirt needs an unattended Proxmox "
+            "installer (tracked separately).  Use "
+            "LibvirtOrchestrator for nested libvirt-in-libvirt in the "
+            "meantime."
         )

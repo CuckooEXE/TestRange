@@ -21,6 +21,7 @@ It is also used directly by :class:`~testrange.test.Test`.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 from collections.abc import Sequence
 from pathlib import Path
@@ -49,6 +50,7 @@ _log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from testrange.backends.libvirt.vm import VM
+    from testrange.vms.hypervisor_base import AbstractHypervisor
 
 _INSTALL_SUBNET_POOL = tuple(f"192.168.{o}.0/24" for o in range(240, 255))
 """Candidate subnets for the ephemeral install-phase network.
@@ -167,6 +169,20 @@ class Orchestrator(AbstractOrchestrator):
     _install_network: VirtualNetwork | None
     """Ephemeral NAT network used during the install phase; ``None`` outside install."""
 
+    _nested_stack: contextlib.ExitStack | None
+    """ExitStack holding every entered inner orchestrator (nested
+    hypervisor VMs).  LIFO-unwound during teardown so inner state is
+    cleaned up before the outer VMs it lives on are destroyed.
+    ``None`` before :meth:`__enter__` and after :meth:`_teardown`.
+    """
+
+    _inner_orchestrators: list[AbstractOrchestrator]
+    """Entered inner orchestrators keyed by outer Hypervisor VM order.
+
+    Kept alongside ``_nested_stack`` so tests / tooling can introspect
+    the live nested structure without reaching into the stack.
+    """
+
     def __init__(
         self,
         host: str = "localhost",
@@ -194,11 +210,95 @@ class Orchestrator(AbstractOrchestrator):
         self._conn = None
         self._run = None
         self._install_network = None
+        self._nested_stack = None
+        self._inner_orchestrators = []
 
     @classmethod
     def backend_type(cls) -> str:
         """Return ``"libvirt"``."""
         return "libvirt"
+
+    @classmethod
+    def root_on_vm(
+        cls,
+        hypervisor: AbstractHypervisor,
+        outer: AbstractOrchestrator,
+    ) -> Orchestrator:
+        """Build a nested :class:`Orchestrator` rooted on ``hypervisor``.
+
+        Derives ``qemu+ssh://<user>@<ip>/system`` from the hypervisor's
+        resolved communicator host and the first credential that carries
+        an ``ssh_key`` (falling back to the first credential declared on
+        the VM).  The inner orchestrator reuses the outer cache root so
+        builder cache keys still hit on the outer side — the storage
+        backend is auto-selected to :class:`SSHStorageBackend` against
+        the hypervisor VM.
+
+        The resulting orchestrator is **not yet entered** — the outer
+        orchestrator manages that lifecycle via :class:`ExitStack`.
+
+        :param hypervisor: The just-booted hypervisor VM.  Must have a
+            static IP (see :class:`VirtualNetworkRef`) and a credential
+            whose matching private key is reachable by ``ssh-agent`` or
+            ``~/.ssh/`` — otherwise the nested libvirt URI will fail to
+            authenticate.
+        :param outer: The outer orchestrator that booted ``hypervisor``;
+            used to source the shared cache root.
+        :returns: A configured (not yet entered) inner orchestrator.
+        :raises OrchestratorError: If the hypervisor's communicator has
+            no host we can reach (DHCP-only networking is not supported
+            for nested libvirt in v1).
+        """
+        if not hypervisor.users:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r} has no users — "
+                "root_on_vm needs at least one Credential for SSH."
+            )
+        cred = next(
+            (c for c in hypervisor.users if c.ssh_key),
+            hypervisor.users[0],
+        )
+
+        # The hypervisor VM's live communicator stores its reachable
+        # host.  Both SSHCommunicator and WinRMCommunicator expose
+        # ``_host`` — we only care about the SSH case here (libvirtd
+        # over SSH), so anything else is a misconfigured hypervisor.
+        comm = hypervisor._require_communicator()
+        host = getattr(comm, "_host", None)
+        if not host:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r}: communicator has "
+                "no resolvable host.  Nested libvirt requires "
+                "communicator='ssh' + a static IP "
+                "(VirtualNetworkRef('Net', ip='10.x.x.x'))."
+            )
+
+        # ``no_verify=1`` skips host-key checking for the ephemeral VM,
+        # matching how the outer SSH communicator already connected.
+        # libvirt-client honours this query parameter in the URI.
+        uri = f"qemu+ssh://{cred.username}@{host}/system?no_verify=1"
+
+        # Reuse the outer cache root so post-install cache hits don't
+        # re-build identical VMs layer-over-layer.  Inner CacheManager
+        # still operates on the outer host for index / sidecar files;
+        # the SSH storage backend handles remote disk IO transparently.
+        #
+        # Image shipping is implicit: the inner orchestrator constructs
+        # an :class:`SSHStorageBackend` from the ``qemu+ssh://`` URI,
+        # and :meth:`CacheManager.stage_source` uploads from the outer
+        # host's ``images/`` cache into the hypervisor VM's cache via
+        # SFTP on first access.  No explicit copy loop is needed.
+        outer_cache_root: Path | None = None
+        outer_cache = getattr(outer, "_cache", None)
+        if outer_cache is not None:
+            outer_cache_root = outer_cache.root
+
+        return cls(
+            host=uri,
+            networks=hypervisor.networks,  # pyright: ignore[reportArgumentType]
+            vms=hypervisor.vms,  # pyright: ignore[reportArgumentType]
+            cache_root=outer_cache_root,
+        )
 
     def keep_alive_hints(self) -> list[str]:
         """Emit ``virsh`` commands the user would run to clean up
@@ -436,7 +536,51 @@ class Orchestrator(AbstractOrchestrator):
                         mac_ip_pairs=mac_ip_pairs,
                     )
                 self.vms[vm.name] = vm
+
+        # 7. Enter inner orchestrators for any Hypervisor VMs.  The
+        # ExitStack owns the unwind so a partial failure here exits
+        # every already-entered inner orchestrator before propagating
+        # to the outer teardown path.
+        self._enter_nested_orchestrators()
         _log.info("all VMs ready; handing off to test function")
+
+    def _enter_nested_orchestrators(self) -> None:
+        """Enter an inner orchestrator for each
+        :class:`AbstractHypervisor` VM in the run.
+
+        Called last in :meth:`_provision` so every outer VM is already
+        booted and its communicator is ready.  Inner orchestrators are
+        entered sequentially — a single-threaded ExitStack is enough
+        because ``root_on_vm`` does not block on anything expensive
+        beyond the inner bring-up (which itself parallelises).
+        """
+        from testrange.vms.hypervisor_base import AbstractHypervisor
+
+        hypervisors = [
+            vm for vm in self._vm_list
+            if isinstance(vm, AbstractHypervisor)
+        ]
+        if not hypervisors:
+            return
+
+        stack = contextlib.ExitStack()
+        entered: list[AbstractOrchestrator] = []
+        try:
+            for hv in hypervisors:
+                with log_duration(
+                    _log, f"enter inner orchestrator on {hv.name!r}",
+                ):
+                    inner = hv.orchestrator.root_on_vm(hv, self)
+                    stack.enter_context(inner)
+                    entered.append(inner)
+        except BaseException:
+            # ExitStack closes in LIFO order — whatever succeeded gets
+            # unwound before the original exception propagates.
+            stack.close()
+            raise
+
+        self._nested_stack = stack
+        self._inner_orchestrators = entered
 
     def _cleanup_stale_install_networks(self) -> None:
         """Undefine any *inactive* install networks left by crashed runs.
@@ -648,6 +792,21 @@ class Orchestrator(AbstractOrchestrator):
             return
 
         _log.info("teardown starting")
+
+        # Inner orchestrators first: their VMs live *inside* outer
+        # hypervisor VMs, so unwinding the inner stack before the
+        # outer VMs get destroyed keeps the "teardown from the top"
+        # invariant intact.  ExitStack.close() propagates any single
+        # exception; aggregate wrapping isn't needed — nothing in
+        # this path should mask the original reason teardown ran.
+        if self._nested_stack is not None:
+            try:
+                self._nested_stack.close()
+            except Exception as exc:
+                _log.debug("inner orchestrator teardown raised (ignored): %s", exc)
+            self._nested_stack = None
+            self._inner_orchestrators = []
+
         for vm in self._vm_list:
             try:
                 vm.shutdown()

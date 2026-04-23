@@ -93,6 +93,56 @@ Verifying the Installation
    conn.close()
 
 
+Nested virtualization (optional)
+--------------------------------
+
+TestRange supports :class:`~testrange.Hypervisor` VMs — VMs that run
+their own inner orchestrator and inner VMs.  For that to work, the
+physical host's KVM module needs **nested virtualization** enabled so
+the L1 hypervisor VM can expose VMX/SVM to its L2 guests.
+
+Check whether nested is already on:
+
+.. code-block:: bash
+
+   cat /sys/module/kvm_intel/parameters/nested   # Intel
+   cat /sys/module/kvm_amd/parameters/nested     # AMD
+
+If the output is ``Y`` or ``1`` you're done.  Otherwise, enable it
+persistently via a modprobe option:
+
+.. code-block:: bash
+
+   # Intel CPUs
+   echo 'options kvm_intel nested=1' | sudo tee /etc/modprobe.d/kvm-nested.conf
+   sudo modprobe -r kvm_intel && sudo modprobe kvm_intel
+
+   # AMD CPUs
+   echo 'options kvm_amd nested=1' | sudo tee /etc/modprobe.d/kvm-nested.conf
+   sudo modprobe -r kvm_amd && sudo modprobe kvm_amd
+
+``modprobe -r`` fails if any VM is running — shut those down first, or
+just reboot, which applies the option cleanly.
+
+TestRange does **not** check this at runtime.  Without the flag,
+inner VMs will fail to boot with opaque KVM errors from the L1 guest;
+that's by design — the check belongs at install time, not on every
+orchestrator start.
+
+The outer VM (:class:`~testrange.Hypervisor`) additionally needs
+to be able to ``ssh`` in via a key-based login from the host, because
+nested libvirt drives the inner layer over ``qemu+ssh://``.  Put a
+:class:`~testrange.Credential` with ``ssh_key=`` on the hypervisor's
+user list, and make sure the matching private key is known to your
+``ssh-agent`` / ``~/.ssh/``.
+
+.. note::
+
+   L2 guests run ~2–4× slower than L1 guests.  Nested is intended for
+   *testing the orchestration flow*, not for production-grade
+   performance.
+
+
 Host dnsmasq coexistence
 ------------------------
 
