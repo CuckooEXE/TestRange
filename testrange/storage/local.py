@@ -1,10 +1,11 @@
 """Local storage backend — filesystem + subprocess on the outer host.
 
 Identity wrapper: every method is the direct filesystem or subprocess
-call that :class:`~testrange.backends.libvirt.Orchestrator` used to
-make inline.  Preserves today's behaviour bit-for-bit; exists so the
-rest of the codebase can talk to storage through
-:class:`AbstractStorageBackend` without branching on backend type.
+call the orchestrator used to make inline when it assumed the
+hypervisor ran on the same machine as Python.  Preserves today's
+behaviour bit-for-bit; exists so the rest of the codebase can talk
+to storage through :class:`AbstractStorageBackend` without branching
+on backend type.
 """
 
 from __future__ import annotations
@@ -54,8 +55,9 @@ class LocalStorageBackend(AbstractStorageBackend):
         run_path = Path(self.run_dir(run_id))
         try:
             run_path.mkdir(parents=True, exist_ok=True)
-            # 0755 so ``qemu:///system`` (libvirt-qemu user) can read
-            # disk images placed inside.
+            # 0755 so the hypervisor process (which typically runs as a
+            # dedicated system user, not the orchestrator's user) can
+            # read disk images placed inside.
             run_path.chmod(0o755)
         except OSError as exc:
             raise CacheError(

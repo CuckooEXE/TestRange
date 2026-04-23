@@ -27,7 +27,7 @@ from testrange.vms.images import resolve_image
 # Sentinel file written at the end of the install runcmd script iff every
 # step succeeded.  ``power_state.condition`` only fires a poweroff when
 # this file exists, so any install failure (apt, dpkg verify, pip, user
-# post-install cmd) leaves the VM up until libvirt hits its build
+# post-install cmd) leaves the VM up until the backend hits its build
 # timeout — which surfaces as :class:`~testrange.exceptions.VMBuildError`
 # instead of silently caching a broken image.
 _INSTALL_OK_SENTINEL = "/var/lib/testrange/install_ok"
@@ -50,10 +50,10 @@ _DNF_INSECURE_CONF = "\nsslverify=False\n"
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
-    from testrange.backends.libvirt.vm import VM
     from testrange.cache import CacheManager
     from testrange.credentials import Credential
     from testrange.packages import AbstractPackage
+    from testrange.vms.base import AbstractVM as VM
 
 
 def _hash_password(plaintext: str) -> str:
@@ -130,8 +130,8 @@ class CloudInitBuilder(Builder):
         cache: CacheManager,
     ) -> InstallDomain:
         # 1. Resolve source (URL → local outer-host path); 2. stage to
-        # backend (no-op for local libvirt, SFTP upload for remote);
-        # 3. create the install overlay on the backend.
+        # backend (no-op for local backends, SFTP / REST upload for
+        # remote ones); 3. create the install overlay on the backend.
         local_base = resolve_image(vm.iso, cache)
         base_ref = cache.stage_source(local_base, run.storage)
         work_disk = run.create_install_disk(
@@ -480,8 +480,8 @@ def build_seed_iso_bytes(
     Returning bytes rather than writing to a path keeps seed ISO
     generation backend-agnostic — the caller hands the bytes to
     whichever :class:`~testrange.storage.AbstractStorageBackend` is in
-    play (local filesystem, SFTP to a remote libvirtd host, put_file
-    into a nested VM's guest agent, …).
+    play (local filesystem, SFTP to a remote host, REST upload into an
+    API-driven storage pool, …).
     """
     iso = PyCdlib()
     iso.new(interchange_level=3, joliet=3, vol_ident="cidata")

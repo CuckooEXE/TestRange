@@ -399,8 +399,8 @@ class TestBootKeypressSpam:
         the Linux SPACE keycode (57)."""
         import libvirt
 
-        from testrange.vms.builders import WindowsUnattendedBuilder
         from testrange.backends.libvirt import vm as vm_mod
+        from testrange.vms.builders import WindowsUnattendedBuilder
 
         # Fast-forward the spam loop so the test runs in ms, not seconds.
         monkeypatch.setattr(vm_mod, "_BOOT_KEYPRESS_WINDOW_S", 0.3)

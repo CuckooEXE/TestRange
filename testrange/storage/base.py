@@ -1,13 +1,13 @@
 """Abstract storage backend.
 
 The backend is the boundary between "outer Python does orchestration
-logic" and "some host reads actual disk bytes for libvirtd / the
-hypervisor control plane."  When the outer host and the libvirtd host
-are the same machine (the :class:`LocalStorageBackend` case) the
-methods collapse to direct filesystem + subprocess ops.  When they
-differ (remote libvirt, nested orchestration, Proxmox with uploads),
-the same signatures route the work over SFTP / SSH exec / REST
-uploads.
+logic" and "some host reads actual disk bytes for the hypervisor's
+control plane."  When the outer host and the hypervisor's host are
+the same machine (the :class:`LocalStorageBackend` case) the methods
+collapse to direct filesystem + subprocess ops.  When they differ
+(remote hypervisor, nested orchestration, API-driven storage), the
+same signatures route the work over the backend's transport (SFTP /
+SSH exec / REST uploads / …).
 
 Contract
 --------
@@ -15,7 +15,7 @@ Contract
 All ``ref`` arguments and return values are **backend-local strings**
 — typically an absolute filesystem path on the backend's host.
 Callers are expected to treat them as opaque identifiers and never
-``Path()``-parse them: a future Proxmox backend will return volume IDs
+``Path()``-parse them: API-driven backends will return volume IDs
 like ``"local-lvm:vm-100-disk-0"`` instead.
 
 The backend owns three subtrees under its :attr:`cache_root`:
@@ -37,10 +37,11 @@ from pathlib import Path
 
 class AbstractStorageBackend(ABC):
     """Primitives the orchestrator needs to put disk bytes where the
-    hypervisor can read them, and to run ``qemu-img`` against them.
+    hypervisor can read them, and to run image-manipulation tooling
+    against them.
 
     Every method takes and returns **backend-local** strings — paths
-    valid on the host where libvirtd (or the equivalent) is running.
+    valid on the host where the backend's hypervisor daemon is running.
     """
 
     # ------------------------------------------------------------------

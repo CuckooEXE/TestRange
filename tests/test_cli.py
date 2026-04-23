@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
@@ -222,8 +223,9 @@ class TestOrchestratorOption:
     def test_unknown_scheme_rejected(
         self, runner: CliRunner, tmp_path: Path
     ) -> None:
-        """vmware:// isn't implemented — the URL parser should refuse
-        it with a clear message."""
+        """vmware:// isn't implemented — no backend claims it, so the
+        CLI must refuse with a clear message rather than silently
+        constructing something default."""
         f = tmp_path / "case.py"
         f.write_text(self._FACTORY_WITH_REAL_ORCH)
         r = runner.invoke(
@@ -231,7 +233,7 @@ class TestOrchestratorOption:
             ["run", f"{f}:gen_tests", "--orchestrator", "vmware://host"],
         )
         assert r.exit_code != 0
-        assert "unknown orchestrator scheme" in r.output.lower()
+        assert "no backend claims" in r.output.lower()
 
     def test_proxmox_url_requires_auth(
         self, runner: CliRunner, tmp_path: Path
@@ -259,58 +261,121 @@ class TestOrchestratorOption:
         assert r.exit_code != 0
 
 
-class TestParseOrchestratorUrl:
-    """Direct unit tests for the URL → backend-kwargs parser.
-
-    Faster than going through Click for each variant.
+class TestBackendUrlDispatch:
+    """Each backend's ``cli_build_orchestrator`` claims its own URL
+    shapes and returns a constructed orchestrator, or ``None`` for a
+    URL it doesn't recognise.  The CLI dispatcher iterates over the
+    registered backends — no scheme knowledge in the CLI itself.
     """
 
-    def test_libvirt_uri_passes_through(self) -> None:
-        from testrange._cli import _parse_orchestrator_url
+    def _fake_original(self, tmp_path: Path | None = None) -> MagicMock:
+        """Return a MagicMock orchestrator shaped like the libvirt one
+        (exposes ``_networks`` / ``_vm_list`` / ``_cache.root``).  The
+        backend ``cli_build_orchestrator`` functions reuse those
+        attributes to reconstruct the orchestrator under a new URL."""
+        m = MagicMock()
+        m._networks = []
+        m._vm_list = []
+        # CacheManager normalises ``root`` through Path; give it a real
+        # tmp path so construction succeeds.
+        m._cache.root = tmp_path or Path("/tmp")
+        return m
 
-        spec = _parse_orchestrator_url("qemu+ssh://alice@vmhost/system")
-        assert spec["backend"] == "libvirt"
-        assert spec["host"] == "qemu+ssh://alice@vmhost/system"
+    def test_libvirt_uri_builds_libvirt_orchestrator(
+        self, tmp_path: Path
+    ) -> None:
+        from testrange.backends.libvirt import (
+            Orchestrator,
+            cli_build_orchestrator,
+        )
+        orch = cli_build_orchestrator(
+            "qemu+ssh://alice@vmhost/system",
+            self._fake_original(tmp_path),
+        )
+        assert isinstance(orch, Orchestrator)
+        assert orch._host == "qemu+ssh://alice@vmhost/system"
 
-    def test_libvirt_scheme_rewrites_to_qemu_ssh(self) -> None:
+    def test_libvirt_scheme_rewrites_to_qemu_ssh(
+        self, tmp_path: Path
+    ) -> None:
         """``libvirt://alice@vmhost`` is a convenience alias that
         reshapes into the equivalent libvirt URI."""
-        from testrange._cli import _parse_orchestrator_url
+        from testrange.backends.libvirt import cli_build_orchestrator
 
-        spec = _parse_orchestrator_url("libvirt://alice@vmhost")
-        assert spec["backend"] == "libvirt"
-        assert spec["host"] == "qemu+ssh://alice@vmhost/system"
+        orch = cli_build_orchestrator(
+            "libvirt://alice@vmhost", self._fake_original(tmp_path),
+        )
+        assert orch is not None
+        assert orch._host == "qemu+ssh://alice@vmhost/system"
+
+    def test_libvirt_returns_none_for_proxmox_url(self) -> None:
+        """A backend must decline URLs that aren't its — letting the
+        dispatcher try the next backend."""
+        from testrange.backends.libvirt import cli_build_orchestrator
+        assert cli_build_orchestrator(
+            "proxmox://root:pw@pve.example.com", self._fake_original(),
+        ) is None
+
+    def test_proxmox_returns_none_for_libvirt_url(self) -> None:
+        from testrange.backends.proxmox import cli_build_orchestrator
+        assert cli_build_orchestrator(
+            "qemu+ssh://vm/system", self._fake_original(),
+        ) is None
 
     def test_proxmox_user_password(self) -> None:
-        from testrange._cli import _parse_orchestrator_url
-
-        spec = _parse_orchestrator_url(
-            "proxmox://root:hunter2@pve.example.com"
+        from testrange.backends.proxmox import (
+            ProxmoxOrchestrator,
+            cli_build_orchestrator,
         )
-        assert spec["backend"] == "proxmox"
-        assert spec["host"] == "pve.example.com"
-        assert spec["user"] == "root"
-        assert spec["password"] == "hunter2"
-        assert spec["token"] is None
+        orch = cli_build_orchestrator(
+            "proxmox://root:hunter2@pve.example.com", self._fake_original(),
+        )
+        assert isinstance(orch, ProxmoxOrchestrator)
+        assert orch._host == "pve.example.com"
+        assert orch._token == {
+            "token": None, "user": "root", "password": "hunter2",
+        }
 
     def test_proxmox_token_in_userinfo(self) -> None:
-        from testrange._cli import _parse_orchestrator_url
-
-        spec = _parse_orchestrator_url(
-            "proxmox://abcdefghij@pve.example.com/pve01"
+        from testrange.backends.proxmox import cli_build_orchestrator
+        orch = cli_build_orchestrator(
+            "proxmox://abcdefghij@pve.example.com/pve01",
+            self._fake_original(),
         )
-        assert spec["token"] == "abcdefghij"
-        assert spec["user"] is None
-        assert spec["password"] is None
-        assert spec["node"] == "pve01"
+        assert orch is not None
+        assert orch._token == {
+            "token": "abcdefghij", "user": None, "password": None,
+        }
+        assert orch._node == "pve01"
 
     def test_proxmox_token_query_param(self) -> None:
         """?token= takes precedence over userinfo (lets callers pass
         the full ``user@realm!name=secret`` blob without URL-encoding)."""
-        from testrange._cli import _parse_orchestrator_url
-
-        spec = _parse_orchestrator_url(
-            "proxmox://pve.example.com?token=root!auto&storage=local-lvm"
+        from testrange.backends.proxmox import cli_build_orchestrator
+        orch = cli_build_orchestrator(
+            "proxmox://pve.example.com?token=root!auto&storage=local-lvm",
+            self._fake_original(),
         )
-        assert spec["token"] == "root!auto"
-        assert spec["storage"] == "local-lvm"
+        assert orch is not None
+        assert orch._token["token"] == "root!auto"
+        assert orch._storage == "local-lvm"
+
+    def test_central_dispatcher_iterates_backends(
+        self, tmp_path: Path
+    ) -> None:
+        from testrange.backends import cli_build_orchestrator
+        from testrange.backends.libvirt import Orchestrator
+
+        # libvirt URL — first backend in the registry that claims it.
+        orch = cli_build_orchestrator(
+            "qemu:///system", self._fake_original(tmp_path),
+        )
+        assert isinstance(orch, Orchestrator)
+
+    def test_central_dispatcher_returns_none_on_unknown(
+        self, tmp_path: Path
+    ) -> None:
+        from testrange.backends import cli_build_orchestrator
+        assert cli_build_orchestrator(
+            "madeup://nothing", self._fake_original(tmp_path),
+        ) is None

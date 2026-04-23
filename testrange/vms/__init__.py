@@ -4,9 +4,7 @@ This package hosts the abstract :class:`AbstractVM`, the image
 resolver, and the provisioning strategies under
 :mod:`testrange.vms.builders` (:class:`CloudInitBuilder`,
 :class:`WindowsUnattendedBuilder`, :class:`NoOpBuilder`).  Concrete VM
-classes live under the backend packages — see
-:class:`testrange.backends.libvirt.VM` for the default libvirt
-implementation.
+classes live under :mod:`testrange.backends`.
 """
 
 from testrange.vms.base import AbstractVM

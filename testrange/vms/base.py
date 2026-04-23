@@ -20,9 +20,10 @@ class AbstractVM(ABC):
     """Abstract interface for a virtual machine instance.
 
     Concrete subclasses must implement the runtime communication methods.
-    Before any of these methods can be called, the VM must be started and
-    its communicator initialised (done automatically by
-    :class:`~testrange.backends.libvirt.Orchestrator`).
+    Before any of these methods can be called, the VM must be started
+    and its communicator initialised (done automatically by an
+    :class:`~testrange.orchestrator_base.AbstractOrchestrator` context
+    manager).
 
     Subclass this to support alternative hypervisors or provisioning mechanisms.
     """
@@ -258,9 +259,9 @@ class AbstractVM(ABC):
 
         The default raises :class:`VMBuildError` — backends that do not
         ship a guest-agent path should let this stand.  Backends that
-        do (libvirt's virtio-serial channel, Proxmox's REST
-        ``/agent`` endpoint) override this method to return their
-        native implementation.
+        do (e.g. a virtio-serial channel through their hypervisor, or
+        a REST ``/agent`` endpoint) override this method to return
+        their native implementation.
         """
         raise VMBuildError(
             f"VM {self.name!r}: communicator='guest-agent' is not "
@@ -296,8 +297,8 @@ class AbstractVM(ABC):
         :param install_network_mac: MAC address for the install NIC
             (empty when the VM's builder skips the install phase).
         :returns: Backend-local ref to the runnable disk image
-            (outer-host path for local libvirt; remote-host path for
-            ``qemu+ssh://`` / other remote backends).
+            (outer-host path for a local backend; remote-host path or
+            opaque storage-volume ID for remote ones).
         :raises VMBuildError: If the install phase fails or times out.
         """
 

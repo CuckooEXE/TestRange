@@ -1,28 +1,28 @@
 """Storage backends — where the hypervisor's disks live.
 
-A :class:`StorageBackend` is the minimal file + ``qemu-img`` surface the
-orchestrator needs to put bytes where a hypervisor can read them, plus
-the handful of image-manipulation primitives every backend builds on.
+A :class:`StorageBackend` is the minimal file + image-manipulation
+surface the orchestrator needs to put bytes where a hypervisor can
+read them.
 
 Why this exists
 ---------------
 
 Every non-trivial TestRange feature comes back to the same question:
-"where does this qcow2 live, and how do I put one there?"  For the
-local KVM case that's a filesystem path + ``subprocess.run(qemu-img)``.
-For ``qemu+ssh://remote/system`` it's SFTP + ``ssh remote qemu-img``.
-For a future Proxmox backend it's a REST upload + a storage-volume
-identifier.  Pre-:class:`StorageBackend` code assumed the local answer
-everywhere and silently broke on every other backend.
+"where does this qcow2 live, and how do I put one there?"  For a
+local-host hypervisor that's a filesystem path + a local subprocess.
+For an SSH-reachable remote hypervisor it's SFTP + remote exec.  For
+an API-driven one (REST / RPC) it's an upload endpoint + a
+storage-volume identifier.  Pre-:class:`StorageBackend` code assumed
+the local answer everywhere and silently broke for every other shape.
 
 Implementations
 ---------------
 
 - :class:`LocalStorageBackend` — outer host's filesystem + local
-  ``qemu-img``.  The default; preserves today's behaviour bit-for-bit.
+  subprocess.  The default when the orchestrator's control plane
+  lives on the same machine as the Python process.
 - :class:`SSHStorageBackend` — remote host via paramiko SFTP + SSH
-  exec.  Turns ``Orchestrator(host="qemu+ssh://box/system")`` into
-  a working setup for the first time.
+  exec.  Used when the orchestrator talks to a hypervisor over SSH.
 """
 
 from testrange.storage.base import AbstractStorageBackend

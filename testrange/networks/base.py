@@ -133,8 +133,8 @@ class AbstractVirtualNetwork(ABC):
         """Create and activate the network on the hypervisor.
 
         :param context: The orchestrator driving this run.  Concrete
-            backends downcast to pick up their native handle (a
-            ``libvirt.virConnect``, a Proxmox REST client, …).
+            backends downcast to pick up their own control-plane
+            handle.
         :raises NetworkError: If the network cannot be created or activated.
         """
 

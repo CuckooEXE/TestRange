@@ -277,10 +277,12 @@ class CacheManager:
     # Backend-aware staging + snapshot cache.
     #
     # All methods below take a StorageBackend (the orchestrator's) and
-    # route disk work to wherever libvirtd actually reads from.  For the
-    # LocalStorageBackend case every op collapses to the same local
-    # filesystem action the pre-backend code did inline; for SSH/remote
-    # backends the bytes flow over SFTP and qemu-img runs remotely.
+    # route disk work to wherever the hypervisor's control plane
+    # actually reads from.  For the LocalStorageBackend case every op
+    # collapses to the same local filesystem action the pre-backend
+    # code did inline; for remote backends the bytes flow over the
+    # backend's transport (SFTP / REST upload / …) and image tooling
+    # runs wherever the backend owns it.
     # ------------------------------------------------------------------
 
     def stage_source(
@@ -301,7 +303,7 @@ class CacheManager:
             path returned by :meth:`get_image`).
         :param backend: Destination backend.
         :returns: Backend-local ref the hypervisor can open.
-        :raises CacheError: On upload or ``qemu-img`` failure.
+        :raises CacheError: On upload or image-manipulation failure.
         """
         local_path = local_path.expanduser().resolve()
         if not local_path.is_file():
@@ -399,7 +401,7 @@ class CacheManager:
             ``.json`` sidecar.
         :param backend: Backend where the snapshot should land.
         :returns: Backend-local ref to the stored snapshot.
-        :raises CacheError: If ``qemu-img convert`` fails.
+        :raises CacheError: If the backend's compress-convert step fails.
         """
         dest_ref = self.vm_snapshot_ref(config_hash, backend)
         manifest_ref = self.vm_manifest_ref(config_hash, backend)
@@ -430,7 +432,7 @@ def vm_config_hash(
     SSH keys are intentionally excluded so that key rotation does not
     invalidate the cached installed image.
 
-    :param iso: The ``iso=`` string as passed to :class:`~testrange.backends.libvirt.VM`.
+    :param iso: The ``iso=`` string as passed to a VM spec.
     :param usernames_passwords_sudo: Sorted list of ``(username, password, sudo)``
         tuples for all credentials.
     :param package_reprs: Sorted list of ``repr(pkg)`` strings for all packages.

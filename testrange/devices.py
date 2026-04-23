@@ -142,7 +142,8 @@ def parse_size(size: str) -> int:
 
 
 def normalise_qemu_size(size: str) -> str:
-    """Return the size string in a form acceptable to ``qemu-img resize``.
+    """Return the size string in the canonical ``<integer>G`` form used
+    by the shipped backends' disk-sizing tools.
 
     Converts to the nearest GiB integer with a ``G`` suffix.
 
@@ -154,9 +155,9 @@ def normalise_qemu_size(size: str) -> str:
 
 
 _HARD_DRIVE_BUSES = ("virtio", "sata", "nvme", "scsi", "ide")
-"""Supported :attr:`HardDrive.bus` values.  All are QEMU-family
-device models; the same strings are understood by libvirt XML and by
-Proxmox's REST API with minimal translation."""
+"""Supported :attr:`HardDrive.bus` values.  Backends map these to
+their own device models; most backends understand the strings
+directly."""
 
 
 class HardDrive(AbstractDevice):
@@ -176,8 +177,8 @@ class HardDrive(AbstractDevice):
         Defaults to ``"20GB"``.
     :param bus: Disk bus.  One of ``"virtio"``, ``"sata"``, ``"nvme"``,
         ``"scsi"``, ``"ide"``.  ``None`` (the default) lets the backend
-        pick — libvirt uses ``"virtio"`` for Linux guests and
-        ``"sata"`` for Windows guests (driver-free install).
+        pick — typically ``"virtio"`` for Linux guests and ``"sata"``
+        for Windows (driver-free install).
     :param nvme: Shortcut for ``bus="nvme"``.  Kept for ergonomics —
         ``HardDrive(2000, nvme=True)`` reads nicely.  ``bus=`` wins
         when both are set.
@@ -248,9 +249,10 @@ class HardDrive(AbstractDevice):
 
     @property
     def qemu_size(self) -> str:
-        """Return a ``qemu-img``-compatible size string (e.g. ``'64G'``).
+        """Return the size string in the canonical ``<integer>G`` form
+        backends feed to their disk-sizing tools (e.g. ``'64G'``).
 
-        :returns: Size string suitable for ``qemu-img resize``.
+        :returns: Normalised size string.
         """
         return normalise_qemu_size(self.size)
 
@@ -283,13 +285,14 @@ class HardDrive(AbstractDevice):
 
 
 class VirtualNetworkRef(AbstractDevice):
-    """Attaches a VM to a named :class:`~testrange.backends.libvirt.VirtualNetwork`.
+    """Attaches a VM to a named
+    :class:`~testrange.networks.base.AbstractVirtualNetwork`.
 
     A VM can have multiple ``VirtualNetworkRef`` entries in its ``devices``
-    list.  Each entry results in one virtual NIC being added to the domain XML.
+    list.  Each entry results in one virtual NIC on the VM.
 
-    :param name: The ``name`` of the :class:`~testrange.backends.libvirt.VirtualNetwork`
-        to attach to.  Must match exactly.
+    :param name: The ``name`` of the network to attach to.  Must match
+        a network declared in the orchestrator's ``networks=`` list.
     :param ip: An optional static IPv4 address to assign to this NIC (e.g.
         ``'10.0.100.55'``).  If ``None`` (the default), the address is
         obtained via DHCP or a deterministic reservation.
@@ -301,7 +304,7 @@ class VirtualNetworkRef(AbstractDevice):
     """
 
     name: str
-    """Name of the :class:`~testrange.backends.libvirt.VirtualNetwork` to attach to."""
+    """Name of the network this NIC attaches to."""
 
     ip: str | None
     """Optional static IPv4 address for this NIC; ``None`` means DHCP."""

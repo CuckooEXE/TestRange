@@ -1,12 +1,11 @@
 """No-op :class:`~testrange.vms.builders.base.Builder` for BYOI images.
 
-Used when the caller hands :class:`~testrange.backends.libvirt.VM` a
-qcow2 that is already fully provisioned (produced by Packer, a custom
-build pipeline, or a hand-prepared golden image).  There is no
-install phase — :meth:`NoOpBuilder.needs_install_phase` returns
-``False`` — so :meth:`~testrange.backends.libvirt.VM.build` calls
-:meth:`~Builder.ready_image` and skips straight to creating a run
-overlay on the staged disk.
+Used when the caller hands a VM spec a qcow2 that is already fully
+provisioned (produced by Packer, a custom build pipeline, or a
+hand-prepared golden image).  There is no install phase —
+:meth:`NoOpBuilder.needs_install_phase` returns ``False`` — so the
+backend's ``build()`` calls :meth:`~Builder.ready_image` and skips
+straight to creating a run overlay on the staged disk.
 """
 
 from __future__ import annotations
@@ -23,8 +22,8 @@ from testrange.vms.builders.base import Builder, RunDomain
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
-    from testrange.backends.libvirt.vm import VM
     from testrange.cache import CacheManager
+    from testrange.vms.base import AbstractVM as VM
 
 
 _log = get_logger(__name__)

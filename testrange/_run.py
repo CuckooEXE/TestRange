@@ -1,17 +1,16 @@
 """Ephemeral per-run scratch space.
 
-Each :class:`~testrange.backends.libvirt.Orchestrator` entry creates a
-fresh :class:`RunDir` — a throwaway directory that holds install-phase
-overlays, per-run boot overlays, cloud-init seed ISOs, and UEFI NVRAM
-files.  On orchestrator exit the directory is removed regardless of
-whether the test passed, failed, or crashed.
+Each orchestrator entry creates a fresh :class:`RunDir` — a throwaway
+directory that holds install-phase overlays, per-run boot overlays,
+seed ISOs, and UEFI NVRAM files.  On orchestrator exit the directory
+is removed regardless of whether the test passed, failed, or crashed.
 
 Every path produced here lives on the :class:`StorageBackend` the
-orchestrator was built with — typically the outer host for local
-libvirt, or a remote host for ``qemu+ssh://`` connections.  Callers
-that previously expected :class:`pathlib.Path` should treat the
-returned strings as opaque backend-local refs: they are valid inputs
-to libvirt's domain XML but not safe to ``Path()``-parse from outer
+orchestrator was built with — typically the outer host for a local
+backend, or a remote host for an SSH / REST-based one.  Callers should
+treat the returned strings as opaque backend-local refs: they are
+valid inputs to whatever the backend's hypervisor consumes (domain
+XML, API volume IDs, …) but not safe to ``Path()``-parse from outer
 Python when the backend is remote.
 
 Run state is **not** part of the persistent cache — that's reserved
@@ -36,8 +35,8 @@ class RunDir:
     to remove it.
 
     :param storage: Storage backend where the run dir should live.
-        Every path this object returns is backend-local (valid for
-        that backend's libvirtd, not necessarily for the outer host).
+        Every path this object returns is backend-local (valid on the
+        backend's hypervisor host, not necessarily the outer host).
     """
 
     run_id: str
@@ -67,7 +66,7 @@ class RunDir:
             (must already exist on the backend).
         :returns: Backend-local ref to the new overlay
             (``<run>/<vm_name>.qcow2``).
-        :raises CacheError: If ``qemu-img create`` fails on the backend.
+        :raises CacheError: If the backend's overlay-create step fails.
         """
         overlay = self._join(f"{vm_name}.qcow2")
         self._storage.qemu_img_create_overlay(backing_ref, overlay)
@@ -84,10 +83,10 @@ class RunDir:
 
         :param vm_name: VM name; becomes the file stem.
         :param base_ref: Backend-local ref to the base cloud image.
-        :param disk_size: ``qemu-img``-compatible size (e.g. ``'64G'``).
+        :param disk_size: qcow2-compatible size string (e.g. ``'64G'``).
         :returns: Backend-local ref to the resized working disk
             (``<run>/<vm_name>-install.qcow2``).
-        :raises CacheError: If ``qemu-img`` fails on the backend.
+        :raises CacheError: If the backend's image-manipulation step fails.
         """
         work_ref = self._join(f"{vm_name}-install.qcow2")
         self._storage.qemu_img_create_overlay(base_ref, work_ref)
@@ -102,10 +101,10 @@ class RunDir:
         empty disk.
 
         :param vm_name: VM name; becomes the file stem.
-        :param disk_size: ``qemu-img``-compatible size (e.g. ``'40G'``).
+        :param disk_size: qcow2-compatible size string (e.g. ``'40G'``).
         :returns: Backend-local ref to the new blank qcow2
             (``<run>/<vm_name>-install.qcow2``).
-        :raises CacheError: If ``qemu-img create`` fails.
+        :raises CacheError: If the backend's blank-disk-create step fails.
         """
         work_ref = self._join(f"{vm_name}-install.qcow2")
         self._storage.qemu_img_create_blank(work_ref, disk_size)
@@ -122,8 +121,9 @@ class RunDir:
     def nvram_path(self, vm_name: str) -> str:
         """Return the backend-local ref for a UEFI VM's per-run NVRAM.
 
-        libvirt copies OVMF_VARS onto this path when the domain first
-        starts; cleanup happens with the rest of the run dir.
+        Backends that support UEFI copy the OVMF_VARS template onto
+        this path when the domain first starts; cleanup happens with
+        the rest of the run dir.
 
         :param vm_name: VM name; becomes the file stem.
         :returns: ``<run>/<vm_name>_VARS.fd``.

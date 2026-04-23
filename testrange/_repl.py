@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from testrange.backends.libvirt.orchestrator import Orchestrator
+    from testrange.orchestrator_base import AbstractOrchestrator as Orchestrator
 
 
 _HISTORY_PATH = Path.home() / ".cache" / "testrange" / "repl_history"
@@ -35,7 +35,8 @@ def start_repl(orch: Orchestrator, test_name: str) -> None:
     per VM (named after the VM) so the user can type ``web.exec([...])``
     instead of ``orch.vms["web"].exec([...])``.
 
-    :param orch: An already-entered :class:`~testrange.backends.libvirt.Orchestrator`.
+    :param orch: An already-entered
+        :class:`~testrange.orchestrator_base.AbstractOrchestrator`.
     :param test_name: Name of the :class:`~testrange.test.Test` whose
         configuration produced *orch*; shown in the REPL banner.
     """
@@ -166,43 +167,28 @@ def _save_history(readline_mod: Any) -> None:
 def print_keep_summary(orch: Orchestrator) -> None:
     """Print cleanup hints when the user passes ``--keep`` to ``testrange repl``.
 
-    Walks :attr:`Orchestrator._vm_list` and :attr:`Orchestrator._networks`
-    to surface the libvirt domain/network names and the run scratch dir
-    so the user can clean up by hand.
+    Delegates backend-specific command generation to
+    :meth:`~testrange.orchestrator_base.AbstractOrchestrator.keep_alive_hints`
+    — the REPL itself knows nothing about the hypervisor's native
+    cleanup CLI.
 
     :param orch: The orchestrator being intentionally left running.
     """
-    domain_names = [
-        f"tr-{vm.name[:10]}-{(orch._run.run_id if orch._run else '')[:8]}"
-        for vm in orch._vm_list
-    ]
-    network_names = []
-    for net in orch._networks:
-        try:
-            network_names.append(net.backend_name())
-        except Exception:
-            network_names.append(net.name)
+    run_dir = (
+        str(orch._run.path)
+        if getattr(orch, "_run", None)
+        else "(none)"
+    )
 
-    run_dir = str(orch._run.path) if orch._run else "(none)"
+    hints = orch.keep_alive_hints()
 
     lines = ["", "Run kept alive. To clean up manually:"]
-    if domain_names:
-        lines.append(f"  Domains:  {', '.join(domain_names)}")
-    if network_names:
-        lines.append(f"  Networks: {', '.join(network_names)}")
     lines.append(f"  Run dir:  {run_dir}")
-
-    if domain_names or network_names:
+    if hints:
         lines.append("Suggested:")
-        for d in domain_names:
-            lines.append(
-                f"  sudo virsh destroy {d} && sudo virsh undefine {d}"
-            )
-        for n in network_names:
-            lines.append(
-                f"  sudo virsh net-destroy {n} && sudo virsh net-undefine {n}"
-            )
-        if orch._run:
+        for cmd in hints:
+            lines.append(f"  {cmd}")
+        if getattr(orch, "_run", None):
             lines.append(f"  rm -rf {run_dir}")
 
     # stdout, not the logger, so it always shows even at --log-level ERROR.

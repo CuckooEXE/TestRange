@@ -21,10 +21,10 @@ from testrange.vms.images import resolve_image
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
-    from testrange.backends.libvirt.vm import VM
     from testrange.cache import CacheManager
     from testrange.credentials import Credential
     from testrange.packages import AbstractPackage
+    from testrange.vms.base import AbstractVM as VM
 
 
 _NS = "urn:schemas-microsoft-com:unattend"
@@ -63,9 +63,9 @@ class WindowsUnattendedBuilder(Builder):
     """Windows unattended install + run strategy.
 
     Stateless: VM-specific values (hostname, users, packages) are pulled
-    from the :class:`~testrange.backends.libvirt.VM` argument each call.
-    Global knobs — product key, UI language, timezone — live on the
-    builder and apply to every VM that uses this instance.
+    from the VM argument each call.  Global knobs — product key, UI
+    language, timezone — live on the builder and apply to every VM
+    that uses this instance.
 
     :param product_key: Windows product key used for edition selection
         during unattended Setup.  Defaults to the publicly documented
@@ -132,7 +132,7 @@ class WindowsUnattendedBuilder(Builder):
         cache: CacheManager,
     ) -> InstallDomain:
         # 1. Resolve + stage the Windows ISO (outer cache), then push
-        # it to whichever backend libvirtd will boot from.
+        # it to whichever host the backend's hypervisor will boot from.
         local_iso = cache.stage_local_iso(resolve_image(vm.iso, cache))
         windows_iso_ref = cache.stage_source(local_iso, run.storage)
 
@@ -142,8 +142,8 @@ class WindowsUnattendedBuilder(Builder):
         )
 
         # 3. Autounattend seed ISO — generated in memory, written via
-        # the storage backend so it lands on whichever host libvirtd
-        # is reading from.
+        # the storage backend so it lands wherever the hypervisor will
+        # be reading from.
         unattend_ref = run.unattend_iso_path(vm.name)
         run.storage.write_bytes(
             unattend_ref,
@@ -191,7 +191,7 @@ class WindowsUnattendedBuilder(Builder):
     ) -> RunDomain:
         # Windows run boots come up with no seed ISO — FirstLogonCommands
         # already set the hostname, user accounts, and services during
-        # install.  Static IPs come from libvirt dnsmasq DHCP
+        # install.  Static IPs come from the backend's DHCP
         # reservations (MAC-matched).
         return RunDomain(seed_iso=None, uefi=True, windows=True)
 

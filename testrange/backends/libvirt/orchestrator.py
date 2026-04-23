@@ -157,6 +157,31 @@ class Orchestrator(AbstractOrchestrator):
         """Return ``"libvirt"``."""
         return "libvirt"
 
+    def keep_alive_hints(self) -> list[str]:
+        """Emit ``virsh`` commands the user would run to clean up
+        domains and networks left behind by ``--keep``.
+
+        The domain/network names come straight off the live orchestrator
+        state — same names the normal teardown path would target.
+        """
+        hints: list[str] = []
+        run_id = self._run.run_id if self._run else ""
+        for vm in self._vm_list:
+            domain = f"tr-{vm.name[:10]}-{run_id[:8]}"
+            hints.append(
+                f"sudo virsh destroy {domain} && sudo virsh undefine {domain}"
+            )
+        for net in self._networks:
+            try:
+                net_name = net.backend_name()
+            except Exception:
+                net_name = net.name
+            hints.append(
+                f"sudo virsh net-destroy {net_name} "
+                f"&& sudo virsh net-undefine {net_name}"
+            )
+        return hints
+
     def _build_uri(self) -> str:
         """Translate :attr:`host` into a libvirt connection URI.
 

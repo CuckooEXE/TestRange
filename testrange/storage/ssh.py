@@ -1,10 +1,10 @@
 """SSH-based storage backend — SFTP + SSH exec to a remote host.
 
-Enables ``Orchestrator(host="qemu+ssh://box.example.com/system")`` to
-work end-to-end: qcow2s are uploaded over SFTP, ``qemu-img`` is
-executed over SSH on the remote side.  The remote libvirtd sees the
-images on its own filesystem at paths the backend manages under
-``<remote_cache_root>``.
+Used by any orchestrator whose hypervisor is reachable over SSH: disk
+images get uploaded over SFTP and image-manipulation tooling is
+executed over SSH on the remote side.  The remote hypervisor daemon
+sees the images on its own filesystem at paths the backend manages
+under ``<remote_cache_root>``.
 
 Authentication follows paramiko's default discovery — ``~/.ssh/config``,
 ``ssh-agent``, default key files.  Callers who need non-default auth
@@ -161,7 +161,7 @@ class SSHStorageBackend(AbstractStorageBackend):
     def make_run_dir(self, run_id: str) -> str:
         run_path = self.run_dir(run_id)
         # ``mkdir -p``: idempotent, creates parents.  Chmod to 0755 so
-        # remote libvirt-qemu can read disk files inside.
+        # the remote hypervisor process can read disk files inside.
         self._exec_check(["mkdir", "-p", run_path])
         self._exec_check(["chmod", "0755", run_path])
         return run_path
@@ -240,8 +240,8 @@ class SSHStorageBackend(AbstractStorageBackend):
         sftp = self._get_sftp()
         # ``put`` streams — no in-memory buffering of the full file.
         sftp.put(str(local_path), ref)
-        # Preserve read permissions; libvirt-qemu on the remote needs
-        # to be able to open the file.
+        # Preserve read permissions; the remote hypervisor process
+        # needs to be able to open the file.
         try:
             sftp.chmod(ref, 0o644)
         except OSError:
