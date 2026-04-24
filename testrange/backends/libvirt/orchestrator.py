@@ -886,8 +886,17 @@ class Orchestrator(AbstractOrchestrator):
         This method is declared never to raise: any bug elsewhere in the
         library that surfaces during provisioning is the *reason* teardown
         is running, and a cleanup failure must not mask the original bug.
+
+        When :attr:`_leaked` is set (via :meth:`leak`), the VM/network/run-dir
+        steps are skipped and only the process-local handles (libvirt
+        connection, storage backend) are closed.  See :meth:`leak` for the
+        full contract and footguns.
         """
         if self._conn is None:
+            return
+
+        if self._leaked:
+            self._leak_and_close()
             return
 
         _log.info("teardown starting")
@@ -957,6 +966,73 @@ class Orchestrator(AbstractOrchestrator):
 
         self.vms = {}  # pyright: ignore[reportIncompatibleVariableOverride]
         _log.info("teardown complete")
+
+    def _leak_and_close(self) -> None:
+        """Leak-mode teardown: preserve VMs/networks/run-dir, but still
+        close the libvirt connection and storage-backend handles so
+        the Python process can exit cleanly (paramiko threads in
+        particular will hang interpreter shutdown otherwise).
+
+        Inner orchestrators inherit the leak via ``inner._leaked = True``
+        so the nested stack's unwind short-circuits the same way —
+        otherwise closing the stack would tear the inner VMs down,
+        defeating the whole point for nested configurations.
+        """
+        assert self._conn is not None
+        _log.info(
+            "leak=True — preserving %d VM(s) and %d network(s); no teardown",
+            len(self._vm_list), len(self._networks),
+        )
+        if self._run is not None:
+            _log.info("run directory preserved: %s", self._run.path)
+
+        hints = self.keep_alive_hints()
+        if hints:
+            _log.info("manual cleanup commands:")
+            for hint in hints:
+                _log.info("  %s", hint)
+
+        # Propagate leak into nested orchestrators before closing the
+        # ExitStack — without this, inner ``__exit__`` runs its full
+        # teardown and destroys the inner VMs we're trying to preserve.
+        for inner in self._inner_orchestrators:
+            inner._leaked = True
+        if self._nested_stack is not None:
+            try:
+                self._nested_stack.close()
+            except Exception as exc:
+                _log.debug(
+                    "inner orchestrator close raised (ignored): %s", exc,
+                )
+            self._nested_stack = None
+            self._inner_orchestrators = []
+
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = None
+
+        if self._storage is not None:
+            close = getattr(self._storage, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception as exc:
+                    _log.debug(
+                        "storage backend close raised (ignored): %s", exc,
+                    )
+            self._storage = None
+
+        # Drop the vms dict — the orchestrator is done managing them;
+        # the user's own references to VM objects (from before the
+        # ``with`` block exited) still work for inspection, they just
+        # aren't routed through ``orch.vms`` anymore.
+        self.vms = {}  # pyright: ignore[reportIncompatibleVariableOverride]
+        # Note: do NOT touch self._run — it still points at the run
+        # dir we just declared preserved.  Clearing it would make a
+        # future caller with a reference to this orchestrator think
+        # the dir is gone.
 
 
 LibvirtOrchestrator = Orchestrator

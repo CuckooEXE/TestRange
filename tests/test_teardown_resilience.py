@@ -512,3 +512,123 @@ class TestNoResourceLeaks:
         assert orch._run is None
         assert orch._install_network is None
         assert orch.vms == {}
+
+
+class TestLeak:
+    """``orch.leak()`` flips a flag that makes ``_teardown`` preserve
+    VMs, networks, and the run dir — but still close the libvirt
+    connection + storage backend so the Python process can exit."""
+
+    def test_leak_skips_vm_shutdown(self) -> None:
+        orch, _, vms, _, _, _ = _make_primed_orchestrator()
+        orch.leak()
+        orch._teardown()
+        for vm in vms:
+            vm.shutdown.assert_not_called()
+
+    def test_leak_skips_network_stop(self) -> None:
+        orch, _, _, networks, _, _ = _make_primed_orchestrator()
+        orch.leak()
+        orch._teardown()
+        for net in networks:
+            net.stop.assert_not_called()
+
+    def test_leak_skips_run_dir_cleanup(self) -> None:
+        orch, _, _, _, _, run = _make_primed_orchestrator()
+        orch.leak()
+        orch._teardown()
+        run.cleanup.assert_not_called()
+        # And ``_run`` stays wired so any later consumer can still
+        # learn the run dir path.
+        assert orch._run is run
+
+    def test_leak_still_closes_libvirt_connection(self) -> None:
+        """Leaving the libvirt connection open would leak a socket and
+        (on paramiko-backed remotes) keep a worker thread alive that
+        hangs Python interpreter shutdown."""
+        orch, conn, _, _, _, _ = _make_primed_orchestrator()
+        orch.leak()
+        orch._teardown()
+        conn.close.assert_called_once()
+        assert orch._conn is None
+
+    def test_leak_still_closes_storage_backend(self) -> None:
+        orch, _, _, _, _, _ = _make_primed_orchestrator()
+        storage = MagicMock(name="storage")
+        orch._storage = storage
+        orch.leak()
+        orch._teardown()
+        storage.close.assert_called_once()
+        assert orch._storage is None
+
+    def test_leak_is_idempotent(self) -> None:
+        orch, _, _, _, _, _ = _make_primed_orchestrator()
+        orch.leak()
+        orch.leak()
+        assert orch._leaked is True
+
+    def test_leak_propagates_to_inner_orchestrators(self) -> None:
+        """If the outer orchestrator leaks, any nested inner
+        orchestrators must inherit the flag — otherwise closing the
+        nested ``ExitStack`` would run each inner's full teardown and
+        destroy the inner VMs we're trying to preserve."""
+        import contextlib
+
+        orch, _, _, _, _, _ = _make_primed_orchestrator()
+        inner_a = MagicMock(name="inner_a", _leaked=False)
+        inner_b = MagicMock(name="inner_b", _leaked=False)
+        orch._inner_orchestrators = [inner_a, inner_b]
+        orch._nested_stack = contextlib.ExitStack()  # real one, empty
+
+        orch.leak()
+        orch._teardown()
+
+        assert inner_a._leaked is True
+        assert inner_b._leaked is True
+
+    def test_leak_emits_cleanup_hints(self) -> None:
+        """The teardown log should show the virsh commands the user
+        needs to clean up later — no silent leak.  We attach a capture
+        handler directly to the orchestrator module's logger (rather
+        than using ``caplog``) because other tests' calls to
+        ``configure_root_logger`` disable propagation on the
+        ``testrange`` logger, which makes caplog's root-level handler
+        miss the records."""
+        import logging
+
+        orch, _, _, _, _, _ = _make_primed_orchestrator()
+        orch.keep_alive_hints = lambda: [  # type: ignore[method-assign]
+            "sudo virsh destroy tr-web-abc1 && sudo virsh undefine tr-web-abc1",
+        ]
+
+        records: list[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = records.append  # type: ignore[method-assign]
+        target = logging.getLogger("testrange.backends.libvirt.orchestrator")
+        prior_level = target.level
+        target.addHandler(handler)
+        target.setLevel(logging.INFO)
+        try:
+            orch.leak()
+            orch._teardown()
+        finally:
+            target.removeHandler(handler)
+            target.setLevel(prior_level)
+
+        joined = "\n".join(r.getMessage() for r in records)
+        assert "leak=True" in joined
+        assert "tr-web-abc1" in joined
+        assert "run directory preserved" in joined
+
+    def test_non_leaked_teardown_is_unchanged(self) -> None:
+        """Regression guard: default path (no leak()) still runs the
+        full teardown — no skipped steps."""
+        orch, conn, vms, networks, install_net, run = _make_primed_orchestrator()
+        orch._teardown()
+        for vm in vms:
+            vm.shutdown.assert_called_once()
+        for net in networks:
+            net.stop.assert_called_once()
+        install_net.stop.assert_called_once()
+        run.cleanup.assert_called_once()
+        conn.close.assert_called_once()

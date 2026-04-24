@@ -81,6 +81,11 @@ class AbstractOrchestrator(ABC):
     _run: RunDir | None
     """Scratch directory for the current run; ``None`` outside one."""
 
+    _leaked: bool = False
+    """Set by :meth:`leak` to tell :meth:`__exit__` to skip resource
+    teardown.  The backend connection itself still closes — just the
+    VMs, networks, and run scratch directory survive."""
+
     @classmethod
     @abstractmethod
     def backend_type(cls) -> str:
@@ -128,17 +133,66 @@ class AbstractOrchestrator(ABC):
 
     def keep_alive_hints(self) -> list[str]:
         """Return shell commands a user would run to clean up resources
-        left behind by ``testrange repl --keep``.
+        left behind by ``testrange repl --keep`` or :meth:`leak`.
 
         Each entry is a self-contained shell line (no chaining needed
         by the caller).  The default returns an empty list — backends
         that can meaningfully advise on manual cleanup (virsh destroy,
         ``qm destroy``, REST DELETE via curl, …) override this.
-
-        Called only by the ``--keep`` path of the REPL; never in the
-        normal teardown flow.
         """
         return []
+
+    def leak(self) -> None:
+        """Mark this run so :meth:`__exit__` does not tear resources down.
+
+        Intended for scripting TestRange as a thin VM-provisioner
+        rather than a test harness — when you want the ``with``
+        block's provisioning guarantees but don't want the VMs
+        destroyed when the block ends::
+
+            with Orchestrator(networks=[...], vms=[...]) as orch:
+                vm = orch.vms["box"]
+                vm.exec(["apt-get", "install", "-y", "my-tool"]).check()
+                orch.leak()
+            # ``vm`` is still running.  Connect to it over SSH,
+            # hand it to another tool, snapshot it, whatever — TestRange
+            # is done with it.
+
+        The backend control-plane connection itself still closes
+        normally; only the provisioned **resources** (VMs, networks,
+        install-phase run directory) are preserved.  On exit the
+        orchestrator logs the commands a human would run to clean up
+        — same list :meth:`keep_alive_hints` produces for
+        ``testrange repl --keep``.
+
+        **Footguns to know about:**
+
+        - **Disk leak:** the run directory at
+          ``<cache_root>/runs/<run_id>/`` stays on disk indefinitely
+          (it holds the leaked VMs' overlay qcow2s and NVRAM).  The
+          log line on exit includes its path so you can ``rm -rf``
+          when you're done.
+        - **Install-subnet pool pressure:** each leaked run holds one
+          of the 16 install-phase subnets from the 192.168.240-254/24
+          pool until the associated network is destroyed.  Enough
+          leaks and future :meth:`__enter__` calls run out of install
+          subnets.
+        - **Memory pressure:** leaked VMs continue to consume host
+          RAM.  The preflight check on future runs is computed
+          against live ``/proc/meminfo``, so it'll correctly account
+          for them — you'll just see fewer VMs fit per host.
+        - **Reversibility:** ``leak()`` is one-way for the current
+          context-manager scope.  There is no ``unleak()``; if you
+          decide you want a normal teardown, don't call ``leak()`` in
+          the first place.
+        - **Idempotent:** calling ``leak()`` twice is a no-op.
+
+        Non-libvirt backends (Proxmox, Hyper-V) honour the flag the
+        same way as long as they short-circuit their teardown on
+        ``self._leaked``.  The base class sets the bit; it's on each
+        backend's ``__exit__`` / ``_teardown`` to check it.
+        """
+        self._leaked = True
 
     @classmethod
     def root_on_vm(

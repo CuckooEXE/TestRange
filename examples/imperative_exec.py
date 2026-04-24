@@ -8,6 +8,19 @@ in a script when you don't need test reporting.
 Run with::
 
     python examples/imperative_exec.py
+
+If you want the VMs to **survive** the script (provisioning only —
+no teardown on exit) call :meth:`Orchestrator.leak` before the
+``with`` block ends::
+
+    with Orchestrator(networks=[net], vms=[vm]) as orch:
+        orch.vms["box"].exec(["apt-get", "install", "-y", "my-tool"]).check()
+        orch.leak()
+    # ``box`` is still running.  The teardown log lists the virsh
+    # commands you'd run later to destroy it manually.
+
+See :meth:`Orchestrator.leak` for the full contract (disk retention,
+install-subnet pool pressure, memory accounting).
 """
 
 from __future__ import annotations
