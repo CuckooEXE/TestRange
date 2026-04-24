@@ -119,19 +119,21 @@ def run_cmd(
 ) -> None:
     """Run tests produced by a factory function.
 
-    TARGET has the form ``MODULE:FACTORY`` where MODULE is either a dotted
-    module name (``mypkg.tests``) or a path to a Python file
-    (``./tests.py``), and FACTORY is a zero-argument callable that returns
-    a ``list`` of :class:`~testrange.test.Test` objects.
+    TARGET has the form ``MODULE[:FACTORY]`` where MODULE is either a
+    dotted module name (``mypkg.tests``) or a path to a Python file
+    (``./tests.py``), and FACTORY is a zero-argument callable that
+    returns a ``list`` of :class:`~testrange.test.Test` objects.
+
+    FACTORY defaults to ``gen_tests`` when omitted.
 
     Example::
 
-        testrange run tests:gen_tests
-        testrange run ./my_tests.py:gen_tests
+        testrange run ./my_tests.py                # uses gen_tests
+        testrange run ./my_tests.py:other_factory  # explicit override
 
     Target a different hypervisor::
 
-        testrange run tests:gen_tests \\
+        testrange run tests \\
             --orchestrator proxmox://TOKENID:SECRET@pve.example.com/pve01
     """
     configure_root_logger(getattr(logging, log_level.upper()))
@@ -156,20 +158,38 @@ def run_cmd(
         sys.exit(1)
 
 
+_DEFAULT_FACTORY = "gen_tests"
+
+
 def _parse_target(target: str) -> tuple[str, str]:
-    """Split a ``MODULE:FACTORY`` string into its two parts.
+    """Split a ``MODULE[:FACTORY]`` string into its two parts.
+
+    The factory suffix is optional; if the user writes just ``MODULE``
+    (or ``./path/to/tests.py``) the factory defaults to
+    :data:`_DEFAULT_FACTORY` — the conventional ``gen_tests`` name
+    used across every TestRange example.  Writing an explicit trailing
+    colon with nothing after it (``path.py:``) is still rejected so
+    typos don't silently succeed.
 
     :param target: Raw user-supplied target string.
     :returns: ``(module_part, factory_name)`` tuple.
     """
     module_part, sep, factory_name = target.partition(":")
-    if not sep or not module_part or not factory_name:
+    if not module_part:
         click.echo(
-            f"TARGET must be in 'module:factory' form (got {target!r}).",
+            f"TARGET must be 'module[:factory]' (got {target!r}).",
             err=True,
         )
         sys.exit(2)
-    return module_part, factory_name
+    if sep and not factory_name:
+        click.echo(
+            f"TARGET has empty factory name (got {target!r}); either "
+            "drop the trailing ':' to use the default 'gen_tests', or "
+            "name a factory.",
+            err=True,
+        )
+        sys.exit(2)
+    return module_part, factory_name or _DEFAULT_FACTORY
 
 
 def _load_module(module_part: str) -> ModuleType:
@@ -281,11 +301,12 @@ def _choose_test(tests: list[Test], name: str | None) -> Test:
 def describe_cmd(target: str) -> None:
     """Pretty-print the networks and VMs defined by a test factory.
 
-    Accepts the same ``MODULE:FACTORY`` form as ``run`` but never
-    provisions anything — it just loads the factory, instantiates the
-    orchestrator, and walks the declared topology::
+    Accepts the same ``MODULE[:FACTORY]`` form as ``run`` (factory
+    defaults to ``gen_tests``) but never provisions anything — it just
+    loads the factory, instantiates the orchestrator, and walks the
+    declared topology::
 
-        testrange describe examples/two_networks_three_vms.py:gen_tests
+        testrange describe examples/two_networks_three_vms.py
     """
     module_part, factory_name = _parse_target(target)
     module = _load_module(module_part)
@@ -298,100 +319,208 @@ def describe_cmd(target: str) -> None:
 
 
 def _print_test(test: Test) -> None:
-    """Pretty-print one :class:`~testrange.test.Test` as a network/VM tree."""
-    from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+    """Pretty-print one :class:`~testrange.test.Test` as a network/VM tree.
 
+    Hypervisor VMs render recursively — their ``Inner networks`` and
+    ``Inner VMs`` sections hang off the hypervisor's block, indented
+    one level deeper.  No orchestrator is entered; the pretty-printer
+    walks specs only.
+    """
     orch = test._orchestrator
     networks = orch._networks
     vms = orch._vm_list
 
     click.secho(f"Test: {test.name}", bold=True)
 
-    click.echo(f"├── Networks ({len(networks)})")
+    # Networks block (always present, never last — VMs follow).
+    _print_networks_block(networks, trunk="", is_last=False)
+    # VMs block (always last under the Test header).
+    _print_vms_block(vms, networks, trunk="", is_last=True)
+
+
+def _print_networks_block(
+    networks: list,
+    *,
+    trunk: str,
+    is_last: bool,
+    label: str = "Networks",
+) -> None:
+    """Print one ``Networks (N)`` section under ``trunk``.
+
+    :param networks: Sequence of
+        :class:`~testrange.networks.base.AbstractVirtualNetwork`.
+    :param trunk: Tree-drawing prefix inherited from the parent block.
+        Every line this function emits starts with ``trunk + …``.
+    :param is_last: Whether this block is the final sibling under its
+        parent.  Controls whether we draw ``├──`` / ``└──`` at the
+        block header, and what the per-network child lines use as
+        their own continuation pipe.
+    :param label: Block header text — overridden for inner layers
+        (``"Inner networks"``).
+    """
+    head = "└──" if is_last else "├──"
+    child_trunk = trunk + ("    " if is_last else "│   ")
+    click.echo(f"{trunk}{head} {label} ({len(networks)})")
     for i, net in enumerate(networks):
-        last = i == len(networks) - 1
-        trunk = "│   " if not last else "    "
-        # Spacing to align with the network block below
-        click.echo(f"│   {'└──' if last else '├──'} {click.style(net.name, fg='cyan', bold=True)}")
+        last_net = i == len(networks) - 1
+        net_head = "└──" if last_net else "├──"
+        net_child_trunk = child_trunk + ("    " if last_net else "│   ")
+        click.echo(
+            f"{child_trunk}{net_head} "
+            f"{click.style(net.name, fg='cyan', bold=True)}"
+        )
         rows = [
             ("subnet",    f"{net.subnet}  (gateway {net.gateway_ip})"),
             ("dhcp",      "yes" if net.dhcp else "no (all static)"),
             ("internet",  "yes (NAT egress)" if net.internet else "no (isolated)"),
             ("dns",       "yes (dnsmasq)" if net.dns else "no"),
         ]
-        for j, (label, value) in enumerate(rows):
+        for j, (k, v) in enumerate(rows):
             last_row = j == len(rows) - 1
-            tree = "└──" if last_row else "├──"
-            click.echo(f"│   {trunk}{tree} {label:<9} {value}")
+            row_head = "└──" if last_row else "├──"
+            click.echo(f"{net_child_trunk}{row_head} {k:<9} {v}")
 
-    click.echo(f"└── VMs ({len(vms)})")
+
+def _print_vms_block(
+    vms: list,
+    networks: list,
+    *,
+    trunk: str,
+    is_last: bool,
+    label: str = "VMs",
+) -> None:
+    """Print one ``VMs (N)`` section under ``trunk``.
+
+    Hypervisor VMs recurse into their inner networks + inner VMs via
+    :func:`_print_networks_block` / :func:`_print_vms_block` with a
+    deeper trunk.
+    """
+    head = "└──" if is_last else "├──"
+    child_trunk = trunk + ("    " if is_last else "│   ")
+    click.echo(f"{trunk}{head} {label} ({len(vms)})")
     for i, vm in enumerate(vms):
-        last = i == len(vms) - 1
-        # Trunk carried by every inner line of this VM's block. Non-last
-        # VMs get a vertical pipe so the tree keeps visual continuity;
-        # the last VM's block is flush.
-        vm_trunk = "        " if last else "    │   "
-        vm_head = "    └──" if last else "    ├──"
+        last_vm = i == len(vms) - 1
+        _print_single_vm(
+            vm,
+            networks,
+            trunk=child_trunk,
+            is_last=last_vm,
+        )
+
+
+def _print_single_vm(
+    vm,
+    networks: list,
+    *,
+    trunk: str,
+    is_last: bool,
+) -> None:
+    """Render one VM's block — iso, cpu, memory, disks, users, pkgs,
+    post-install, nics.  When ``vm`` is an
+    :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`,
+    appends an ``Inner networks`` + ``Inner VMs`` section.
+    """
+    from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+    from testrange.vms.hypervisor_base import AbstractHypervisor
+
+    vm_head = "└──" if is_last else "├──"
+    vm_trunk = trunk + ("    " if is_last else "│   ")
+
+    # Header line: mark hypervisors so the topology is obvious at a
+    # glance even without scrolling to the inner sections.
+    if isinstance(vm, AbstractHypervisor):
+        tag = click.style(
+            f" [Hypervisor → {vm.orchestrator.__name__}]",
+            fg="magenta",
+        )
+    else:
+        tag = ""
+    click.echo(
+        f"{trunk}{vm_head} "
+        f"{click.style(vm.name, fg='green', bold=True)}{tag}"
+    )
+
+    vcpu = next((d.count for d in vm.devices if isinstance(d, vCPU)), 2)
+    mem = next((d.gib for d in vm.devices if isinstance(d, Memory)), 2.0)
+    drives = [d for d in vm.devices if isinstance(d, HardDrive)]
+    nics = [d for d in vm.devices if isinstance(d, VirtualNetworkRef)]
+
+    disk_desc = (
+        ", ".join(f"{d.size}{' NVMe' if d.nvme else ''}" for d in drives)
+        if drives else "20GB (default)"
+    )
+    pkg_desc = (
+        ", ".join(repr(p) for p in vm.pkgs) if vm.pkgs else "(none)"
+    )
+    user_desc = (
+        ", ".join(
+            f"{c.username}{'/sudo' if c.sudo else ''}" for c in vm.users
+        )
+        if vm.users else "(none)"
+    )
+    post_desc = (
+        f"{len(vm.post_install_cmds)} command(s)"
+        if vm.post_install_cmds else "(none)"
+    )
+
+    rows = [
+        ("iso",           vm.iso),
+        ("cpu",           f"{vcpu} vCPU"),
+        ("memory",        f"{mem:g} GiB"),
+        ("disk",          disk_desc),
+        ("users",         user_desc),
+        ("packages",      pkg_desc),
+        ("post-install",  post_desc),
+    ]
+
+    # All VM rows use ``├──`` — the final row is either ``nics`` (for
+    # plain VMs) or a nested inner block (for hypervisors) which owns
+    # the ``└──`` terminator of the VM's block.
+    for k, v in rows:
+        click.echo(f"{vm_trunk}├── {k:<13} {v}")
+
+    is_hv = isinstance(vm, AbstractHypervisor)
+    # nics: ``└──`` for plain VMs; ``├──`` when a hypervisor block
+    # still has inner sections to emit below.
+    if not nics:
         click.echo(
-            f"{vm_head} {click.style(vm.name, fg='green', bold=True)}"
+            f"{vm_trunk}{'├──' if is_hv else '└──'} nics          (none)"
         )
+    else:
+        click.echo(f"{vm_trunk}{'├──' if is_hv else '└──'} nics")
+        nic_child_trunk = vm_trunk + ("│   " if is_hv else "    ")
+        for j, nic in enumerate(nics):
+            last_nic = j == len(nics) - 1
+            nic_head = "└──" if last_nic else "├──"
+            # Resolve against the scope the nic was declared in:
+            # an inner VM's ref matches the hypervisor's own inner
+            # networks, not the outer ones — ``networks`` is already
+            # the correct scope by the time we recurse.
+            net = next((n for n in networks if n.name == nic.name), None)
+            if nic.ip:
+                addr = f"static {nic.ip}"
+            elif net is not None and net.dhcp:
+                addr = "DHCP"
+            else:
+                addr = "auto-reserved"
+            net_tag = click.style(nic.name, fg="cyan")
+            click.echo(f"{nic_child_trunk}{nic_head} {net_tag:<20} ({addr})")
 
-        vcpu = next((d.count for d in vm.devices if isinstance(d, vCPU)), 2)
-        mem = next((d.gib for d in vm.devices if isinstance(d, Memory)), 2.0)
-        drives = [d for d in vm.devices if isinstance(d, HardDrive)]
-        nics = [d for d in vm.devices if isinstance(d, VirtualNetworkRef)]
-
-        if drives:
-            disk_desc = ", ".join(
-                f"{d.size}{' NVMe' if d.nvme else ''}" for d in drives
-            )
-        else:
-            disk_desc = "20GB (default)"
-
-        pkg_desc = (
-            ", ".join(repr(p) for p in vm.pkgs) if vm.pkgs else "(none)"
+    # Hypervisor recursion: inner networks (not last) + inner VMs (last).
+    if is_hv:
+        _print_networks_block(
+            vm.networks,
+            trunk=vm_trunk,
+            is_last=False,
+            label="Inner networks",
         )
-        user_desc = (
-            ", ".join(
-                f"{c.username}{'/sudo' if c.sudo else ''}" for c in vm.users
-            )
-            if vm.users else "(none)"
+        _print_vms_block(
+            vm.vms,
+            vm.networks,
+            trunk=vm_trunk,
+            is_last=True,
+            label="Inner VMs",
         )
-        post = vm.post_install_cmds
-        post_desc = f"{len(post)} command(s)" if post else "(none)"
-
-        rows = [
-            ("iso",           vm.iso),
-            ("cpu",           f"{vcpu} vCPU"),
-            ("memory",        f"{mem:g} GiB"),
-            ("disk",          disk_desc),
-            ("users",         user_desc),
-            ("packages",      pkg_desc),
-            ("post-install",  post_desc),
-        ]
-        for label, value in rows:
-            click.echo(f"{vm_trunk}├── {label:<13} {value}")
-
-        # NICs section is the last line of the VM block
-        if not nics:
-            click.echo(f"{vm_trunk}└── nics          (none)")
-        else:
-            click.echo(f"{vm_trunk}└── nics")
-            for j, nic in enumerate(nics):
-                last_nic = j == len(nics) - 1
-                tree = "└──" if last_nic else "├──"
-                # Resolve network metadata if the ref matches a declared net
-                net = next((n for n in networks if n.name == nic.name), None)
-                if nic.ip:
-                    addr = f"static {nic.ip}"
-                elif net is not None and net.dhcp:
-                    addr = "DHCP"
-                else:
-                    addr = "auto-reserved"
-                net_tag = click.style(nic.name, fg="cyan")
-                click.echo(
-                    f"{vm_trunk}    {tree} {net_tag:<20} ({addr})"
-                )
 
 
 @main.command("repl")
@@ -431,18 +560,19 @@ def repl_cmd(
 ) -> None:
     """Provision a test plan and drop into a Python REPL.
 
-    TARGET has the same ``MODULE:FACTORY`` form as ``run`` and
-    ``describe``. The chosen :class:`~testrange.test.Test`'s orchestrator
-    is started, then the REPL is launched with ``orch``, ``vms``, and
-    one binding per VM (named after the VM) already in scope::
+    TARGET has the same ``MODULE[:FACTORY]`` form as ``run`` and
+    ``describe`` (factory defaults to ``gen_tests``). The chosen
+    :class:`~testrange.test.Test`'s orchestrator is started, then the
+    REPL is launched with ``orch``, ``vms``, and one binding per VM
+    (named after the VM) already in scope::
 
-        testrange repl ./my_tests.py:gen_tests
-        testrange repl examples/hello_world.py:gen_tests --test smoke
-        testrange repl examples/two_networks_three_vms.py:gen_tests --keep
+        testrange repl ./my_tests.py
+        testrange repl examples/hello_world.py --test smoke
+        testrange repl examples/two_networks_three_vms.py --keep
 
     Use ``--orchestrator`` to point at a remote backend::
 
-        testrange repl tests:gen_tests \\
+        testrange repl tests \\
             --orchestrator qemu+ssh://alice@vmhost/system
 
     The REPL prefers IPython if installed, otherwise falls back to the

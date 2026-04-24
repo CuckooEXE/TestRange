@@ -30,14 +30,37 @@ class TestMainGroup:
 
 
 class TestRunCommand:
-    def test_missing_separator(self, runner: CliRunner) -> None:
-        r = runner.invoke(main, ["run", "justmodule"])
-        assert r.exit_code == 2
-        assert "module:factory" in r.output
+    def test_bare_target_defaults_to_gen_tests(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # No ``:factory`` suffix — should look up ``gen_tests``.
+        f = tmp_path / "bare.py"
+        f.write_text("def gen_tests():\n    return []\n")
+        r = runner.invoke(main, ["run", str(f)])
+        # Empty list is a valid result; run succeeds (exit 0).
+        assert r.exit_code == 0
+
+    def test_bare_target_missing_gen_tests_factory(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # Default factory resolves but isn't defined in the module.
+        f = tmp_path / "noops.py"
+        f.write_text("# no gen_tests defined\n")
+        r = runner.invoke(main, ["run", str(f)])
+        assert r.exit_code == 1
+        assert "gen_tests" in r.output
 
     def test_empty_factory_name(self, runner: CliRunner) -> None:
+        # Trailing colon with no factory is still an error — we don't
+        # want typos ("run x:") to silently fall back to gen_tests.
         r = runner.invoke(main, ["run", "mymodule:"])
         assert r.exit_code == 2
+        assert "empty factory" in r.output
+
+    def test_empty_module_part(self, runner: CliRunner) -> None:
+        r = runner.invoke(main, ["run", ":gen_tests"])
+        assert r.exit_code == 2
+        assert "module[:factory]" in r.output
 
     def test_missing_file_path(self, runner: CliRunner) -> None:
         r = runner.invoke(main, ["run", "/nonexistent/file.py:gen_tests"])
@@ -385,3 +408,170 @@ class TestBackendUrlDispatch:
         assert cli_build_orchestrator(
             "madeup://nothing", self._fake_original(tmp_path),
         ) is None
+
+
+# ---------------------------------------------------------------------------
+# describe command — verifies the pretty-printer's output for plain and
+# Hypervisor (nested) VMs.  Written as a tmp-path module file + CliRunner
+# roundtrip so it exercises the real MODULE:FACTORY loader path.
+# ---------------------------------------------------------------------------
+
+
+_PLAIN_DESCRIBE_MODULE = '''
+from testrange import (
+    VM, Credential, HardDrive, Memory, Orchestrator,
+    Test, VirtualNetwork, VirtualNetworkRef, vCPU,
+)
+
+def gen_tests():
+    return [Test(
+        Orchestrator(
+            networks=[
+                VirtualNetwork("Net", "10.0.0.0/24", internet=True, dhcp=True),
+            ],
+            vms=[
+                VM(
+                    name="web",
+                    iso="https://example.com/debian.qcow2",
+                    users=[Credential("root", "pw")],
+                    devices=[
+                        vCPU(1), Memory(1), HardDrive(10),
+                        VirtualNetworkRef("Net", ip="10.0.0.5"),
+                    ],
+                ),
+            ],
+        ),
+        lambda orch: None,
+        name="plain-smoke",
+    )]
+'''
+
+
+_NESTED_DESCRIBE_MODULE = '''
+from testrange import (
+    VM, Credential, HardDrive, Hypervisor, LibvirtOrchestrator, Memory,
+    Orchestrator, Test, VirtualNetwork, VirtualNetworkRef, vCPU,
+)
+
+def gen_tests():
+    root = Credential("root", "pw", ssh_key="ssh-ed25519 AAA")
+    return [Test(
+        Orchestrator(
+            networks=[
+                VirtualNetwork("OuterNet", "10.0.0.0/24", internet=True),
+            ],
+            vms=[
+                VM(
+                    name="sidecar",
+                    iso="https://example.com/debian.qcow2",
+                    users=[root],
+                    devices=[
+                        vCPU(1), Memory(1), HardDrive(10),
+                        VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
+                    ],
+                ),
+                Hypervisor(
+                    name="hv",
+                    iso="https://example.com/debian.qcow2",
+                    users=[root],
+                    communicator="ssh",
+                    devices=[
+                        vCPU(2), Memory(4), HardDrive(40),
+                        VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                    ],
+                    orchestrator=LibvirtOrchestrator,
+                    networks=[
+                        VirtualNetwork("PublicNet", "10.42.0.0/24", internet=True),
+                        VirtualNetwork("PrivateNet", "10.43.0.0/24", internet=False),
+                    ],
+                    vms=[
+                        VM(
+                            name="webpublic",
+                            iso="https://example.com/debian.qcow2",
+                            users=[root],
+                            devices=[
+                                vCPU(1), Memory(1), HardDrive(10),
+                                VirtualNetworkRef("PublicNet", ip="10.42.0.5"),
+                            ],
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        lambda orch: None,
+        name="nested-smoke",
+    )]
+'''
+
+
+def _write_module(tmp_path: Path, source: str) -> str:
+    mod = tmp_path / "descmod.py"
+    mod.write_text(source)
+    return f"{mod}:gen_tests"
+
+
+class TestDescribeCommand:
+    def test_plain_vm_renders(self, runner: CliRunner, tmp_path: Path) -> None:
+        target = _write_module(tmp_path, _PLAIN_DESCRIBE_MODULE)
+        # color_off keeps ANSI escapes out of the output so substring
+        # matching against network names stays robust.
+        r = runner.invoke(main, ["describe", target], color=False)
+        assert r.exit_code == 0, r.output
+        assert "Test: plain-smoke" in r.output
+        assert "Networks (1)" in r.output
+        assert "VMs (1)" in r.output
+        assert "web" in r.output
+        # Plain VMs never emit the Hypervisor tag or inner sections.
+        assert "Hypervisor" not in r.output
+        assert "Inner networks" not in r.output
+        assert "Inner VMs" not in r.output
+
+    def test_nested_shows_hypervisor_tag(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        target = _write_module(tmp_path, _NESTED_DESCRIBE_MODULE)
+        r = runner.invoke(main, ["describe", target], color=False)
+        assert r.exit_code == 0, r.output
+        # The hypervisor's header line carries the driver annotation so
+        # readers can see the topology is nested without scrolling.
+        assert "Hypervisor → Orchestrator" in r.output
+
+    def test_nested_inner_blocks_present(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        target = _write_module(tmp_path, _NESTED_DESCRIBE_MODULE)
+        r = runner.invoke(main, ["describe", target], color=False)
+        assert r.exit_code == 0, r.output
+        assert "Inner networks (2)" in r.output
+        assert "Inner VMs (1)" in r.output
+        assert "PublicNet" in r.output
+        assert "PrivateNet" in r.output
+        assert "webpublic" in r.output
+
+    def test_nested_inner_nic_resolves_against_inner_networks(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """An inner VM's VirtualNetworkRef must be interpreted against
+        the *inner* networks list, not the outer — otherwise a nic ref
+        like 'PublicNet' would show as 'auto-reserved' instead of
+        static."""
+        target = _write_module(tmp_path, _NESTED_DESCRIBE_MODULE)
+        r = runner.invoke(main, ["describe", target], color=False)
+        assert r.exit_code == 0, r.output
+        assert "static 10.42.0.5" in r.output
+
+    def test_sibling_vm_before_hypervisor(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        """Regression guard: sidecar must render before hv without the
+        inner block bleeding into the sidecar's section."""
+        target = _write_module(tmp_path, _NESTED_DESCRIBE_MODULE)
+        r = runner.invoke(main, ["describe", target], color=False)
+        lines = r.output.splitlines()
+        # Find sidecar and hv headers; sidecar's line index is lower.
+        sidecar_idx = next(i for i, line in enumerate(lines) if "sidecar" in line)
+        hv_idx = next(i for i, line in enumerate(lines) if " hv " in line or line.endswith(" hv"))
+        inner_idx = next(
+            i for i, line in enumerate(lines) if "Inner networks" in line
+        )
+        assert sidecar_idx < hv_idx < inner_idx

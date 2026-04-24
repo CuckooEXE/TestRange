@@ -207,6 +207,14 @@ class SSHFileTransport(AbstractFileTransport):
         except (OSError, FileNotFoundError):
             pass
 
+    def rename(self, src_ref: str, dst_ref: str) -> None:
+        # ``posix_rename`` is the SFTP v3 extension that mirrors
+        # POSIX ``rename(2)`` — atomic, replaces the destination.
+        # Plain ``sftp.rename`` fails if the dest exists, which would
+        # turn a retry-after-crash into a second bug.
+        sftp = self._get_sftp()
+        sftp.posix_rename(src_ref, dst_ref)
+
     def makedirs(self, ref: str, mode: int = 0o755) -> None:
         # paramiko's SFTPClient has no ``makedirs``; fall back to the
         # remote shell where ``mkdir -p`` is a one-liner.

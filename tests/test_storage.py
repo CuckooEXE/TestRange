@@ -147,6 +147,7 @@ class _FakeTransport:
 
     def __init__(self, exit_code: int = 0, stderr: bytes = b"") -> None:
         self.calls: list[list[str]] = []
+        self.timeouts: list[float] = []
         self.exit_code = exit_code
         self.stderr = stderr
 
@@ -154,6 +155,7 @@ class _FakeTransport:
         self, argv: list[str], timeout: float = 60.0,
     ) -> tuple[int, bytes, bytes]:
         self.calls.append(list(argv))
+        self.timeouts.append(timeout)
         return self.exit_code, b"", self.stderr
 
 
@@ -206,6 +208,28 @@ class TestQcow2DiskFormat:
             "/t/s.qcow2",
             "/t/d.qcow2",
         ]]
+
+    def test_compress_uses_long_timeout(self) -> None:
+        """Regression guard: compression on a multi-GB image easily
+        exceeds the 60s default and would time out as "qemu-img
+        timed out after 60s" after the install phase had already
+        succeeded.  A dedicated timeout keeps ordinary installs
+        working without silently papering over genuine stalls."""
+        t = _FakeTransport()
+        Qcow2DiskFormat(cast(AbstractFileTransport, t)).compress(
+            "/t/s.qcow2", "/t/d.qcow2",
+        )
+        assert t.timeouts == [pytest.approx(1800.0)]
+
+    def test_fast_ops_use_default_timeout(self) -> None:
+        """Metadata-only ops stay on the 60s default so a wedged
+        transport still surfaces quickly."""
+        t = _FakeTransport()
+        fmt = Qcow2DiskFormat(cast(AbstractFileTransport, t))
+        fmt.create_blank("/t/blank.qcow2", "40G")
+        fmt.resize("/t/d.qcow2", "64G")
+        fmt.create_overlay("/t/base.qcow2", "/t/ov.qcow2")
+        assert t.timeouts == [pytest.approx(60.0)] * 3
 
     def test_nonzero_exit_wrapped_as_cache_error(self) -> None:
         """The disk format layer translates tool-exit failures into

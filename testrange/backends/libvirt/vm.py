@@ -81,6 +81,13 @@ has started its own input loop)."""
 _BOOT_KEYPRESS_INTERVAL_S = 1.0
 """Gap between spacebars during the boot-keypress window."""
 
+_MAX_CONSECUTIVE_STATE_ERRORS = 5
+"""Give up polling ``domain.state()`` after this many consecutive
+libvirt errors.  At :data:`_POLL_INTERVAL` = 5s that's ~25 seconds of
+lost connection before we bail — fast enough to surface a dead
+libvirtd within the user's attention span, slow enough to tolerate a
+hiccup during a heavy install."""
+
 _LINUX_KEY_SPACE = 57
 """Linux keycode for SPACE — consumes the 'Press any key' prompt without
 risking a menu selection the way ENTER or arrow keys might."""
@@ -641,15 +648,26 @@ class VM(AbstractVM):
 
         try:
             domain = conn.defineXML(xml)
+        except libvirt.libvirtError as exc:
+            raise VMBuildError(
+                f"Failed to define install domain for {self._name!r}: {exc}"
+            ) from exc
+
+        # Stash on the instance before ``create()`` so the outer
+        # orchestrator's teardown has a second chance to clean up if
+        # the ``finally`` below never runs (e.g. ``create()`` raises
+        # — ``defineXML`` has already persisted a domain entry in
+        # libvirt, and losing track of it leaks a defined-but-never-
+        # started domain that confuses the next run).
+        self._install_domain = domain
+        try:
             domain.create()
         except libvirt.libvirtError as exc:
+            _destroy_and_undefine(domain)
+            self._install_domain = None
             raise VMBuildError(
                 f"Failed to start install domain for {self._name!r}: {exc}"
             ) from exc
-
-        # Stash on the instance so the orchestrator's teardown has a
-        # second chance to clean up if the ``finally`` below fails.
-        self._install_domain = domain
         _log.info(
             "install domain %r running; waiting for %s builder to finish "
             "and power off (timeout %ds)",
@@ -682,13 +700,28 @@ class VM(AbstractVM):
                 _log, f"install phase for VM {self._name!r}"
             ):
                 deadline = time.monotonic() + _BUILD_TIMEOUT
+                consecutive_errors = 0
                 while time.monotonic() < deadline:
                     try:
                         state, _ = domain.state()
+                        consecutive_errors = 0
                         if state == libvirt.VIR_DOMAIN_SHUTOFF:
                             break
-                    except libvirt.libvirtError:
-                        pass
+                    except libvirt.libvirtError as exc:
+                        # A single transient error is fine (libvirtd
+                        # restarted, momentary RPC blip).  Persistent
+                        # errors mean the connection is dead and we'd
+                        # otherwise silently wait out the full
+                        # ``_BUILD_TIMEOUT`` before reporting a useless
+                        # timeout — surface the real reason instead.
+                        consecutive_errors += 1
+                        if consecutive_errors >= _MAX_CONSECUTIVE_STATE_ERRORS:
+                            raise VMBuildError(
+                                f"Lost libvirt connection while waiting "
+                                f"for VM {self._name!r} install phase "
+                                f"({consecutive_errors} consecutive "
+                                f"state() errors): {exc}"
+                            ) from exc
                     time.sleep(_POLL_INTERVAL)
                 else:
                     raise VMBuildError(

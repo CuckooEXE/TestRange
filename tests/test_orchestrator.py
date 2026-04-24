@@ -45,6 +45,97 @@ class TestInitialState:
         assert o._cache.root == tmp_path / "alt"
 
 
+class TestNameCollisions:
+    """Collision checks fire at construction time, not at defineXML."""
+
+    def _vm(self, name: str):
+        from testrange import VM, Credential, HardDrive, Memory, VirtualNetworkRef, vCPU
+
+        return VM(
+            name=name,
+            iso="x",
+            users=[Credential("root", "pw")],
+            devices=[
+                vCPU(1), Memory(1), HardDrive(10),
+                VirtualNetworkRef("NetA"),
+            ],
+        )
+
+    def test_duplicate_vm_name_raises(self) -> None:
+        with pytest.raises(OrchestratorError, match="duplicate VM name 'a'"):
+            Orchestrator(
+                networks=[VirtualNetwork("NetA", "10.0.0.0/24")],
+                vms=[self._vm("a"), self._vm("a")],
+            )
+
+    def test_vm_name_10char_truncation_collision_raises(self) -> None:
+        # Both names truncate to 'webserver-' (10 chars).
+        with pytest.raises(
+            OrchestratorError,
+            match="10-character truncation",
+        ):
+            Orchestrator(
+                networks=[VirtualNetwork("NetA", "10.0.0.0/24")],
+                vms=[
+                    self._vm("webserver-public"),
+                    self._vm("webserver-private"),
+                ],
+            )
+
+    def test_duplicate_network_name_raises(self) -> None:
+        with pytest.raises(OrchestratorError, match="duplicate network name 'NetA'"):
+            Orchestrator(
+                networks=[
+                    VirtualNetwork("NetA", "10.0.0.0/24"),
+                    VirtualNetwork("NetA", "10.1.0.0/24"),
+                ],
+            )
+
+    def test_network_6char_truncation_collision_raises(self) -> None:
+        # 'Public_Net'[:6].lower().replace('_','') → 'public'
+        # 'publicnet2'[:6].lower().replace('_','') → 'public'
+        with pytest.raises(
+            OrchestratorError,
+            match="6-character truncation",
+        ):
+            Orchestrator(
+                networks=[
+                    VirtualNetwork("Public_Net", "10.0.0.0/24"),
+                    VirtualNetwork("publicnet2", "10.1.0.0/24"),
+                ],
+            )
+
+    def test_distinct_names_pass(self) -> None:
+        Orchestrator(
+            networks=[
+                VirtualNetwork("NetA", "10.0.0.0/24"),
+                VirtualNetwork("NetB", "10.1.0.0/24"),
+            ],
+            vms=[self._vm("a"), self._vm("b")],
+        )
+
+    def test_hypervisor_inner_vm_duplicate_raises(self) -> None:
+        """Inner-VM collisions surface from Hypervisor.__init__."""
+        from testrange import (
+            Credential, HardDrive, Hypervisor, LibvirtOrchestrator,
+            Memory, VirtualNetworkRef, vCPU,
+        )
+
+        with pytest.raises(OrchestratorError, match="duplicate VM name 'client'"):
+            Hypervisor(
+                name="hv",
+                iso="x",
+                users=[Credential("root", "pw")],
+                devices=[
+                    vCPU(1), Memory(2), HardDrive(20),
+                    VirtualNetworkRef("Outer"),
+                ],
+                orchestrator=LibvirtOrchestrator,
+                networks=[VirtualNetwork("Inner", "10.42.0.0/24")],
+                vms=[self._vm("client"), self._vm("client")],
+            )
+
+
 class TestFindNetwork:
     def test_returns_matching_network(self) -> None:
         net = VirtualNetwork("NetA", "10.0.0.0/24")
