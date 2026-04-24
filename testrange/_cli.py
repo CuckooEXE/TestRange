@@ -119,19 +119,21 @@ def run_cmd(
 ) -> None:
     """Run tests produced by a factory function.
 
-    TARGET has the form ``MODULE:FACTORY`` where MODULE is either a dotted
-    module name (``mypkg.tests``) or a path to a Python file
-    (``./tests.py``), and FACTORY is a zero-argument callable that returns
-    a ``list`` of :class:`~testrange.test.Test` objects.
+    TARGET has the form ``MODULE[:FACTORY]`` where MODULE is either a
+    dotted module name (``mypkg.tests``) or a path to a Python file
+    (``./tests.py``), and FACTORY is a zero-argument callable that
+    returns a ``list`` of :class:`~testrange.test.Test` objects.
+
+    FACTORY defaults to ``gen_tests`` when omitted.
 
     Example::
 
-        testrange run tests:gen_tests
-        testrange run ./my_tests.py:gen_tests
+        testrange run ./my_tests.py                # uses gen_tests
+        testrange run ./my_tests.py:other_factory  # explicit override
 
     Target a different hypervisor::
 
-        testrange run tests:gen_tests \\
+        testrange run tests \\
             --orchestrator proxmox://TOKENID:SECRET@pve.example.com/pve01
     """
     configure_root_logger(getattr(logging, log_level.upper()))
@@ -156,20 +158,38 @@ def run_cmd(
         sys.exit(1)
 
 
+_DEFAULT_FACTORY = "gen_tests"
+
+
 def _parse_target(target: str) -> tuple[str, str]:
-    """Split a ``MODULE:FACTORY`` string into its two parts.
+    """Split a ``MODULE[:FACTORY]`` string into its two parts.
+
+    The factory suffix is optional; if the user writes just ``MODULE``
+    (or ``./path/to/tests.py``) the factory defaults to
+    :data:`_DEFAULT_FACTORY` — the conventional ``gen_tests`` name
+    used across every TestRange example.  Writing an explicit trailing
+    colon with nothing after it (``path.py:``) is still rejected so
+    typos don't silently succeed.
 
     :param target: Raw user-supplied target string.
     :returns: ``(module_part, factory_name)`` tuple.
     """
     module_part, sep, factory_name = target.partition(":")
-    if not sep or not module_part or not factory_name:
+    if not module_part:
         click.echo(
-            f"TARGET must be in 'module:factory' form (got {target!r}).",
+            f"TARGET must be 'module[:factory]' (got {target!r}).",
             err=True,
         )
         sys.exit(2)
-    return module_part, factory_name
+    if sep and not factory_name:
+        click.echo(
+            f"TARGET has empty factory name (got {target!r}); either "
+            "drop the trailing ':' to use the default 'gen_tests', or "
+            "name a factory.",
+            err=True,
+        )
+        sys.exit(2)
+    return module_part, factory_name or _DEFAULT_FACTORY
 
 
 def _load_module(module_part: str) -> ModuleType:
@@ -281,11 +301,12 @@ def _choose_test(tests: list[Test], name: str | None) -> Test:
 def describe_cmd(target: str) -> None:
     """Pretty-print the networks and VMs defined by a test factory.
 
-    Accepts the same ``MODULE:FACTORY`` form as ``run`` but never
-    provisions anything — it just loads the factory, instantiates the
-    orchestrator, and walks the declared topology::
+    Accepts the same ``MODULE[:FACTORY]`` form as ``run`` (factory
+    defaults to ``gen_tests``) but never provisions anything — it just
+    loads the factory, instantiates the orchestrator, and walks the
+    declared topology::
 
-        testrange describe examples/two_networks_three_vms.py:gen_tests
+        testrange describe examples/two_networks_three_vms.py
     """
     module_part, factory_name = _parse_target(target)
     module = _load_module(module_part)
@@ -539,18 +560,19 @@ def repl_cmd(
 ) -> None:
     """Provision a test plan and drop into a Python REPL.
 
-    TARGET has the same ``MODULE:FACTORY`` form as ``run`` and
-    ``describe``. The chosen :class:`~testrange.test.Test`'s orchestrator
-    is started, then the REPL is launched with ``orch``, ``vms``, and
-    one binding per VM (named after the VM) already in scope::
+    TARGET has the same ``MODULE[:FACTORY]`` form as ``run`` and
+    ``describe`` (factory defaults to ``gen_tests``). The chosen
+    :class:`~testrange.test.Test`'s orchestrator is started, then the
+    REPL is launched with ``orch``, ``vms``, and one binding per VM
+    (named after the VM) already in scope::
 
-        testrange repl ./my_tests.py:gen_tests
-        testrange repl examples/hello_world.py:gen_tests --test smoke
-        testrange repl examples/two_networks_three_vms.py:gen_tests --keep
+        testrange repl ./my_tests.py
+        testrange repl examples/hello_world.py --test smoke
+        testrange repl examples/two_networks_three_vms.py --keep
 
     Use ``--orchestrator`` to point at a remote backend::
 
-        testrange repl tests:gen_tests \\
+        testrange repl tests \\
             --orchestrator qemu+ssh://alice@vmhost/system
 
     The REPL prefers IPython if installed, otherwise falls back to the

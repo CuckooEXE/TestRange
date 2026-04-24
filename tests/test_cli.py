@@ -30,14 +30,37 @@ class TestMainGroup:
 
 
 class TestRunCommand:
-    def test_missing_separator(self, runner: CliRunner) -> None:
-        r = runner.invoke(main, ["run", "justmodule"])
-        assert r.exit_code == 2
-        assert "module:factory" in r.output
+    def test_bare_target_defaults_to_gen_tests(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # No ``:factory`` suffix — should look up ``gen_tests``.
+        f = tmp_path / "bare.py"
+        f.write_text("def gen_tests():\n    return []\n")
+        r = runner.invoke(main, ["run", str(f)])
+        # Empty list is a valid result; run succeeds (exit 0).
+        assert r.exit_code == 0
+
+    def test_bare_target_missing_gen_tests_factory(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        # Default factory resolves but isn't defined in the module.
+        f = tmp_path / "noops.py"
+        f.write_text("# no gen_tests defined\n")
+        r = runner.invoke(main, ["run", str(f)])
+        assert r.exit_code == 1
+        assert "gen_tests" in r.output
 
     def test_empty_factory_name(self, runner: CliRunner) -> None:
+        # Trailing colon with no factory is still an error — we don't
+        # want typos ("run x:") to silently fall back to gen_tests.
         r = runner.invoke(main, ["run", "mymodule:"])
         assert r.exit_code == 2
+        assert "empty factory" in r.output
+
+    def test_empty_module_part(self, runner: CliRunner) -> None:
+        r = runner.invoke(main, ["run", ":gen_tests"])
+        assert r.exit_code == 2
+        assert "module[:factory]" in r.output
 
     def test_missing_file_path(self, runner: CliRunner) -> None:
         r = runner.invoke(main, ["run", "/nonexistent/file.py:gen_tests"])
