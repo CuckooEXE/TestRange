@@ -119,8 +119,32 @@ class TestGetVm:
         b = _local_backend(tmp_cache_root)
         disk = c.vms_dir / "abc123.qcow2"
         disk.write_bytes(b"fake")
+        manifest = c.vms_dir / "abc123.json"
+        manifest.write_text("{}")
         # For LocalStorageBackend, the ref is just the absolute path.
         assert c.get_vm("abc123", b) == str(disk)
+
+    def test_qcow2_without_manifest_is_cache_miss(
+        self, tmp_cache_root: Path
+    ) -> None:
+        """A qcow2 with no sibling manifest is the footprint of a
+        crashed ``store_vm`` — treat it as a miss so the rebuild
+        overwrites it instead of booting from a truncated image."""
+        c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
+        disk = c.vms_dir / "partial.qcow2"
+        disk.write_bytes(b"truncated")
+        assert c.get_vm("partial", b) is None
+
+    def test_manifest_without_qcow2_is_cache_miss(
+        self, tmp_cache_root: Path
+    ) -> None:
+        """Symmetric: an orphan manifest (e.g. someone deleted the
+        qcow2) should also miss."""
+        c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
+        (c.vms_dir / "ghost.json").write_text("{}")
+        assert c.get_vm("ghost", b) is None
 
     def test_vm_paths(self, tmp_cache_root: Path) -> None:
         c = CacheManager(root=tmp_cache_root)
@@ -193,6 +217,59 @@ class TestStoreVm:
             and "-c" in cmd
             for cmd in fake_qemu_img
         )
+
+    def test_compress_writes_to_partial_then_renames(
+        self,
+        tmp_cache_root: Path,
+        fake_qemu_img: list[list[str]],
+    ) -> None:
+        """qemu-img must target ``<hash>.qcow2.partial`` — not the
+        final path — so a crash can't leave a plausible cache file."""
+        c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
+        src = tmp_cache_root / "work.qcow2"
+        src.write_bytes(b"x")
+        c.store_vm("abc", str(src), {"name": "v"}, b)
+
+        convert_calls = [cmd for cmd in fake_qemu_img if cmd[:2] == ["qemu-img", "convert"]]
+        assert convert_calls, "expected a qemu-img convert call"
+        assert convert_calls[-1][-1].endswith(".qcow2.partial"), (
+            f"compress must write to .partial, got argv={convert_calls[-1]!r}"
+        )
+        # After a successful store_vm the partial must be gone.
+        assert not (tmp_cache_root / "vms" / "abc.qcow2.partial").exists()
+        assert (tmp_cache_root / "vms" / "abc.qcow2").exists()
+
+    def test_compress_failure_leaves_no_partial_behind(
+        self,
+        tmp_cache_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If compress raises mid-write, the .partial stub must not
+        linger — and critically, no final-named qcow2 is ever created,
+        so the next run re-enters ``store_vm`` instead of getting a
+        false cache hit."""
+        c = CacheManager(root=tmp_cache_root)
+        b = _local_backend(tmp_cache_root)
+        src = tmp_cache_root / "work.qcow2"
+        src.write_bytes(b"x")
+
+        from testrange.storage.disk import qcow2 as _qcow2_mod
+
+        def _boom(self: object, src_ref: str, dest_ref: str) -> None:
+            # Simulate a compress that writes a partial file and then
+            # dies — matches the OOM-kill we actually observed.
+            Path(dest_ref).write_bytes(b"partial")
+            raise RuntimeError("simulated OOM")
+
+        monkeypatch.setattr(_qcow2_mod.Qcow2DiskFormat, "compress", _boom)
+
+        with pytest.raises(RuntimeError, match="simulated OOM"):
+            c.store_vm("abc", str(src), {"name": "v"}, b)
+
+        assert not (tmp_cache_root / "vms" / "abc.qcow2.partial").exists()
+        assert not (tmp_cache_root / "vms" / "abc.qcow2").exists()
+        assert not (tmp_cache_root / "vms" / "abc.json").exists()
 
 
 class TestGetImage:

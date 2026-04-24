@@ -87,6 +87,17 @@ class AbstractFileTransport(ABC):
         """Best-effort remove.  No-op when missing."""
 
     @abstractmethod
+    def rename(self, src_ref: str, dst_ref: str) -> None:
+        """Atomically rename *src_ref* to *dst_ref*.
+
+        If *dst_ref* already exists it is replaced.  Both refs must
+        live on the same filesystem so the operation is a true atomic
+        rename — used by :meth:`CacheManager.store_vm` to publish a
+        freshly-compressed cache entry only once the compress step
+        has finished writing.
+        """
+
+    @abstractmethod
     def makedirs(self, ref: str, mode: int = 0o755) -> None:
         """``mkdir -p`` with an explicit mode on the final component."""
 

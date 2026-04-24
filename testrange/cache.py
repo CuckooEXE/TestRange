@@ -375,12 +375,32 @@ class CacheManager:
     ) -> str | None:
         """Return the cached snapshot ref for *config_hash*, or ``None``.
 
+        A cache hit requires **both** the qcow2 and its ``.json``
+        manifest to exist.  The manifest is written last by
+        :meth:`store_vm`, so its absence is the canonical signal that
+        a previous compress step crashed mid-write (OOM, SIGKILL,
+        power loss) and left a truncated qcow2 behind.  Returning
+        ``None`` in that case forces a rebuild; the stale qcow2 is
+        overwritten by the next :meth:`store_vm` invocation.
+
         :param config_hash: Hash key from :func:`vm_config_hash`.
         :param backend: Backend to check.
-        :returns: Backend-local ref on hit, ``None`` on miss.
+        :returns: Backend-local ref on hit, ``None`` on miss (or on a
+            detected partial-write orphan).
         """
-        ref = self.vm_snapshot_ref(config_hash, backend)
-        return ref if backend.transport.exists(ref) else None
+        snapshot_ref = self.vm_snapshot_ref(config_hash, backend)
+        manifest_ref = self.vm_manifest_ref(config_hash, backend)
+        transport = backend.transport
+        if not transport.exists(snapshot_ref):
+            return None
+        if not transport.exists(manifest_ref):
+            _log.warning(
+                "cache entry %r has a qcow2 but no manifest — treating "
+                "as partial write, will rebuild",
+                config_hash,
+            )
+            return None
+        return snapshot_ref
 
     def store_vm(
         self,
@@ -393,9 +413,13 @@ class CacheManager:
 
         Uses the backend's disk-format ``compress`` op so the
         compression runs wherever the source lives (remote for SSH
-        backends, local for the default).  A sibling manifest JSON is
-        written via the transport so it lives next to the snapshot it
-        describes, regardless of backend.
+        backends, local for the default).  The qcow2 is written via a
+        ``.qcow2.partial`` staging path and atomically renamed on
+        success, so a mid-compress crash can never leave a
+        plausible-looking-but-truncated file at the final name.  A
+        sibling manifest JSON is written *after* the rename — its
+        presence is what :meth:`get_vm` checks to distinguish a
+        complete cache entry from a partial one.
 
         :param config_hash: Hash key for this VM configuration.
         :param src_ref: Backend-local ref to the post-install image.
@@ -406,14 +430,26 @@ class CacheManager:
         :raises CacheError: If the backend's compress step fails.
         """
         dest_ref = self.vm_snapshot_ref(config_hash, backend)
+        partial_ref = dest_ref + ".partial"
         manifest_ref = self.vm_manifest_ref(config_hash, backend)
         transport = backend.transport
         # Make sure the target dir exists before compress writes into it.
         transport.makedirs(transport.vms_dir())
-        with log_duration(
-            _log, f"compress installed image for {manifest.get('name', '?')!r}"
-        ):
-            backend.disk.compress(src_ref, dest_ref)
+        # A leftover .partial from an earlier crashed run would make
+        # qemu-img refuse to overwrite (or race the compress with
+        # another process); blow it away first.
+        transport.remove(partial_ref)
+        try:
+            with log_duration(
+                _log, f"compress installed image for {manifest.get('name', '?')!r}"
+            ):
+                backend.disk.compress(src_ref, partial_ref)
+            transport.rename(partial_ref, dest_ref)
+        except BaseException:
+            # Compress died (SIGKILL, OOM, Ctrl-C).  Clean the stub so
+            # the next run doesn't inherit a half-written artefact.
+            transport.remove(partial_ref)
+            raise
         transport.write_bytes(
             manifest_ref,
             json.dumps(

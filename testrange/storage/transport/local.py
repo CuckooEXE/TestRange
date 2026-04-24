@@ -86,6 +86,9 @@ class LocalFileTransport(AbstractFileTransport):
                 # Best-effort; teardown must never raise.
                 pass
 
+    def rename(self, src_ref: str, dst_ref: str) -> None:
+        os.replace(src_ref, dst_ref)
+
     def makedirs(self, ref: str, mode: int = 0o755) -> None:
         path = Path(ref)
         path.mkdir(parents=True, exist_ok=True)
