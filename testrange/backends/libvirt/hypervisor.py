@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from testrange.backends.libvirt.orchestrator import check_name_collisions
 from testrange.backends.libvirt.vm import VM
 from testrange.packages import Apt
 from testrange.vms.hypervisor_base import AbstractHypervisor
@@ -166,6 +167,7 @@ class Hypervisor(VM, AbstractHypervisor):
         self.orchestrator = orchestrator
         self.vms = list(vms or [])
         self.networks = list(networks or [])
+        check_name_collisions(self.vms, self.networks)
 
 
 __all__ = ["Hypervisor"]

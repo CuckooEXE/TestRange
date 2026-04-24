@@ -332,8 +332,10 @@ class TestNestedEnterExit:
                 return _FakeInner("B", fail=True)
 
         hv_a = _hypervisor()
+        hv_a._name = "hv-a"  # type: ignore[assignment]
         hv_a.orchestrator = _DriverA
         hv_b = _hypervisor()
+        hv_b._name = "hv-b"  # type: ignore[assignment]
         hv_b.orchestrator = _DriverB
 
         orch = self._orch_with_hypervisors([hv_a, hv_b])

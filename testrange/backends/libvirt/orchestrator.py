@@ -50,7 +50,74 @@ _log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from testrange.backends.libvirt.vm import VM
+    from testrange.networks.base import AbstractVirtualNetwork
+    from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
+
+def check_name_collisions(
+    vms: Sequence[AbstractVM],
+    networks: Sequence[AbstractVirtualNetwork],
+) -> None:
+    """Validate VM and network names for a libvirt orchestrator layer.
+
+    Raises :class:`OrchestratorError` on:
+
+    - duplicate VM names (``orch.vms`` would silently overwrite);
+    - VM names whose first 10 characters collide (libvirt domain
+      names are formatted as ``tr-<name[:10]>-<runid[:8]>`` — two VMs
+      sharing a 10-char prefix would try to ``defineXML`` the same
+      domain name);
+    - duplicate network names;
+    - network names whose first 6 characters collide after
+      lowercasing and dropping underscores (libvirt network names are
+      formatted as ``tr-<name[:6]>-<runid[:4]>`` with the same
+      normalisation — see :meth:`VirtualNetwork.backend_name`).
+
+    Raising at construction time (rather than at ``defineXML``) keeps
+    the error message pointing at the config, not at an opaque
+    libvirt fault.
+    """
+    seen_vm: dict[str, str] = {}
+    seen_vm_trunc: dict[str, str] = {}
+    for vm in vms:
+        if vm.name in seen_vm:
+            raise OrchestratorError(
+                f"duplicate VM name {vm.name!r}; VM names must be "
+                "unique within an orchestrator (and within a "
+                "Hypervisor's inner vms list)."
+            )
+        seen_vm[vm.name] = vm.name
+        trunc = vm.name[:10]
+        prior = seen_vm_trunc.get(trunc)
+        if prior is not None and prior != vm.name:
+            raise OrchestratorError(
+                f"VM name {vm.name!r} collides with {prior!r} after "
+                f"10-character truncation ({trunc!r}); libvirt domain "
+                "names would clash.  Shorten or disambiguate within "
+                "the first 10 characters."
+            )
+        seen_vm_trunc[trunc] = vm.name
+
+    seen_net: set[str] = set()
+    seen_net_trunc: dict[str, str] = {}
+    for net in networks:
+        if net.name in seen_net:
+            raise OrchestratorError(
+                f"duplicate network name {net.name!r}; network names "
+                "must be unique within an orchestrator."
+            )
+        seen_net.add(net.name)
+        trunc = net.name[:6].lower().replace("_", "")
+        prior = seen_net_trunc.get(trunc)
+        if prior is not None and prior != net.name:
+            raise OrchestratorError(
+                f"network name {net.name!r} collides with {prior!r} "
+                f"after 6-character truncation ({trunc!r}); libvirt "
+                "network names would clash.  Disambiguate within the "
+                "first 6 characters (case- and underscore-insensitive)."
+            )
+        seen_net_trunc[trunc] = net.name
+
 
 _INSTALL_SUBNET_POOL = tuple(f"192.168.{o}.0/24" for o in range(240, 255))
 """Candidate subnets for the ephemeral install-phase network.
@@ -199,6 +266,7 @@ class Orchestrator(AbstractOrchestrator):
         # we ignored the class-body declarations above.
         self._networks = list(networks) if networks else []  # pyright: ignore[reportIncompatibleVariableOverride]
         self._vm_list = list(vms) if vms else []  # pyright: ignore[reportIncompatibleVariableOverride]
+        check_name_collisions(self._vm_list, self._networks)
         self._cache = CacheManager(root=cache_root) if cache_root else CacheManager()
         # Explicit override wins.  When ``None``, _select_storage_backend
         # inspects the libvirt URI at __enter__ and picks LocalStorage
