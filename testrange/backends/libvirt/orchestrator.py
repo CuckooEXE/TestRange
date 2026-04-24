@@ -33,6 +33,11 @@ import libvirt
 from testrange._concurrency import install_subnet_lock
 from testrange._logging import get_logger, log_duration
 from testrange._run import RunDir
+from testrange.backends.libvirt._preflight import (
+    check_memory,
+    declared_gib_per_vm,
+    read_meminfo,
+)
 from testrange.backends.libvirt.network import (
     VirtualNetwork,
     _mac_for_vm_network,
@@ -472,6 +477,12 @@ class Orchestrator(AbstractOrchestrator):
                     self._conn = None
                 raise
 
+        # Refuse to provision if the declared plan would push the host
+        # over the memory threshold.  Runs before RunDir is created so
+        # a failed preflight leaves zero filesystem state behind.
+        with log_duration(_log, "memory preflight"):
+            self._preflight_memory()
+
         self._run = RunDir(self._storage)
 
         try:
@@ -498,6 +509,26 @@ class Orchestrator(AbstractOrchestrator):
             # _teardown() is already defensively coded to never raise; this
             # is a belt-and-braces guard against future regressions.
             pass
+
+    def _preflight_memory(self) -> None:
+        """Refuse to provision if the declared memory budget would
+        push the target host above the memory-usage threshold.
+
+        Reads the *target* host's ``/proc/meminfo`` via the already-
+        selected storage transport, so the check reports what actually
+        matters: for local libvirt that's this machine, for
+        ``qemu+ssh://`` backends it's the remote host.  See
+        :mod:`testrange.backends.libvirt._preflight` for the algorithm
+        and environment-variable override.
+
+        :raises OrchestratorError: If the projected post-allocation
+            usage would reach the threshold.  The message enumerates
+            each VM so the user knows what to trim.
+        """
+        assert self._storage is not None
+        meminfo = read_meminfo(self._storage.transport)
+        declared = declared_gib_per_vm(self._vm_list)
+        check_memory(meminfo, declared)
 
     def _provision(self, run: RunDir) -> None:
         """Internal provisioning sequence.

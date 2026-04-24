@@ -628,3 +628,153 @@ class TestProvisionInstallFreeVMs:
         # Only 'cloud' should be registered; 'byoi' must be skipped.
         vm_names = [entry[0] for entry in install_net._vm_entries]
         assert vm_names == ["cloud"]
+
+
+class TestMemoryPreflight:
+    """Memory preflight refuses plans that would push the target host's
+    RAM usage past TESTRANGE_MEMORY_THRESHOLD (default 85%).  The check
+    reads the *target* host's ``/proc/meminfo`` via the storage
+    transport — so for ``qemu+ssh://`` it reports the remote."""
+
+    def _meminfo(self, total_gib: float, available_gib: float):
+        from testrange.backends.libvirt._preflight import MemInfo
+
+        return MemInfo(
+            total_bytes=int(total_gib * 1024**3),
+            available_bytes=int(available_gib * 1024**3),
+        )
+
+    def _vm(self, name: str, memory_gib: float):
+        from testrange import (
+            VM, Credential, HardDrive, Memory, VirtualNetworkRef, vCPU,
+        )
+
+        return VM(
+            name=name,
+            iso="x",
+            users=[Credential("root", "pw")],
+            devices=[
+                vCPU(1), Memory(memory_gib), HardDrive(10),
+                VirtualNetworkRef("NetA"),
+            ],
+        )
+
+    def test_passes_when_under_threshold(self) -> None:
+        from testrange.backends.libvirt._preflight import check_memory
+
+        # 16 GiB host, 2 GiB in use, declaring 4 GiB → projected ~37%.
+        check_memory(
+            self._meminfo(total_gib=16, available_gib=14),
+            declared_gib={"vm1": 4.0},
+            threshold=0.85,
+        )  # must not raise
+
+    def test_raises_at_threshold(self) -> None:
+        from testrange.backends.libvirt._preflight import check_memory
+
+        # 16 GiB host, 1 GiB in use, declaring 13 GiB → projected ~87%.
+        with pytest.raises(OrchestratorError, match="Memory preflight"):
+            check_memory(
+                self._meminfo(total_gib=16, available_gib=15),
+                declared_gib={"big": 13.0},
+                threshold=0.85,
+            )
+
+    def test_nested_hypervisor_not_double_counted(self) -> None:
+        """Only the outer VM list feeds ``declared_gib_per_vm`` — inner
+        VMs live inside the hypervisor's allocation so counting them
+        would over-report."""
+        from testrange import (
+            Credential, HardDrive, Hypervisor, LibvirtOrchestrator,
+            Memory, VirtualNetwork, VirtualNetworkRef, vCPU,
+        )
+        from testrange.backends.libvirt._preflight import declared_gib_per_vm
+
+        inner_vms = [self._vm(f"inner{i}", 1.0) for i in range(3)]
+        hv = Hypervisor(
+            name="hv",
+            iso="x",
+            users=[Credential("root", "pw")],
+            devices=[
+                vCPU(2), Memory(4), HardDrive(20),
+                VirtualNetworkRef("Outer"),
+            ],
+            orchestrator=LibvirtOrchestrator,
+            networks=[VirtualNetwork("Inner", "10.42.0.0/24")],
+            vms=inner_vms,
+        )
+        gib = declared_gib_per_vm([hv])
+        # The 3 inner VMs (3 GiB) must NOT show up — only the hv itself.
+        assert gib == {"hv": 4.0}
+
+    def test_env_var_override_disables_check(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Values > 1.0 effectively disable the preflight — useful for
+        debug sessions where the user accepts the risk."""
+        from testrange.backends.libvirt._preflight import check_memory
+
+        monkeypatch.setenv("TESTRANGE_MEMORY_THRESHOLD", "10")
+        # 16 GiB host, already at 99% — declaring another 8 GiB.  Would
+        # normally blow the default 85% check out of the water; a 10x
+        # threshold lets even a grossly overcommitted plan through.
+        check_memory(
+            self._meminfo(total_gib=16, available_gib=0.16),
+            declared_gib={"big": 8.0},
+        )  # must not raise — effective bypass
+
+    def test_env_var_bad_value_rejected(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An invalid env value must fail loud — silently running a
+        different check than the user asked for is the worst option."""
+        from testrange.backends.libvirt._preflight import check_memory
+
+        monkeypatch.setenv("TESTRANGE_MEMORY_THRESHOLD", "banana")
+        with pytest.raises(OrchestratorError, match="not a number"):
+            check_memory(
+                self._meminfo(total_gib=16, available_gib=14),
+                declared_gib={"vm1": 1.0},
+            )
+
+    def test_error_message_lists_per_vm_breakdown(self) -> None:
+        """The error names every VM + its GiB so the user can tell
+        which one to shrink without re-reading the config."""
+        from testrange.backends.libvirt._preflight import check_memory
+
+        with pytest.raises(OrchestratorError) as excinfo:
+            check_memory(
+                self._meminfo(total_gib=16, available_gib=15),
+                declared_gib={"sidecar": 2.0, "hv": 12.0},
+                threshold=0.85,
+            )
+        msg = str(excinfo.value)
+        assert "sidecar: 2.00 GiB" in msg
+        assert "hv: 12.00 GiB" in msg
+        assert "threshold 85%" in msg
+        assert "TESTRANGE_MEMORY_THRESHOLD" in msg
+
+    def test_reads_meminfo_via_transport(self) -> None:
+        """The check must read the TARGET host's /proc/meminfo via the
+        transport — so for ``qemu+ssh://user@host`` it reads the remote
+        box, not this machine.  Regression guard on that plumbing."""
+        from testrange.backends.libvirt._preflight import read_meminfo
+
+        fake = MagicMock()
+        fake.read_bytes.return_value = (
+            b"MemTotal:       16000000 kB\n"
+            b"MemFree:          500000 kB\n"
+            b"MemAvailable:    2000000 kB\n"
+            b"Buffers:          100000 kB\n"
+        )
+        info = read_meminfo(fake)
+        fake.read_bytes.assert_called_once_with("/proc/meminfo")
+        assert info.total_bytes == 16_000_000 * 1024
+        assert info.available_bytes == 2_000_000 * 1024
+        assert info.used_bytes == (16_000_000 - 2_000_000) * 1024
+
+    def test_parse_meminfo_missing_fields_raises(self) -> None:
+        from testrange.backends.libvirt._preflight import _parse_meminfo
+
+        with pytest.raises(OrchestratorError, match="MemTotal and MemAvailable"):
+            _parse_meminfo("Buffers: 100 kB\n")  # no MemTotal/MemAvailable
