@@ -382,6 +382,87 @@ class TestInstallPhaseCleanup:
         dom.destroy.assert_not_called()  # not active → no destroy
         assert basic_vm._install_domain is None
 
+    def test_create_failure_undefines_the_defined_domain(
+        self, basic_vm: VM, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``defineXML`` persists a domain entry.  If the subsequent
+        ``create()`` raises, the entry must be undefined so the next
+        run doesn't inherit an orphan ``tr-build-*`` in libvirt."""
+        import libvirt
+        from testrange.exceptions import VMBuildError
+        dom, conn, cache, run = self._patch_install(basic_vm, monkeypatch)
+        dom.isActive.return_value = False  # never actually started
+        dom.create.side_effect = libvirt.libvirtError("create failed")
+
+        with pytest.raises(VMBuildError, match="Failed to start install domain"):
+            basic_vm._run_install_phase(
+                conn=conn, cache=cache, run=run,
+                install_network_name="tr-i",
+                install_network_mac="52:54:00:00:00:01",
+                h="cafebabe",
+            )
+
+        # The defined-but-never-started domain must be undefined.
+        dom.undefineFlags.assert_called_once()
+        # Not active → destroy shouldn't be called.
+        dom.destroy.assert_not_called()
+        assert basic_vm._install_domain is None
+
+    def test_persistent_state_errors_bail_early_with_diagnostic(
+        self, basic_vm: VM, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If ``domain.state()`` raises consistently (libvirtd died),
+        the install-phase poll must surface the real error fast —
+        not silently eat errors until _BUILD_TIMEOUT."""
+        import libvirt
+        from testrange.exceptions import VMBuildError
+        dom, conn, cache, run = self._patch_install(basic_vm, monkeypatch)
+        dom.state.side_effect = libvirt.libvirtError("connection lost")
+
+        with pytest.raises(
+            VMBuildError, match="Lost libvirt connection",
+        ) as excinfo:
+            basic_vm._run_install_phase(
+                conn=conn, cache=cache, run=run,
+                install_network_name="tr-i",
+                install_network_mac="52:54:00:00:00:01",
+                h="cafebabe",
+            )
+
+        # Called exactly the cap number of times (5).  The cap is what
+        # keeps us from silently sitting through a 30-minute timeout.
+        from testrange.backends.libvirt import vm as vm_mod
+        assert dom.state.call_count == vm_mod._MAX_CONSECUTIVE_STATE_ERRORS
+        assert "connection lost" in str(excinfo.value)
+
+        # Cleanup still ran — the finally block is unconditional.
+        dom.undefineFlags.assert_called_once()
+        assert basic_vm._install_domain is None
+
+    def test_transient_state_error_does_not_bail(
+        self, basic_vm: VM, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A one-off libvirtError followed by a successful state() must
+        not count against the error cap — counter resets on success."""
+        import libvirt
+        dom, conn, cache, run = self._patch_install(basic_vm, monkeypatch)
+        dom.isActive.return_value = False
+
+        # 1st call: transient error; 2nd call: success, SHUTOFF.
+        dom.state.side_effect = [
+            libvirt.libvirtError("blip"),
+            (libvirt.VIR_DOMAIN_SHUTOFF, 0),
+        ]
+
+        result = basic_vm._run_install_phase(
+            conn=conn, cache=cache, run=run,
+            install_network_name="tr-i",
+            install_network_mac="52:54:00:00:00:01",
+            h="cafebabe",
+        )
+        assert result == Path("/cache/winbox.qcow2")
+        assert dom.state.call_count == 2
+
 
 class TestBootKeypressSpam:
     """Windows install ISOs under UEFI show a 'Press any key to boot
