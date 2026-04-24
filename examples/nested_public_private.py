@@ -207,7 +207,7 @@ def gen_tests() -> list[Test]:
                         post_install_cmds=_nginx_post_install("Sidecar L1"),
                         devices=[
                             vCPU(1),
-                            Memory(1),
+                            Memory(0.5),
                             HardDrive(10),
                             VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
                         ],
@@ -220,7 +220,7 @@ def gen_tests() -> list[Test]:
                         communicator="ssh",
                         devices=[
                             vCPU(2),
-                            Memory(6),
+                            Memory(4),
                             HardDrive(60),
                             VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
                         ],
@@ -246,7 +246,7 @@ def gen_tests() -> list[Test]:
                                 ),
                                 devices=[
                                     vCPU(1),
-                                    Memory(1),
+                                    Memory(0.5),
                                     HardDrive(10),
                                     VirtualNetworkRef(
                                         "PublicNet", ip="10.42.0.5",
@@ -263,7 +263,7 @@ def gen_tests() -> list[Test]:
                                 ),
                                 devices=[
                                     vCPU(1),
-                                    Memory(1),
+                                    Memory(0.5),
                                     HardDrive(10),
                                     VirtualNetworkRef(
                                         "PrivateNet", ip="10.43.0.5",
@@ -281,7 +281,7 @@ def gen_tests() -> list[Test]:
                                 pkgs=[Apt("curl"), Apt("iputils-ping")],
                                 devices=[
                                     vCPU(1),
-                                    Memory(1),
+                                    Memory(0.5),
                                     HardDrive(10),
                                     VirtualNetworkRef(
                                         "PublicNet", ip="10.42.0.6",
