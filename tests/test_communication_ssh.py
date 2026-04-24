@@ -64,6 +64,21 @@ class TestWaitReady:
         assert c._client is clients[0]
         clients[0].connect.assert_called_once()
 
+    def test_connect_enables_agent_and_key_discovery(
+        self, SSHCommunicator, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Debian cloud images disable root password SSH; auth relies
+        on the private key that matches Credential.ssh_key being
+        reachable via ssh-agent or a standard ``~/.ssh/`` key file.
+        Regression guard: don't reintroduce ``allow_agent=False`` /
+        ``look_for_keys=False``."""
+        clients = self._mock_client_class(monkeypatch)
+        c = SSHCommunicator("h", "u")
+        c.wait_ready(timeout=5)
+        kwargs = clients[0].connect.call_args.kwargs
+        assert kwargs["allow_agent"] is True
+        assert kwargs["look_for_keys"] is True
+
     def test_connection_failures_retry_until_timeout(
         self, SSHCommunicator, monkeypatch: pytest.MonkeyPatch
     ) -> None:

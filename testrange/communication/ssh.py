@@ -115,8 +115,17 @@ class SSHCommunicator(AbstractCommunicator):
                     timeout=attempt_timeout,
                     banner_timeout=attempt_timeout,
                     auth_timeout=attempt_timeout,
-                    allow_agent=False,
-                    look_for_keys=False,
+                    # Allow discovery of the private key that matches
+                    # the Credential.ssh_key cloud-init authorized on
+                    # the guest: ssh-agent first (most common), then
+                    # ~/.ssh/id_{ed25519,rsa,ecdsa,...} as fallback.
+                    # Mirrors how a user's interactive ``ssh`` finds
+                    # the same key, so behaviour lines up with their
+                    # expectations — and Debian cloud images disable
+                    # root password SSH, so key-based auth is the only
+                    # path that actually works there.
+                    allow_agent=True,
+                    look_for_keys=True,
                 )
                 self._client = client
                 return
