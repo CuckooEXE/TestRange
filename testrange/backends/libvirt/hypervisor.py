@@ -6,7 +6,7 @@ A :class:`Hypervisor` is a regular libvirt
 packages and post-install steps needed to run ``libvirtd`` inside
 it:
 
-- ``libvirt-daemon-system``, ``qemu-kvm``, ``qemu-utils`` via apt
+- ``libvirt-daemon-system``, ``qemu-system-x86``, ``qemu-utils`` via apt
 - ``systemctl enable --now libvirtd`` so the daemon is reachable on
   first boot
 - members of the ``libvirt`` group for every declared user so that
@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 _HYPERVISOR_PKGS: tuple[str, ...] = (
     "libvirt-daemon-system",
-    "qemu-kvm",
+    "qemu-system-x86",
     "qemu-utils",
     "libvirt-clients",
 )

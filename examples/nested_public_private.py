@@ -63,7 +63,7 @@ Running
     testrange run examples/nested_public_private.py:gen_tests
 
 Expect the first run to take a while — the outer hypervisor installs
-libvirt + qemu-kvm, then the inner orchestrator repeats the install
+libvirt + qemu-system-x86, then the inner orchestrator repeats the install
 phase for each L2 VM inside it.  Second runs hit the post-install
 cache on both layers.
 """

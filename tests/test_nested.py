@@ -99,7 +99,7 @@ class TestHypervisorDefaultPayload:
         hv = _hypervisor()
         pkg_names = {p.name for p in hv.pkgs}
         assert "libvirt-daemon-system" in pkg_names
-        assert "qemu-kvm" in pkg_names
+        assert "qemu-system-x86" in pkg_names
         assert "qemu-utils" in pkg_names
 
     def test_caller_pkgs_appended(self) -> None:

@@ -15,7 +15,7 @@ Prerequisites
 
 - Passwordless SSH from the outer host to the target.  Paramiko uses
   standard discovery (``~/.ssh/config``, ssh-agent, default key files).
-- ``libvirt-daemon-system`` + ``qemu-kvm`` + ``qemu-utils`` installed
+- ``libvirt-daemon-system`` + ``qemu-system-x86`` + ``qemu-utils`` installed
   on the target.  The SSH user must be in the target's ``libvirt``
   group or run as root.
 - Enough free disk on ``/var/tmp/testrange/<ssh_user>/`` on the target
