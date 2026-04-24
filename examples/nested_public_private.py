@@ -207,7 +207,7 @@ def gen_tests() -> list[Test]:
                         post_install_cmds=_nginx_post_install("Sidecar L1"),
                         devices=[
                             vCPU(1),
-                            Memory(0.5),
+                            Memory(1),
                             HardDrive(10),
                             VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
                         ],
