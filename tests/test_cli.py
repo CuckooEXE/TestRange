@@ -355,9 +355,10 @@ class TestBackendUrlDispatch:
         )
         assert isinstance(orch, ProxmoxOrchestrator)
         assert orch._host == "pve.example.com"
-        assert orch._token == {
-            "token": None, "user": "root", "password": "hunter2",
-        }
+        # CLI lifts ``user:password`` out of the URL into the
+        # orchestrator's explicit auth kwargs.
+        assert orch._user == "root"
+        assert orch._password == "hunter2"
 
     def test_proxmox_token_in_userinfo(self) -> None:
         from testrange.backends.proxmox import cli_build_orchestrator
@@ -366,27 +367,27 @@ class TestBackendUrlDispatch:
             self._fake_original(),
         )
         assert orch is not None
-        assert orch._token == {
-            "token": "abcdefghij", "user": None, "password": None,
-        }
+        # Userinfo without a colon is treated as a token.  The
+        # orchestrator stashes it on ``_legacy_token`` until the URL
+        # handler grows explicit ``token_name``/``token_value``
+        # parsing for the ``user@realm!name=secret`` form.
+        assert orch._legacy_token == "abcdefghij"
         assert orch._node == "pve01"
 
     def test_proxmox_token_query_param(self) -> None:
-        """?token= takes precedence over userinfo (lets callers pass
-        the full ``user@realm!name=secret`` blob without URL-encoding)."""
-        from testrange.backends.proxmox import cli_build_orchestrator
+        """``?token=`` takes precedence over userinfo (lets callers
+        pass the full ``user@realm!name=secret`` blob without
+        URL-encoding)."""
+        from testrange.backends.proxmox import (
+            ProxmoxOrchestrator,
+            cli_build_orchestrator,
+        )
         orch = cli_build_orchestrator(
             "proxmox://pve.example.com?token=root!auto&storage=local-lvm",
             self._fake_original(),
         )
-        assert orch is not None
-        # ``_token`` is typed as ``object`` on the ProxmoxOrchestrator;
-        # pyright can't tell it's a dict without narrowing.  assert it
-        # here and then index.
-        from testrange.backends.proxmox import ProxmoxOrchestrator
         assert isinstance(orch, ProxmoxOrchestrator)
-        assert isinstance(orch._token, dict)
-        assert orch._token["token"] == "root!auto"
+        assert orch._legacy_token == "root!auto"
         assert orch._storage == "local-lvm"
 
     def test_central_dispatcher_iterates_backends(
