@@ -66,11 +66,13 @@ Non-goals (for v1 of the Proxmox backend)
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from testrange._logging import get_logger
+from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
 from testrange.exceptions import OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
 
@@ -133,6 +135,17 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         the explicit kwargs above.
     """
 
+    # Narrow the abstract ``list[AbstractVirtualNetwork]`` to our
+    # concrete subclass so calls to ``bind_run`` / ``register_vm`` /
+    # ``backend_name`` type-check without a per-call cast.  The
+    # ``pyright: ignore`` matches the libvirt backend's convention —
+    # ``list`` is invariant, so the narrow is technically a violation
+    # of the LSP variance rule, but it's intentional and safe
+    # (mixing backend types in one orchestrator is a user error
+    # caught at construction).
+    _networks: list[ProxmoxVirtualNetwork]  # type: ignore[assignment] # pyright: ignore[reportIncompatibleVariableOverride]
+    _started_networks: list[ProxmoxVirtualNetwork]
+
     def __init__(
         self,
         host: str = "localhost",
@@ -155,7 +168,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         )
         self._host = host
         self._port = port
-        self._networks = list(networks) if networks else []
+        # Narrow the abstract list back to our concrete subclass —
+        # mixing backend types in one orchestrator is a user error
+        # we don't try to handle gracefully.  Same convention as
+        # the libvirt backend (see orchestrator.py:272).
+        self._networks = cast(  # pyright: ignore[reportIncompatibleVariableOverride]
+            "list[ProxmoxVirtualNetwork]",
+            list(networks) if networks else [],
+        )
         self._vm_list = list(vms) if vms else []
         self._cache_root = cache_root
         self._node = node
@@ -183,6 +203,8 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._client: Any = None
         self.vms = {}
         self._run = None
+        self._run_id: str | None = None
+        self._started_networks = []
 
     @classmethod
     def backend_type(cls) -> str:
@@ -233,37 +255,120 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             "PVE ready: node=%s storage=%s zone=%s",
             self._node, self._storage, self._zone,
         )
+
+        # Run setup — every entry generates a fresh ID so concurrent
+        # runs against the same PVE namespace cleanly.  RunDir
+        # (scratch space for install overlays / seed ISOs) is
+        # deferred until VM provisioning lands; for now the run ID
+        # is enough to bind networks against.
+        self._run_id = uuid.uuid4().hex
+        _log.info("run id: %s", self._run_id[:8])
+
+        try:
+            self._start_networks()
+        except Exception:
+            # Roll back any networks we managed to bring up before
+            # the failure so we don't leak SDN state into the user's
+            # exception.
+            self._teardown_networks()
+            self._client = None
+            self._run_id = None
+            raise
+
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        """Close the PVE client.
+        """Tear down SDN vnets and close the PVE client.
 
-        Future slices will tear down VMs and SDN vnets before this; for
-        now the orchestrator owns no provisioned resources, so the
-        teardown is a single client-handle release.  Honours
-        :meth:`leak` by short-circuiting any future cleanup the same
-        way the libvirt backend does.
+        Honours :meth:`leak` by skipping resource teardown (just
+        releases the client handle) — the same contract the libvirt
+        backend follows.  Per the
+        :class:`~testrange.orchestrator_base.AbstractOrchestrator`
+        contract, never raises: per-network teardown errors are
+        already swallowed by :meth:`ProxmoxVirtualNetwork.stop`, and
+        any other unexpected error here is logged.
         """
-        if self._leaked:
-            _log.info(
-                "leak() set — leaving Proxmox resources in place; "
-                "client handle released",
-            )
+        try:
+            if self._leaked:
+                hints = self.keep_alive_hints()
+                _log.info(
+                    "leak() set — leaving %d Proxmox network(s) in "
+                    "place; manual cleanup hints follow",
+                    len(self._started_networks),
+                )
+                for line in hints:
+                    _log.info("  %s", line)
+            else:
+                self._teardown_networks()
+        except Exception as exc:  # pragma: no cover — defensive
+            _log.warning("unexpected error during PVE teardown: %s", exc)
+        finally:
             self._client = None
-            return None
-        self._client = None
-        return None
+            self._run_id = None
 
     def keep_alive_hints(self) -> list[str]:
         """Return cleanup commands for resources left behind by
         :meth:`leak`.
 
-        At the current implementation slice no provisioned resources
-        survive ``__exit__``, so the hint list is empty.  Future
-        slices populate it with ``pvesh`` snippets for the leaked
-        VMIDs and SDN vnets.
+        Each line is a self-contained ``pvesh`` invocation a human
+        would run on the PVE node to release one resource — useful
+        when ``leak()`` was set, the user is done poking, and they
+        want to tidy up by hand without booting another orchestrator.
+
+        Future slices add lines for leaked VMIDs.  This slice covers
+        the SDN vnets started during :meth:`__enter__`.
         """
-        return []
+        lines: list[str] = []
+        for net in self._started_networks:
+            try:
+                vnet = net.backend_name()
+            except RuntimeError:
+                # bind_run never ran — net was never actually started;
+                # nothing to advise on.
+                continue
+            lines.append(
+                f"pvesh delete /cluster/sdn/vnets/{vnet}"
+            )
+        if lines:
+            lines.append("pvesh set /cluster/sdn  # apply pending deletes")
+        return lines
+
+    # ------------------------------------------------------------------
+    # Network lifecycle
+    # ------------------------------------------------------------------
+
+    def _start_networks(self) -> None:
+        """Bind + start every configured network under our run ID.
+
+        Tracks successfully-started networks on
+        :attr:`_started_networks` so :meth:`_teardown_networks`
+        only stops what we actually brought up — important on the
+        rollback path when a later network's :meth:`start` fails.
+        """
+        assert self._run_id is not None, "run id must be set first"
+        for net in self._networks:
+            net.bind_run(self._run_id)
+            net.start(self)
+            self._started_networks.append(net)
+            _log.debug(
+                "started network %r (backend=%s)",
+                net.name, net.backend_name(),
+            )
+
+    def _teardown_networks(self) -> None:
+        """Stop each network we brought up, in reverse start order.
+
+        :meth:`ProxmoxVirtualNetwork.stop` is itself best-effort and
+        never raises, so this loop just walks the list.  Reverse order
+        mirrors the libvirt backend's teardown discipline — symmetric
+        with :meth:`_start_networks` and reduces the chance of
+        cross-resource dependencies tripping cleanup (not relevant
+        for current SDN vnets, but a useful default if future
+        backends add inter-network dependencies).
+        """
+        while self._started_networks:
+            net = self._started_networks.pop()
+            net.stop(self)
 
     # ------------------------------------------------------------------
     # Helpers

@@ -78,6 +78,16 @@ def orch():
         yield entered
 
 
+def _build_orch(**overrides):
+    """Build (don't enter) a fresh :class:`ProxmoxOrchestrator` with
+    overrides on top of the env-derived auth kwargs."""
+    from testrange.backends.proxmox import ProxmoxOrchestrator
+
+    kwargs = _env_or_skip()
+    kwargs.update(overrides)
+    return ProxmoxOrchestrator(**kwargs)
+
+
 @pytest.fixture
 def short_run_id() -> str:
     """A 4-char run ID that survives PVE's 8-char SDN cap when
@@ -209,6 +219,81 @@ class TestNetworkLifecycle:
             assert colliding._subnet_created is False
         finally:
             first.stop(orch)
+
+
+class TestNetworkLifecycleViaOrchestrator:
+    """The orchestrator's ``__enter__`` / ``__exit__`` should drive the
+    SDN-network lifecycle end-to-end — bind_run + start on entry,
+    stop on exit, with rollback if any single network's start fails."""
+
+    def test_with_block_starts_and_stops_networks(self) -> None:
+        from testrange.backends.proxmox import ProxmoxVirtualNetwork
+
+        nets = [
+            ProxmoxVirtualNetwork("trA", "10.245.1.0/24", internet=False),
+            ProxmoxVirtualNetwork("trB", "10.245.2.0/24", internet=True),
+        ]
+        orch = _build_orch(networks=nets)
+        with orch:
+            active = {v["vnet"] for v in orch._client.cluster.sdn.vnets.get()}
+            for net in nets:
+                assert net.backend_name() in active
+
+        # After __exit__, all configured networks should be torn down.
+        with _build_orch() as probe:
+            after = {v["vnet"] for v in probe._client.cluster.sdn.vnets.get()}
+            for net in nets:
+                assert net.backend_name() not in after, (
+                    f"vnet {net.backend_name()!r} leaked after __exit__"
+                )
+
+    def test_failed_start_rolls_back_earlier_networks(self) -> None:
+        """If the second network fails, the first must be torn down."""
+        from testrange.backends.proxmox import ProxmoxVirtualNetwork
+        from testrange.exceptions import NetworkError
+
+        good = ProxmoxVirtualNetwork("trrg", "10.245.3.0/24")
+        bad = ProxmoxVirtualNetwork("trrb", "10.245.4.0/24")
+        # Sabotage the second by clearing its parsed network — start()
+        # will trip on gateway_ip and raise.
+        bad._network = None  # type: ignore[assignment]
+
+        # AttributeError surfaces from ``gateway_ip`` resolution, then
+        # gets wrapped into ``NetworkError`` by the network's start().
+        with (
+            pytest.raises((NetworkError, AttributeError)),
+            _build_orch(networks=[good, bad]),
+        ):
+            pass  # pragma: no cover — never reached
+
+        # ``good`` must not survive the rollback.
+        with _build_orch() as probe:
+            active = {v["vnet"] for v in probe._client.cluster.sdn.vnets.get()}
+            assert good.backend_name() not in active, (
+                f"vnet {good.backend_name()!r} leaked after rollback"
+            )
+
+    def test_leak_preserves_networks_and_emits_hints(self) -> None:
+        """``leak()`` keeps the networks alive past ``__exit__`` and
+        :meth:`keep_alive_hints` reports the ``pvesh`` cleanup
+        commands a human would run."""
+        from testrange.backends.proxmox import ProxmoxVirtualNetwork
+
+        net = ProxmoxVirtualNetwork("trlk", "10.245.5.0/24")
+        orch = _build_orch(networks=[net])
+        with orch:
+            orch.leak()
+            hints = orch.keep_alive_hints()
+        backend = net.backend_name()
+        assert any(backend in h for h in hints)
+        assert any("/cluster/sdn" in h for h in hints[-1:])  # reload
+
+        # Verify the vnet survived, then clean up by hand.
+        with _build_orch() as probe:
+            active = {v["vnet"] for v in probe._client.cluster.sdn.vnets.get()}
+            assert backend in active
+            net._client = probe._client
+            net.stop(probe)
 
 
 class TestErrorPaths:
