@@ -286,6 +286,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         try:
             self._setup_vm_networks()
             self._start_networks()
+            self._warn_if_unroutable()
             self._provision_vms()
         except Exception:
             # Roll back in reverse provisioning order so we don't
@@ -378,6 +379,71 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             _log.debug(
                 "started network %r (backend=%s)",
                 net.name, net.backend_name(),
+            )
+
+    def _check_network_reachable(
+        self, net: ProxmoxVirtualNetwork,
+    ) -> bool:
+        """Check whether the test runner has a route into *net*'s subnet.
+
+        SDN vnets live on a bridge inside the PVE host.  The test
+        runner needs an IP route through the PVE node to reach VM
+        IPs on that subnet — without it, the SSH-readiness wait in
+        :meth:`ProxmoxVM.start_run` will time out at 300s with no
+        useful diagnostic.
+
+        We can't TCP-probe a VM that doesn't exist yet, and the
+        gateway IP isn't a host (just the PVE-side bridge).  But the
+        kernel knows whether *anything* on the subnet is routable:
+        ``ip route get`` returns a "via … dev …" line for a routable
+        target and exits non-zero otherwise.  We pick a host inside
+        the subnet (any will do — the kernel doesn't ARP) and ask.
+        """
+        import subprocess
+
+        # Pick the gateway address — guaranteed to be in-subnet and
+        # not equal to the test runner's own address.
+        target = net.gateway_ip
+        try:
+            result = subprocess.run(
+                ["ip", "-4", "route", "get", target],
+                capture_output=True, text=True, timeout=2,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Either ``ip`` isn't on PATH or the kernel hung — give
+            # the user the benefit of the doubt and skip the warning.
+            return True
+        if result.returncode != 0:
+            return False
+        # ``ip route get`` returns 0 even when the route is via the
+        # default gateway, which would not actually reach the SDN
+        # subnet (the default GW has no route for it).  Look for a
+        # ``via <pve-host>`` clause to confirm we'd egress through
+        # the PVE node.
+        return f"via {self._host}" in result.stdout
+
+    def _warn_if_unroutable(self) -> None:
+        """Log a clear ``ip route add ...`` hint for any SDN subnet
+        that isn't reachable from the test runner.
+
+        Called after networks come up but before VMs build, so the
+        warning lands in the user's logs *before* a 300-second SSH
+        timeout would.  Doesn't raise — the hint is advisory; some
+        topologies may route correctly via mechanisms we can't
+        detect here.
+        """
+        for net in self._started_networks:
+            if self._check_network_reachable(net):
+                continue
+            _log.warning(
+                "SDN subnet %s (gateway %s) is not reachable from "
+                "this host — VM SSH attach will likely time out.",
+                net.subnet, net.gateway_ip,
+            )
+            _log.warning(
+                "Add a route through the PVE node, e.g.: "
+                "sudo ip route add %s via %s",
+                net.subnet, self._host,
             )
 
     def _teardown_networks(self) -> None:
