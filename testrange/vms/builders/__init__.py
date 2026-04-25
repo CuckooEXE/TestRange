@@ -46,6 +46,7 @@ predicates don't shadow user registrations unless the user asks for
 that behaviour explicitly.
 """
 
+import re
 from collections.abc import Callable
 
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
@@ -54,6 +55,10 @@ from testrange.vms.builders.cloud_init import (
     build_seed_iso_bytes,
 )
 from testrange.vms.builders.noop import NoOpBuilder
+from testrange.vms.builders.proxmox_answer import (
+    ProxmoxAnswerBuilder,
+    build_proxmox_seed_iso_bytes,
+)
 from testrange.vms.builders.unattend import (
     WindowsUnattendedBuilder,
     build_autounattend_iso_bytes,
@@ -63,7 +68,22 @@ from testrange.vms.images import is_windows_image
 _BuilderFactory = Callable[[], Builder]
 _BuilderPredicate = Callable[[str], bool]
 
+_PROXMOX_ISO_RE = re.compile(r"proxmox-ve[-_].*\.iso$", re.IGNORECASE)
+
+
+def is_proxmox_installer_iso(iso: str) -> bool:
+    """Return ``True`` when *iso* looks like a ProxMox VE installer ISO.
+
+    Matches filenames like ``proxmox-ve-8.2-1.iso`` and the hyphenated
+    or underscored variants upstream has shipped over the years.  The
+    predicate runs against the full ``iso=`` string so URL paths match
+    too (``.../proxmox-ve_8.2-1.iso``).
+    """
+    return bool(_PROXMOX_ISO_RE.search(iso))
+
+
 BUILDER_REGISTRY: list[tuple[_BuilderPredicate, _BuilderFactory]] = [
+    (is_proxmox_installer_iso, ProxmoxAnswerBuilder),
     (is_windows_image, WindowsUnattendedBuilder),
 ]
 """Ordered list of ``(predicate, factory)`` pairs used for auto-selection.
@@ -120,9 +140,12 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
+    "ProxmoxAnswerBuilder",
     "build_seed_iso_bytes",
     "build_autounattend_iso_bytes",
+    "build_proxmox_seed_iso_bytes",
     "BUILDER_REGISTRY",
     "register_builder",
     "auto_select_builder",
+    "is_proxmox_installer_iso",
 ]

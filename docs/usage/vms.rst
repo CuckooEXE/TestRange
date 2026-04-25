@@ -41,7 +41,7 @@ Builders
 
 Every VM has a :class:`~testrange.vms.builders.base.Builder`: a
 strategy object that encodes how the VM gets from ``iso=`` to a
-runnable disk image.  Three concrete builders ship today:
+runnable disk image.  Four concrete builders ship today:
 
 - :class:`~testrange.vms.builders.CloudInitBuilder` — boots a Linux
   cloud image under a NoCloud seed ISO and lets cloud-init customise
@@ -50,6 +50,13 @@ runnable disk image.  Three concrete builders ship today:
   Windows installer with an autounattend seed and lets Setup +
   FirstLogonCommands run to completion.  Default for ``.iso`` inputs
   that look like Windows install media (see :doc:`windows`).
+- :class:`~testrange.vms.builders.ProxmoxAnswerBuilder` — boots a
+  ProxMox VE installer with a ``PROXMOX-AIS``-labeled answer-file
+  seed and lets PVE's auto-installer run unattended.  Default for
+  ``proxmox-ve_*.iso`` inputs.  Always declare a static ``ip=`` on
+  the VM's :class:`~testrange.devices.VirtualNetworkRef` — PVE's
+  ``from-dhcp`` mode freezes the install-phase lease as static
+  config, which doesn't survive into the run-phase network.
 - :class:`~testrange.vms.builders.NoOpBuilder` — no install phase;
   the user's qcow2 is already ready (BYOI, see :ref:`byoi`).
 

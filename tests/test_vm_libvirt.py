@@ -389,6 +389,7 @@ class TestInstallPhaseCleanup:
         ``create()`` raises, the entry must be undefined so the next
         run doesn't inherit an orphan ``tr-build-*`` in libvirt."""
         import libvirt
+
         from testrange.exceptions import VMBuildError
         dom, conn, cache, run = self._patch_install(basic_vm, monkeypatch)
         dom.isActive.return_value = False  # never actually started
@@ -415,6 +416,7 @@ class TestInstallPhaseCleanup:
         the install-phase poll must surface the real error fast —
         not silently eat errors until _BUILD_TIMEOUT."""
         import libvirt
+
         from testrange.exceptions import VMBuildError
         dom, conn, cache, run = self._patch_install(basic_vm, monkeypatch)
         dom.state.side_effect = libvirt.libvirtError("connection lost")
@@ -462,6 +464,166 @@ class TestInstallPhaseCleanup:
         )
         assert result == Path("/cache/winbox.qcow2")
         assert dom.state.call_count == 2
+
+
+class TestInstallPhaseNvramSnapshot:
+    """The install-phase NVRAM holds the boot entries the installer
+    just wrote.  Libvirt's ``VIR_DOMAIN_UNDEFINE_NVRAM`` (passed by
+    ``_destroy_and_undefine``) deletes the per-run NVRAM at teardown,
+    so the snapshot into the cache MUST happen between the install
+    SHUTOFF and the finally block — otherwise the run phase boots
+    with empty boot entries and any distro that doesn't write the
+    ``/EFI/BOOT/BOOTX64.EFI`` removable-path fallback (PVE included)
+    hangs at an empty EFI shell."""
+
+    def _patch_install_uefi(
+        self, vm: VM, monkeypatch: pytest.MonkeyPatch, *, uefi: bool,
+    ) -> tuple[MagicMock, MagicMock, MagicMock, MagicMock]:
+        """Mirror :class:`TestInstallPhaseCleanup` but parameterised on
+        ``uefi`` so we can prove the snapshot only fires for UEFI."""
+        import libvirt as _libvirt
+
+        from testrange._run import RunDir
+        from testrange.cache import CacheManager
+        from testrange.vms.builders.base import InstallDomain
+
+        dom = MagicMock()
+        dom.isActive.return_value = False  # already shutoff for happy path
+        dom.state.return_value = (_libvirt.VIR_DOMAIN_SHUTOFF, 0)
+        conn = MagicMock()
+        conn.defineXML.return_value = dom
+
+        cache = MagicMock(spec=CacheManager)
+        cache.store_vm.return_value = "/cache/vm.qcow2"
+
+        run = MagicMock(spec=RunDir)
+        run.run_id = "abcdef00-1111-2222-3333-444455556666"
+        run.nvram_path.return_value = "/tmp/proxmox_VARS.fd"
+
+        # Avoid touching the real OVMF template on disk.
+        monkeypatch.setattr(
+            "testrange.backends.libvirt.vm._preseed_nvram",
+            lambda _ref, _t: None,
+        )
+
+        install_spec = InstallDomain(
+            work_disk="/tmp/work.qcow2",
+            seed_iso="/tmp/seed.iso",
+            extra_cdroms=(),
+            uefi=uefi,
+            windows=False,
+            boot_cdrom=False,
+        )
+        monkeypatch.setattr(
+            vm.builder, "prepare_install_domain",
+            lambda _vm, _run, _cache: install_spec,
+        )
+        monkeypatch.setattr(
+            vm.builder, "install_manifest",
+            lambda _vm, _h: {"name": _vm.name},
+        )
+        monkeypatch.setattr(
+            "testrange.backends.libvirt.vm._POLL_INTERVAL", 0,
+        )
+
+        return dom, conn, cache, run
+
+    def test_uefi_install_snapshots_nvram_to_cache(
+        self, basic_vm: VM, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        dom, conn, cache, run = self._patch_install_uefi(
+            basic_vm, monkeypatch, uefi=True,
+        )
+
+        basic_vm._run_install_phase(
+            conn=conn, cache=cache, run=run,
+            install_network_name="tr-i",
+            install_network_mac="52:54:00:00:00:01",
+            h="cafebabe",
+        )
+
+        cache.store_vm.assert_called_once()
+        cache.store_vm_nvram.assert_called_once()
+        # The snapshot reads the per-run NVRAM file libvirt wrote into.
+        snap_args = cache.store_vm_nvram.call_args
+        assert snap_args.args[0] == "cafebabe"        # config_hash
+        assert snap_args.args[1] == "/tmp/proxmox_VARS.fd"
+
+    def test_bios_install_does_not_snapshot_nvram(
+        self, basic_vm: VM, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """BIOS domains have no NVRAM file; calling ``store_vm_nvram``
+        for them would be a no-op at best and a stat on a missing file
+        at worst."""
+        dom, conn, cache, run = self._patch_install_uefi(
+            basic_vm, monkeypatch, uefi=False,
+        )
+
+        basic_vm._run_install_phase(
+            conn=conn, cache=cache, run=run,
+            install_network_name="tr-i",
+            install_network_mac="52:54:00:00:00:01",
+            h="cafebabe",
+        )
+        cache.store_vm.assert_called_once()
+        cache.store_vm_nvram.assert_not_called()
+
+    def test_failed_install_does_not_snapshot_nvram(
+        self, basic_vm: VM, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If the cache write fails (or the install hits a build
+        timeout), we must NOT snapshot a partial / blank NVRAM —
+        a future run hitting that cache entry would inherit broken
+        boot state."""
+        from testrange.exceptions import CacheError
+        dom, conn, cache, run = self._patch_install_uefi(
+            basic_vm, monkeypatch, uefi=True,
+        )
+        cache.store_vm.side_effect = CacheError("compress failed")
+
+        with pytest.raises(CacheError):
+            basic_vm._run_install_phase(
+                conn=conn, cache=cache, run=run,
+                install_network_name="tr-i",
+                install_network_mac="52:54:00:00:00:01",
+                h="cafebabe",
+            )
+        cache.store_vm_nvram.assert_not_called()
+
+
+class TestPreseedNvram:
+    """``_preseed_nvram`` is what makes the NVRAM file readable by us
+    after libvirt's DAC driver chowns it for the install-phase domain.
+    Without our pre-creation, ``remember_owner`` has no original-owner
+    xattr to restore on shutdown and the file stays
+    ``libvirt-qemu:0600``."""
+
+    def test_writes_template_bytes_to_ref(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from testrange.backends.libvirt.vm import _preseed_nvram
+
+        # Stub the OVMF template so we don't depend on the host having
+        # the real firmware file installed.
+        fake_template = tmp_path / "OVMF_VARS_4M.fd"
+        fake_template.write_bytes(b"OVMF VARS TEMPLATE BYTES")
+        monkeypatch.setattr(
+            "testrange.backends.libvirt.vm._OVMF_VARS_TEMPLATE",
+            str(fake_template),
+        )
+
+        transport = MagicMock()
+        nvram_ref = "/run/dir/proxmox_VARS.fd"
+
+        _preseed_nvram(nvram_ref, transport)
+
+        transport.write_bytes.assert_called_once()
+        args = transport.write_bytes.call_args
+        assert args.args[0] == nvram_ref
+        assert args.args[1] == b"OVMF VARS TEMPLATE BYTES"
+        # Mode 0o644 lets us read back after libvirt restores
+        # ownership on domain shutdown.
+        assert args.kwargs.get("mode") == 0o644
 
 
 class TestBootKeypressSpam:

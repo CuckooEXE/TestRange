@@ -234,6 +234,57 @@ class CacheManager:
             tmp.rename(dest)
         return dest
 
+    def get_proxmox_prepared_iso(self, vanilla_iso: Path) -> Path:
+        """Return the local path to a prepared ProxMox installer ISO.
+
+        The ProxMox VE installer only enters unattended (answer-file)
+        mode when its initrd carries ``/auto-installer-mode.toml``.  We
+        produce that modified ISO with a pure-Python replacement of
+        ``proxmox-auto-install-assistant prepare-iso`` — see
+        :mod:`testrange.vms.builders._proxmox_prepare` — and cache the
+        output here keyed by the SHA-256 of the vanilla ISO.  One base
+        ISO version → one prepared copy, reused across every ProxMox
+        VM that builds against that source.
+        Concurrent callers contend on a :class:`FileLock` sibling;
+        whoever wins writes the prepared ISO atomically via a
+        ``.part`` rename, so an interrupted prep can't leave a stub
+        that later callers mistake for a cache hit.
+        :param vanilla_iso: Local path to an unmodified PVE installer
+            ISO (typically the result of :meth:`get_image` for a
+            ProxMox VE release URL).
+        :returns: Path to the prepared ISO under
+            ``<cache_root>/images/proxmox-prepared-<sha>.iso``.
+        :raises CacheError: On filesystem errors during prep.
+        :raises ~testrange.vms.builders._proxmox_prepare.ProxmoxPrepareError:
+            If the ISO can't be prepared (unknown initrd compression,
+            missing initrd, etc.).
+        """
+        from testrange.vms.builders._proxmox_prepare import prepare_iso_bytes
+
+        sha = _sha256_file(vanilla_iso)[:24]
+        dest = self.images_dir / f"proxmox-prepared-{sha}.iso"
+        lock_path = self.images_dir / f"proxmox-prepared-{sha}.lock"
+        with FileLock(str(lock_path), timeout=1800):
+            if dest.exists():
+                _log.debug("proxmox prepared-ISO cache hit (%s)", sha)
+                return dest
+            _log.info(
+                "preparing proxmox installer ISO (sha=%s) → %s", sha, dest,
+            )
+            tmp = dest.with_suffix(".iso.part")
+            try:
+                with log_duration(
+                    _log, f"prepare proxmox ISO {vanilla_iso.name!r}"
+                ):
+                    prepare_iso_bytes(vanilla_iso, tmp)
+                os.chmod(tmp, 0o644)
+                tmp.rename(dest)
+            except BaseException:
+                if tmp.exists():
+                    tmp.unlink()
+                raise
+        return dest
+
     def get_virtio_win_iso(
         self,
         url: str = _DEFAULT_VIRTIO_WIN_URL,
@@ -367,6 +418,84 @@ class CacheManager:
         """
         t = backend.transport
         return t._join(t.vms_dir(), f"{config_hash}.json")
+
+    def vm_nvram_ref(
+        self,
+        config_hash: str,
+        backend: StorageBackend,
+    ) -> str:
+        """Return the backend-local ref for a cached UEFI NVRAM sidecar.
+
+        Lives alongside the qcow2 / manifest at
+        ``<vms_dir>/<config_hash>.nvram.fd``.  Absence means this VM
+        was installed in BIOS mode (no NVRAM to preserve) or nothing
+        has populated it yet for this hash.
+
+        :param config_hash: Hash key from :func:`vm_config_hash`.
+        :param backend: Backend whose ``vms/`` dir hosts the sidecar.
+        """
+        t = backend.transport
+        return t._join(t.vms_dir(), f"{config_hash}.nvram.fd")
+
+    def store_vm_nvram(
+        self,
+        config_hash: str,
+        nvram_src_ref: str,
+        backend: StorageBackend,
+    ) -> str:
+        """Snapshot the install-phase UEFI NVRAM into the cache sidecar.
+
+        The installer writes EFI boot entries into NVRAM during
+        install; without this snapshot those entries die with the
+        per-run NVRAM file (libvirt's
+        ``VIR_DOMAIN_UNDEFINE_NVRAM`` flag deletes it at teardown),
+        and run-phase UEFI comes up with an empty ``BootOrder``.
+        For distros that don't also write the removable-path
+        fallback (``/EFI/BOOT/BOOTX64.EFI``) that leaves the VM
+        hanging at an empty EFI shell.
+
+        Atomic: writes to a ``.partial`` sibling and renames on
+        success, matching :meth:`store_vm`'s discipline.
+
+        :param config_hash: Hash key from :func:`vm_config_hash`.
+        :param nvram_src_ref: Backend-local ref to the install-phase
+            NVRAM file (typically ``<run>/<vm>_VARS.fd``).
+        :param backend: Backend to store the sidecar on.
+        :returns: Backend-local ref to the stored NVRAM sidecar.
+        :raises CacheError: If the read / write fails.
+        """
+        dest_ref = self.vm_nvram_ref(config_hash, backend)
+        partial_ref = dest_ref + ".partial"
+        transport = backend.transport
+        transport.makedirs(transport.vms_dir())
+        transport.remove(partial_ref)
+        try:
+            data = transport.read_bytes(nvram_src_ref)
+            transport.write_bytes(partial_ref, data)
+            transport.rename(partial_ref, dest_ref)
+        except BaseException:
+            transport.remove(partial_ref)
+            raise
+        return dest_ref
+
+    def get_vm_nvram(
+        self,
+        config_hash: str,
+        backend: StorageBackend,
+    ) -> str | None:
+        """Return the cached NVRAM ref for *config_hash*, or ``None``.
+
+        Callers on the run-phase lifecycle use this to seed the
+        per-run NVRAM file from the install-phase snapshot instead
+        of the empty global OVMF_VARS template.
+
+        :param config_hash: Hash key from :func:`vm_config_hash`.
+        :param backend: Backend to check.
+        """
+        ref = self.vm_nvram_ref(config_hash, backend)
+        if backend.transport.exists(ref):
+            return ref
+        return None
 
     def get_vm(
         self,

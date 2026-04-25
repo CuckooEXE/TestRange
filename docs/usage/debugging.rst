@@ -126,27 +126,64 @@ connection:
    ssh -L 5900:127.0.0.1:5900 user@host
    open vnc://127.0.0.1:5900                   # macOS, any VNC client otherwise
 
-**Terminal-only screenshots.**  If you're SSH-only and would rather
-not set up a VNC client, libvirt can dump the framebuffer to a PPM
-file directly — no ``TESTRANGE_VNC`` needed — and
-``caca-utils``' ``img2txt`` renders it as colour ASCII:
+**Terminal-only screenshots (sixel).**  If you're SSH-only and your
+local terminal supports sixel (WezTerm, iTerm2, Kitty, Windows
+Terminal 1.22+, ghostty, foot, mlterm, xterm launched with
+``-ti vt340``), a ``while`` loop + ``virsh screenshot`` +
+``img2sixel`` gives you a live low-res view of the framebuffer with
+no VNC client, SSH tunnel, or ``TESTRANGE_VNC`` needed.  The
+domain *does* need a video device — ``TESTRANGE_VNC=1`` adds a QXL
+one; otherwise the install-phase domain is headless and
+``screenshot`` errors with "no graphics device".
+
+Requires ``TESTRANGE_VNC=1`` on the ``testrange`` run so the
+install/run domains get the QXL device, plus ``libsixel-bin`` on
+the host for ``img2sixel``:
+
+.. code-block:: bash
+
+   sudo apt-get install -y libsixel-bin
+
+   # Find the running proxmox (or any) domain.  The builder-name
+   # prefix is ``tr-build-<vm>-<id>`` during install and
+   # ``tr-<vm>-<id>`` once the run phase has started — update the
+   # pattern if you're watching a different VM.
+   DOM=$(sudo virsh list --name | grep '^tr-proxmox-' | head -1)
+
+   while sleep 3; do
+       virsh -c qemu:///system screenshot "$DOM" /tmp/vm.ppm >/dev/null 2>&1 \
+           && clear && img2sixel /tmp/vm.ppm
+   done
+
+.. note::
+
+   Use ``virsh screenshot`` (which pulls the framebuffer via
+   libvirt's privileged stream API) rather than
+   ``virsh qemu-monitor-command --hmp '$DOM' 'screendump /tmp/s.ppm'``.
+   The monitor command tells QEMU to open the file itself, and
+   AppArmor's libvirt profile blocks QEMU from writing to arbitrary
+   paths — you'll get a ``failed to open file ... Permission denied``
+   that can't be fixed by chowning the file or pointing it at
+   ``/var/lib/libvirt/qemu/``.  ``virsh screenshot`` sidesteps the
+   profile entirely because libvirt writes the file.
+
+**Terminal-only screenshots (ASCII fallback).**  If your terminal
+doesn't do sixel, ``caca-utils``' ``img2txt`` renders colour ASCII
+instead — good enough to tell "partitioning" from "copying files"
+from "OOBE":
 
 .. code-block:: bash
 
    sudo apt-get install -y caca-utils
-   DOM=tr-build-winbox-<id>
+   DOM=$(sudo virsh list --name | grep '^tr-build-' | head -1)
    while sleep 3; do
        virsh -c qemu:///system screenshot "$DOM" /tmp/vm.ppm >/dev/null 2>&1 \
            && clear && img2txt -W "$(tput cols)" /tmp/vm.ppm
    done
 
-Good enough to distinguish "partitioning" from "copying files" from
-"OOBE".  Terminals with sixel support (kitty, WezTerm, xterm-sixel)
-can use ``img2sixel`` from ``libsixel-bin`` for a much sharper
-render.
-
 When the install reboots into the run phase the domain name changes
-from ``tr-build-<vm>-<id>`` to ``tr-<vm>-<id>``; update ``DOM``.
+from ``tr-build-<vm>-<id>`` to ``tr-<vm>-<id>``; update the ``grep``
+pattern.
 
 Tips
 ----

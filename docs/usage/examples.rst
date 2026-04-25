@@ -84,6 +84,16 @@ Provisioning variations
        into cache), override the service config at test time via
        ``upload`` / ``write_text``.  Config changes don't bust the
        cache hash because they happen after provisioning.
+   * - ``nested_proxmox_public_private.py``
+     - ProxMox VE as an L1 guest with a sibling Debian sidecar.
+       Auto-selected :class:`~testrange.vms.builders.ProxmoxAnswerBuilder`
+       does the unattended PVE install through the upstream
+       ``answer.toml`` mechanism (UEFI, kebab-case schema,
+       ``reboot-mode = "power-off"``); sidecar smoke-tests the
+       ProxMox API at ``https://10.0.0.10:8006/api2/json/version``.
+       Inner-orchestrator plumbing is staged behind
+       ``TODO(proxmox-nest):`` markers, ready to enable once the
+       ProxMox backend's ``root_on_vm()`` lands.
 
 Networking
 ----------

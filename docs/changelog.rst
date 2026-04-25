@@ -8,6 +8,78 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+ProxMox VE install path
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**Added: ``ProxmoxAnswerBuilder``** for unattended ProxMox VE
+installs.  Auto-selected for ``iso=`` strings matching
+``proxmox-ve[-_]*.iso``; emits an ``answer.toml`` to a
+``PROXMOX-AIS``-labeled seed ISO and prepares the main installer ISO
+in pure Python (no ``proxmox-auto-install-assistant`` host
+dependency, no ``xorriso``).  Working PVE 9.x out of the box;
+declare ``VirtualNetworkRef(..., ip="...")`` for the run-phase
+network and the builder synthesises a ``from-answer`` static config
+that survives the install-to-run network swap.  Example:
+``examples/nested_proxmox_public_private.py``.
+
+The path lives on top of seven distinct PVE-specific behaviours
+that all needed handling: activation via ``/cdrom/auto-installer-mode.toml``
+at the ISO root (PVE 9.x; earlier releases looked inside the
+initrd), kebab-case ``answer.toml`` field names that don't match
+the underscored mode-file fields, ``reboot-mode = "power-off"`` to
+turn the installer's reboot into the SHUTOFF the cache pipeline
+expects, OVMF-only firmware to sidestep a SeaBIOS + q35 + SATA-CD
+GRUB triple-fault, NVRAM sidecar caching to preserve the
+installer's UEFI ``BootOrder`` past
+``VIR_DOMAIN_UNDEFINE_NVRAM``, ``from-dhcp``-vs-``from-answer``
+distinction (the former freezes the install-phase lease as
+static), and interface-name-based NIC filtering (the install-phase
+MAC differs from the run-phase MAC, but interface name is stable
+across the swap).  Each is regression-tested.
+
+Cache layout
+~~~~~~~~~~~~
+
+**Added: per-VM UEFI NVRAM sidecar at ``<vms_dir>/<hash>.nvram.fd``.**
+Install-phase NVRAM (where the installer writes EFI ``BootOrder``
+entries) is now snapshotted into the cache alongside the qcow2,
+because libvirt's ``VIR_DOMAIN_UNDEFINE_NVRAM`` deletes the per-run
+NVRAM at teardown.  Run-phase domains seed their NVRAM from the
+cached sidecar rather than the empty global ``OVMF_VARS`` template,
+so any UEFI install whose distro doesn't write the
+``/EFI/BOOT/BOOTX64.EFI`` removable-path fallback (PVE included)
+still boots cleanly.  New helpers:
+:meth:`~testrange.cache.CacheManager.vm_nvram_ref`,
+:meth:`~testrange.cache.CacheManager.store_vm_nvram`,
+:meth:`~testrange.cache.CacheManager.get_vm_nvram`.  Backwards-
+compatible: existing entries without sidecars stay valid for BIOS
+installs (cloud-init), and a missing sidecar on a UEFI install
+falls through to the template just as before.
+
+**Added: prepared-ISO cache for ProxMox installer media** at
+``<images_dir>/proxmox-prepared-<sha>.iso``, populated by
+:meth:`~testrange.cache.CacheManager.get_proxmox_prepared_iso` on
+first use.  Keyed by the SHA-256 of the vanilla ISO so the
+expensive (~1 s) prep step happens once per upstream version,
+amortised across every VM that builds against it.
+
+DAC ownership of UEFI NVRAM
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Fixed: NVRAM file ``Permission denied`` after install completes.**
+When libvirt creates the per-domain NVRAM by copying the
+``<nvram template="...">`` source on first ``domain.create()``,
+the DAC security driver records no original-owner xattr — the
+file stays ``libvirt-qemu:0600`` after the domain stops, and the
+NVRAM-snapshot read fails with EACCES on any non-libvirt-qemu user.
+:func:`~testrange.backends.libvirt.vm._preseed_nvram` pre-creates
+the NVRAM as the invoking user with mode ``0644`` *before*
+``defineXML``; DAC's ``remember_owner`` xattr then has an original
+owner to restore on shutdown, and the snapshot reader can open
+the file.  Behaviour is identical at install time (the seeded
+bytes are the OVMF_VARS template, exactly what libvirt would have
+copied).
+
 Windows install path
 ~~~~~~~~~~~~~~~~~~~~
 
