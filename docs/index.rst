@@ -2,7 +2,8 @@ TestRange
 =========
 
 **TestRange** is a pip-installable Python package for orchestrating
-KVM/QEMU virtual machine environments for integration testing.
+hypervisor-backed virtual machine environments for integration
+testing.
 
 It handles:
 
@@ -13,9 +14,18 @@ It handles:
 - Caching installed VM snapshots so subsequent runs start in seconds
   (the first run does the slow install; every run after that is a
   thin qcow2 overlay)
-- Talking to running VMs via the QEMU Guest Agent over
-  ``virtio-serial`` — **no network port is exposed to the host**,
-  so fully isolated networks can still be inspected
+- Talking to running VMs through a backend-native side channel —
+  **no network port is exposed to the host**, so fully isolated
+  networks can still be inspected
+
+The default :doc:`backend </api/backends>` drives KVM/QEMU through
+libvirt; a Proxmox VE backend lives alongside it as scaffolding (see
+:class:`~testrange.backends.proxmox.ProxmoxOrchestrator`).  Test code,
+networks, and VM specs are written against the hypervisor-neutral
+abstractions (:class:`~testrange.AbstractOrchestrator`,
+:class:`~testrange.AbstractVM`,
+:class:`~testrange.AbstractVirtualNetwork`) so swapping backends is an
+import-line change.
 
 .. code-block:: bash
 

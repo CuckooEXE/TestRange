@@ -1,10 +1,14 @@
 Networks
 ========
 
-A TestRange :class:`~testrange.backends.libvirt.VirtualNetwork` is a
-libvirt-managed Linux bridge with an optional dnsmasq instance
-providing DHCP and/or DNS, optionally NAT-forwarded to the host's
-upstream network.  Three boolean flags describe the topology:
+A TestRange :class:`~testrange.AbstractVirtualNetwork` is a logical
+L2 segment with optional DHCP, DNS, and NAT forwarding.  How that
+materialises depends on the backend — under the default libvirt
+backend each network becomes a libvirt-managed Linux bridge plus a
+dnsmasq instance; under Proxmox VE it would become an SDN vnet plus
+IPAM reservations.  The three boolean flags below describe the
+topology in backend-neutral terms; the rest of this page describes
+the libvirt rendering specifically.
 
 ``internet``
     If ``True``, libvirt writes a ``<forward mode='nat'/>`` stanza
@@ -69,10 +73,10 @@ dnsmasq still considers it a DHCP lease.
 Reference
 ---------
 
-.. autoclass:: testrange.backends.libvirt.VirtualNetwork
+.. autoclass:: testrange.networks.base.AbstractVirtualNetwork
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.networks.base.AbstractVirtualNetwork
+.. autoclass:: testrange.backends.libvirt.VirtualNetwork
    :members:
    :show-inheritance:

@@ -11,11 +11,13 @@ if called before provisioning.
 Building the spec
 -----------------
 
-:class:`~testrange.backends.libvirt.VM` takes a small set of keyword
-arguments:
+:class:`~testrange.AbstractVM` (and its concrete implementations,
+e.g. :class:`~testrange.backends.libvirt.VM`) takes a small set of
+keyword arguments:
 
-- ``name`` — unique per test run; shows up as hostname, in DNS, and in
-  libvirt domain names.
+- ``name`` — unique per test run; shows up as hostname, in DNS, and
+  as the backend domain identifier (libvirt domain name, Proxmox
+  VM name, …).
 - ``iso`` — an absolute path to a local qcow2/img, or an ``https://``
   URL pointing at an upstream cloud image.  See :doc:`/usage/vms` for
   common upstream URLs.
@@ -77,9 +79,11 @@ Talking to a running VM
 -----------------------
 
 All runtime calls go through a
-:class:`~testrange.communication.base.AbstractCommunicator`.  For
-Linux guests this is the QEMU guest agent (virtio-serial, no TCP);
-Windows guests default to WinRM.  See :doc:`communication`.
+:class:`~testrange.communication.base.AbstractCommunicator`.  Linux
+guests default to a hypervisor-native side-channel (the QEMU guest
+agent over virtio-serial under libvirt; the equivalent REST agent
+endpoint under Proxmox); Windows guests default to WinRM.  See
+:doc:`communication`.
 
 The high-level methods on :class:`~testrange.vms.base.AbstractVM` are
 thin wrappers that:
@@ -139,11 +143,11 @@ Prerequisites and cross-layer behaviour are documented in
 Reference
 ---------
 
-.. autoclass:: testrange.backends.libvirt.VM
+.. autoclass:: testrange.vms.base.AbstractVM
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.vms.base.AbstractVM
+.. autoclass:: testrange.backends.libvirt.VM
    :members:
    :show-inheritance:
 

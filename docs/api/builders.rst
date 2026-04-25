@@ -1,13 +1,15 @@
 Builders
 ========
 
-Every :class:`~testrange.backends.libvirt.VM` owns a
+Every :class:`~testrange.AbstractVM` owns a
 :class:`~testrange.vms.builders.base.Builder` that encodes the
 provisioning strategy — how the VM gets from ``iso=`` to a runnable
-disk image.  :class:`VM` delegates everything install-pipeline related
-to the builder: disk preparation, seed ISO generation, domain-XML
-hints (UEFI, Windows device models, extra CD-ROMs), and cache key
-derivation.
+disk image.  The VM delegates everything install-pipeline related to
+the builder: disk preparation, seed ISO generation, domain hints
+(UEFI, Windows device models, extra CD-ROMs), and cache key
+derivation.  The hints are *backend-neutral* — the libvirt backend
+renders them into domain XML; the Proxmox backend would render them
+into REST parameters.
 
 Why a strategy object?
 ----------------------
@@ -29,7 +31,7 @@ The contract
 
 Builders are **stateless**: one instance can serve any number of VMs.
 All per-VM state comes in through the
-:class:`~testrange.backends.libvirt.VM` argument of each method.  The ABC
+:class:`~testrange.AbstractVM` argument of each method.  The ABC
 defines eight methods:
 
 - :meth:`~testrange.vms.builders.base.Builder.default_communicator` —
