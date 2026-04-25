@@ -71,6 +71,13 @@ Concrete builders
 - :class:`~testrange.vms.builders.NoOpBuilder` — prebuilt qcow2
   (BYOI).  No install phase; the image is content-hash staged into
   the cache and booted from an overlay.  See :ref:`BYOI <byoi>`.
+- :class:`~testrange.vms.builders.ProxmoxAnswerBuilder` — ProxMox VE
+  installer ISOs.  Patches the vanilla PVE ISO in pure Python (no
+  ``proxmox-auto-install-assistant`` host dep), emits an
+  ``answer.toml`` on a ``PROXMOX-AIS``-labeled seed ISO, and runs
+  unattended under OVMF with an NVRAM-snapshot sidecar so the
+  install-phase ``BootOrder`` survives into run phase.  Default for
+  ``proxmox-ve_*.iso`` URLs.
 
 Reference
 ---------
@@ -97,6 +104,14 @@ Reference
    :members:
    :show-inheritance:
 
-.. autofunction:: testrange.vms.builders.cloud_init.write_seed_iso
+.. autoclass:: testrange.vms.builders.ProxmoxAnswerBuilder
+   :members:
+   :show-inheritance:
 
-.. autofunction:: testrange.vms.builders.unattend.write_autounattend_iso
+.. autofunction:: testrange.vms.builders.cloud_init.build_seed_iso_bytes
+
+.. autofunction:: testrange.vms.builders.unattend.build_autounattend_iso_bytes
+
+.. autofunction:: testrange.vms.builders.build_proxmox_seed_iso_bytes
+
+.. autofunction:: testrange.vms.builders.is_proxmox_installer_iso

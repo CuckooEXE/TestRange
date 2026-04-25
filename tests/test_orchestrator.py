@@ -117,8 +117,13 @@ class TestNameCollisions:
     def test_hypervisor_inner_vm_duplicate_raises(self) -> None:
         """Inner-VM collisions surface from Hypervisor.__init__."""
         from testrange import (
-            Credential, HardDrive, Hypervisor, LibvirtOrchestrator,
-            Memory, VirtualNetworkRef, vCPU,
+            Credential,
+            HardDrive,
+            Hypervisor,
+            LibvirtOrchestrator,
+            Memory,
+            VirtualNetworkRef,
+            vCPU,
         )
 
         with pytest.raises(OrchestratorError, match="duplicate VM name 'client'"):
@@ -646,7 +651,12 @@ class TestMemoryPreflight:
 
     def _vm(self, name: str, memory_gib: float):
         from testrange import (
-            VM, Credential, HardDrive, Memory, VirtualNetworkRef, vCPU,
+            VM,
+            Credential,
+            HardDrive,
+            Memory,
+            VirtualNetworkRef,
+            vCPU,
         )
 
         return VM(
@@ -685,8 +695,14 @@ class TestMemoryPreflight:
         VMs live inside the hypervisor's allocation so counting them
         would over-report."""
         from testrange import (
-            Credential, HardDrive, Hypervisor, LibvirtOrchestrator,
-            Memory, VirtualNetwork, VirtualNetworkRef, vCPU,
+            Credential,
+            HardDrive,
+            Hypervisor,
+            LibvirtOrchestrator,
+            Memory,
+            VirtualNetwork,
+            VirtualNetworkRef,
+            vCPU,
         )
         from testrange.backends.libvirt._preflight import declared_gib_per_vm
 

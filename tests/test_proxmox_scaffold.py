@@ -69,6 +69,26 @@ class TestProxmoxVMStubs:
         vm = self._vm()
         assert vm.name == "x"
 
+    def test_properties_forward_to_inner_spec(self) -> None:
+        """``builder``/``users``/``communicator`` are property proxies
+        onto the wrapped libvirt spec.  Reading them must not raise and
+        must reflect what the spec carries."""
+        from testrange.vms.builders import CloudInitBuilder
+        vm = self._vm()
+        assert vm.users[0].username == "root"
+        assert isinstance(vm.builder, CloudInitBuilder)
+        # Default communicator for a Linux qcow2 image is the
+        # CloudInitBuilder default ("guest-agent" today).
+        assert vm.communicator in {"guest-agent", "ssh", "winrm"}
+        # The ``_communicator`` getter/setter pair is what
+        # :meth:`AbstractVM._make_communicator` writes to.  Round-trip
+        # confirms the setter delegates and the getter reads back.
+        assert vm._communicator is None
+        sentinel = object()
+        vm._communicator = sentinel  # type: ignore[assignment]
+        assert vm._communicator is sentinel
+        vm._communicator = None
+
     def test_build_raises(self) -> None:
         vm = self._vm()
         with pytest.raises(NotImplementedError, match="not yet implemented"):
@@ -113,3 +133,41 @@ class TestProxmoxNetworkStubs:
     def test_backend_name_raises(self) -> None:
         with pytest.raises(NotImplementedError):
             self._net().backend_name()
+
+
+class TestProxmoxGuestAgentStubs:
+    """``ProxmoxGuestAgentCommunicator`` is the future REST-backed twin
+    of the libvirt :class:`GuestAgentCommunicator`.  Until the Proxmox
+    REST calls are implemented every method raises with a pointer at
+    the upstream API endpoint that would satisfy it."""
+
+    def _comm(self):
+        from testrange.backends.proxmox import ProxmoxGuestAgentCommunicator
+        return ProxmoxGuestAgentCommunicator(
+            client=MagicMock(), node="pve01", vmid=100,
+        )
+
+    def test_init_stores_target(self) -> None:
+        comm = self._comm()
+        assert comm._node == "pve01"
+        assert comm._vmid == 100
+
+    def test_wait_ready_raises(self) -> None:
+        with pytest.raises(NotImplementedError, match="not yet implemented"):
+            self._comm().wait_ready()
+
+    def test_exec_raises(self) -> None:
+        with pytest.raises(NotImplementedError, match="not yet implemented"):
+            self._comm().exec(["true"])
+
+    def test_get_file_raises(self) -> None:
+        with pytest.raises(NotImplementedError, match="not yet implemented"):
+            self._comm().get_file("/etc/hostname")
+
+    def test_put_file_raises(self) -> None:
+        with pytest.raises(NotImplementedError, match="not yet implemented"):
+            self._comm().put_file("/etc/hostname", b"x")
+
+    def test_hostname_raises(self) -> None:
+        with pytest.raises(NotImplementedError, match="not yet implemented"):
+            self._comm().hostname()

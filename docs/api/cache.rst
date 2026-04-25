@@ -17,6 +17,12 @@ Four classes of artifact live in the TestRange cache:
    fedorapeople.  Stable filename (no URL hash).  See
    :meth:`~testrange.cache.CacheManager.get_virtio_win_iso`.
 
+   **Prepared ProxMox installer ISOs** live alongside, named
+   ``proxmox-prepared-<sha>.iso`` and keyed by SHA-256 of the
+   vanilla PVE installer.  One vanilla → one prepared, reused
+   across every ProxMox VM that builds against the same source.
+   See :meth:`~testrange.cache.CacheManager.get_proxmox_prepared_iso`.
+
 4. **Post-install VM snapshots** — compressed qcow2 files produced by
    running cloud-init (Linux) or Windows Setup + autounattend
    (Windows) on a base image once.  Keyed by

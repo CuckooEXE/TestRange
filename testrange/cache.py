@@ -245,10 +245,12 @@ class CacheManager:
         output here keyed by the SHA-256 of the vanilla ISO.  One base
         ISO version → one prepared copy, reused across every ProxMox
         VM that builds against that source.
+
         Concurrent callers contend on a :class:`FileLock` sibling;
         whoever wins writes the prepared ISO atomically via a
         ``.part`` rename, so an interrupted prep can't leave a stub
         that later callers mistake for a cache hit.
+
         :param vanilla_iso: Local path to an unmodified PVE installer
             ISO (typically the result of :meth:`get_image` for a
             ProxMox VE release URL).
