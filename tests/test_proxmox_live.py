@@ -296,6 +296,83 @@ class TestNetworkLifecycleViaOrchestrator:
             net.stop(probe)
 
 
+class TestVMLifecycle:
+    """End-to-end provisioning: orchestrator brings up a Debian-12
+    cloud-init VM on a fresh SDN vnet, exec'es a command via SSH,
+    then tears the whole thing down.
+
+    Slow (~5-10 min on first run; ~2-3 min once the qcow2 is on PVE
+    storage).  Marked ``slow`` so the default live run can opt out.
+    """
+
+    DEBIAN12_URL = (
+        "https://cloud.debian.org/images/cloud/bookworm/latest/"
+        "debian-12-genericcloud-amd64.qcow2"
+    )
+
+    @pytest.mark.slow
+    def test_debian12_install_and_ssh(self, short_run_id: str) -> None:
+        from testrange import (
+            Credential,
+            Memory,
+            VirtualNetworkRef,
+            vCPU,
+        )
+        from testrange.backends.proxmox import (
+            ProxmoxVirtualNetwork,
+            ProxmoxVM,
+        )
+
+        net = ProxmoxVirtualNetwork(
+            "trvmL", "10.244.0.0/24", internet=True,
+        )
+        # Non-root user goes first so SSHCommunicator selects it.
+        # Debian cloud images block root password login by default
+        # (sshd's ``PermitRootLogin prohibit-password`` plus
+        # cloud-init's ``disable_root: true``), so a root-only
+        # credential list would fail SSH auth.
+        vm = ProxmoxVM(
+            name="trvmsmoke",
+            iso=self.DEBIAN12_URL,
+            users=[
+                Credential("debian", "testrange", sudo=True),
+                Credential("root", "testrange"),
+            ],
+            devices=[
+                vCPU(2),
+                Memory(1.0),
+                VirtualNetworkRef("trvmL", ip="10.244.0.10"),
+            ],
+            communicator="ssh",
+        )
+
+        orch = _build_orch(networks=[net], vms=[vm])
+        with orch:
+            assert vm._vmid is not None
+            result = vm.exec(["uname", "-s"])
+            assert result.exit_code == 0
+            stdout = result.stdout or b""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode()
+            assert "Linux" in stdout
+
+            # Hostname comes from cloud-init's hostname module.
+            assert vm.hostname() == "trvmsmoke"
+
+        # After teardown, no VMID with our name should remain on the
+        # node and no vnets we created should be left.
+        with _build_orch() as probe:
+            running = probe._client.nodes(probe._node).qemu.get()
+            names = [v.get("name") for v in running]
+            assert "trvmsmoke" not in names, (
+                f"VM 'trvmsmoke' leaked: still in {names!r}"
+            )
+            vnets = {v["vnet"] for v in probe._client.cluster.sdn.vnets.get()}
+            assert net.backend_name() not in vnets, (
+                f"vnet leaked: {net.backend_name()!r}"
+            )
+
+
 class TestErrorPaths:
     def test_bad_node_surfaces_clear_error(self) -> None:
         from testrange.backends.proxmox import ProxmoxOrchestrator

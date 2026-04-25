@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from testrange.communication.base import AbstractCommunicator, ExecResult
 from testrange.exceptions import VMBuildError
@@ -149,6 +149,17 @@ class AbstractVM(ABC):
         from testrange.devices import HardDrive
         drives = [d for d in self.devices if isinstance(d, HardDrive)]
         return drives[0].qemu_size if drives else "20G"
+
+    def _network_refs(self) -> list[Any]:
+        """Return every :class:`~testrange.devices.VirtualNetworkRef`
+        on :attr:`devices` in declaration order.
+
+        Pure spec lookup with no backend dependencies — used by
+        orchestrators to walk a VM's NICs when assigning IPs and
+        building network configs.
+        """
+        from testrange.devices import VirtualNetworkRef
+        return [d for d in self.devices if isinstance(d, VirtualNetworkRef)]
 
     def _require_communicator(self) -> AbstractCommunicator:
         """Return the active communicator or raise an error.

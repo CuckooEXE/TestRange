@@ -110,32 +110,37 @@ class TestProxmoxVMStubs:
         vm = self._vm()
         assert not hasattr(vm, "_spec")
 
-    def test_build_raises(self) -> None:
+    def test_shutdown_without_client_is_noop(self) -> None:
+        """``shutdown()`` is called from teardown paths — it must not
+        raise even when the orchestrator hasn't attached its client
+        (e.g. a VM constructed for spec-only inspection)."""
         vm = self._vm()
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
+        # Never set a client and never set a vmid — should be silent.
+        vm.shutdown()  # must not raise
+
+    def test_non_cloud_init_builder_rejected(self) -> None:
+        """v1 only supports CloudInitBuilder.  Other builders raise
+        ``VMBuildError`` at build time so users see a clear error
+        before any PVE state gets allocated."""
+        from testrange import Credential
+        from testrange.backends.proxmox import ProxmoxVM
+        from testrange.exceptions import VMBuildError
+        from testrange.vms.builders import NoOpBuilder
+
+        vm = ProxmoxVM(
+            name="x",
+            iso="/local/path/disk.qcow2",
+            users=[Credential("root", "pw")],
+            builder=NoOpBuilder(),
+        )
+        with pytest.raises(VMBuildError, match="CloudInitBuilder"):
             vm.build(
                 context=MagicMock(),
                 cache=MagicMock(),
                 run=MagicMock(),
-                install_network_name="",
-                install_network_mac="",
+                install_network_name="bridge",
+                install_network_mac="52:54:00:aa:bb:cc",
             )
-
-    def test_start_run_raises(self) -> None:
-        vm = self._vm()
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            vm.start_run(
-                context=MagicMock(),
-                run=MagicMock(),
-                installed_disk=MagicMock(),
-                network_entries=[],
-                mac_ip_pairs=[],
-            )
-
-    def test_shutdown_raises(self) -> None:
-        vm = self._vm()
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            vm.shutdown()
 
 
 class TestProxmoxNetworkOfflineSurface:

@@ -71,9 +71,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from testrange._logging import get_logger
-from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
-from testrange.exceptions import OrchestratorError
+from testrange._logging import get_logger, log_duration
+from testrange.backends.proxmox.network import (
+    ProxmoxVirtualNetwork,
+    _mac_for_vm_network,
+)
+from testrange.backends.proxmox.vm import ProxmoxVM
+from testrange.cache import CacheManager
+from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
 
 if TYPE_CHECKING:
@@ -145,6 +150,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     # caught at construction).
     _networks: list[ProxmoxVirtualNetwork]  # type: ignore[assignment] # pyright: ignore[reportIncompatibleVariableOverride]
     _started_networks: list[ProxmoxVirtualNetwork]
+    _provisioned_vms: list[ProxmoxVM]
 
     def __init__(
         self,
@@ -205,6 +211,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._run = None
         self._run_id: str | None = None
         self._started_networks = []
+        self._provisioned_vms = []
+        # CacheManager creation involves filesystem mutation
+        # (mkdir/chmod on the cache root); defer it to __enter__ so
+        # cheap construction patterns — CLI URL dispatch, tests
+        # constructing instances for spec inspection — don't trip
+        # on filesystem permissions.
+        self._cache: CacheManager | None = None
 
     @classmethod
     def backend_type(cls) -> str:
@@ -233,6 +246,12 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 "package — install with "
                 "``pip install testrange[proxmox]``."
             ) from exc
+
+        if self._cache is None:
+            self._cache = (
+                CacheManager(root=self._cache_root)
+                if self._cache_root else CacheManager()
+            )
 
         client_kwargs = self._resolve_client_kwargs()
         _log.info(
@@ -265,11 +284,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         _log.info("run id: %s", self._run_id[:8])
 
         try:
+            self._setup_vm_networks()
             self._start_networks()
+            self._provision_vms()
         except Exception:
-            # Roll back any networks we managed to bring up before
-            # the failure so we don't leak SDN state into the user's
-            # exception.
+            # Roll back in reverse provisioning order so we don't
+            # leak any SDN / VMID state into the user's exception.
+            self._teardown_vms()
             self._teardown_networks()
             self._client = None
             self._run_id = None
@@ -292,13 +313,15 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             if self._leaked:
                 hints = self.keep_alive_hints()
                 _log.info(
-                    "leak() set — leaving %d Proxmox network(s) in "
-                    "place; manual cleanup hints follow",
+                    "leak() set — leaving %d VM(s) and %d network(s) "
+                    "in place; manual cleanup hints follow",
+                    len(self._provisioned_vms),
                     len(self._started_networks),
                 )
                 for line in hints:
                     _log.info("  %s", line)
             else:
+                self._teardown_vms()
                 self._teardown_networks()
         except Exception as exc:  # pragma: no cover — defensive
             _log.warning("unexpected error during PVE teardown: %s", exc)
@@ -314,22 +337,24 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         would run on the PVE node to release one resource — useful
         when ``leak()`` was set, the user is done poking, and they
         want to tidy up by hand without booting another orchestrator.
-
-        Future slices add lines for leaked VMIDs.  This slice covers
-        the SDN vnets started during :meth:`__enter__`.
         """
         lines: list[str] = []
+        for vm in self._provisioned_vms:
+            if vm._vmid is None:
+                continue
+            lines.append(
+                f"pvesh create /nodes/{self._node}/qemu/{vm._vmid}/status/stop"
+            )
+            lines.append(
+                f"pvesh delete /nodes/{self._node}/qemu/{vm._vmid}"
+            )
         for net in self._started_networks:
             try:
                 vnet = net.backend_name()
             except RuntimeError:
-                # bind_run never ran — net was never actually started;
-                # nothing to advise on.
                 continue
-            lines.append(
-                f"pvesh delete /cluster/sdn/vnets/{vnet}"
-            )
-        if lines:
+            lines.append(f"pvesh delete /cluster/sdn/vnets/{vnet}")
+        if any("/cluster/sdn/vnets/" in line for line in lines):
             lines.append("pvesh set /cluster/sdn  # apply pending deletes")
         return lines
 
@@ -369,6 +394,138 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         while self._started_networks:
             net = self._started_networks.pop()
             net.stop(self)
+
+    # ------------------------------------------------------------------
+    # VM lifecycle
+    # ------------------------------------------------------------------
+
+    def _setup_vm_networks(self) -> None:
+        """Register each VM's static IPs against its networks.
+
+        v1 PVE backend requires every :class:`VirtualNetworkRef` to
+        carry a static ``ip=`` — DHCP discovery is a future slice.
+        We fail loud here rather than later in
+        :meth:`AbstractVM._make_communicator` so users see the cause
+        immediately.
+        """
+        for vm in self._vm_list:
+            if not isinstance(vm, ProxmoxVM):
+                raise OrchestratorError(
+                    f"VM {vm.name!r} is not a ProxmoxVM; cannot mix "
+                    "backends in one orchestrator."
+                )
+            for ref in vm._network_refs():
+                net = self._find_network(ref.name)
+                if net is None:
+                    raise NetworkError(
+                        f"VM {vm.name!r} references unknown network "
+                        f"{ref.name!r}; available: "
+                        f"{[n.name for n in self._networks]!r}"
+                    )
+                if not ref.ip:
+                    raise NetworkError(
+                        f"VM {vm.name!r}: VirtualNetworkRef "
+                        f"{ref.name!r} has no static ``ip=`` — "
+                        "the Proxmox backend doesn't support DHCP "
+                        "discovery yet."
+                    )
+                net.register_vm(vm.name, ref.ip)
+
+    def _find_network(
+        self, name: str,
+    ) -> ProxmoxVirtualNetwork | None:
+        for net in self._networks:
+            if net.name == name:
+                return net
+        return None
+
+    def _vm_network_refs(
+        self,
+        vm: ProxmoxVM,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+        """Build ``(network_entries, mac_ip_pairs)`` for a VM.
+
+        Mirrors the libvirt backend's ``_build_nic_entries``:
+        ``network_entries`` carries ``(backend_net_name, mac)`` (used
+        to attach NICs to PVE bridges), and ``mac_ip_pairs`` carries
+        ``(mac, ip_with_cidr, gateway, dns)`` (used by cloud-init's
+        network-config and SSH host resolution).
+        """
+        network_entries: list[tuple[str, str]] = []
+        mac_ip_pairs: list[tuple[str, str, str, str]] = []
+        for ref in vm._network_refs():
+            net = self._find_network(ref.name)
+            if net is None:
+                continue
+            mac = _mac_for_vm_network(vm.name, ref.name)
+            network_entries.append((net.backend_name(), mac))
+            gateway = net.gateway_ip if net.internet else ""
+            nameserver = net.gateway_ip if net.dns else ""
+            cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
+            mac_ip_pairs.append((mac, cidr, gateway, nameserver))
+        return network_entries, mac_ip_pairs
+
+    def _provision_vms(self) -> None:
+        """Build + start every configured VM.
+
+        Each VM gets its first NIC's network as the install-phase
+        attachment — the Proxmox backend doesn't have a separate
+        install network the way the libvirt backend does, since
+        cloud-init can run against the same vnet the test phase
+        will use.  Tracks successfully-started VMs in
+        ``_provisioned_vms`` so a partial failure rolls back only
+        what got created.
+        """
+        # __enter__ sets _cache before _provision_vms runs; the assert
+        # narrows the Optional for pyright.
+        assert self._cache is not None, "cache must be initialised"
+        cache = self._cache
+        installed_disks: dict[str, str] = {}
+        for vm in self._vm_list:
+            assert isinstance(vm, ProxmoxVM)
+            network_entries, _ = self._vm_network_refs(vm)
+            if not network_entries:
+                raise NetworkError(
+                    f"VM {vm.name!r}: no network refs — Proxmox VMs "
+                    "need at least one VirtualNetworkRef."
+                )
+            install_net_name, install_mac = network_entries[0]
+
+            vm.set_client(self._client)
+            with log_duration(_log, f"build VM {vm.name!r}"):
+                installed_disks[vm.name] = vm.build(
+                    context=self,
+                    cache=cache,
+                    run=None,  # type: ignore[arg-type]
+                    install_network_name=install_net_name,
+                    install_network_mac=install_mac,
+                )
+            self._provisioned_vms.append(vm)
+
+        for vm in self._vm_list:
+            assert isinstance(vm, ProxmoxVM)
+            network_entries, mac_ip_pairs = self._vm_network_refs(vm)
+            with log_duration(_log, f"start VM {vm.name!r}"):
+                vm.start_run(
+                    context=self,
+                    run=None,  # type: ignore[arg-type]
+                    installed_disk=installed_disks[vm.name],
+                    network_entries=network_entries,
+                    mac_ip_pairs=mac_ip_pairs,
+                )
+            self.vms[vm.name] = vm
+
+    def _teardown_vms(self) -> None:
+        """Stop and DELETE each provisioned VMID, in reverse order.
+
+        :meth:`ProxmoxVM.shutdown` swallows its own errors, so this
+        loop just walks the list — symmetric with
+        :meth:`_provision_vms`.
+        """
+        while self._provisioned_vms:
+            vm = self._provisioned_vms.pop()
+            vm.shutdown()
+        self.vms.clear()
 
     # ------------------------------------------------------------------
     # Helpers
