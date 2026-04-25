@@ -175,6 +175,41 @@ class TestNetworkLifecycle:
         net.stop(orch)
         net.stop(orch)  # must not raise
 
+    def test_collision_rollback_preserves_other_network(
+        self, orch, short_run_id: str,
+    ) -> None:
+        """Regression: when ``start()`` fails because PVE refuses to
+        create the vnet (e.g. another run has it), the rollback path
+        must not list-and-delete the other run's vnet by name.  The
+        creation-state flags on :class:`ProxmoxVirtualNetwork`
+        guarantee rollback only undoes work the failed call did."""
+        from testrange.backends.proxmox import ProxmoxVirtualNetwork
+        from testrange.exceptions import NetworkError
+
+        first = ProxmoxVirtualNetwork("trcoll", "10.253.0.0/24")
+        first.bind_run(short_run_id)
+        first.start(orch)
+        backend = first.backend_name()
+
+        try:
+            colliding = ProxmoxVirtualNetwork("trcoll", "10.253.0.0/24")
+            colliding.bind_run(short_run_id)
+            with pytest.raises(NetworkError):
+                colliding.start(orch)
+
+            # The other vnet must still be there.
+            vnets = {v["vnet"] for v in orch._client.cluster.sdn.vnets.get()}
+            assert backend in vnets, (
+                f"colliding rollback destroyed the other run's vnet "
+                f"{backend!r}; surviving vnets: {vnets!r}"
+            )
+            # And the colliding instance must not falsely think it
+            # owns anything.
+            assert colliding._vnet_created is False
+            assert colliding._subnet_created is False
+        finally:
+            first.stop(orch)
+
 
 class TestErrorPaths:
     def test_bad_node_surfaces_clear_error(self) -> None:

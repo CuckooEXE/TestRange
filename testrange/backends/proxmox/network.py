@@ -103,6 +103,17 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     _subnet_id: str | None
     _client: Any
 
+    _vnet_created: bool
+    """``True`` once :meth:`start` has successfully created the vnet
+    (i.e. PVE accepted the POST).  Drives :meth:`stop` so we only
+    delete things this instance actually created — important on the
+    rollback path when ``vnets.post`` fails because the name is
+    already taken by another run."""
+
+    _subnet_created: bool
+    """``True`` once :meth:`start` has successfully created the
+    subnet under our vnet."""
+
     def __init__(
         self,
         name: str,
@@ -117,6 +128,8 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
         self._vnet_name = None
         self._subnet_id = None
         self._client = None
+        self._vnet_created = False
+        self._subnet_created = False
 
     def bind_run(self, run_id: str) -> None:
         """Associate this network with a specific run ID.
@@ -187,8 +200,16 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
         zone = _proxmox_zone(context)
         vnet = self.backend_name()
 
+        # Track creation state explicitly so the rollback path only
+        # undoes work *this* call did.  Without this, a name-collision
+        # failure on ``vnets.post`` would lead the rollback to find the
+        # other run's vnet by name and (try to) delete it.
+        self._vnet_name = vnet
+        self._client = client
+
         try:
             client.cluster.sdn.vnets.post(vnet=vnet, zone=zone)
+            self._vnet_created = True
 
             subnet_params: dict[str, Any] = {
                 "type": "subnet",
@@ -203,6 +224,7 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
                 subnet_params["snat"] = 1
 
             client.cluster.sdn.vnets(vnet).subnets.post(**subnet_params)
+            self._subnet_created = True
 
             # PVE auto-derives the subnet ID from ``<zone>-<cidr>``
             # with the slash replaced by a dash.  Capture it from a
@@ -217,15 +239,21 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
             client.cluster.sdn.put()
 
         except Exception as exc:
-            # Best-effort rollback so a failed start doesn't leak a
-            # half-created vnet.
-            self._cleanup(client, vnet, self._subnet_id, log_failures=False)
+            # Rollback only the parts this call created.
+            self._cleanup(
+                client,
+                vnet=vnet if self._vnet_created else None,
+                subnet_id=self._subnet_id if self._subnet_created else None,
+            )
+            self._vnet_created = False
+            self._subnet_created = False
+            self._vnet_name = None
+            self._subnet_id = None
+            self._client = None
             raise NetworkError(
                 f"Failed to start SDN vnet {vnet!r}: {exc}"
             ) from exc
 
-        self._client = client
-        self._vnet_name = vnet
         _log.debug(
             "vnet %r active: zone=%s subnet=%s gateway=%s internet=%s",
             vnet, zone, self.subnet, self.gateway_ip, self.internet,
@@ -234,20 +262,31 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     def stop(self, context: AbstractOrchestrator) -> None:
         """Delete the SDN vnet + subnet and reload SDN.
 
-        Best-effort: never raises.  Safe to call if :meth:`start` was
-        not (or only partially) successful.
+        Never raises — :meth:`AbstractOrchestrator.__exit__` cannot
+        let teardown errors mask the original exception that ended
+        the ``with`` block.  Errors are logged at WARNING level
+        instead, except for 404s on the delete calls (which mean the
+        resource was already gone — that's :meth:`stop`'s
+        postcondition met).  Safe to call before :meth:`start` or
+        after a partial failure.
 
         :param context: The :class:`ProxmoxOrchestrator`.
         """
         client = _proxmox_client(context)
-        if self._vnet_name is None:
+        if not self._vnet_created:
+            # Either start() never ran, or it failed before creating
+            # the vnet.  Either way nothing to clean up here.
             return
         self._cleanup(
-            client, self._vnet_name, self._subnet_id, log_failures=True,
+            client,
+            vnet=self._vnet_name,
+            subnet_id=self._subnet_id if self._subnet_created else None,
         )
         self._vnet_name = None
         self._subnet_id = None
         self._client = None
+        self._vnet_created = False
+        self._subnet_created = False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -272,33 +311,98 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     @staticmethod
     def _cleanup(
         client: Any,
-        vnet: str,
+        vnet: str | None,
         subnet_id: str | None,
-        *,
-        log_failures: bool,
     ) -> None:
         """Tear down a vnet + its subnets and reload SDN.
 
-        Each step is independent and best-effort so a partial state
-        (vnet without subnet, subnet without vnet) still gets cleaned
-        up.
+        Both args are optional so the rollback path in :meth:`start`
+        can ask only for the parts it actually created — passing
+        ``vnet=None`` if PVE refused the ``vnets.post``, or
+        ``subnet_id=None`` if the subnet was never created.
+
+        Look-before-you-leap: list the vnets / subnets first and
+        only DELETE things that actually exist (and that we
+        recorded creating).  PVE returns HTTP 500 ("does not
+        exist") rather than 404 for missing SDN resources, so we
+        can't disambiguate "already gone" from "actually broken"
+        by status code alone — listing first avoids the 500-spam
+        entirely and keeps logged warnings meaningful (a warning
+        here means the resource exists *and* we couldn't delete
+        it).
+
+        Errors that do happen are logged but never re-raised —
+        this helper feeds both the orchestrator-teardown path
+        (where raising would mask the user's exception) and the
+        ``start()`` rollback path (where raising would mask the
+        original create failure).
         """
+        if vnet is None:
+            return  # nothing to do
+        # 1. Check what exists.  If we can't even list, bail —
+        # without a current view we'd be guessing whether each
+        # delete failure is "already gone" or "real problem", and
+        # that's exactly the noise we're trying to avoid.
+        try:
+            vnet_names = {v["vnet"] for v in client.cluster.sdn.vnets.get()}
+        except Exception as exc:
+            _log.warning(
+                "failed to list SDN vnets for cleanup of %r: %s — "
+                "skipping further teardown to avoid spurious errors",
+                vnet, exc,
+            )
+            return
+        if vnet not in vnet_names:
+            return  # already gone — nothing to do
+
+        # 2. Subnet, if we recorded one.
         if subnet_id is not None:
             try:
-                client.cluster.sdn.vnets(vnet).subnets(subnet_id).delete()
+                subnet_ids = {
+                    s["subnet"]
+                    for s in client.cluster.sdn.vnets(vnet).subnets.get()
+                }
             except Exception as exc:
-                if log_failures:
-                    _log.warning(
-                        "failed to delete subnet %s/%s: %s",
-                        vnet, subnet_id, exc,
-                    )
+                _log.warning(
+                    "failed to list subnets of vnet %r: %s",
+                    vnet, exc,
+                )
+                subnet_ids = set()
+            if subnet_id in subnet_ids:
+                ProxmoxVirtualNetwork._call_and_log(
+                    f"delete subnet {vnet}/{subnet_id}",
+                    lambda: client.cluster.sdn.vnets(vnet)
+                        .subnets(subnet_id).delete(),
+                )
+
+        # 3. The vnet itself.
+        ProxmoxVirtualNetwork._call_and_log(
+            f"delete vnet {vnet}",
+            lambda: client.cluster.sdn.vnets(vnet).delete(),
+        )
+
+        # 4. Apply pending SDN config so the deletes actually take
+        # effect.  Without this PUT, the entries hang around as
+        # "pending deletion" until the next reload from anywhere.
+        ProxmoxVirtualNetwork._call_and_log(
+            "reload SDN after cleanup",
+            lambda: client.cluster.sdn.put(),
+        )
+
+    @staticmethod
+    def _call_and_log(action: str, fn: Any) -> None:
+        """Run *fn* and log any failure at WARNING level.
+
+        Used after we've already confirmed the resource exists, so
+        any failure here is a real problem worth surfacing — the
+        log line includes the HTTP status code when proxmoxer
+        attached one.
+        """
         try:
-            client.cluster.sdn.vnets(vnet).delete()
+            fn()
         except Exception as exc:
-            if log_failures:
-                _log.warning("failed to delete vnet %s: %s", vnet, exc)
-        try:
-            client.cluster.sdn.put()
-        except Exception as exc:
-            if log_failures:
-                _log.warning("failed to reload SDN after cleanup: %s", exc)
+            status = getattr(exc, "status_code", None)
+            if status is not None:
+                _log.warning("failed to %s: HTTP %s — %s", action, status, exc)
+            else:
+                _log.warning("failed to %s: %s", action, exc)
