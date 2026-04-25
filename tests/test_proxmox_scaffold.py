@@ -69,10 +69,10 @@ class TestProxmoxVMStubs:
         vm = self._vm()
         assert vm.name == "x"
 
-    def test_properties_forward_to_inner_spec(self) -> None:
-        """``builder``/``users``/``communicator`` are property proxies
-        onto the wrapped libvirt spec.  Reading them must not raise and
-        must reflect what the spec carries."""
+    def test_spec_attributes_populated(self) -> None:
+        """Verify ``ProxmoxVM`` inherits the shared spec constructor —
+        no libvirt wrapping under the hood, the standard attributes
+        are populated directly on the instance."""
         from testrange.vms.builders import CloudInitBuilder
         vm = self._vm()
         assert vm.users[0].username == "root"
@@ -80,14 +80,23 @@ class TestProxmoxVMStubs:
         # Default communicator for a Linux qcow2 image is the
         # CloudInitBuilder default ("guest-agent" today).
         assert vm.communicator in {"guest-agent", "ssh", "winrm"}
-        # The ``_communicator`` getter/setter pair is what
-        # :meth:`AbstractVM._make_communicator` writes to.  Round-trip
-        # confirms the setter delegates and the getter reads back.
+        # ``_communicator`` is the slot the orchestrator writes to once
+        # the VM is started; it's a plain instance attribute, not a
+        # property forwarder onto a wrapped backend.
         assert vm._communicator is None
         sentinel = object()
         vm._communicator = sentinel  # type: ignore[assignment]
         assert vm._communicator is sentinel
         vm._communicator = None
+
+    def test_does_not_wrap_libvirt(self) -> None:
+        """Regression: ``ProxmoxVM`` must not carry a private
+        ``_spec`` / libvirt VM instance.  The two backends are
+        peers — both inherit :class:`AbstractVM` directly — so
+        importing the proxmox backend should not require the libvirt
+        backend's internals to construct a VM."""
+        vm = self._vm()
+        assert not hasattr(vm, "_spec")
 
     def test_build_raises(self) -> None:
         vm = self._vm()

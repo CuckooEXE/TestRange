@@ -40,67 +40,57 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from testrange.backends.libvirt.vm import VM as _LibvirtVM
 from testrange.vms.base import AbstractVM
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.cache import CacheManager
-    from testrange.communication.base import AbstractCommunicator
+    from testrange.credentials import Credential
+    from testrange.devices import AbstractDevice
     from testrange.orchestrator_base import AbstractOrchestrator
+    from testrange.packages import AbstractPackage
+    from testrange.vms.builders.base import Builder
 
 
 class ProxmoxVM(AbstractVM):
     """Proxmox-VE implementation of :class:`AbstractVM` (SCAFFOLDING).
 
-    The constructor accepts the same arguments as
-    :class:`~testrange.backends.libvirt.VM` and defers all lifecycle methods
-    with :class:`NotImplementedError`.  Spec data lives on the instance
-    so a future implementer only has to fill in the lifecycle methods.
+    The hypervisor-neutral spec — ``name``, ``iso``, ``users``,
+    ``pkgs``, ``post_install_cmds``, ``devices``, ``builder``,
+    ``communicator`` — is handled by :meth:`AbstractVM.__init__`.
+    Future PVE-specific runtime fields (the ``proxmoxer`` client
+    handle, the assigned VMID, etc.) get added here once the
+    lifecycle methods are wired up.
     """
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        # Reuse the libvirt VM's constructor solely for its input
-        # validation + device-list normalisation; the resulting
-        # instance holds the same ``name``, ``iso``, ``users``,
-        # ``builder``, ``communicator`` attributes the Proxmox
-        # lifecycle methods will consult.  Swap this for a dedicated
-        # dataclass when the spec and libvirt implementation drift.
-        self._spec = _LibvirtVM(*args, **kwargs)  # type: ignore[arg-type]
-
-    @property
-    def name(self) -> str:
-        return self._spec.name
-
-    @property
-    def builder(self):  # type: ignore[no-untyped-def]
-        return self._spec.builder
-
-    @property
-    def users(self):  # type: ignore[no-untyped-def]
-        """Forward to the underlying spec so
-        :meth:`~testrange.vms.base.AbstractVM._make_communicator` can
-        read credentials without the VM growing its own storage."""
-        return self._spec.users
-
-    # pyright flags these as "property overrides attribute" against
-    # AbstractVM's plain-attribute declarations.  They're a deliberate
-    # proxy pattern (ProxmoxVM wraps an internal _spec and forwards
-    # reads); the ignore scope is exactly the override.
-    @property
-    def communicator(self) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
-        """Forward to the underlying spec (see :attr:`users`)."""
-        return self._spec.communicator
-
-    @property
-    def _communicator(self) -> AbstractCommunicator | None:  # pyright: ignore[reportIncompatibleVariableOverride]
-        return self._spec._communicator
-
-    @_communicator.setter
-    def _communicator(  # pyright: ignore[reportIncompatibleVariableOverride]
-        self, value: AbstractCommunicator | None,
+    def __init__(
+        self,
+        name: str,
+        iso: str,
+        users: list[Credential],
+        pkgs: list[AbstractPackage] | None = None,
+        post_install_cmds: list[str] | None = None,
+        devices: list[AbstractDevice] | None = None,
+        builder: Builder | None = None,
+        communicator: str | None = None,
     ) -> None:
-        self._spec._communicator = value
+        super().__init__(
+            name=name,
+            iso=iso,
+            users=users,
+            pkgs=pkgs,
+            post_install_cmds=post_install_cmds,
+            devices=devices,
+            builder=builder,
+            communicator=communicator,
+        )
+        # Proxmox-specific runtime state, populated by
+        # :class:`ProxmoxOrchestrator` once :meth:`build` and
+        # :meth:`start_run` are implemented.  Listed here so the shape
+        # is visible to readers of this class.
+        self._client: object | None = None
+        self._node: str | None = None
+        self._vmid: int | None = None
 
     def build(
         self,

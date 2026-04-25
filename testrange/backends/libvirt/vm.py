@@ -34,12 +34,9 @@ from testrange.communication.base import AbstractCommunicator
 from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
 from testrange.exceptions import VMBuildError
 from testrange.vms.base import AbstractVM
-from testrange.vms.builders import Builder, auto_select_builder
+from testrange.vms.builders import Builder
 
 _log = get_logger(__name__)
-
-_COMMUNICATOR_KINDS = ("guest-agent", "ssh", "winrm")
-"""Legal values for the ``communicator=`` kwarg on :class:`VM`."""
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
@@ -281,51 +278,20 @@ class VM(AbstractVM):
         builder: Builder | None = None,
         communicator: str | None = None,
     ) -> None:
-        self._name = name
-        self.iso = iso
-        self.users = users
-        self.pkgs: list[AbstractPackage] = pkgs or []
-        self.post_install_cmds: list[str] = post_install_cmds or []
-        self.devices: list[AbstractDevice] = devices or []
-
-        # Auto-select a builder from iso= when the caller doesn't pass
-        # one.  The registry (testrange.vms.builders.BUILDER_REGISTRY)
-        # walks front-to-back; the default entry matches Windows
-        # install ISOs and everything else falls through to
-        # CloudInitBuilder.  Third-party builders register themselves
-        # via testrange.vms.builders.register_builder().
-        if builder is None:
-            builder = auto_select_builder(iso)
-        self.builder = builder
-
-        # Communicator default comes from the builder so each
-        # provisioning strategy can pick what it knows works — e.g.
-        # the Windows builder installs qemu-guest-agent via
-        # FirstLogonCommands but defaults to WinRM because that's
-        # reachable earlier in the boot.
-        if communicator is None:
-            communicator = self.builder.default_communicator()
-        self.communicator = communicator
-
-        if communicator not in _COMMUNICATOR_KINDS:
-            raise VMBuildError(
-                f"VM {name!r}: communicator={communicator!r} is not one of "
-                f"{_COMMUNICATOR_KINDS}"
-            )
-
-        # Runtime state — set by Orchestrator
-        self._communicator = None
-        self._domain = None
-        self._install_domain = None
-        self._run_id = None
-
-    @property
-    def name(self) -> str:
-        """Return the VM's configured name.
-
-        :returns: Name string.
-        """
-        return self._name
+        super().__init__(
+            name=name,
+            iso=iso,
+            users=users,
+            pkgs=pkgs,
+            post_install_cmds=post_install_cmds,
+            devices=devices,
+            builder=builder,
+            communicator=communicator,
+        )
+        # Libvirt-specific runtime state, populated by Orchestrator.
+        self._domain: libvirt.virDomain | None = None
+        self._install_domain: libvirt.virDomain | None = None
+        self._run_id: str | None = None
 
     def _vcpu_count(self) -> int:
         vcpus = [d for d in self.devices if isinstance(d, vCPU)]
