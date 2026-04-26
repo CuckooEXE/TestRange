@@ -108,11 +108,24 @@ class AbstractOrchestrator(ABC):
         networks: Sequence[AbstractVirtualNetwork] | None = None,
         vms: Sequence[AbstractVM] | None = None,
         cache_root: Path | None = None,
+        cache: str | None = None,
+        cache_verify: bool | str = True,
     ) -> None:
         """Store inputs — subclasses override to open the backend
         connection and initialise handles.
+
+        :param cache: Optional URL of an :doc:`HTTP cache </usage/http_cache>`
+            (e.g. ``"https://cache.testrange"``) consulted as a
+            second-tier fill source for downloaded base images and
+            post-install VM snapshots.  ``None`` (default) uses only
+            the local on-disk cache.
+        :param cache_verify: TLS verification for the HTTP cache.
+            ``True`` (default) requires a trusted cert chain;
+            ``False`` accepts self-signed (matches the bundled
+            ``cache/`` docker setup); a string is treated as a path
+            to a CA bundle.  Ignored when *cache* is ``None``.
         """
-        del host, networks, vms, cache_root  # subclasses wire these
+        del host, networks, vms, cache_root, cache, cache_verify  # subclasses wire these
 
     @abstractmethod
     def __enter__(self) -> AbstractOrchestrator:

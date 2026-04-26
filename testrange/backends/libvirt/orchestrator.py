@@ -261,6 +261,8 @@ class Orchestrator(AbstractOrchestrator):
         networks: Sequence[VirtualNetwork] | None = None,
         vms: Sequence[VM] | None = None,
         cache_root: Path | None = None,
+        cache: str | None = None,
+        cache_verify: bool | str = True,
         storage_backend: AbstractStorageBackend | None = None,
     ) -> None:
         self._host = host
@@ -272,7 +274,15 @@ class Orchestrator(AbstractOrchestrator):
         self._networks = list(networks) if networks else []  # pyright: ignore[reportIncompatibleVariableOverride]
         self._vm_list = list(vms) if vms else []  # pyright: ignore[reportIncompatibleVariableOverride]
         check_name_collisions(self._vm_list, self._networks)
-        self._cache = CacheManager(root=cache_root) if cache_root else CacheManager()
+        remote = None
+        if cache is not None:
+            from testrange.cache_http import HttpCache  # noqa: PLC0415
+            remote = HttpCache(cache, verify=cache_verify)
+        self._cache = (
+            CacheManager(root=cache_root, remote=remote)
+            if cache_root
+            else CacheManager(remote=remote)
+        )
         # Explicit override wins.  When ``None``, _select_storage_backend
         # inspects the libvirt URI at __enter__ and picks LocalStorage
         # for ``qemu:///system`` or SSHStorage for ``qemu+ssh://…``.

@@ -118,17 +118,22 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         networks: Sequence[AbstractVirtualNetwork] | None = None,
         vms: Sequence[AbstractVM] | None = None,
         cache_root: Path | None = None,
+        cache: str | None = None,
+        cache_verify: bool | str = True,
         node: str | None = None,
         storage: str | None = None,
         token: object | None = None,
     ) -> None:
         super().__init__(
             host=host, networks=networks, vms=vms, cache_root=cache_root,
+            cache=cache, cache_verify=cache_verify,
         )
         self._host = host
         self._networks = list(networks) if networks else []
         self._vm_list = list(vms) if vms else []
         self._cache_root = cache_root
+        self._cache_url = cache
+        self._cache_verify = cache_verify
         self._node = node
         self._storage = storage
         self._token = token

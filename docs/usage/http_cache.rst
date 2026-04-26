@@ -99,12 +99,71 @@ What's *not* in scope
   conventions (e.g. ``vms/<config_hash>.qcow2``) are TestRange's
   responsibility, not the cache's.
 
-Future TestRange integration
-----------------------------
+Wiring it into TestRange
+------------------------
 
-Once wired in, the local :doc:`caching <caching>` layer will check
-the HTTP cache before doing a fresh install and ``PUT`` the
-resulting artifact back on success.  Each backend keeps its native
-on-disk format on the cache (qcow2 for libvirt, ``.vma.zst`` for
-Proxmox, vhdx for Hyper-V) — the HTTP layer doesn't care; it's
-just bytes keyed by URL.
+Pass ``cache=`` to the orchestrator constructor and the per-host
+:doc:`local cache <caching>` will use it as a second-tier fill
+source:
+
+.. code-block:: python
+
+   from testrange import Orchestrator
+
+   with Orchestrator(
+       cache="https://cache.testrange",
+       cache_verify=False,           # bundled docker uses self-signed
+       networks=[...],
+       vms=[...],
+   ) as orch:
+       ...
+
+Behaviour
+~~~~~~~~~
+
+* **Base images** (``get_image``).  Local hit short-circuits as
+  before.  Local miss → check remote → if remote hit, ``GET`` to
+  local cache + synthesise a meta sidecar.  Remote miss → download
+  from upstream URL → ``PUT`` to remote on success.
+* **VM snapshots** (``get_vm`` / ``store_vm``).  Local hit
+  short-circuits.  Local miss → ``GET`` qcow2 + manifest from
+  remote and land them in the local backend.  ``store_vm`` after
+  install ``PUT``\ s both back to the remote.
+* **Failure handling.**  Every remote operation is best-effort.
+  Connection errors, timeouts, and unexpected status codes log a
+  warning and fall through to the cold path; a flaky cache slows
+  test runs back to local-cache-only speeds, never breaks them.
+* **Backend scope.**  Remote fill / publish runs only when the
+  backend's storage transport is local (the default).  SSH-reached
+  hypervisors are skipped to avoid round-tripping multi-GiB
+  artifacts through the test runner — put the cache and the
+  hypervisor on the same network if you want them sharing.
+
+URL keyspace
+~~~~~~~~~~~~
+
+The remote keyspace mirrors the local cache directory layout, one
+URL path per file:
+
+============================================  =================================
+``images/<url_hash>.qcow2`` (or ``.img``)     Base image bytes
+``images/<url_hash>.meta.json``               URL + sha256 + size + timestamp
+``vms/<config_hash>.qcow2``                   Compressed post-install snapshot
+``vms/<config_hash>.json``                    Build manifest (packages, cmds…)
+============================================  =================================
+
+``url_hash`` and ``config_hash`` use the same 24-char SHA-256 prefix
+the local cache uses (see :func:`testrange.cache.vm_config_hash`),
+so artifacts produced by one host can be picked up unchanged by
+any other host that asks for the same URL or VM spec.
+
+Not yet on the remote
+~~~~~~~~~~~~~~~~~~~~~
+
+* **NVRAM sidecars** (``<config_hash>.nvram.fd``) — UEFI installs
+  still require the local sidecar; a follow-up will mirror it to
+  the remote alongside the qcow2.
+* **virtio-win.iso** and **staged Windows ISOs** — fetched
+  upstream / staged locally as today.
+* **Proxmox prepared ISOs** — local-only; PVE-side caching is
+  a separate slice.

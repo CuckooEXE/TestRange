@@ -50,6 +50,7 @@ from testrange._logging import get_logger, log_duration
 from testrange.exceptions import CacheError, ImageNotFoundError
 
 if TYPE_CHECKING:
+    from testrange.cache_http import HttpCache
     from testrange.storage.base import StorageBackend
 
 _log = get_logger(__name__)
@@ -94,6 +95,12 @@ class CacheManager:
 
     :param root: Base directory for all cached data.  Defaults to
         ``/var/tmp/testrange/<user>`` (overridable via ``TESTRANGE_CACHE_DIR``).
+    :param remote: Optional :class:`~testrange.cache_http.HttpCache`
+        consulted as a second-tier fill source.  When set, base-image
+        downloads and VM-snapshot lookups check the remote on local
+        miss; successful local stores are mirrored back to the remote.
+        All remote operations are best-effort — failures fall through
+        to the cold path.
     """
 
     root: Path
@@ -105,10 +112,18 @@ class CacheManager:
     vms_dir: Path
     """Subdirectory holding post-install VM snapshots (``<root>/vms``)."""
 
-    def __init__(self, root: Path = _DEFAULT_CACHE_ROOT) -> None:
+    remote: HttpCache | None
+    """Optional second-tier remote cache; ``None`` disables it."""
+
+    def __init__(
+        self,
+        root: Path = _DEFAULT_CACHE_ROOT,
+        remote: HttpCache | None = None,
+    ) -> None:
         self.root = root
         self.images_dir = root / "images"
         self.vms_dir = root / "vms"
+        self.remote = remote
         self._ensure_dirs()
 
     def _ensure_dirs(self) -> None:
@@ -144,10 +159,22 @@ class CacheManager:
         image_path = self.images_dir / f"{url_hash}{ext}"
 
         lock_path = self.images_dir / f"{url_hash}.lock"
+        remote_image_key = f"images/{url_hash}{ext}"
+        remote_meta_key = f"images/{url_hash}.meta.json"
         with FileLock(str(lock_path), timeout=1800):
             if image_path.exists() and meta_path.exists():
                 _log.debug("base image cache hit for %s", url)
                 return image_path
+
+            # Second-tier: HTTP cache (best-effort).  A hit avoids a
+            # round-trip to the upstream mirror, which for a 600 MiB
+            # Debian image is the difference between a few seconds and
+            # a few minutes on a slow link.
+            if self._fill_image_from_remote(
+                url, remote_image_key, remote_meta_key, image_path, meta_path,
+            ):
+                return image_path
+
             _log.info("downloading base image from %s", url)
             try:
                 with log_duration(_log, f"download {image_path.name}"):
@@ -167,7 +194,63 @@ class CacheManager:
                     indent=2,
                 )
             )
+            self._publish_image_to_remote(
+                remote_image_key, remote_meta_key, image_path, meta_path,
+            )
         return image_path
+
+    def _fill_image_from_remote(
+        self,
+        url: str,
+        image_key: str,
+        meta_key: str,
+        image_path: Path,
+        meta_path: Path,
+    ) -> bool:
+        """Try to populate *image_path* + *meta_path* from the HTTP
+        cache.  Returns ``True`` on hit, ``False`` on miss / disabled."""
+        if self.remote is None:
+            return False
+        if not self.remote.exists(image_key):
+            return False
+        with log_duration(_log, f"http-cache fill {image_path.name}"):
+            if not self.remote.get(image_key, image_path):
+                return False
+        if not self.remote.get(meta_key, meta_path):
+            # Image came down but meta sidecar is missing; synthesise a
+            # minimal one so get_image's hit-check on the next run
+            # passes without re-downloading.
+            file_sha256 = _sha256_file(image_path)
+            meta_path.write_text(
+                json.dumps(
+                    {
+                        "url": url,
+                        "downloaded_at": time.time(),
+                        "sha256": file_sha256,
+                        "size_bytes": image_path.stat().st_size,
+                        "source": "http-cache (missing meta.json)",
+                    },
+                    indent=2,
+                )
+            )
+        _log.info("base image filled from http-cache for %s", url)
+        return True
+
+    def _publish_image_to_remote(
+        self,
+        image_key: str,
+        meta_key: str,
+        image_path: Path,
+        meta_path: Path,
+    ) -> None:
+        """Best-effort PUT of a freshly-downloaded image + meta to the
+        HTTP cache.  Failures are logged at WARN by HttpCache and do
+        not raise."""
+        if self.remote is None:
+            return
+        with log_duration(_log, f"http-cache publish {image_path.name}"):
+            self.remote.put(image_key, image_path)
+        self.remote.put(meta_key, meta_path)
 
     @staticmethod
     def _download(url: str, dest: Path) -> None:
@@ -383,6 +466,12 @@ class CacheManager:
         ``None`` in that case forces a rebuild; the stale qcow2 is
         overwritten by the next :meth:`store_vm` invocation.
 
+        When a remote :class:`~testrange.cache_http.HttpCache` is
+        configured and the local backend cache is empty, the remote is
+        queried; on a remote hit both the qcow2 and the manifest are
+        pulled into the local backend and the freshly-populated ref is
+        returned, exactly as if a previous run had built it locally.
+
         :param config_hash: Hash key from :func:`vm_config_hash`.
         :param backend: Backend to check.
         :returns: Backend-local ref on hit, ``None`` on miss (or on a
@@ -392,6 +481,10 @@ class CacheManager:
         manifest_ref = self.vm_manifest_ref(config_hash, backend)
         transport = backend.transport
         if not transport.exists(snapshot_ref):
+            if self._fill_vm_from_remote(
+                config_hash, snapshot_ref, manifest_ref, backend,
+            ):
+                return snapshot_ref
             return None
         if not transport.exists(manifest_ref):
             _log.warning(
@@ -401,6 +494,59 @@ class CacheManager:
             )
             return None
         return snapshot_ref
+
+    def _fill_vm_from_remote(
+        self,
+        config_hash: str,
+        snapshot_ref: str,
+        manifest_ref: str,
+        backend: StorageBackend,
+    ) -> bool:
+        """Try to populate the backend's snapshot cache from the HTTP
+        cache.  Returns ``True`` on hit.
+
+        Only fires for local-filesystem backends in this slice; SSH /
+        remote backends would need a tmp-then-upload round-trip that
+        adds bandwidth without obvious benefit (you wouldn't put the
+        HTTP cache and the SSH-reached hypervisor on different sides
+        of the slow link).  Logs a debug line and returns ``False``
+        for those.
+        """
+        if self.remote is None:
+            return False
+        if not _transport_is_local(backend.transport):
+            _log.debug(
+                "http-cache: skipping fill for non-local backend %r",
+                type(backend.transport).__name__,
+            )
+            return False
+
+        snapshot_key = f"vms/{config_hash}.qcow2"
+        manifest_key = f"vms/{config_hash}.json"
+        if not self.remote.exists(snapshot_key):
+            return False
+
+        snapshot_path = Path(snapshot_ref)
+        manifest_path = Path(manifest_ref)
+        with log_duration(
+            _log, f"http-cache fill VM snapshot {config_hash}",
+        ):
+            if not self.remote.get(snapshot_key, snapshot_path):
+                return False
+        if not self.remote.get(manifest_key, manifest_path):
+            # Snapshot came down but manifest didn't — get_vm's manifest
+            # check would then mark the entry as a partial write on the
+            # next call.  Drop the snapshot so we don't pollute the
+            # local cache with an orphan.
+            snapshot_path.unlink(missing_ok=True)
+            _log.warning(
+                "http-cache: snapshot %s present but manifest missing; "
+                "discarded fill",
+                config_hash,
+            )
+            return False
+        _log.info("VM snapshot %s filled from http-cache", config_hash)
+        return True
 
     def store_vm(
         self,
@@ -456,7 +602,44 @@ class CacheManager:
                 manifest, indent=2, default=str, sort_keys=True,
             ).encode("utf-8"),
         )
+        self._publish_vm_to_remote(config_hash, dest_ref, manifest_ref, backend)
         return dest_ref
+
+    def _publish_vm_to_remote(
+        self,
+        config_hash: str,
+        snapshot_ref: str,
+        manifest_ref: str,
+        backend: StorageBackend,
+    ) -> None:
+        """Best-effort PUT of a freshly-stored VM snapshot to the HTTP
+        cache.  See :meth:`_fill_vm_from_remote` for the local-only
+        scope rationale.
+        """
+        if self.remote is None:
+            return
+        if not _transport_is_local(backend.transport):
+            return
+        snapshot_key = f"vms/{config_hash}.qcow2"
+        manifest_key = f"vms/{config_hash}.json"
+        with log_duration(
+            _log, f"http-cache publish VM snapshot {config_hash}",
+        ):
+            self.remote.put(snapshot_key, Path(snapshot_ref))
+        self.remote.put(manifest_key, Path(manifest_ref))
+
+
+def _transport_is_local(transport: Any) -> bool:
+    """True if *transport* operates on the local filesystem.
+
+    Imported lazily to avoid a circular dependency between
+    :mod:`testrange.cache` and :mod:`testrange.storage`.
+    """
+    from testrange.storage.transport.local import (  # noqa: PLC0415
+        LocalFileTransport,
+    )
+
+    return isinstance(transport, LocalFileTransport)
 
 
 def vm_config_hash(
