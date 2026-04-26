@@ -280,6 +280,10 @@ class ProxmoxVM(AbstractVM):
                     "vm %r: PVE template cache MISS for %s — installing",
                     self.name, config_hash[:12],
                 )
+                # Sweep any orphans (half-promoted templates from
+                # earlier crashed installs) so the new install
+                # doesn't trip over a duplicate display name.
+                _delete_orphan_templates(client, node, template_name)
                 template_vmid = self._install_and_template(
                     context, cache, run,
                     install_network_name=install_network_name,
@@ -297,22 +301,39 @@ class ProxmoxVM(AbstractVM):
         self._template_vmid = template_vmid
 
         # Clone for the run phase.  Each test run gets its own VMID;
-        # the template stays untouched.  ``full=0`` asks for a linked
-        # clone — fast on storage backends that support it (LVM-thin,
-        # ZFS, qcow2 file storage).  PVE rejects with a clear error
-        # on raw LVM / Ceph-no-snap; if you hit that, override the
-        # storage in your orchestrator config.
+        # the template stays untouched.  Try a linked clone first
+        # (seconds, requires LVM-thin / ZFS / qcow2 file storage);
+        # fall back to full on storage that can't snapshot
+        # (raw LVM, Ceph without snapshots, NFS).  Linked vs full
+        # is a perf knob for the user, not a correctness one — both
+        # produce a runnable clone.
         run_vmid = int(client.cluster.nextid.get())
         self._vmid = run_vmid
         clone_name = f"tr-{self.name[:10]}-{run.run_id[:8]}"
         try:
-            clone_upid = client.nodes(node).qemu(template_vmid).clone.post(
-                newid=run_vmid,
-                name=clone_name,
-                full=0,
-            )
+            try:
+                clone_upid = client.nodes(node).qemu(template_vmid).clone.post(
+                    newid=run_vmid,
+                    name=clone_name,
+                    full=0,
+                )
+                clone_mode = "linked"
+            except Exception as linked_exc:
+                _log.info(
+                    "vm %r: linked clone of template %d failed (%s); "
+                    "retrying as full clone",
+                    self.name, template_vmid, linked_exc,
+                )
+                clone_upid = client.nodes(node).qemu(template_vmid).clone.post(
+                    newid=run_vmid,
+                    name=clone_name,
+                    full=1,
+                )
+                clone_mode = "full"
             with log_duration(
-                _log, f"clone template {template_vmid} → VMID {run_vmid}",
+                _log,
+                f"{clone_mode} clone template {template_vmid} → "
+                f"VMID {run_vmid}",
             ):
                 self._wait_for_task(
                     client, node, clone_upid, timeout=600,
@@ -1016,8 +1037,9 @@ def _find_template(client: Any, node: str, name: str) -> int | None:
     Returns the VMID if a VM with display name == *name* exists on
     *node* and has ``template: 1`` in its config.  Returns ``None``
     on miss.  A name match without the template flag is treated as
-    a miss (probably a half-promoted install that died) — the
-    caller will rebuild over it.
+    a miss (probably a half-promoted install that died); use
+    :func:`_delete_orphan_templates` before rebuilding so the install
+    doesn't trip over a duplicate name.
     """
     try:
         vms = client.nodes(node).qemu.get()
@@ -1039,6 +1061,46 @@ def _find_template(client: Any, node: str, name: str) -> int | None:
             return None
         return int(vm["vmid"])
     return None
+
+
+def _delete_orphan_templates(client: Any, node: str, name: str) -> int:
+    """Delete every VMID on *node* with display name *name* but no
+    ``template: 1`` flag — the footprint of an install that died
+    between create + promote.
+
+    Returns the number of orphans deleted.  Best-effort: per-VMID
+    failures are logged but never raise so the install can proceed.
+    """
+    try:
+        vms = client.nodes(node).qemu.get()
+    except Exception as exc:
+        _log.debug("orphan sweep: list-VMs failed: %s", exc)
+        return 0
+    deleted = 0
+    for vm in vms or []:
+        if vm.get("name") != name or vm.get("template"):
+            continue
+        vmid = int(vm["vmid"])
+        _log.warning(
+            "orphan sweep: deleting half-promoted VMID %d (%r)",
+            vmid, name,
+        )
+        try:
+            # Stop first in case the orphan is somehow still running
+            # (interrupt during install but before poweroff).
+            try:
+                client.nodes(node).qemu(vmid).status.stop.post()
+            except Exception:
+                pass
+            client.nodes(node).qemu(vmid).delete()
+            deleted += 1
+        except Exception as exc:
+            _log.warning(
+                "orphan sweep: delete VMID %d failed: %s — install may "
+                "fail with duplicate-name; clean up manually",
+                vmid, exc,
+            )
+    return deleted
 
 
 __all__ = ["ProxmoxVM"]
