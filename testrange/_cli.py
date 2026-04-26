@@ -612,6 +612,68 @@ def repl_cmd(
             orch.__exit__(None, None, None)
 
 
+@main.command("cleanup")
+@click.argument("target")
+@click.argument("run_id")
+@_orchestrator_option
+@click.option(
+    "--log-level",
+    type=click.Choice(
+        ["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False
+    ),
+    default="INFO",
+    help="Minimum level for TestRange stderr logs.",
+)
+def cleanup_cmd(
+    target: str,
+    run_id: str,
+    orchestrator_url: str | None,
+    log_level: str,
+) -> None:
+    """Tear down resources from a leaked test run.
+
+    TARGET is the same ``MODULE[:FACTORY]`` shape as ``testrange run``.
+    RUN_ID is the UUID4 from the original run (find it in the run's log
+    output or in ``<cache_root>/runs/<run_id>/``).
+
+    Reconstructs every resource the test factory + run id would have
+    produced and best-effort destroys each.  Idempotent; safe to run
+    repeatedly.
+
+    Use after a ``kill -9 <testrange-pid>``, OOM-killer hit, host
+    reboot mid-run, or anything else that prevented the orchestrator's
+    ``__exit__`` from running.
+
+    Example::
+
+        testrange cleanup ./my_tests.py:gen_tests \\
+            deadbeef-1111-2222-3333-444455556666
+    """
+    configure_root_logger(getattr(logging, log_level.upper()))
+    module_part, factory_name = _parse_target(target)
+    module = _load_module(module_part)
+    tests = _load_tests(module, module_part, factory_name)
+
+    failures = 0
+    for test in tests:
+        orch = _resolve_orchestrator(test, orchestrator_url)
+        try:
+            orch.cleanup(run_id)
+        except NotImplementedError as exc:
+            click.echo(f"  {test.name}: {exc}", err=True)
+            failures += 1
+        except Exception as exc:  # noqa: BLE001 — surface anything as a CLI error
+            click.echo(
+                f"  {test.name}: cleanup failed: {exc}", err=True,
+            )
+            failures += 1
+        else:
+            click.echo(f"  {test.name}: cleanup ok")
+
+    if failures:
+        sys.exit(1)
+
+
 @main.command("cache-list")
 @click.option("--cache-dir", type=click.Path(path_type=Path), default=None)
 def cache_list(cache_dir: Path | None) -> None:

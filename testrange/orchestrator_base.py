@@ -144,6 +144,36 @@ class AbstractOrchestrator(ABC):
         the ``with`` block.
         """
 
+    def cleanup(self, run_id: str) -> None:
+        """Tear down resources from a prior run that exited uncleanly.
+
+        Reconstructs the deterministic backend names this orchestrator
+        would have created for *run_id* — which is the only
+        nondeterministic input — and tries to destroy each.  Used
+        from the CLI as ``testrange cleanup MODULE[:FACTORY] RUN_ID``
+        when a previous run was killed before its ``__exit__`` could
+        run (``kill -9``, host reboot, OOM, etc.).
+
+        Does NOT call :meth:`__enter__` — there's nothing to
+        provision, just orphaned resources to delete.  Implementations
+        open whatever connection they need, enumerate the names the
+        spec + run_id imply, and best-effort delete each.  Already-
+        deleted resources are silently skipped so cleanup is
+        idempotent.
+
+        :param run_id: UUID4 string from the original run, the only
+            nondeterministic input.  Find it in the run's log output
+            (``run id <uuid>``) or in
+            ``<cache_root>/runs/<run_id>/``.
+        :raises NotImplementedError: When this backend hasn't wired
+            cleanup yet.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement cleanup() yet — "
+            "the backend cannot tear down a leaked run.  Until that "
+            "lands, clean up by hand using its native tools."
+        )
+
     def keep_alive_hints(self) -> list[str]:
         """Return shell commands a user would run to clean up resources
         left behind by ``testrange repl --keep`` or :meth:`leak`.

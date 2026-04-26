@@ -525,6 +525,146 @@ class Orchestrator(AbstractOrchestrator):
             # is a belt-and-braces guard against future regressions.
             pass
 
+    def cleanup(self, run_id: str) -> None:
+        """Tear down resources from a prior run that exited uncleanly.
+
+        Reconstructs every libvirt domain and network name this
+        orchestrator's ``__enter__`` would have created for *run_id*
+        — the names are deterministic functions of (vm_name,
+        run_id) and (network_name, run_id) — and best-effort
+        destroys + undefines each.  Already-deleted resources are
+        silently skipped so this is idempotent.
+
+        Names checked for *run_id*:
+
+        * ``tr-<vm[:10]>-<run_id[:8]>`` — run-phase domain per VM
+        * ``tr-build-<vm[:10]>-<run_id[:8]>`` — install-phase domain
+          per VM (only present if a build was in flight when the
+          run died)
+        * ``tr-<net[:6]>-<run_id[:4]>`` — per-test network (with
+          the same name normalisation
+          :class:`VirtualNetwork.backend_name` applies)
+        * ``tr-instal-<run_id[:4]>`` — the ephemeral install
+          network for the run
+        * ``<cache_root>/runs/<run_id>/`` — per-run scratch
+          directory (overlays, seed ISOs, NVRAM)
+
+        Opens its own libvirt connection — does **not** call
+        :meth:`__enter__`, since there's nothing to provision.
+
+        :param run_id: UUID4 of the leaked run, the only
+            nondeterministic input.
+        """
+        from testrange.backends.libvirt.network import VirtualNetwork as _VN
+
+        uri = self._build_uri()
+        _log.info("cleanup: connecting to %s for run %s", uri, run_id[:8])
+        try:
+            conn = libvirt.open(uri)
+        except libvirt.libvirtError as exc:
+            raise OrchestratorError(
+                f"cleanup: cannot open libvirt connection {uri!r}: {exc}"
+            ) from exc
+
+        try:
+            # 1. Per-VM domains.
+            for vm in self._vm_list:
+                for prefix in ("tr-", "tr-build-"):
+                    name = f"{prefix}{vm.name[:10]}-{run_id[:8]}"
+                    self._cleanup_domain(conn, name)
+
+            # 2. Per-test networks (compute their backend names by
+            #    binding each spec to this run_id).
+            for net in self._networks:
+                if not isinstance(net, _VN):
+                    _log.debug(
+                        "cleanup: skipping non-libvirt network %r", net.name,
+                    )
+                    continue
+                # Binding mutates per-instance state; we're outside an
+                # active run so no concurrent code looks at it.
+                net.bind_run(run_id)
+                self._cleanup_network(conn, net.backend_name())
+
+            # 3. The ephemeral install network for this run.  Mirrors
+            #    the construction in _create_install_network(): name is
+            #    ``install-<run_id[:4]>`` which truncates to libvirt
+            #    ``tr-instal-<run_id[:4]>``.
+            install_logical = f"install-{run_id[:4]}"
+            install_backend = (
+                f"tr-{install_logical[:6].lower().replace('_','')}"
+                f"-{run_id[:4]}"
+            )
+            self._cleanup_network(conn, install_backend)
+        finally:
+            try:
+                conn.close()
+            except libvirt.libvirtError:
+                pass
+
+        # 4. Per-run scratch dir (filesystem op, no libvirt needed).
+        run_dir = self._cache.root / "runs" / run_id
+        if run_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(run_dir)
+                _log.info("cleanup: removed run dir %s", run_dir)
+            except OSError as exc:
+                _log.warning(
+                    "cleanup: failed to remove run dir %s: %s", run_dir, exc,
+                )
+
+    @staticmethod
+    def _cleanup_domain(conn: libvirt.virConnect, name: str) -> None:
+        """Best-effort destroy + undefine of a libvirt domain by name."""
+        try:
+            domain = conn.lookupByName(name)
+        except libvirt.libvirtError:
+            return  # not present — nothing to clean up
+        _log.info("cleanup: destroying domain %r", name)
+        try:
+            if domain.isActive():
+                domain.destroy()
+        except libvirt.libvirtError as exc:
+            _log.warning(
+                "cleanup: destroy of domain %r failed (ignored): %s",
+                name, exc,
+            )
+        try:
+            domain.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
+        except (libvirt.libvirtError, AttributeError):
+            try:
+                domain.undefine()
+            except libvirt.libvirtError as exc:
+                _log.warning(
+                    "cleanup: undefine of domain %r failed (ignored): %s",
+                    name, exc,
+                )
+
+    @staticmethod
+    def _cleanup_network(conn: libvirt.virConnect, name: str) -> None:
+        """Best-effort destroy + undefine of a libvirt network by name."""
+        try:
+            net = conn.networkLookupByName(name)
+        except libvirt.libvirtError:
+            return  # not present
+        _log.info("cleanup: destroying network %r", name)
+        try:
+            if net.isActive():
+                net.destroy()
+        except libvirt.libvirtError as exc:
+            _log.warning(
+                "cleanup: destroy of network %r failed (ignored): %s",
+                name, exc,
+            )
+        try:
+            net.undefine()
+        except libvirt.libvirtError as exc:
+            _log.warning(
+                "cleanup: undefine of network %r failed (ignored): %s",
+                name, exc,
+            )
+
     def _preflight_memory(self) -> None:
         """Refuse to provision if the declared memory budget would
         push the target host above the memory-usage threshold.
