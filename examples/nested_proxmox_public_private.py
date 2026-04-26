@@ -41,18 +41,24 @@ What the example demonstrates
    outer orchestrator's :class:`ExitStack` enters as a normal
    nested orchestrator.  The inner orchestrator then provisions
    the L2 networks + VMs declared on the :class:`Hypervisor`.
+4. The inner VMs talk to the test runner over PVE's
+   :class:`~testrange.backends.proxmox.guest_agent.ProxmoxGuestAgentCommunicator`,
+   so the L2 SDN subnets (10.42/24, 10.43/24) do **not** need to
+   be routed back to the outer host — agent traffic hops through
+   PVE's local virtio-serial channel.
 
 Prerequisites
 =============
 
-- KVM on the physical host (nested-virt support is only required
-  once the inner orchestrator is re-enabled — v0 doesn't boot any
-  inner VMs).
+- KVM on the physical host with nested-virt enabled (the inner
+  L2 layer is real KVM-on-KVM-on-KVM).
 - A running ssh-agent (``echo $SSH_AUTH_SOCK`` returns a path).
   This example generates a fresh ed25519 keypair per run and loads
   it via ``ssh-add`` so the test runner can SSH into the booted PVE
   + sidecar without ever touching the user's ``~/.ssh/`` keys.  No
-  pre-existing key required.
+  pre-existing key required.  (The outer ``proxmox`` VM uses SSH
+  on its routable 10.0.0.10 outer-bridge IP; only the inner L2
+  VMs use the guest-agent path.)
 - The vanilla ProxMox VE installer ISO URL.  Upstream mirrors
   require no login for the community installer; pin a specific
   version via :data:`PROXMOX_ISO` below when you iterate.
@@ -417,6 +423,14 @@ def gen_tests() -> list[Test]:
                             ),
                         ],
                         vms=[
+                            # Inner VMs use ``communicator='guest-agent'``
+                            # explicitly: PVE's REST ``/agent/`` endpoints
+                            # let the outer test runner talk to each L2
+                            # VM through PVE's host-mediated virtio-serial
+                            # channel, so the SDN subnets don't need to
+                            # be routable from the outer host.  This is
+                            # the cloud-init default already, but spell
+                            # it out here so the contract is visible.
                             VM(
                                 name="webpublic",
                                 iso=DEBIAN_CLOUD,
@@ -425,6 +439,7 @@ def gen_tests() -> list[Test]:
                                 post_install_cmds=_nginx_post_install(
                                     "Public webserver"
                                 ),
+                                communicator="guest-agent",
                                 devices=[
                                     vCPU(1),
                                     Memory(0.5),
@@ -442,6 +457,7 @@ def gen_tests() -> list[Test]:
                                 post_install_cmds=_nginx_post_install(
                                     "Private DB"
                                 ),
+                                communicator="guest-agent",
                                 devices=[
                                     vCPU(1),
                                     Memory(0.5),
@@ -456,6 +472,7 @@ def gen_tests() -> list[Test]:
                                 iso=DEBIAN_CLOUD,
                                 users=[root_cred],
                                 pkgs=[Apt("curl"), Apt("iputils-ping")],
+                                communicator="guest-agent",
                                 devices=[
                                     vCPU(1),
                                     Memory(0.5),

@@ -185,24 +185,32 @@ class TestGuestAgentFactoryIsBackendOverridable:
         comm = vm._make_guest_agent_communicator()
         assert isinstance(comm, GuestAgentCommunicator)
 
-    def test_proxmox_vm_raises_not_implemented_clearly(self) -> None:
-        """Proxmox hasn't implemented guest-agent yet.  Until the real
-        :class:`ProxmoxGuestAgentCommunicator` is wired into
-        :meth:`ProxmoxVM._make_guest_agent_communicator`, the default
-        :meth:`AbstractVM` fallback surfaces a clear error instead of
-        the pre-refactor ``AttributeError: 'ProxmoxVM' has no attribute
-        '_domain'``."""
+    def test_proxmox_vm_produces_proxmox_guest_agent(self) -> None:
+        """End-to-end: ProxmoxVM + ``communicator="guest-agent"``
+        must produce the PVE-REST-flavoured communicator (regression:
+        previously this method raised because the override was a
+        stub).  The VM must already have the orchestrator-side state
+        ``_make_guest_agent_communicator`` reaches for —
+        ``_client`` / ``_node`` / ``_vmid`` — populated, otherwise
+        construction asserts."""
+        from unittest.mock import MagicMock
+
         from testrange import Credential
-        from testrange.backends.proxmox import ProxmoxVM
-        from testrange.exceptions import VMBuildError
+        from testrange.backends.proxmox import (
+            ProxmoxGuestAgentCommunicator,
+            ProxmoxVM,
+        )
 
         vm = ProxmoxVM(
             name="x",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
         )
-        with pytest.raises(VMBuildError, match="guest-agent"):
-            vm._make_guest_agent_communicator()
+        vm._client = MagicMock()
+        vm._node = "pve01"
+        vm._vmid = 100
+        comm = vm._make_guest_agent_communicator()
+        assert isinstance(comm, ProxmoxGuestAgentCommunicator)
 
 
 # =====================================================================
