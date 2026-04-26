@@ -203,11 +203,14 @@ class TestProxmoxNetworkOfflineSurface:
         ctx._client.cluster.sdn.vnets.assert_not_called()
 
 
-class TestProxmoxGuestAgentStubs:
-    """``ProxmoxGuestAgentCommunicator`` is the future REST-backed twin
-    of the libvirt :class:`GuestAgentCommunicator`.  Until the Proxmox
-    REST calls are implemented every method raises with a pointer at
-    the upstream API endpoint that would satisfy it."""
+class TestProxmoxGuestAgentSurface:
+    """Smoke checks that ``ProxmoxGuestAgentCommunicator`` exists and
+    stores its (client, node, vmid) target.
+
+    Functional coverage (REST round-trips, error wrapping, timeout
+    behaviour) lives in ``tests/test_proxmox_guest_agent.py`` —
+    these scaffold tests now just guard that the import path and
+    constructor signature stay as documented."""
 
     def _comm(self):
         from testrange.backends.proxmox import ProxmoxGuestAgentCommunicator
@@ -220,22 +223,6 @@ class TestProxmoxGuestAgentStubs:
         assert comm._node == "pve01"
         assert comm._vmid == 100
 
-    def test_wait_ready_raises(self) -> None:
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            self._comm().wait_ready()
-
-    def test_exec_raises(self) -> None:
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            self._comm().exec(["true"])
-
-    def test_get_file_raises(self) -> None:
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            self._comm().get_file("/etc/hostname")
-
-    def test_put_file_raises(self) -> None:
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            self._comm().put_file("/etc/hostname", b"x")
-
-    def test_hostname_raises(self) -> None:
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            self._comm().hostname()
+    def test_implements_abstract_communicator(self) -> None:
+        from testrange.communication.base import AbstractCommunicator
+        assert isinstance(self._comm(), AbstractCommunicator)
