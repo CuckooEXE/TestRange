@@ -45,16 +45,17 @@ from testrange.backends.libvirt.network import (
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
-from testrange.storage import (
-    AbstractStorageBackend,
+from testrange.vms.generic import GenericVM
+from testrange.backends.libvirt.storage import (
     LocalStorageBackend,
     SSHStorageBackend,
 )
+from testrange.storage import AbstractStorageBackend
 
 _log = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from testrange.backends.libvirt.vm import VM
+    from testrange.backends.libvirt.vm import LibvirtVM
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
@@ -122,6 +123,30 @@ def check_name_collisions(
                 "first 6 characters (case- and underscore-insensitive)."
             )
         seen_net_trunc[trunc] = net.name
+
+
+def _promote_to_libvirt(vm: LibvirtVM | GenericVM) -> LibvirtVM:
+    """Convert a backend-agnostic :class:`GenericVM` to the libvirt
+    backend's concrete :class:`LibvirtVM`.
+
+    The two share their entire constructor surface (since GenericVM
+    exists exactly to be pluggable into any backend), so the
+    translation is a field-for-field copy.  An already-LibvirtVM
+    input passes through unchanged.
+    """
+    if isinstance(vm, GenericVM):
+        from testrange.backends.libvirt.vm import LibvirtVM as _LibvirtVM
+        return _LibvirtVM(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,  # type: ignore[arg-type]  # device-type union narrows on construction
+            builder=vm.builder,
+            communicator=vm.communicator,
+        )
+    return vm
 
 
 _INSTALL_SUBNET_POOL = tuple(f"192.168.{o}.0/24" for o in range(240, 255))
@@ -194,7 +219,7 @@ class Orchestrator(AbstractOrchestrator):
         orchestrator = Orchestrator(
             host="localhost",
             networks=[VirtualNetwork("TestNet", "10.1.0.0/24", internet=True)],
-            vms=[VM("server", "debian-12", users=[...], devices=[vCPU(2)])],
+            vms=[LibvirtVM("server", "debian-12", users=[...], devices=[vCPU(2)])],
         )
         with orchestrator as orch:
             result = orch.vms["server"].exec(["uname", "-r"])
@@ -217,7 +242,7 @@ class Orchestrator(AbstractOrchestrator):
     _networks: list[VirtualNetwork]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Test networks to create for this run."""
 
-    _vm_list: list[VM]  # pyright: ignore[reportIncompatibleVariableOverride]
+    _vm_list: list[LibvirtVM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """VM specifications to provision."""
 
     _cache: CacheManager
@@ -229,7 +254,7 @@ class Orchestrator(AbstractOrchestrator):
     # per-symbol ignore suppresses Pyright's strict-override rule
     # which doesn't accept a narrower mutable override even though
     # nothing external mutates this attribute.
-    vms: dict[str, VM]  # pyright: ignore[reportIncompatibleVariableOverride]
+    vms: dict[str, LibvirtVM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Running VMs keyed by name; populated after :meth:`__enter__`."""
 
     _conn: libvirt.virConnect | None
@@ -259,8 +284,10 @@ class Orchestrator(AbstractOrchestrator):
         self,
         host: str = "localhost",
         networks: Sequence[VirtualNetwork] | None = None,
-        vms: Sequence[VM] | None = None,
+        vms: Sequence[LibvirtVM | GenericVM] | None = None,
         cache_root: Path | None = None,
+        cache: str | None = None,
+        cache_verify: bool | str = True,
         storage_backend: AbstractStorageBackend | None = None,
     ) -> None:
         self._host = host
@@ -270,9 +297,25 @@ class Orchestrator(AbstractOrchestrator):
         # assignment too; ignore per-line here for the same reason
         # we ignored the class-body declarations above.
         self._networks = list(networks) if networks else []  # pyright: ignore[reportIncompatibleVariableOverride]
-        self._vm_list = list(vms) if vms else []  # pyright: ignore[reportIncompatibleVariableOverride]
+        # Convert any GenericVM specs to LibvirtVM up front so the
+        # rest of the orchestrator (and external readers of
+        # ``self._vm_list``) see only the backend-native type.
+        self._vm_list = [_promote_to_libvirt(v) for v in (vms or [])]  # pyright: ignore[reportIncompatibleVariableOverride]
         check_name_collisions(self._vm_list, self._networks)
-        self._cache = CacheManager(root=cache_root) if cache_root else CacheManager()
+        remote = None
+        if cache is not None:
+            from testrange.cache_http import HttpCache  # noqa: PLC0415
+            remote = HttpCache(cache, verify=cache_verify)
+        self._cache = (
+            CacheManager(root=cache_root, remote=remote)
+            if cache_root
+            else CacheManager(remote=remote)
+        )
+        # The orchestrator owns the cache for its lifetime; tag it
+        # with our backend identity so HTTP-cache URL keys are
+        # namespaced correctly when more than one backend shares a
+        # remote.  Not user-facing.
+        self._cache.backend_name = self.backend_type()
         # Explicit override wins.  When ``None``, _select_storage_backend
         # inspects the libvirt URI at __enter__ and picks LocalStorage
         # for ``qemu:///system`` or SSHStorage for ``qemu+ssh://…``.
@@ -311,7 +354,7 @@ class Orchestrator(AbstractOrchestrator):
         orchestrator manages that lifecycle via :class:`ExitStack`.
 
         :param hypervisor: The just-booted hypervisor VM.  Must have a
-            static IP (see :class:`VirtualNetworkRef`) and a credential
+            static IP (see :class:`vNIC`) and a credential
             whose matching private key is reachable by ``ssh-agent`` or
             ``~/.ssh/`` — otherwise the nested libvirt URI will fail to
             authenticate.
@@ -343,7 +386,7 @@ class Orchestrator(AbstractOrchestrator):
                 f"Hypervisor VM {hypervisor.name!r}: communicator has "
                 "no resolvable host.  Nested libvirt requires "
                 "communicator='ssh' + a static IP "
-                "(VirtualNetworkRef('Net', ip='10.x.x.x'))."
+                "(vNIC('Net', ip='10.x.x.x'))."
             )
 
         # ``no_verify=1`` skips host-key checking for the ephemeral VM,
@@ -509,6 +552,146 @@ class Orchestrator(AbstractOrchestrator):
             # _teardown() is already defensively coded to never raise; this
             # is a belt-and-braces guard against future regressions.
             pass
+
+    def cleanup(self, run_id: str) -> None:
+        """Tear down resources from a prior run that exited uncleanly.
+
+        Reconstructs every libvirt domain and network name this
+        orchestrator's ``__enter__`` would have created for *run_id*
+        — the names are deterministic functions of (vm_name,
+        run_id) and (network_name, run_id) — and best-effort
+        destroys + undefines each.  Already-deleted resources are
+        silently skipped so this is idempotent.
+
+        Names checked for *run_id*:
+
+        * ``tr-<vm[:10]>-<run_id[:8]>`` — run-phase domain per VM
+        * ``tr-build-<vm[:10]>-<run_id[:8]>`` — install-phase domain
+          per VM (only present if a build was in flight when the
+          run died)
+        * ``tr-<net[:6]>-<run_id[:4]>`` — per-test network (with
+          the same name normalisation
+          :class:`VirtualNetwork.backend_name` applies)
+        * ``tr-instal-<run_id[:4]>`` — the ephemeral install
+          network for the run
+        * ``<cache_root>/runs/<run_id>/`` — per-run scratch
+          directory (overlays, seed ISOs, NVRAM)
+
+        Opens its own libvirt connection — does **not** call
+        :meth:`__enter__`, since there's nothing to provision.
+
+        :param run_id: UUID4 of the leaked run, the only
+            nondeterministic input.
+        """
+        from testrange.backends.libvirt.network import VirtualNetwork as _VN
+
+        uri = self._build_uri()
+        _log.info("cleanup: connecting to %s for run %s", uri, run_id[:8])
+        try:
+            conn = libvirt.open(uri)
+        except libvirt.libvirtError as exc:
+            raise OrchestratorError(
+                f"cleanup: cannot open libvirt connection {uri!r}: {exc}"
+            ) from exc
+
+        try:
+            # 1. Per-VM domains.
+            for vm in self._vm_list:
+                for prefix in ("tr-", "tr-build-"):
+                    name = f"{prefix}{vm.name[:10]}-{run_id[:8]}"
+                    self._cleanup_domain(conn, name)
+
+            # 2. Per-test networks (compute their backend names by
+            #    binding each spec to this run_id).
+            for net in self._networks:
+                if not isinstance(net, _VN):
+                    _log.debug(
+                        "cleanup: skipping non-libvirt network %r", net.name,
+                    )
+                    continue
+                # Binding mutates per-instance state; we're outside an
+                # active run so no concurrent code looks at it.
+                net.bind_run(run_id)
+                self._cleanup_network(conn, net.backend_name())
+
+            # 3. The ephemeral install network for this run.  Mirrors
+            #    the construction in _create_install_network(): name is
+            #    ``install-<run_id[:4]>`` which truncates to libvirt
+            #    ``tr-instal-<run_id[:4]>``.
+            install_logical = f"install-{run_id[:4]}"
+            install_backend = (
+                f"tr-{install_logical[:6].lower().replace('_','')}"
+                f"-{run_id[:4]}"
+            )
+            self._cleanup_network(conn, install_backend)
+        finally:
+            try:
+                conn.close()
+            except libvirt.libvirtError:
+                pass
+
+        # 4. Per-run scratch dir (filesystem op, no libvirt needed).
+        run_dir = self._cache.root / "runs" / run_id
+        if run_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(run_dir)
+                _log.info("cleanup: removed run dir %s", run_dir)
+            except OSError as exc:
+                _log.warning(
+                    "cleanup: failed to remove run dir %s: %s", run_dir, exc,
+                )
+
+    @staticmethod
+    def _cleanup_domain(conn: libvirt.virConnect, name: str) -> None:
+        """Best-effort destroy + undefine of a libvirt domain by name."""
+        try:
+            domain = conn.lookupByName(name)
+        except libvirt.libvirtError:
+            return  # not present — nothing to clean up
+        _log.info("cleanup: destroying domain %r", name)
+        try:
+            if domain.isActive():
+                domain.destroy()
+        except libvirt.libvirtError as exc:
+            _log.warning(
+                "cleanup: destroy of domain %r failed (ignored): %s",
+                name, exc,
+            )
+        try:
+            domain.undefineFlags(libvirt.VIR_DOMAIN_UNDEFINE_NVRAM)
+        except (libvirt.libvirtError, AttributeError):
+            try:
+                domain.undefine()
+            except libvirt.libvirtError as exc:
+                _log.warning(
+                    "cleanup: undefine of domain %r failed (ignored): %s",
+                    name, exc,
+                )
+
+    @staticmethod
+    def _cleanup_network(conn: libvirt.virConnect, name: str) -> None:
+        """Best-effort destroy + undefine of a libvirt network by name."""
+        try:
+            net = conn.networkLookupByName(name)
+        except libvirt.libvirtError:
+            return  # not present
+        _log.info("cleanup: destroying network %r", name)
+        try:
+            if net.isActive():
+                net.destroy()
+        except libvirt.libvirtError as exc:
+            _log.warning(
+                "cleanup: destroy of network %r failed (ignored): %s",
+                name, exc,
+            )
+        try:
+            net.undefine()
+        except libvirt.libvirtError as exc:
+            _log.warning(
+                "cleanup: undefine of network %r failed (ignored): %s",
+                name, exc,
+            )
 
     def _preflight_memory(self) -> None:
         """Refuse to provision if the declared memory budget would
@@ -808,22 +991,22 @@ class Orchestrator(AbstractOrchestrator):
         net_counters: dict[str, int] = {net.name: 0 for net in self._networks}
 
         for vm in self._vm_list:
-            for ref in vm._network_refs():
-                net = self._find_network(ref.name)
+            for nic in vm._network_refs():
+                net = self._find_network(nic.ref)
                 if net is None:
                     raise NetworkError(
-                        f"VM {vm.name!r} references unknown network {ref.name!r}. "
+                        f"VM {vm.name!r} references unknown network {nic.ref!r}. "
                         f"Available networks: {[n.name for n in self._networks]}"
                     )
 
-                if ref.ip:
+                if nic.ip:
                     # Static IP — register with the explicit address
-                    net.register_vm(vm.name, ref.ip)
+                    net.register_vm(vm.name, nic.ip)
                 else:
                     # Auto-assign from the subnet
-                    idx = net_counters[ref.name]
+                    idx = net_counters[nic.ref]
                     ip = net.static_ip_for_index(idx)
-                    net_counters[ref.name] = idx + 1
+                    net_counters[nic.ref] = idx + 1
                     net.register_vm(vm.name, ip)
 
     def _find_network(self, name: str) -> VirtualNetwork | None:
@@ -838,7 +1021,7 @@ class Orchestrator(AbstractOrchestrator):
         return None
 
     def _build_nic_entries(
-        self, vm: VM
+        self, vm: LibvirtVM
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
         """Build the NIC parameters needed for domain XML and network-config.
 
@@ -854,11 +1037,11 @@ class Orchestrator(AbstractOrchestrator):
         network_entries: list[tuple[str, str]] = []
         mac_ip_pairs: list[tuple[str, str, str, str]] = []
 
-        for ref in vm._network_refs():
-            net = self._find_network(ref.name)
+        for nic in vm._network_refs():
+            net = self._find_network(nic.ref)
             if net is None:
                 continue
-            mac = _mac_for_vm_network(vm.name, ref.name)
+            mac = _mac_for_vm_network(vm.name, nic.ref)
             lv_name = net.backend_name()
             network_entries.append((lv_name, mac))
 
@@ -870,7 +1053,7 @@ class Orchestrator(AbstractOrchestrator):
             # gateway IP is not a listening DNS server).
             gateway = net.gateway_ip if net.internet else ""
             nameserver = net.gateway_ip if net.dns else ""
-            cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
+            cidr = f"{nic.ip}/{net.prefix_len}" if nic.ip else ""
             mac_ip_pairs.append((mac, cidr, gateway, nameserver))
 
         return network_entries, mac_ip_pairs

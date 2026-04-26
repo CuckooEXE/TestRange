@@ -11,7 +11,7 @@ Quick-start example::
 
     from testrange import (
         Test, Orchestrator, VM, VirtualNetwork,
-        Credential, Apt, vCPU, Memory, VirtualNetworkRef, HardDrive,
+        Credential, Apt, vCPU, Memory, vNIC, HardDrive,
     )
 
     def smoke_test(orchestrator: Orchestrator) -> None:
@@ -38,7 +38,7 @@ Quick-start example::
                         devices=[
                             vCPU(2),
                             Memory(2),
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                             HardDrive(20),  # 20 GiB OS disk
                         ],
                     ),
@@ -49,22 +49,22 @@ Quick-start example::
     ]
 
 ``Orchestrator`` / ``VM`` / ``VirtualNetwork`` re-exported at the top
-level resolve to the default backend (KVM / QEMU via libvirt).
-Alternative backends can be pulled in directly from
-:mod:`testrange.backends`.
+level resolve to the default backend.  Alternative backends can be
+pulled in directly from :mod:`testrange.backends` — each is a peer
+implementation of the same abstract surface.
 """
 
 from testrange._version import __version__
 from testrange.backends.libvirt import (
-    VM,
     Hypervisor,
     LibvirtOrchestrator,
+    LibvirtVM,
     Orchestrator,
     VirtualNetwork,
 )
 from testrange.communication.base import ExecResult
 from testrange.credentials import Credential
-from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange.devices import HardDrive, Memory, vNIC, vCPU
 from testrange.exceptions import (
     CacheError,
     CloudInitError,
@@ -80,13 +80,17 @@ from testrange.exceptions import (
 from testrange.networks.base import AbstractVirtualNetwork
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.packages import Apt, Dnf, Homebrew, Pip, Winget
-from testrange.storage import (
-    AbstractStorageBackend,
-    LocalStorageBackend,
-    SSHStorageBackend,
-)
+from testrange.storage import AbstractStorageBackend, StorageBackend
 from testrange.test import Test, TestResult, run_tests
 from testrange.vms.base import AbstractVM
+from testrange.vms.generic import GenericVM
+
+# ``VM`` at the top level is the generic, backend-agnostic spec
+# (:class:`GenericVM`).  The orchestrator promotes it to its native
+# concrete type at provisioning time.  Users who want to pin a VM
+# to a specific backend reach for that backend's class explicitly
+# (``LibvirtVM``, future ``ProxmoxVM``, …).
+VM = GenericVM
 from testrange.vms.builders import (
     Builder,
     CloudInitBuilder,
@@ -106,6 +110,8 @@ __all__ = [
     "AbstractOrchestrator",
     # VM + credentials
     "VM",
+    "GenericVM",
+    "LibvirtVM",
     "AbstractVM",
     "Hypervisor",
     "AbstractHypervisor",
@@ -115,10 +121,11 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
-    # Storage backends
+    # Storage backends — generic composer.  Backend-flavoured pre-
+    # composed pairings (LocalStorageBackend / SSHStorageBackend
+    # for libvirt) live in their backend module.
+    "StorageBackend",
     "AbstractStorageBackend",
-    "LocalStorageBackend",
-    "SSHStorageBackend",
     # Networks
     "VirtualNetwork",
     "AbstractVirtualNetwork",
@@ -126,7 +133,7 @@ __all__ = [
     "vCPU",
     "Memory",
     "HardDrive",
-    "VirtualNetworkRef",
+    "vNIC",
     # Packages
     "Apt",
     "Dnf",

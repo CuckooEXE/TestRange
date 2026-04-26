@@ -243,7 +243,7 @@ class ProxmoxVM(AbstractVM):
         # cloud-init can't reach package mirrors.  We synthesise
         # ``mac_ip_pairs`` from the orchestrator-derived
         # ``install_network_*`` plus this VM's own
-        # :class:`VirtualNetworkRef` entries so the seed pins the
+        # :class:`vNIC` entries so the seed pins the
         # right IPs.
         mac_ip_pairs = self._build_install_mac_ip_pairs(
             context, install_network_name, install_network_mac,
@@ -471,7 +471,7 @@ class ProxmoxVM(AbstractVM):
             "serial0": "socket",
             "vga": "serial0",
             # NIC: prefer a configured network from the VM's
-            # VirtualNetworkRefs; fall back to the install network the
+            # vNICs; fall back to the install network the
             # orchestrator passed in.  PVE SDN vnet names are also the
             # bridge names, so ``bridge=<vnet>`` works directly.
             "net0": (
@@ -496,7 +496,7 @@ class ProxmoxVM(AbstractVM):
 
         The orchestrator passes us the *first* NIC's network + MAC as
         ``install_network_*``; we walk this VM's
-        :class:`VirtualNetworkRef` list and look the corresponding
+        :class:`vNIC` list and look the corresponding
         :class:`ProxmoxVirtualNetwork` up on the orchestrator to
         derive the rest.
 
@@ -517,18 +517,18 @@ class ProxmoxVM(AbstractVM):
             ProxmoxVirtualNetwork,
             _mac_for_vm_network,
         )
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         pairs: list[tuple[str, str, str, str]] = []
         nets: list[ProxmoxVirtualNetwork] = getattr(context, "_networks", [])
         net_by_logical_name = {n.name: n for n in nets}
         for ref in self._network_refs():
-            if not isinstance(ref, VirtualNetworkRef):
+            if not isinstance(ref, vNIC):
                 continue
-            net = net_by_logical_name.get(ref.name)
+            net = net_by_logical_name.get(ref.ref)
             if net is None:
                 continue
-            mac = _mac_for_vm_network(self.name, ref.name)
+            mac = _mac_for_vm_network(self.name, ref.ref)
             cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
             gateway = net.gateway_ip if net.internet else ""
             dns = _PUBLIC_DNS if net.internet else ""

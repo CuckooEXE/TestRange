@@ -6,11 +6,13 @@ User Guide
 
    installation
    quickstart
+   architecture
    networks
    vms
    windows
    packages
    caching
+   http_cache
    communication
    debugging
    extending

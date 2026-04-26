@@ -315,7 +315,7 @@ class TestVMLifecycle:
         from testrange import (
             Credential,
             Memory,
-            VirtualNetworkRef,
+            vNIC,
             vCPU,
         )
         from testrange.backends.proxmox import (
@@ -341,7 +341,7 @@ class TestVMLifecycle:
             devices=[
                 vCPU(2),
                 Memory(1.0),
-                VirtualNetworkRef("trvmL", ip="10.244.0.10"),
+                vNIC("trvmL", ip="10.244.0.10"),
             ],
             communicator="ssh",
         )

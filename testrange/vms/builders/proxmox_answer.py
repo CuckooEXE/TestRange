@@ -33,7 +33,7 @@ from pycdlib import PyCdlib  # type: ignore[attr-defined]
 
 from testrange._logging import get_logger
 from testrange.cache import vm_config_hash
-from testrange.devices import VirtualNetworkRef
+from testrange.devices import vNIC
 from testrange.exceptions import CloudInitError
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
 from testrange.vms.images import resolve_image
@@ -128,7 +128,7 @@ class ProxmoxAnswerBuilder(Builder):
        the user-facing test network can't use.  To avoid this, this
        builder emits ``source = "from-answer"`` whenever the VM
        declares a static IP on its primary
-       :class:`~testrange.devices.VirtualNetworkRef` — derivable
+       :class:`~testrange.devices.vNIC` — derivable
        deterministically from the VM spec without touching the
        install-phase network.  If no static IP is declared, it
        falls back to ``from-dhcp`` and logs a warning; the VM
@@ -233,8 +233,13 @@ class ProxmoxAnswerBuilder(Builder):
         )
 
         # 3. Seed ISO carrying answer.toml, labeled so the prepared
-        #    installer's partition fetch finds it.
-        seed_ref = run.seed_iso_path(vm.name, install=True)
+        #    installer's partition fetch finds it.  The filename
+        #    convention is builder-specific (the PVE installer
+        #    looks for the ``PROXMOX-AIS`` label rather than reading
+        #    the filename), so compose via the generic
+        #    :meth:`RunDir.path_for` helper rather than the
+        #    cloud-init-specific seed helpers.
+        seed_ref = run.path_for(f"{vm.name}-proxmox-answer.iso")
         run.storage.transport.write_bytes(
             seed_ref,
             build_proxmox_seed_iso_bytes(
@@ -350,7 +355,7 @@ class ProxmoxAnswerBuilder(Builder):
 
         Picks between ``source = "from-answer"`` (explicit static
         config derived from the VM's primary
-        :class:`VirtualNetworkRef`) and ``source = "from-dhcp"``
+        :class:`vNIC`) and ``source = "from-dhcp"``
         (the PVE default, which freezes the install-phase lease as
         static — unusable under TestRange's install/test-network
         split).  See the builder docstring ``.. note::`` for why
@@ -359,11 +364,11 @@ class ProxmoxAnswerBuilder(Builder):
         ref = _primary_network_ref(vm)
         if ref is None or not ref.ip:
             _log.warning(
-                "VM %r has no static IP on its primary VirtualNetworkRef; "
+                "VM %r has no static IP on its primary vNIC; "
                 "falling back to answer.toml source = \"from-dhcp\".  PVE "
                 "will bake the install-phase DHCP lease as static config, "
                 "leaving the VM unreachable in the run phase.  Set "
-                "``VirtualNetworkRef(..., ip=\"...\")`` to emit a "
+                "``vNIC(..., ip=\"...\")`` to emit a "
                 "``from-answer`` block instead.",
                 vm.name,
             )
@@ -409,18 +414,18 @@ class ProxmoxAnswerBuilder(Builder):
 # ----------------------------------------------------------------------
 
 
-def _primary_network_ref(vm: VM) -> VirtualNetworkRef | None:
-    """Return the VM's first :class:`VirtualNetworkRef` device, or ``None``.
+def _primary_network_ref(vm: VM) -> vNIC | None:
+    """Return the VM's first :class:`vNIC` device, or ``None``.
 
     The PVE installer configures exactly one NIC at install time
     (no equivalent of cloud-init's network-config v2), so the
-    "primary" NIC is whichever :class:`VirtualNetworkRef` appears
+    "primary" NIC is whichever :class:`vNIC` appears
     first in ``vm.devices``.  Multi-NIC PVE installs would need a
     post-install hook to bring up secondary interfaces; out of
     scope for v0.
     """
     for device in vm.devices:
-        if isinstance(device, VirtualNetworkRef):
+        if isinstance(device, vNIC):
             return device
     return None
 

@@ -1,11 +1,11 @@
 """No-op :class:`~testrange.vms.builders.base.Builder` for BYOI images.
 
-Used when the caller hands a VM spec a qcow2 that is already fully
-provisioned (produced by Packer, a custom build pipeline, or a
-hand-prepared golden image).  There is no install phase —
-:meth:`NoOpBuilder.needs_install_phase` returns ``False`` — so the
-backend's ``build()`` calls :meth:`~Builder.ready_image` and skips
-straight to creating a run overlay on the staged disk.
+Used when the caller hands a VM spec a prebuilt disk image that is
+already fully provisioned (produced by Packer, a custom build
+pipeline, or a hand-prepared golden image).  There is no install
+phase — :meth:`NoOpBuilder.needs_install_phase` returns ``False`` —
+so the backend's ``build()`` calls :meth:`~Builder.ready_image` and
+skips straight to creating a run overlay on the staged disk.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from testrange._logging import get_logger
-from testrange._qemu_img import info as _qemu_img_info
 from testrange.exceptions import VMBuildError
 from testrange.vms.builders.base import Builder, RunDomain
 
@@ -30,8 +29,8 @@ _log = get_logger(__name__)
 
 
 class NoOpBuilder(Builder):
-    """Prebuilt-qcow2 strategy.  Skips the install phase and copies the
-    user's qcow2 into the cache under a content-hashed name.
+    """Prebuilt-image strategy.  Skips the install phase and copies the
+    user's prebuilt disk into the cache under a content-hashed name.
 
     :param windows: If ``True``, the prebuilt image is a Windows guest.
         Propagates to the run-phase domain XML (UEFI + SATA primary
@@ -103,20 +102,23 @@ class NoOpBuilder(Builder):
     def ready_image(
         self, vm: VM, cache: CacheManager, run: RunDir,
     ) -> str:
-        """Stage the user-supplied qcow2 into the backend's ``vms/``
-        cache and return its backend-local ref.
+        """Stage the user-supplied prebuilt disk into the backend's
+        ``vms/`` cache and return its backend-local ref.
 
-        Validates the source on the outer host (``qemu-img info``),
-        then stages into ``<transport.vms_dir>/byoi-<sha[:24]>.qcow2``
-        with a manifest JSON sidecar.  For the default local backend
-        this is a filesystem copy (identical to the pre-backend
-        behaviour); for SSH / remote backends it's an SFTP upload to
-        the same logical location on the remote host.  Sources that
-        already live under the local backend's cache root are returned
-        in place.
+        Validates the source on the outer host via the backend's
+        disk-format
+        :meth:`~testrange.storage.disk.AbstractDiskFormat.validate_source_image`,
+        then stages into the per-VM directory
+        ``<transport.vms_dir>/byoi-<sha[:24]>/`` with the standard
+        primary-disk + ``manifest.json`` resource pair.  For the
+        default local backend this is a filesystem copy; for SSH /
+        remote backends it's an SFTP upload to the same logical
+        location on the remote host.  Sources that already live under
+        the local backend's cache root are returned in place.
 
-        :raises VMBuildError: If the source does not exist, is not a
-            qcow2, or if the staging copy fails.
+        :raises VMBuildError: If the source does not exist, is not in
+            the backend's expected disk format, or if the staging
+            copy fails.
         """
         try:
             src = Path(vm.iso).expanduser().resolve(strict=True)
@@ -126,16 +128,9 @@ class NoOpBuilder(Builder):
             ) from exc
 
         try:
-            meta = _qemu_img_info(src)
-        except Exception as exc:  # noqa: BLE001 — surface as VMBuildError
-            raise VMBuildError(
-                f"VM {vm.name!r}: qemu-img info failed on {src}: {exc}"
-            ) from exc
-        if meta.get("format") != "qcow2":
-            raise VMBuildError(
-                f"VM {vm.name!r}: prebuilt image {src} is not qcow2 "
-                f"(qemu-img reports format={meta.get('format')!r})."
-            )
+            run.storage.disk.validate_source_image(src)
+        except VMBuildError as exc:
+            raise VMBuildError(f"VM {vm.name!r}: {exc}") from exc
 
         transport = run.storage.transport
 
@@ -154,21 +149,22 @@ class NoOpBuilder(Builder):
             pass
 
         sha = _sha256_file(src)[:24]
-        dest_ref = transport._join(transport.vms_dir(), f"byoi-{sha}.qcow2")
-        manifest_ref = transport._join(transport.vms_dir(), f"byoi-{sha}.json")
+        config_hash = f"byoi-{sha}"
+        dest_ref = cache.vm_disk_ref(config_hash, run.storage)
+        manifest_ref = cache.vm_manifest_ref(config_hash, run.storage)
 
         if transport.exists(dest_ref):
             _log.info(
-                "VM %r prebuilt cache hit (byoi-%s) — reusing staged copy",
-                vm.name, sha,
+                "VM %r prebuilt cache hit (%s) — reusing staged copy",
+                vm.name, config_hash,
             )
             return dest_ref
 
         _log.info(
-            "VM %r prebuilt cache miss (byoi-%s) — staging %s into backend",
-            vm.name, sha, src,
+            "VM %r prebuilt cache miss (%s) — staging %s into backend",
+            vm.name, config_hash, src,
         )
-        transport.makedirs(transport.vms_dir())
+        transport.makedirs(cache.vm_dir(config_hash, run.storage))
         transport.upload(src, dest_ref)
         transport.write_bytes(
             manifest_ref,

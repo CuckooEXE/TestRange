@@ -81,7 +81,7 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     shared simple-zone, then a subnet whose CIDR matches
     :attr:`subnet`.  :meth:`stop` deletes both and reloads SDN.
 
-    :param name: Logical network name (used by ``VirtualNetworkRef``
+    :param name: Logical network name (used by ``vNIC``
         matching, NIC bridge selection, and the deterministic MAC
         scheme).  Mapped to a PVE-legal 8-character vnet name via
         :meth:`backend_name`.

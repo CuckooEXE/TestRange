@@ -50,7 +50,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -117,7 +117,7 @@ def gen_tests() -> list[Test]:
                             # disk — size it for the sum of inner
                             # base images + overlays.
                             HardDrive(40),
-                            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                            vNIC("OuterNet", ip="10.0.0.10"),
                         ],
                         communicator="ssh",
                         orchestrator=LibvirtOrchestrator,
@@ -145,7 +145,7 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(1),
                                     HardDrive(10),
-                                    VirtualNetworkRef(
+                                    vNIC(
                                         "InnerNet", ip="10.42.0.5",
                                     ),
                                 ],

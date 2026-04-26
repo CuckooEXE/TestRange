@@ -18,17 +18,17 @@ from unittest.mock import MagicMock
 import pytest
 
 from testrange import (
-    VM,
     AbstractHypervisor,
     Credential,
     HardDrive,
     Hypervisor,
     LibvirtOrchestrator,
+    LibvirtVM as VM,
     Memory,
     Orchestrator,
     OrchestratorError,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     vCPU,
 )
 
@@ -50,7 +50,7 @@ def _hypervisor(
             vCPU(2),
             Memory(4),
             HardDrive(40),
-            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+            vNIC("OuterNet", ip="10.0.0.10"),
         ],
         communicator=communicator,
         orchestrator=LibvirtOrchestrator,
@@ -72,7 +72,7 @@ class TestAbstractHypervisor:
             name="plain",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
         )
         assert not isinstance(plain, AbstractHypervisor)
 
@@ -82,7 +82,7 @@ class TestAbstractHypervisor:
             name="inner",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
-            devices=[VirtualNetworkRef("InnerNet", ip="10.42.0.5")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
         )
         hv = _hypervisor(vms=[inner_vm], networks=[inner_net])
         assert hv.orchestrator is LibvirtOrchestrator
@@ -111,7 +111,7 @@ class TestHypervisorDefaultPayload:
             pkgs=[Apt("tmux")],
             orchestrator=LibvirtOrchestrator,
             communicator="ssh",
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.10")],
+            devices=[vNIC("Net", ip="10.0.0.10")],
         )
         pkg_names = [p.name for p in hv.pkgs]
         # Libvirt-needed packages first; caller extras after.
@@ -136,7 +136,7 @@ class TestHypervisorDefaultPayload:
             post_install_cmds=["echo hello"],
             orchestrator=LibvirtOrchestrator,
             communicator="ssh",
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.10")],
+            devices=[vNIC("Net", ip="10.0.0.10")],
         )
         # Library cmds first, caller extras after — the caller's
         # commands should run only after libvirtd is up.
@@ -188,7 +188,7 @@ class TestRootOnVmLibvirt:
             name="inner",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
-            devices=[VirtualNetworkRef("InnerNet", ip="10.42.0.5")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
         )
         hv = self._booted_hv()
         hv.vms = [inner_vm]

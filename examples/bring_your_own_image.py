@@ -14,7 +14,7 @@ Because the no-op builder has no install phase:
   as already present in the image and hands them to whichever
   communicator you select.
 - The communicator is still your choice: ``communicator="ssh"`` uses the
-  first static IP declared on a ``VirtualNetworkRef``; the default
+  first static IP declared on a ``vNIC``; the default
   ``"guest-agent"`` requires you to have installed ``qemu-guest-agent``
   in your image.
 
@@ -44,7 +44,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -95,7 +95,7 @@ def _bake_golden_image() -> Path:
             vCPU(1),
             Memory(1),
             HardDrive(10),
-            VirtualNetworkRef("BakeNet"),
+            vNIC("BakeNet"),
         ],
     )
 
@@ -184,7 +184,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("BYOINet", ip="10.40.0.10"),
+                            vNIC("BYOINet", ip="10.40.0.10"),
                         ],
                     ),
                 ],

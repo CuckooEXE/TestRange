@@ -25,7 +25,7 @@ from testrange import (
     Pip,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -74,7 +74,7 @@ def gen_tests() -> list[Test]:
                             vCPU(2),
                             Memory(2),
                             HardDrive(20),  # 20 GiB OS disk
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                         ],
                     ),
                 ],

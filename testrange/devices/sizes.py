@@ -48,11 +48,14 @@ def parse_size(size: str) -> int:
     return int(value * _SIZE_UNITS[unit])
 
 
-def normalise_qemu_size(size: str) -> str:
+def normalise_size(size: str) -> str:
     """Return the size string in the canonical ``<integer>G`` form used
-    by the shipped backends' disk-sizing tools.
+    by every shipped backend's disk-sizing tools.
 
-    Converts to the nearest GiB integer with a ``G`` suffix.
+    Converts to the nearest GiB integer with a ``G`` suffix.  This
+    form is widely accepted (libvirt's ``qemu-img``, proxmox storage
+    tools, Hyper-V's ``New-VHD``, …); backends that need a different
+    syntax can re-parse the canonical string.
 
     :param size: Human-readable size string.
     :returns: String like ``'64G'``.
@@ -61,4 +64,4 @@ def normalise_qemu_size(size: str) -> str:
     return f"{max(gib, 1)}G"
 
 
-__all__ = ["parse_size", "normalise_qemu_size"]
+__all__ = ["parse_size", "normalise_size"]

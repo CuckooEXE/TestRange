@@ -9,11 +9,11 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.vm import LibvirtVM as VM
 from testrange.cache import CacheManager
 from testrange.communication.winrm import WinRMCommunicator
 from testrange.credentials import Credential
-from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange.devices import HardDrive, Memory, vNIC, vCPU
 from testrange.exceptions import VMBuildError
 
 
@@ -29,7 +29,7 @@ def _win_vm(**overrides: Any) -> VM:
             vCPU(2),
             Memory(4),
             HardDrive(40),
-            VirtualNetworkRef("Net", ip="10.50.0.10"),
+            vNIC("Net", ip="10.50.0.10"),
         ],
     )
     defaults.update(overrides)

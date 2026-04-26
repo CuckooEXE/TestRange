@@ -15,11 +15,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from testrange import VM, Credential, NoOpBuilder
+from testrange import Credential, NoOpBuilder
+from testrange import LibvirtVM as VM
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.cache import CacheManager
 from testrange.communication.ssh import SSHCommunicator
-from testrange.devices import HardDrive, VirtualNetworkRef
+from testrange.devices import HardDrive, vNIC
 from testrange.exceptions import VMBuildError
 
 
@@ -31,7 +32,7 @@ def _writable_qcow2(path: Path) -> Path:
 def _local_run(cache_root: Path):
     """Return a RunDir backed by a LocalStorageBackend at *cache_root*."""
     from testrange._run import RunDir
-    from testrange.storage import LocalStorageBackend
+    from testrange.backends.libvirt.storage import LocalStorageBackend
     return RunDir(LocalStorageBackend(cache_root))
 
 
@@ -50,7 +51,7 @@ def _noop_vm(
         name=name,
         iso=str(src),
         users=users or [Credential("deploy", "pw")],
-        devices=devices or [VirtualNetworkRef("Net", ip="10.0.0.5")],
+        devices=devices or [vNIC("Net", ip="10.0.0.5")],
         builder=NoOpBuilder(windows=windows),
         communicator=communicator,
     )
@@ -90,13 +91,13 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
 
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -104,12 +105,12 @@ class TestReadyImage:
         dest = Path(vm.builder.ready_image(vm, cache, run))
 
         assert dest.exists()
-        assert dest.parent == cache.vms_dir
-        assert dest.name.startswith("byoi-")
-        assert dest.suffix == ".qcow2"
+        # New layout: BYOI sits in its own per-VM directory keyed by
+        # ``byoi-<sha>``, with the standard disk + manifest pair inside.
+        assert dest.parent.parent == cache.vms_dir
+        assert dest.parent.name.startswith("byoi-")
         assert dest.read_bytes() == b"PREBUILT_CONTENTS"
-        # Manifest sidecar written
-        manifest = dest.with_suffix(".json")
+        manifest = dest.parent / "manifest.json"
         assert manifest.exists()
         meta = json.loads(manifest.read_text())
         assert meta["prebuilt"] is True
@@ -126,12 +127,12 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -156,11 +157,11 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -191,12 +192,12 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "raw"},
         )
         run = _local_run(tmp_cache_root)
@@ -275,7 +276,7 @@ class TestBaseDomainXmlSeedOptional:
 
         vm = _noop_vm(
             tmp_path,
-            devices=[HardDrive(10), VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[HardDrive(10), vNIC("Net", ip="10.0.0.5")],
             communicator="ssh",
         )
         xml = vm._base_domain_xml(
@@ -296,7 +297,7 @@ class TestBaseDomainXmlSeedOptional:
             name="cloud",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
-            devices=[HardDrive(10), VirtualNetworkRef("Net")],
+            devices=[HardDrive(10), vNIC("Net")],
         )
         xml = vm._base_domain_xml(
             domain_name="tr-cloud-xxxx",

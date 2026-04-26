@@ -32,13 +32,8 @@ doesn't require knowing whether its target filesystem is local.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from testrange.storage.disk.base import AbstractDiskFormat
-from testrange.storage.disk.qcow2 import Qcow2DiskFormat
 from testrange.storage.transport.base import AbstractFileTransport
-from testrange.storage.transport.local import LocalFileTransport
-from testrange.storage.transport.ssh import SSHFileTransport
 
 
 class StorageBackend:
@@ -79,61 +74,12 @@ class StorageBackend:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Pre-composed convenience subclasses.
-#
-# The vast majority of current users want "local filesystem + qcow2"
-# or "SSH-reachable remote filesystem + qcow2".  Expose those as
-# single-argument constructors so ``Orchestrator(host=…)``'s
-# auto-selection stays a one-liner per URI shape; callers with more
-# exotic pairings (different transport × different format) build a
-# :class:`StorageBackend` directly.
-# ---------------------------------------------------------------------------
-
-
-class LocalStorageBackend(StorageBackend):
-    """Convenience: :class:`LocalFileTransport` + :class:`Qcow2DiskFormat`.
-
-    What ``Orchestrator(host="localhost")`` ends up with by default.
-    Preserves today's behaviour bit-for-bit.
-    """
-
-    def __init__(self, cache_root: Path) -> None:
-        transport = LocalFileTransport(cache_root)
-        super().__init__(
-            transport=transport,
-            disk=Qcow2DiskFormat(transport),
-        )
-
-
-class SSHStorageBackend(StorageBackend):
-    """Convenience: :class:`SSHFileTransport` + :class:`Qcow2DiskFormat`.
-
-    What ``Orchestrator(host="qemu+ssh://...")`` auto-selects.  All
-    keyword args forward to :class:`SSHFileTransport`.
-    """
-
-    def __init__(
-        self,
-        host: str,
-        username: str | None = None,
-        port: int = 22,
-        key_filename: str | None = None,
-        cache_root: str | None = None,
-        connect_timeout: float = 30.0,
-    ) -> None:
-        transport = SSHFileTransport(
-            host=host,
-            username=username,
-            port=port,
-            key_filename=key_filename,
-            cache_root=cache_root,
-            connect_timeout=connect_timeout,
-        )
-        super().__init__(
-            transport=transport,
-            disk=Qcow2DiskFormat(transport),
-        )
+# Pre-composed convenience subclasses (e.g. ``LocalFileTransport +
+# Qcow2DiskFormat``) that pin a specific disk format are
+# **backend-flavoured** — the format binding is the libvirt-leaning
+# bit.  Each backend that wants its own pairings publishes them in
+# its backend module (see :mod:`testrange.backends.libvirt.storage`).
+# The generic storage layer here intentionally stays format-agnostic.
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ networks, one with internet access and one isolated.
 
     from testrange import (
         Test, Orchestrator, VM, VirtualNetwork,
-        Credential, Apt, Pip, vCPU, Memory, VirtualNetworkRef, HardDrive,
+        Credential, Apt, Pip, vCPU, Memory, vNIC, HardDrive,
         run_tests,
     )
 
@@ -89,7 +89,7 @@ networks, one with internet access and one isolated.
                         devices=[
                             vCPU(2),
                             Memory(2),
-                            VirtualNetworkRef("NetA"),
+                            vNIC("NetA"),
                             HardDrive(20),   # 20 GiB OS disk
                         ],
                     ),
@@ -107,7 +107,7 @@ networks, one with internet access and one isolated.
                         devices=[
                             vCPU(1),
                             Memory(1),
-                            VirtualNetworkRef("OfflineNet", ip="10.0.100.55"),
+                            vNIC("OfflineNet", ip="10.0.100.55"),
                             HardDrive(10),   # 10 GiB OS disk
                         ],
                     ),

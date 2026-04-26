@@ -79,8 +79,8 @@ Windows install path instead of the cloud-init one.  The path is:
 3. **Generate an autounattend ISO.**
    :class:`~testrange.vms.builders.WindowsUnattendedBuilder` composes the
    answer file (disk partitioning, user accounts, locale, first-logon
-   commands); :func:`~testrange.vms.builders.write_autounattend_iso`
-   wraps it in an ISO 9660 seed volume that Windows Setup auto-detects.
+   commands); :func:`~testrange.vms.builders.build_autounattend_iso_bytes`
+   produces an ISO 9660 seed volume that Windows Setup auto-detects.
 
 4. **Fetch / reuse the virtio-win ISO.**
    :meth:`~testrange.cache.CacheManager.get_virtio_win_iso` downloads
@@ -147,7 +147,7 @@ virtio-win ISO attached).  The NVRAM is per-run scratch so Windows can
 update UEFI vars without leaking between tests.  The orchestrator
 constructs a :class:`~testrange.communication.winrm.WinRMCommunicator`
 pointed at the first static IP on the VM's
-:class:`~testrange.devices.VirtualNetworkRef` and waits for port 5985
+:class:`~testrange.devices.vNIC` and waits for port 5985
 to answer.  From there your test function uses the normal
 :meth:`~testrange.vms.base.AbstractVM.exec` /
 :meth:`~testrange.vms.base.AbstractVM.get_file` /
@@ -176,7 +176,7 @@ Writing a Windows VM spec
             vCPU(2),
             Memory(4),
             HardDrive(40),
-            VirtualNetworkRef("WinNet", ip="10.60.0.10"),
+            vNIC("WinNet", ip="10.60.0.10"),
         ],
         communicator="winrm",  # defaulted for Windows ISOs; shown here
     )
@@ -192,7 +192,7 @@ Things to notice:
   wired into the autounattend; Apt/Dnf/Pip/Homebrew are ignored on
   Windows.
 - ``post_install_cmds`` are **PowerShell commands**, not Bash.
-- A :class:`~testrange.devices.VirtualNetworkRef` with a **static IP**
+- A :class:`~testrange.devices.vNIC` with a **static IP**
   is required whenever the WinRM communicator is in use (v1 does not
   support DHCP-lease discovery; see :doc:`communication`).
 
@@ -313,7 +313,7 @@ Install drops to a UEFI shell (``Shell>``)
 ``WinRM at http://10.x.x.x:5985/wsman not ready after 300s``
   Either (a) Windows finished Setup but FirstLogonCommands didn't
   enable WinRM, (b) the static IP on the
-  :class:`~testrange.devices.VirtualNetworkRef` doesn't match what the
+  :class:`~testrange.devices.vNIC` doesn't match what the
   guest's DHCP client was handed (libvirt dnsmasq reservations need
   the MAC to match — ``register_vm`` computes a deterministic MAC),
   or (c) the Windows Firewall is still blocking 5985 because the

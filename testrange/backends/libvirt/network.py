@@ -63,7 +63,7 @@ class VirtualNetwork(AbstractVirtualNetwork):
             dns=True,
         )
 
-    :param name: Logical network name (used for DNS and ``VirtualNetworkRef``
+    :param name: Logical network name (used for DNS and ``vNIC``
         matching).
     :param subnet: CIDR subnet (e.g. ``'10.0.50.0/24'``).
     :param dhcp: Enable DHCP on the network bridge.

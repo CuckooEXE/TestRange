@@ -24,13 +24,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from testrange.backends.libvirt.orchestrator import check_name_collisions
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.vm import LibvirtVM
 from testrange.packages import Apt
 from testrange.vms.hypervisor_base import AbstractHypervisor
 
 if TYPE_CHECKING:
+    from testrange.backends.libvirt.vm import LibvirtAcceptedDevice
     from testrange.credentials import Credential
-    from testrange.devices import AbstractDevice
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.orchestrator_base import AbstractOrchestrator
     from testrange.packages import AbstractPackage
@@ -80,13 +80,13 @@ def _default_post_install_cmds(users: list[Credential]) -> list[str]:
     return cmds
 
 
-class Hypervisor(VM, AbstractHypervisor):
+class Hypervisor(LibvirtVM, AbstractHypervisor):
     """A libvirt VM that hosts an inner libvirt orchestrator.
 
     .. code-block:: python
 
         from testrange import Hypervisor, LibvirtOrchestrator, VM
-        from testrange import Credential, VirtualNetworkRef, HardDrive, Memory
+        from testrange import Credential, vNIC, HardDrive, Memory
 
         hv = Hypervisor(
             name="hv",
@@ -95,7 +95,7 @@ class Hypervisor(VM, AbstractHypervisor):
             devices=[
                 Memory(8),
                 HardDrive(80),
-                VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                vNIC("OuterNet", ip="10.0.0.10"),
             ],
             orchestrator=LibvirtOrchestrator,
             vms=[
@@ -103,7 +103,7 @@ class Hypervisor(VM, AbstractHypervisor):
                     name="inner-web",
                     iso="https://cloud.debian.org/.../debian-12-generic-amd64.qcow2",
                     users=[Credential("root", "Password123!")],
-                    devices=[VirtualNetworkRef("InnerNet", ip="10.42.0.5")],
+                    devices=[vNIC("InnerNet", ip="10.42.0.5")],
                 ),
             ],
             networks=[
@@ -142,7 +142,7 @@ class Hypervisor(VM, AbstractHypervisor):
         networks: list[AbstractVirtualNetwork] | None = None,
         pkgs: list[AbstractPackage] | None = None,
         post_install_cmds: list[str] | None = None,
-        devices: list[AbstractDevice] | None = None,
+        devices: list["LibvirtAcceptedDevice"] | None = None,
         builder: Builder | None = None,
         communicator: str | None = None,
     ) -> None:

@@ -63,7 +63,7 @@ class AbstractVM(ABC):
 
     iso: str
     """Source image reference — URL or absolute local path to a
-    cloud image / installer ISO / prebuilt qcow2.  See
+    cloud image, installer ISO, or prebuilt disk image.  See
     :func:`testrange.vms.images.resolve_image`."""
 
     pkgs: list[AbstractPackage]
@@ -138,7 +138,7 @@ class AbstractVM(ABC):
         return self._name
 
     def _primary_disk_size(self) -> str:
-        """Return the primary (OS) disk's size as a qcow2-compatible
+        """Return the primary (OS) disk's size as a backend-friendly
         string (e.g. ``'64G'``).
 
         Default implementation: the first
@@ -148,18 +148,18 @@ class AbstractVM(ABC):
         """
         from testrange.devices import HardDrive
         drives = [d for d in self.devices if isinstance(d, HardDrive)]
-        return drives[0].qemu_size if drives else "20G"
+        return drives[0].size_string if drives else "20G"
 
     def _network_refs(self) -> list[Any]:
-        """Return every :class:`~testrange.devices.VirtualNetworkRef`
+        """Return every :class:`~testrange.devices.vNIC`
         on :attr:`devices` in declaration order.
 
         Pure spec lookup with no backend dependencies — used by
         orchestrators to walk a VM's NICs when assigning IPs and
         building network configs.
         """
-        from testrange.devices import VirtualNetworkRef
-        return [d for d in self.devices if isinstance(d, VirtualNetworkRef)]
+        from testrange.devices import vNIC
+        return [d for d in self.devices if isinstance(d, vNIC)]
 
     def _require_communicator(self) -> AbstractCommunicator:
         """Return the active communicator or raise an error.
@@ -302,7 +302,7 @@ class AbstractVM(ABC):
         """Return the first non-empty static IP from *mac_ip_pairs*.
 
         The v1 SSH / WinRM paths require a static IP via a
-        :class:`~testrange.devices.VirtualNetworkRef`.  Future
+        :class:`~testrange.devices.vNIC`.  Future
         DHCP-lease discovery plugs in here by replacing / extending
         this method — no other caller inspects ``mac_ip_pairs`` for
         host resolution.
@@ -312,8 +312,8 @@ class AbstractVM(ABC):
                 return ip_cidr.split("/", 1)[0]
         raise VMBuildError(
             f"VM {self.name!r}: communicator={self.communicator!r} "
-            "requires a static IP on at least one VirtualNetworkRef "
-            "(e.g. VirtualNetworkRef('Net', ip='10.0.0.10')). "
+            "requires a static IP on at least one vNIC "
+            "(e.g. vNIC('Net', ip='10.0.0.10')). "
             "DHCP-only discovery is not supported in v1."
         )
 

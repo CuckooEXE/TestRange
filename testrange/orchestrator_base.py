@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.networks.base import AbstractVirtualNetwork
+    from testrange.storage.base import StorageBackend
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
@@ -108,11 +109,38 @@ class AbstractOrchestrator(ABC):
         networks: Sequence[AbstractVirtualNetwork] | None = None,
         vms: Sequence[AbstractVM] | None = None,
         cache_root: Path | None = None,
+        cache: str | None = None,
+        cache_verify: bool | str = True,
+        storage_backend: StorageBackend | None = None,
     ) -> None:
         """Store inputs — subclasses override to open the backend
         connection and initialise handles.
+
+        :param cache: Optional URL of an :doc:`HTTP cache </usage/http_cache>`
+            (e.g. ``"https://cache.testrange"``) consulted as a
+            second-tier fill source for downloaded base images and
+            post-install VM snapshots.  ``None`` (default) uses only
+            the local on-disk cache.
+        :param cache_verify: TLS verification for the HTTP cache.
+            ``True`` (default) requires a trusted cert chain;
+            ``False`` accepts self-signed (matches the bundled
+            ``cache/`` docker setup); a string is treated as a path
+            to a CA bundle.  Ignored when *cache* is ``None``.
+        :param storage_backend: Optional explicit
+            :class:`~testrange.storage.StorageBackend` (transport +
+            disk format) for this run.  When ``None`` (default) each
+            backend infers a sensible default from *host* and its
+            own URL conventions — the libvirt backend picks
+            :class:`~testrange.storage.LocalStorageBackend` for
+            local URIs and :class:`~testrange.storage.SSHStorageBackend`
+            for ``qemu+ssh://``; other backends document their own
+            inference in their concrete subclass docstring.  Pass
+            explicitly when the auto-selection logic can't guess
+            (custom remote paths, a fake backend in tests, an
+            uncommon transport+format pairing).
         """
-        del host, networks, vms, cache_root  # subclasses wire these
+        del host, networks, vms, cache_root, cache, cache_verify  # subclasses wire these
+        del storage_backend
 
     @abstractmethod
     def __enter__(self) -> AbstractOrchestrator:
@@ -130,6 +158,36 @@ class AbstractOrchestrator(ABC):
         so they cannot mask the original exception (if any) that ended
         the ``with`` block.
         """
+
+    def cleanup(self, run_id: str) -> None:
+        """Tear down resources from a prior run that exited uncleanly.
+
+        Reconstructs the deterministic backend names this orchestrator
+        would have created for *run_id* — which is the only
+        nondeterministic input — and tries to destroy each.  Used
+        from the CLI as ``testrange cleanup MODULE[:FACTORY] RUN_ID``
+        when a previous run was killed before its ``__exit__`` could
+        run (``kill -9``, host reboot, OOM, etc.).
+
+        Does NOT call :meth:`__enter__` — there's nothing to
+        provision, just orphaned resources to delete.  Implementations
+        open whatever connection they need, enumerate the names the
+        spec + run_id imply, and best-effort delete each.  Already-
+        deleted resources are silently skipped so cleanup is
+        idempotent.
+
+        :param run_id: UUID4 string from the original run, the only
+            nondeterministic input.  Find it in the run's log output
+            (``run id <uuid>``) or in
+            ``<cache_root>/runs/<run_id>/``.
+        :raises NotImplementedError: When this backend hasn't wired
+            cleanup yet.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement cleanup() yet — "
+            "the backend cannot tear down a leaked run.  Until that "
+            "lands, clean up by hand using its native tools."
+        )
 
     def keep_alive_hints(self) -> list[str]:
         """Return shell commands a user would run to clean up resources
@@ -169,9 +227,10 @@ class AbstractOrchestrator(ABC):
 
         - **Disk leak:** the run directory at
           ``<cache_root>/runs/<run_id>/`` stays on disk indefinitely
-          (it holds the leaked VMs' overlay qcow2s and NVRAM).  The
-          log line on exit includes its path so you can ``rm -rf``
-          when you're done.
+          (it holds the leaked VMs' per-run scratch — overlays,
+          firmware-state files, seed ISOs, etc.).  The log line on
+          exit includes its path so you can ``rm -rf`` when you're
+          done.
         - **Install-subnet pool pressure:** each leaked run holds one
           of the 16 install-phase subnets from the 192.168.240-254/24
           pool until the associated network is destroyed.  Enough
@@ -187,10 +246,10 @@ class AbstractOrchestrator(ABC):
           the first place.
         - **Idempotent:** calling ``leak()`` twice is a no-op.
 
-        Non-libvirt backends (Proxmox, Hyper-V) honour the flag the
-        same way as long as they short-circuit their teardown on
-        ``self._leaked``.  The base class sets the bit; it's on each
-        backend's ``__exit__`` / ``_teardown`` to check it.
+        Every backend honours the flag the same way as long as its
+        ``__exit__`` / ``_teardown`` short-circuits on
+        ``self._leaked``.  The base class sets the bit; backends
+        check it.
         """
         self._leaked = True
 
@@ -208,12 +267,11 @@ class AbstractOrchestrator(ABC):
         The returned orchestrator is **not yet entered** — the caller
         does that via ``ExitStack``.
 
-        Different drivers build this differently:
-
-        - libvirt → ``qemu+ssh://<user>@<vm-ip>/system``, ingesting
-          the hypervisor's SSH key and grabbing its host key
-        - Proxmox → ``https://<vm-ip>:8006`` + API token obtained at
-          first boot
+        Each driver builds the inner control plane in its own
+        backend-native way (typically: bring up the inner control-
+        plane endpoint, authenticate against it with credentials
+        seeded into the hypervisor at install time, return a
+        configured orchestrator pointing at it).
 
         The *outer* orchestrator passes itself as ``outer`` so the
         inner driver can reuse shared state (cache root, storage
@@ -235,8 +293,7 @@ class AbstractOrchestrator(ABC):
         raise NotImplementedError(
             f"{cls.__name__} does not support nested orchestration "
             "yet — it cannot be rooted on a hypervisor VM.  Use a "
-            "driver that implements root_on_vm() (currently: "
-            "testrange.backends.libvirt.Orchestrator)."
+            "backend whose orchestrator implements root_on_vm()."
         )
 
 

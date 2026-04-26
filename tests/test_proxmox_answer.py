@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from testrange import VM, Credential, HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange import VM, Credential, HardDrive, Memory, vNIC, vCPU
 from testrange.exceptions import CloudInitError
 from testrange.vms.builders import Builder
 from testrange.vms.builders.base import InstallDomain, RunDomain
@@ -44,7 +44,7 @@ def _proxmox_vm(**overrides: Any) -> VM:
             vCPU(2),
             Memory(4),
             HardDrive(64),
-            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+            vNIC("OuterNet", ip="10.0.0.10"),
         ],
     )
     defaults.update(overrides)
@@ -113,11 +113,11 @@ class TestProxmoxAnswerBuilderCacheKey:
         b = ProxmoxAnswerBuilder()
         a = _proxmox_vm(devices=[
             vCPU(2), Memory(4), HardDrive(64),
-            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+            vNIC("OuterNet", ip="10.0.0.10"),
         ])
         c = _proxmox_vm(devices=[
             vCPU(2), Memory(4), HardDrive(64),
-            VirtualNetworkRef("OuterNet", ip="10.0.0.20"),
+            vNIC("OuterNet", ip="10.0.0.20"),
         ])
         assert b.cache_key(a) != b.cache_key(c)
 
@@ -125,11 +125,11 @@ class TestProxmoxAnswerBuilderCacheKey:
         b = ProxmoxAnswerBuilder()
         a = _proxmox_vm(devices=[
             vCPU(2), Memory(4), HardDrive(64),
-            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+            vNIC("OuterNet", ip="10.0.0.10"),
         ])
         c = _proxmox_vm(devices=[
             vCPU(2), Memory(4), HardDrive(64),
-            VirtualNetworkRef("MgmtNet", ip="10.0.0.10"),
+            vNIC("MgmtNet", ip="10.0.0.10"),
         ])
         # Network name doesn't change the [network] block (filter is
         # interface-name-based, not net-name) — keys MAY match.  This
@@ -225,7 +225,7 @@ class TestBuildAnswerTomlNetworkBlock:
         b = ProxmoxAnswerBuilder()
         toml = b.build_answer_toml(_proxmox_vm(devices=[
             vCPU(2), Memory(4), HardDrive(64),
-            VirtualNetworkRef("OuterNet", ip="172.16.5.42"),
+            vNIC("OuterNet", ip="172.16.5.42"),
         ]))
         assert 'cidr = "172.16.5.42/24"' in toml
         assert 'gateway = "172.16.5.1"' in toml
@@ -277,7 +277,7 @@ class TestBuildAnswerTomlNetworkBlock:
             toml = ProxmoxAnswerBuilder().build_answer_toml(
                 _proxmox_vm(devices=[
                     vCPU(2), Memory(4), HardDrive(64),
-                    VirtualNetworkRef("OuterNet"),
+                    vNIC("OuterNet"),
                 ]),
             )
         finally:
@@ -337,12 +337,12 @@ class TestPrimaryNetworkRef:
     def test_returns_first_virtual_network_ref(self) -> None:
         vm = _proxmox_vm(devices=[
             vCPU(2),
-            VirtualNetworkRef("First", ip="1.1.1.1"),
-            VirtualNetworkRef("Second", ip="2.2.2.2"),
+            vNIC("First", ip="1.1.1.1"),
+            vNIC("Second", ip="2.2.2.2"),
         ])
         ref = _primary_network_ref(vm)
         assert ref is not None
-        assert ref.name == "First"
+        assert ref.ref == "First"
 
     def test_returns_none_when_no_network_ref(self) -> None:
         vm = _proxmox_vm(devices=[vCPU(2), Memory(4), HardDrive(64)])
@@ -351,11 +351,11 @@ class TestPrimaryNetworkRef:
     def test_skips_non_network_devices(self) -> None:
         vm = _proxmox_vm(devices=[
             vCPU(2), Memory(4), HardDrive(64),
-            VirtualNetworkRef("Net", ip="10.0.0.5"),
+            vNIC("Net", ip="10.0.0.5"),
         ])
         ref = _primary_network_ref(vm)
         assert ref is not None
-        assert ref.name == "Net"
+        assert ref.ref == "Net"
 
 
 class TestRootCredential:
@@ -461,7 +461,7 @@ class TestPrepareInstallDomain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from testrange._run import RunDir
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         vm = _proxmox_vm()
@@ -501,7 +501,7 @@ class TestPrepareInstallDomain:
         the InstallDomain so callers don't accidentally ship UEFI
         when they explicitly opted into BIOS."""
         from testrange._run import RunDir
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         cache = MagicMock()
@@ -528,7 +528,7 @@ class TestPrepareRunDomain:
         self, tmp_path: Path,
     ) -> None:
         from testrange._run import RunDir
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         spec = ProxmoxAnswerBuilder().prepare_run_domain(
@@ -549,7 +549,7 @@ class TestPrepareRunDomain:
         immediately because the EFI partition isn't bootable in BIOS
         mode.  This test pins the propagation."""
         from testrange._run import RunDir
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         spec = ProxmoxAnswerBuilder(uefi=False).prepare_run_domain(

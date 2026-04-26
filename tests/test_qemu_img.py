@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`testrange._qemu_img`."""
+"""Unit tests for :mod:`testrange.storage.disk._qemu_img`."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from testrange import _qemu_img
+from testrange.storage.disk import _qemu_img
 from testrange.exceptions import CacheError
 
 

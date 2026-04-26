@@ -108,7 +108,7 @@ into the cache and booted from an overlay as-is.
         users=[Credential("deploy", "alreadyset", sudo=True)],
         devices=[
             vCPU(2), Memory(4), HardDrive(40),
-            VirtualNetworkRef("Net", ip="10.40.0.10"),
+            vNIC("Net", ip="10.40.0.10"),
         ],
     )
 
@@ -126,7 +126,7 @@ Rules for the :class:`NoOpBuilder`:
   continue to work.
 - ``communicator="ssh"`` and ``communicator="winrm"`` (see
   :doc:`communication`) require at least one
-  :class:`~testrange.devices.VirtualNetworkRef` with a static ``ip=``.
+  :class:`~testrange.devices.vNIC` with a static ``ip=``.
   The orchestrator registers that IP as a libvirt DHCP reservation on
   the MAC it assigns the NIC, so the VM comes up at the address you
   declared.
@@ -247,8 +247,8 @@ Hardware (devices)
         Memory(8),
         HardDrive(200),                # 200 GiB OS disk
         HardDrive(500),                # 500 GiB data disk → /dev/vdb
-        VirtualNetworkRef("Public"),
-        VirtualNetworkRef("Private", ip="10.0.2.10"),
+        vNIC("Public"),
+        vNIC("Private", ip="10.0.2.10"),
     ]
 
 ``HardDrive`` accepts a number (interpreted as GiB) or a size string
@@ -267,7 +267,7 @@ Bus mapping:
   slots.  Extra drives still use virtio and come online after
   first-logon installs the drivers.
 
-Multiple ``VirtualNetworkRef`` entries add NICs — the first is
+Multiple ``vNIC`` entries add NICs — the first is
 typically the one with internet access.
 
 Talking to a running VM

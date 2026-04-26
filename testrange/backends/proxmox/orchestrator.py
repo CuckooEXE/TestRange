@@ -158,6 +158,9 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         networks: Sequence[AbstractVirtualNetwork] | None = None,
         vms: Sequence[AbstractVM] | None = None,
         cache_root: Path | None = None,
+        cache: str | None = None,
+        cache_verify: bool | str = True,
+        storage_backend: object | None = None,
         node: str | None = None,
         storage: str | None = None,
         port: int = 8006,
@@ -171,7 +174,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     ) -> None:
         super().__init__(
             host=host, networks=networks, vms=vms, cache_root=cache_root,
+            cache=cache, cache_verify=cache_verify,
+            storage_backend=storage_backend,  # type: ignore[arg-type]
         )
+        # Proxmox doesn't yet honour storage_backend (the orchestrator
+        # is a stub).  Stash it for forward-compatibility so the
+        # contract test passes today and the wiring follows when the
+        # PVE REST integration lands.
+        self._storage_backend_override = storage_backend
         self._host = host
         self._port = port
         # Narrow the abstract list back to our concrete subclass —
@@ -184,6 +194,8 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         )
         self._vm_list = list(vms) if vms else []
         self._cache_root = cache_root
+        self._cache_url = cache
+        self._cache_verify = cache_verify
         self._node = node
         self._storage = storage
         self._zone = zone
@@ -218,6 +230,24 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # constructing instances for spec inspection — don't trip
         # on filesystem permissions.
         self._cache: CacheManager | None = None
+
+        # CacheManager construction mirrors LibvirtOrchestrator's
+        # wiring so the cross-backend cache.backend_name invariant
+        # holds even though the rest of this orchestrator is still a
+        # stub.  Without it, the contract test in
+        # tests/test_backend_contract.py::TestScenarioConstructionContract
+        # catches the missing setup.
+        from testrange.cache import CacheManager
+        remote = None
+        if cache is not None:
+            from testrange.cache_http import HttpCache
+            remote = HttpCache(cache, verify=cache_verify)
+        self._cache = (
+            CacheManager(root=cache_root, remote=remote)
+            if cache_root
+            else CacheManager(remote=remote)
+        )
+        self._cache.backend_name = self.backend_type()
 
     @classmethod
     def backend_type(cls) -> str:
@@ -468,7 +498,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     def _setup_vm_networks(self) -> None:
         """Register each VM's static IPs against its networks.
 
-        v1 PVE backend requires every :class:`VirtualNetworkRef` to
+        v1 PVE backend requires every :class:`vNIC` to
         carry a static ``ip=`` — DHCP discovery is a future slice.
         We fail loud here rather than later in
         :meth:`AbstractVM._make_communicator` so users see the cause
@@ -481,17 +511,17 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                     "backends in one orchestrator."
                 )
             for ref in vm._network_refs():
-                net = self._find_network(ref.name)
+                net = self._find_network(ref.ref)
                 if net is None:
                     raise NetworkError(
                         f"VM {vm.name!r} references unknown network "
-                        f"{ref.name!r}; available: "
+                        f"{ref.ref!r}; available: "
                         f"{[n.name for n in self._networks]!r}"
                     )
                 if not ref.ip:
                     raise NetworkError(
-                        f"VM {vm.name!r}: VirtualNetworkRef "
-                        f"{ref.name!r} has no static ``ip=`` — "
+                        f"VM {vm.name!r}: vNIC "
+                        f"{ref.ref!r} has no static ``ip=`` — "
                         "the Proxmox backend doesn't support DHCP "
                         "discovery yet."
                     )
@@ -520,10 +550,10 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         network_entries: list[tuple[str, str]] = []
         mac_ip_pairs: list[tuple[str, str, str, str]] = []
         for ref in vm._network_refs():
-            net = self._find_network(ref.name)
+            net = self._find_network(ref.ref)
             if net is None:
                 continue
-            mac = _mac_for_vm_network(vm.name, ref.name)
+            mac = _mac_for_vm_network(vm.name, ref.ref)
             network_entries.append((net.backend_name(), mac))
             gateway = net.gateway_ip if net.internet else ""
             nameserver = net.gateway_ip if net.dns else ""
@@ -553,7 +583,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             if not network_entries:
                 raise NetworkError(
                     f"VM {vm.name!r}: no network refs — Proxmox VMs "
-                    "need at least one VirtualNetworkRef."
+                    "need at least one vNIC."
                 )
             install_net_name, install_mac = network_entries[0]
 

@@ -420,7 +420,20 @@ def _print_single_vm(
     :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`,
     appends an ``Inner networks`` + ``Inner VMs`` section.
     """
-    from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+    from testrange.backends.libvirt.devices import LibvirtHardDrive
+    from testrange.devices import (
+        AbstractHardDrive,
+        AbstractVNIC,
+        Memory,
+        vCPU,
+    )
+
+    def _drive_tag(d: AbstractHardDrive) -> str:
+        # NVMe is libvirt-specific; only the LibvirtHardDrive subclass
+        # carries the flag.  Generic HardDrive renders untagged.
+        if isinstance(d, LibvirtHardDrive) and d.nvme:
+            return " NVMe"
+        return ""
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
     vm_head = "└──" if is_last else "├──"
@@ -442,11 +455,13 @@ def _print_single_vm(
 
     vcpu = next((d.count for d in vm.devices if isinstance(d, vCPU)), 2)
     mem = next((d.gib for d in vm.devices if isinstance(d, Memory)), 2.0)
-    drives = [d for d in vm.devices if isinstance(d, HardDrive)]
-    nics = [d for d in vm.devices if isinstance(d, VirtualNetworkRef)]
+    drives = [d for d in vm.devices if isinstance(d, AbstractHardDrive)]
+    nics = [
+        d for d in vm.devices if isinstance(d, AbstractVNIC)
+    ]
 
     disk_desc = (
-        ", ".join(f"{d.size}{' NVMe' if d.nvme else ''}" for d in drives)
+        ", ".join(f"{d.size}{_drive_tag(d)}" for d in drives)
         if drives else "20GB (default)"
     )
     pkg_desc = (
@@ -496,14 +511,14 @@ def _print_single_vm(
             # an inner VM's ref matches the hypervisor's own inner
             # networks, not the outer ones — ``networks`` is already
             # the correct scope by the time we recurse.
-            net = next((n for n in networks if n.name == nic.name), None)
+            net = next((n for n in networks if n.name == nic.ref), None)
             if nic.ip:
                 addr = f"static {nic.ip}"
             elif net is not None and net.dhcp:
                 addr = "DHCP"
             else:
                 addr = "auto-reserved"
-            net_tag = click.style(nic.name, fg="cyan")
+            net_tag = click.style(nic.ref, fg="cyan")
             click.echo(f"{nic_child_trunk}{nic_head} {net_tag:<20} ({addr})")
 
     # Hypervisor recursion: inner networks (not last) + inner VMs (last).
@@ -595,6 +610,68 @@ def repl_cmd(
             print_keep_summary(orch)
         else:
             orch.__exit__(None, None, None)
+
+
+@main.command("cleanup")
+@click.argument("target")
+@click.argument("run_id")
+@_orchestrator_option
+@click.option(
+    "--log-level",
+    type=click.Choice(
+        ["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False
+    ),
+    default="INFO",
+    help="Minimum level for TestRange stderr logs.",
+)
+def cleanup_cmd(
+    target: str,
+    run_id: str,
+    orchestrator_url: str | None,
+    log_level: str,
+) -> None:
+    """Tear down resources from a leaked test run.
+
+    TARGET is the same ``MODULE[:FACTORY]`` shape as ``testrange run``.
+    RUN_ID is the UUID4 from the original run (find it in the run's log
+    output or in ``<cache_root>/runs/<run_id>/``).
+
+    Reconstructs every resource the test factory + run id would have
+    produced and best-effort destroys each.  Idempotent; safe to run
+    repeatedly.
+
+    Use after a ``kill -9 <testrange-pid>``, OOM-killer hit, host
+    reboot mid-run, or anything else that prevented the orchestrator's
+    ``__exit__`` from running.
+
+    Example::
+
+        testrange cleanup ./my_tests.py:gen_tests \\
+            deadbeef-1111-2222-3333-444455556666
+    """
+    configure_root_logger(getattr(logging, log_level.upper()))
+    module_part, factory_name = _parse_target(target)
+    module = _load_module(module_part)
+    tests = _load_tests(module, module_part, factory_name)
+
+    failures = 0
+    for test in tests:
+        orch = _resolve_orchestrator(test, orchestrator_url)
+        try:
+            orch.cleanup(run_id)
+        except NotImplementedError as exc:
+            click.echo(f"  {test.name}: {exc}", err=True)
+            failures += 1
+        except Exception as exc:  # noqa: BLE001 — surface anything as a CLI error
+            click.echo(
+                f"  {test.name}: cleanup failed: {exc}", err=True,
+            )
+            failures += 1
+        else:
+            click.echo(f"  {test.name}: cleanup ok")
+
+    if failures:
+        sys.exit(1)
 
 
 @main.command("cache-list")

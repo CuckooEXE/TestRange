@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from testrange.backends.libvirt.devices import LibvirtDriveBus, LibvirtHardDrive
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.backends.libvirt.hypervisor import Hypervisor
 from testrange.backends.libvirt.network import VirtualNetwork
@@ -34,7 +35,11 @@ from testrange.backends.libvirt.orchestrator import (
     LibvirtOrchestrator,
     Orchestrator,
 )
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.storage import (
+    LocalStorageBackend,
+    SSHStorageBackend,
+)
+from testrange.backends.libvirt.vm import LibvirtVM
 
 if TYPE_CHECKING:
     from testrange.orchestrator_base import AbstractOrchestrator
@@ -90,10 +95,14 @@ def cli_build_orchestrator(
 
 __all__ = [
     "GuestAgentCommunicator",
-    "VirtualNetwork",
-    "Orchestrator",
-    "LibvirtOrchestrator",
-    "VM",
     "Hypervisor",
+    "LibvirtDriveBus",
+    "LibvirtHardDrive",
+    "LibvirtOrchestrator",
+    "LibvirtVM",
+    "LocalStorageBackend",
+    "Orchestrator",
+    "SSHStorageBackend",
+    "VirtualNetwork",
     "cli_build_orchestrator",
 ]

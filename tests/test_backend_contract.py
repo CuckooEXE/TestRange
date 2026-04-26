@@ -1,9 +1,23 @@
 """Cross-backend contract tests.
 
-These encode the shape of the hypervisor ABCs so a new backend can't
-silently skip or rename a method.  They never *instantiate* backends
-beyond libvirt (Proxmox raises on instantiation today) — signature
-checks only.
+Two layers:
+
+1. **Signature contract** (the original ``Test*Contract`` classes).
+   Encodes the shape of the hypervisor ABCs so a new backend can't
+   silently skip or rename a method.  Pure introspection — never
+   instantiates anything.
+
+2. **Scenario contract** (the ``Scenario*`` classes added below).
+   Exercises the *behaviour* every backend must share — construction
+   defaults, GenericVM promotion, leak / cleanup semantics, backend
+   identity, resource-name determinism.  Each scenario runs against
+   every registered backend; backends whose ``__enter__`` isn't
+   implemented yet (Proxmox today) hit construction-only tests and
+   skip the rest.
+
+When a new backend lands, add it to the parametrize lists at the
+top — the same scenarios immediately exercise it, and any divergence
+fails loudly.
 """
 
 from __future__ import annotations
@@ -15,7 +29,7 @@ import pytest
 from testrange import AbstractOrchestrator, AbstractVirtualNetwork, AbstractVM
 from testrange.backends.libvirt.network import VirtualNetwork as LibvirtNetwork
 from testrange.backends.libvirt.orchestrator import Orchestrator as LibvirtOrch
-from testrange.backends.libvirt.vm import VM as LibvirtVM
+from testrange.backends.libvirt.vm import LibvirtVM
 from testrange.backends.proxmox import (
     ProxmoxOrchestrator,
     ProxmoxVirtualNetwork,
@@ -25,6 +39,18 @@ from testrange.backends.proxmox import (
 ORCHESTRATORS = [LibvirtOrch, ProxmoxOrchestrator]
 VM_CLASSES = [LibvirtVM, ProxmoxVM]
 NETWORK_CLASSES = [LibvirtNetwork, ProxmoxVirtualNetwork]
+
+# Backend triples for scenario tests.  Each entry is (orchestrator
+# class, backend's native VM class, backend's network class) — the
+# things needed to set up + tear down a minimal scenario.  Add a new
+# triple here when adding a backend; every scenario test below picks
+# it up automatically.
+BACKEND_TRIPLES = [
+    pytest.param(LibvirtOrch, LibvirtVM, LibvirtNetwork, id="libvirt"),
+    pytest.param(
+        ProxmoxOrchestrator, ProxmoxVM, ProxmoxVirtualNetwork, id="proxmox",
+    ),
+]
 
 
 class TestOrchestratorContract:
@@ -39,9 +65,12 @@ class TestOrchestratorContract:
 
     @pytest.mark.parametrize("cls", ORCHESTRATORS)
     def test_constructor_accepts_standard_kwargs(self, cls) -> None:
-        """host/networks/vms/cache_root must be accepted by every backend."""
+        """The kwargs every backend must accept (cross-backend contract)."""
         sig = inspect.signature(cls.__init__)
-        expected = {"host", "networks", "vms", "cache_root"}
+        expected = {
+            "host", "networks", "vms", "cache_root",
+            "cache", "cache_verify", "storage_backend",
+        }
         missing = expected - set(sig.parameters)
         assert not missing, (
             f"{cls.__name__} is missing kwargs: {missing}"
@@ -143,8 +172,8 @@ class TestGuestAgentFactoryIsBackendOverridable:
 
         from testrange import Credential
         from testrange.backends.libvirt import (
-            VM,
             GuestAgentCommunicator,
+            LibvirtVM as VM,
         )
 
         vm = VM(
@@ -174,5 +203,218 @@ class TestGuestAgentFactoryIsBackendOverridable:
         )
         with pytest.raises(VMBuildError, match="guest-agent"):
             vm._make_guest_agent_communicator()
+
+
+# =====================================================================
+# SCENARIO-LEVEL CONTRACT
+#
+# These exercise observable behaviour that the abstract layer
+# promises.  Run against every backend in BACKEND_TRIPLES; backends
+# whose ``__enter__`` is unimplemented run construction-only tests
+# and skip the rest.
+# =====================================================================
+
+
+def _spec(name: str = "web", *, vm_cls=None):
+    """Build a tiny VM spec.  When ``vm_cls`` is given, instantiates
+    that backend's concrete class; otherwise returns a backend-
+    agnostic GenericVM."""
+    from testrange import Credential, GenericVM, Memory, vCPU
+    kwargs = dict(
+        name=name,
+        iso="https://example.com/x.qcow2",
+        users=[Credential("root", "pw")],
+        devices=[vCPU(1), Memory(1)],
+    )
+    return (vm_cls or GenericVM)(**kwargs)
+
+
+class TestScenarioConstructionContract:
+    """Construction-time invariants every backend must satisfy.
+
+    These don't enter the orchestrator — safe to run even when the
+    backend's ``__enter__`` raises NotImplementedError."""
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_constructs_with_no_args(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """An orchestrator with no networks + no VMs must still
+        construct cleanly — used by ad-hoc scripts that build the
+        spec list dynamically."""
+        del vm_cls, net_cls
+        orch = orch_cls()
+        assert orch._vm_list == []
+        assert orch._networks == []
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_cache_backend_name_matches_backend_type(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """The cache's backend_name (used as the HTTP-cache URL prefix)
+        must match the orchestrator's own backend_type — otherwise
+        artifacts pushed by one backend would land under the wrong
+        prefix and never get found again."""
+        del vm_cls, net_cls
+        orch = orch_cls()
+        assert orch._cache.backend_name == orch_cls.backend_type()
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_promotes_generic_vm_to_native(
+        self, orch_cls, vm_cls, net_cls, request,
+    ) -> None:
+        """GenericVM is the backend-agnostic spec; every orchestrator
+        must convert it to its own native VM type at __init__ so the
+        rest of provisioning operates on backend-specific instances.
+
+        Proxmox is xfail until its orchestrator wires _promote_to_proxmox;
+        the test will turn green automatically when that happens, which
+        is the point — divergence detection."""
+        del net_cls
+        if orch_cls is ProxmoxOrchestrator:
+            request.node.add_marker(pytest.mark.xfail(
+                reason="ProxmoxOrchestrator scaffolding doesn't promote "
+                       "GenericVM yet; xfail flips to pass when it does",
+                strict=True,
+            ))
+
+        from testrange import GenericVM
+        spec = _spec("web")
+        assert isinstance(spec, GenericVM)
+
+        orch = orch_cls(vms=[spec])
+
+        assert all(isinstance(v, vm_cls) for v in orch._vm_list)
+        assert not any(isinstance(v, GenericVM) for v in orch._vm_list)
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_native_vm_passes_through_unchanged(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """Already-native VM specs must not be re-wrapped — that
+        would lose any backend-specific options the user set
+        explicitly on the concrete class."""
+        del net_cls
+        try:
+            native = _spec("web", vm_cls=vm_cls)
+            orch = orch_cls(vms=[native])
+        except NotImplementedError:
+            pytest.skip(f"{orch_cls.__name__} construction not implemented")
+        assert orch._vm_list[0] is native
+
+
+class TestScenarioBackendIdentityContract:
+    """``backend_type()`` is the introspection hook test code uses to
+    branch on which backend it's running against.  These pin the
+    invariants every backend must honour."""
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_backend_type_is_lowercase_string(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        del vm_cls, net_cls
+        bt = orch_cls.backend_type()
+        assert isinstance(bt, str)
+        assert bt and bt == bt.lower(), (
+            f"{orch_cls.__name__}.backend_type() must be a non-empty "
+            f"lowercase string, got {bt!r}"
+        )
+
+    def test_backend_types_are_unique(self) -> None:
+        """No two backends may share a ``backend_type()`` — the
+        identifier ends up in HTTP-cache URLs and CLI dispatch."""
+        seen = [t.values[0].backend_type() for t in BACKEND_TRIPLES]
+        assert len(seen) == len(set(seen)), (
+            f"backend_type() collision in {seen}"
+        )
+
+
+class TestScenarioLifecycleContract:
+    """The teardown contract: ``__exit__`` never raises (it would
+    mask a more useful exception in the ``with`` block), ``leak()``
+    is idempotent and skips resource teardown, and ``cleanup()`` is
+    idempotent + best-effort even when called against runs whose
+    resources don't exist."""
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_keep_alive_hints_returns_a_list(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """Always a list (eagerly evaluated, not a generator) so
+        callers can iterate it twice without re-running it."""
+        del vm_cls, net_cls
+        orch = orch_cls()
+        hints = orch.keep_alive_hints()
+        assert isinstance(hints, list)
+        assert all(isinstance(h, str) for h in hints)
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_leak_sets_flag_idempotently(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """Calling ``leak()`` once or twice must end in the same
+        state — backend ``__exit__`` implementations check the flag
+        and skip teardown when set."""
+        del vm_cls, net_cls
+        orch = orch_cls()
+        assert orch._leaked is False
+        orch.leak()
+        assert orch._leaked is True
+        orch.leak()
+        assert orch._leaked is True
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_cleanup_either_works_or_documents_unimplemented(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """Cleanup is the SIGKILL-recovery hook (``testrange cleanup
+        MODULE RUN_ID``).  Backends either implement it cleanly
+        (idempotent best-effort) or raise NotImplementedError with a
+        clear message naming the backend.  Anything else (silent
+        AttributeError, generic exception) breaks the recovery CLI."""
+        del vm_cls, net_cls
+        orch = orch_cls()
+        run_id = "00000000-0000-0000-0000-000000000000"
+        try:
+            orch.cleanup(run_id)
+        except NotImplementedError as exc:
+            # Default fallback shape: clear message naming the backend.
+            assert orch_cls.__name__ in str(exc) or "cleanup" in str(exc).lower()
+
+
+class TestScenarioDeterministicNaming:
+    """Backend resource names that the spec implies (domains, networks)
+    must be pure functions of (vm/net name, run_id).  This is what
+    ``testrange cleanup`` relies on to reconstruct what to delete.
+
+    The *mechanism* differs per backend (libvirt's
+    :class:`VirtualNetwork` exposes ``bind_run(run_id)``; Proxmox's
+    SDN-based one will use a different setup hook).  These tests
+    cover only the cross-backend invariant — the methods exist and
+    return strings; backend-specific naming logic is exercised in
+    each backend's own test file (``test_vm_libvirt.py`` etc.)."""
+
+    @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
+    def test_backend_name_is_a_string(
+        self, orch_cls, vm_cls, net_cls,
+    ) -> None:
+        """Once the network has been initialised for a run, its
+        backend_name() must return a non-empty string.  The
+        initialisation hook is backend-specific: libvirt uses
+        bind_run(), Proxmox uses its SDN setup."""
+        del orch_cls, vm_cls
+        net = net_cls(name="MyNet", subnet="10.0.0.0/24")
+        run_id = "deadbeef-aaaa-bbbb-cccc-dddddddddddd"
+        # Best-effort: try the libvirt-style hook first.
+        if hasattr(net, "bind_run"):
+            net.bind_run(run_id)
+        try:
+            name = net.backend_name()
+        except (RuntimeError, NotImplementedError):
+            pytest.skip(
+                f"{type(net).__name__}.backend_name() requires backend-"
+                "specific initialisation that's not yet wired"
+            )
+        assert isinstance(name, str) and name
 
 

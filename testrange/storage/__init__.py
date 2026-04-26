@@ -19,19 +19,31 @@ REST upload + a storage-volume identifier.  Decomposing into
 format to re-learn it, and adding a new format doesn't force every
 transport to re-learn it.
 
-Shipped concrete pairings:
+Shipped pieces here are deliberately format-agnostic:
 
-- :class:`LocalStorageBackend` — local filesystem + qcow2.
-- :class:`SSHStorageBackend` — SFTP/SSH + qcow2.
+- The generic :class:`StorageBackend` composer.
+- Both transports (:class:`LocalFileTransport`,
+  :class:`SSHFileTransport`).
+- The disk-format ABC plus the qcow2 implementation
+  (qcow2 is a real cross-vendor format, not a backend choice).
 
-Callers that need a custom pairing build a :class:`StorageBackend`
-directly with the transport and format they want.
+Pre-composed pairings (transport + disk-format) are
+**backend-flavoured** — the disk-format binding is what makes a
+pairing libvirt-, Hyper-V-, or Proxmox-flavoured.  Each backend
+publishes its own convenience subclasses in its backend module:
+
+- :class:`testrange.backends.libvirt.LocalStorageBackend`
+  (Local + qcow2)
+- :class:`testrange.backends.libvirt.SSHStorageBackend`
+  (SSH + qcow2)
+
+Callers that want an exotic pairing compose a
+:class:`StorageBackend` directly with the transport + format they
+need.
 """
 
 from testrange.storage.base import (
     AbstractStorageBackend,
-    LocalStorageBackend,
-    SSHStorageBackend,
     StorageBackend,
 )
 from testrange.storage.disk import AbstractDiskFormat, Qcow2DiskFormat
@@ -42,10 +54,8 @@ from testrange.storage.transport import (
 )
 
 __all__ = [
-    # Composition + convenience pairings
+    # Composition
     "StorageBackend",
-    "LocalStorageBackend",
-    "SSHStorageBackend",
     "AbstractStorageBackend",  # legacy alias for StorageBackend
     # Transport axis
     "AbstractFileTransport",

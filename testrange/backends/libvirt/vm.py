@@ -31,10 +31,17 @@ from testrange._logging import get_logger, log_duration
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.cache import CacheManager
 from testrange.communication.base import AbstractCommunicator
-from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange.backends.libvirt.devices import LibvirtHardDrive
+from testrange.devices import (
+    AbstractHardDrive,
+    HardDrive,
+    Memory,
+    vNIC,
+    vCPU,
+)
 from testrange.exceptions import VMBuildError
-from testrange.vms.base import AbstractVM
-from testrange.vms.builders import Builder
+from testrange.vms.base import _COMMUNICATOR_KINDS, AbstractVM
+from testrange.vms.builders import Builder, auto_select_builder
 
 _log = get_logger(__name__)
 
@@ -45,6 +52,22 @@ if TYPE_CHECKING:
     from testrange.orchestrator_base import AbstractOrchestrator
     from testrange.packages import AbstractPackage
     from testrange.storage.transport.base import AbstractFileTransport
+
+
+# Pyright-checked union of devices this backend's VM accepts.  Generic
+# devices (vCPU, Memory, vNIC, HardDrive) live in
+# :mod:`testrange.devices`; libvirt-specific drives (and any future
+# libvirt-specific NIC / vCPU / RNG) come from
+# :mod:`testrange.backends.libvirt.devices`.  A backend-specific device
+# from a different backend (ProxmoxHardDrive, HyperVHardDrive, …) is
+# rejected here at type-check time and again at runtime in
+# :meth:`VM.__init__` for callers who bypass the type checker.
+LibvirtAcceptedDevice = (
+    vCPU | Memory | vNIC | HardDrive | LibvirtHardDrive
+)
+_ACCEPTED_DEVICE_TYPES: tuple[type, ...] = (
+    vCPU, Memory, vNIC, HardDrive, LibvirtHardDrive,
+)
 
 
 def _libvirt_conn(context: AbstractOrchestrator) -> libvirt.virConnect:
@@ -146,6 +169,32 @@ def _destroy_and_undefine(domain: libvirt.virDomain) -> None:
             pass
 
 
+def _resolve_bus(drive: AbstractHardDrive, *, windows: bool = False) -> str:
+    """Pick the libvirt disk bus to render for *drive*.
+
+    :class:`LibvirtHardDrive` carries an explicit bus selector when
+    the user wants one; the generic :class:`HardDrive` doesn't, and
+    we fall back to the libvirt-default of SATA for Windows guests
+    (driver-free install) and virtio for everything else.
+    """
+    if isinstance(drive, LibvirtHardDrive) and drive.bus is not None:
+        return drive.bus
+    return "sata" if windows else "virtio"
+
+
+def _nvram_run_path(run: RunDir, vm_name: str) -> str:
+    """Backend-local ref for *vm_name*'s per-run UEFI NVRAM file.
+
+    libvirt copies the OVMF_VARS template onto this path when the
+    domain first starts; cleanup happens with the rest of the run
+    dir.  Lives in the libvirt backend because NVRAM is how libvirt
+    surfaces UEFI state — other backends handle UEFI variables
+    differently (Proxmox via PVE templates, Hyper-V via the VHD,
+    …).
+    """
+    return run.path_for(f"{vm_name}_VARS.fd")
+
+
 def _press_any_key_loop(
     domain: libvirt.virDomain,
     stop: threading.Event,
@@ -177,18 +226,22 @@ def _press_any_key_loop(
         stop.wait(interval_s)
 
 
-class VM(AbstractVM):
+class LibvirtVM(AbstractVM):
     """A KVM/QEMU virtual machine managed by libvirt.
+
+    Re-exported as :class:`testrange.VM` because libvirt is the
+    default backend; users who want explicit naming can import this
+    class directly from :mod:`testrange.backends.libvirt`.
 
     .. code-block:: python
 
-        VM(
+        LibvirtVM(
             name="MyVM",
             iso="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
             users=[Credential("root", "Password123!")],
             pkgs=[Apt("nginx")],
             post_install_cmds=["systemctl enable --now nginx"],
-            devices=[vCPU(2), Memory(4), VirtualNetworkRef("NetA"), HardDrive(20)],
+            devices=[vCPU(2), Memory(4), vNIC("NetA"), HardDrive(20)],
         )
 
     :param name: Unique name for this VM within a test run.
@@ -274,24 +327,68 @@ class VM(AbstractVM):
         users: list[Credential],
         pkgs: list[AbstractPackage] | None = None,
         post_install_cmds: list[str] | None = None,
-        devices: list[AbstractDevice] | None = None,
+        devices: list[LibvirtAcceptedDevice] | None = None,
         builder: Builder | None = None,
         communicator: str | None = None,
     ) -> None:
-        super().__init__(
-            name=name,
-            iso=iso,
-            users=users,
-            pkgs=pkgs,
-            post_install_cmds=post_install_cmds,
-            devices=devices,
-            builder=builder,
-            communicator=communicator,
-        )
-        # Libvirt-specific runtime state, populated by Orchestrator.
+        self._name = name
+        self.iso = iso
+        self.users = users
+        self.pkgs: list[AbstractPackage] = pkgs or []
+        self.post_install_cmds: list[str] = post_install_cmds or []
+        self.devices: list[AbstractDevice] = list(devices or [])
+        # Runtime check for callers who bypass the type checker.  The
+        # union typing above lets pyright catch a foreign-backend
+        # device at edit time; this catches the same mistake when the
+        # spec is constructed dynamically (test factories, YAML
+        # loaders, etc.).
+        for d in self.devices:
+            if not isinstance(d, _ACCEPTED_DEVICE_TYPES):
+                accepted = ", ".join(t.__name__ for t in _ACCEPTED_DEVICE_TYPES)
+                raise VMBuildError(
+                    f"VM {name!r}: device {d!r} of type "
+                    f"{type(d).__name__} is not accepted by the "
+                    f"libvirt backend (accepted: {accepted})"
+                )
+
+        # Auto-select a builder from iso= when the caller doesn't pass
+        # one.  The registry (testrange.vms.builders.BUILDER_REGISTRY)
+        # walks front-to-back; the default entry matches Windows
+        # install ISOs and everything else falls through to
+        # CloudInitBuilder.  Third-party builders register themselves
+        # via testrange.vms.builders.register_builder().
+        if builder is None:
+            builder = auto_select_builder(iso)
+        self.builder = builder
+
+        # Communicator default comes from the builder so each
+        # provisioning strategy can pick what it knows works — e.g.
+        # the Windows builder installs qemu-guest-agent via
+        # FirstLogonCommands but defaults to WinRM because that's
+        # reachable earlier in the boot.
+        if communicator is None:
+            communicator = self.builder.default_communicator()
+        self.communicator = communicator
+
+        if communicator not in _COMMUNICATOR_KINDS:
+            raise VMBuildError(
+                f"VM {name!r}: communicator={communicator!r} is not one of "
+                f"{_COMMUNICATOR_KINDS}"
+            )
+
+        # Runtime state — set by Orchestrator
+        self._communicator = None
         self._domain: libvirt.virDomain | None = None
         self._install_domain: libvirt.virDomain | None = None
         self._run_id: str | None = None
+
+    @property
+    def name(self) -> str:
+        """Return the VM's configured name.
+
+        :returns: Name string.
+        """
+        return self._name
 
     def _vcpu_count(self) -> int:
         vcpus = [d for d in self.devices if isinstance(d, vCPU)]
@@ -301,15 +398,15 @@ class VM(AbstractVM):
         mems = [d for d in self.devices if isinstance(d, Memory)]
         return mems[0].kib if mems else 2 * 1024 * 1024
 
-    def _hard_drives(self) -> list[HardDrive]:
-        return [d for d in self.devices if isinstance(d, HardDrive)]
+    def _hard_drives(self) -> list[AbstractHardDrive]:
+        return [d for d in self.devices if isinstance(d, AbstractHardDrive)]
 
-    def _network_refs(self) -> list[VirtualNetworkRef]:
-        return [d for d in self.devices if isinstance(d, VirtualNetworkRef)]
+    def _network_refs(self) -> list[vNIC]:
+        return [d for d in self.devices if isinstance(d, vNIC)]
 
     def _primary_disk_size(self) -> str:
         drives = self._hard_drives()
-        return drives[0].qemu_size if drives else "20G"
+        return drives[0].size_string if drives else "20G"
 
     def _base_domain_xml(
         self,
@@ -431,18 +528,19 @@ class VM(AbstractVM):
 
         # Primary disk
         drives = self._hard_drives()
-        primary_drive = drives[0] if drives else HardDrive()
+        primary_drive: AbstractHardDrive = drives[0] if drives else HardDrive()
+        primary_bus = _resolve_bus(primary_drive, windows=windows)
         disk_el = ET.SubElement(devices, "disk", type="file", device="disk")
         ET.SubElement(disk_el, "driver", name="qemu", type="qcow2", discard="unmap")
         ET.SubElement(disk_el, "source", file=disk_path)
-        if primary_drive.nvme:
+        if primary_bus == "nvme":
             ET.SubElement(disk_el, "target", dev="nvme0n1", bus="nvme")
-        elif windows:
+        elif primary_bus == "sata":
             # Windows Setup has native AHCI/SATA drivers but not virtio-blk;
             # using SATA sidesteps the DriverPaths dance with virtio-win.
             ET.SubElement(disk_el, "target", dev="sda", bus="sata")
         else:
-            ET.SubElement(disk_el, "target", dev="vda", bus="virtio")
+            ET.SubElement(disk_el, "target", dev="vda", bus=primary_bus)
 
         # Additional data drives (index 1+).  They sit alongside the
         # primary disk in the run dir, so derive the path by string
@@ -459,7 +557,8 @@ class VM(AbstractVM):
                 f"{primary_parent}/{data_name}" if primary_parent else data_name
             )
             ET.SubElement(d, "source", file=data_ref)
-            if drive.nvme:
+            data_bus = _resolve_bus(drive, windows=windows)
+            if data_bus == "nvme":
                 ET.SubElement(d, "target", dev=f"nvme{idx}n1", bus="nvme")
             else:
                 dev_names = "bcdefghijklmnop"
@@ -488,7 +587,7 @@ class VM(AbstractVM):
                 cdrom_sources.extend(extra_cdroms)
 
         _sd_letters = "abcdefghijklmnop"
-        cdrom_letter_offset = 1 if (windows and not primary_drive.nvme) else 0
+        cdrom_letter_offset = 1 if (windows and primary_bus != "nvme") else 0
         for cd_idx, cdrom_path in enumerate(cdrom_sources):
             cdrom = ET.SubElement(devices, "disk", type="file", device="cdrom")
             ET.SubElement(cdrom, "driver", name="qemu", type="raw")
@@ -629,7 +728,7 @@ class VM(AbstractVM):
         """
         domain_spec = self.builder.prepare_install_domain(self, run, cache)
         nvram_ref = (
-            run.nvram_path(self._name) if domain_spec.uefi else None
+            _nvram_run_path(run, self._name) if domain_spec.uefi else None
         )
         if nvram_ref is not None:
             # Seed the per-run NVRAM ourselves so DAC's remember_owner
@@ -819,7 +918,7 @@ class VM(AbstractVM):
         # rotates instance-id here; Windows + NoOp don't) and which
         # firmware / device models the run domain needs.
         run_spec = self.builder.prepare_run_domain(self, run, mac_ip_pairs)
-        nvram_ref = run.nvram_path(self._name) if run_spec.uefi else None
+        nvram_ref = _nvram_run_path(run, self._name) if run_spec.uefi else None
 
         # Seed the per-run NVRAM from the install-phase snapshot when
         # we have one.  Libvirt uses the file as-is if it exists; it
@@ -893,4 +992,4 @@ class VM(AbstractVM):
         self._communicator = None
 
     def __repr__(self) -> str:
-        return f"VM(name={self._name!r}, iso={self.iso!r})"
+        return f"LibvirtVM(name={self._name!r}, iso={self.iso!r})"

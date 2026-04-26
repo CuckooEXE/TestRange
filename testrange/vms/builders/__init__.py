@@ -8,8 +8,8 @@ Each concrete :class:`Builder` encodes one install pipeline:
 - :class:`WindowsUnattendedBuilder` — boot a Windows installer with an
   autounattend seed and let Setup + FirstLogonCommands run to
   completion.
-- :class:`NoOpBuilder` — no install phase; the user's qcow2 is already
-  ready.
+- :class:`NoOpBuilder` — no install phase; the user's prebuilt disk
+  image is already ready.
 
 Subclass :class:`Builder` to support a new provisioning pipeline
 (preseed, Kickstart, Ignition, sysprep'd Windows, …) and pass the
@@ -124,8 +124,7 @@ def auto_select_builder(iso: str) -> Builder:
 
     Falls back to :class:`CloudInitBuilder` when no registered
     predicate matches (Linux cloud images are the most common case,
-    and every ``.qcow2`` / ``.img`` / ``https://`` input lands there
-    by default).
+    and every plain image URL or local file lands there by default).
     """
     for predicate, factory in BUILDER_REGISTRY:
         if predicate(iso):

@@ -32,7 +32,7 @@ from testrange import (
     Memory,
     Orchestrator,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     vCPU,
 )
 
@@ -53,7 +53,7 @@ def main() -> None:
             vCPU(1),
             Memory(1),
             HardDrive(10),
-            VirtualNetworkRef("Net"),
+            vNIC("Net"),
         ],
     )
 

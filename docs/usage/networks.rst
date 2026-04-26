@@ -28,7 +28,7 @@ Topology flags
    * - ``dhcp``
      - dnsmasq hands out DHCP leases.  NICs without an explicit
        ``ip=`` get a deterministic address via MAC reservation.
-     - No DHCP.  Every ``VirtualNetworkRef`` attached to this network
+     - No DHCP.  Every ``vNIC`` attached to this network
        must pass ``ip="..."``; the orchestrator raises otherwise.
    * - ``dns``
      - dnsmasq listens on port 53 on the bridge IP and resolves
@@ -79,7 +79,7 @@ or hard-coded service endpoints.
 Static IPs
 ----------
 
-Passing ``VirtualNetworkRef("NetA", ip="10.0.0.5")`` registers that
+Passing ``vNIC("NetA", ip="10.0.0.5")`` registers that
 MAC/IP pair as a dnsmasq reservation (if DHCP is on) and writes it
 into the guest's cloud-init network-config.  Two consequences:
 

@@ -119,7 +119,7 @@ Networking
    * - ``static_ip_lab.py``
      - ``VirtualNetwork(dhcp=False, ...)`` disables libvirt's DHCP
        server.  Every NIC on that network must come with an explicit
-       ``ip=`` on its ``VirtualNetworkRef`` — the orchestrator
+       ``ip=`` on its ``vNIC`` — the orchestrator
        enforces this at provisioning time.
    * - ``two_networks_three_vms.py``
      - The flagship networking example.  Two networks (NAT +

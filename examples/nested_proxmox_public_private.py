@@ -72,7 +72,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -252,7 +252,7 @@ def gen_tests() -> list[Test]:
                             # preflight for the bigger ProxMox VM.
                             Memory(0.5),
                             HardDrive(10),
-                            VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
+                            vNIC("OuterNet", ip="10.0.0.11"),
                         ],
                     ),
                     # ProxMox VE VM — the eventual nested hypervisor.
@@ -286,7 +286,7 @@ def gen_tests() -> list[Test]:
                             # smallest round number that doesn't
                             # trip any of PVE's sanity checks.
                             HardDrive(64),
-                            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                            vNIC("OuterNet", ip="10.0.0.10"),
                         ],
                         # TODO(proxmox-nest): swap VM → Hypervisor
                         # and uncomment the nested plumbing below
@@ -331,7 +331,7 @@ def gen_tests() -> list[Test]:
                         #             vCPU(1),
                         #             Memory(0.5),
                         #             HardDrive(10),
-                        #             VirtualNetworkRef(
+                        #             vNIC(
                         #                 "PublicNet", ip="10.42.0.5",
                         #             ),
                         #         ],
@@ -348,7 +348,7 @@ def gen_tests() -> list[Test]:
                         #             vCPU(1),
                         #             Memory(0.5),
                         #             HardDrive(10),
-                        #             VirtualNetworkRef(
+                        #             vNIC(
                         #                 "PrivateNet", ip="10.43.0.5",
                         #             ),
                         #         ],
@@ -362,10 +362,10 @@ def gen_tests() -> list[Test]:
                         #             vCPU(1),
                         #             Memory(0.5),
                         #             HardDrive(10),
-                        #             VirtualNetworkRef(
+                        #             vNIC(
                         #                 "PublicNet", ip="10.42.0.6",
                         #             ),
-                        #             VirtualNetworkRef(
+                        #             vNIC(
                         #                 "PrivateNet", ip="10.43.0.6",
                         #             ),
                         #         ],

@@ -131,7 +131,7 @@ class TestCloudInitPrepareRunDomain:
     def test_seed_iso_always_written(self, tmp_path: Path) -> None:
         from testrange._run import RunDir
         from testrange.cache import CacheManager
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         vm = _linux_vm()
@@ -168,7 +168,7 @@ class TestWindowsUnattendedBuilderPrepareInstallDomain:
         """Windows install mandates UEFI + windows hints + CD-ROM boot
         order.  Those flags are the entire reason this builder exists."""
         from testrange._run import RunDir
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         vm = _windows_vm()
@@ -201,7 +201,7 @@ class TestWindowsUnattendedBuilderPrepareInstallDomain:
 
     def test_run_domain_has_uefi_windows_no_seed(self, tmp_path: Path) -> None:
         from testrange._run import RunDir
-        from testrange.storage import LocalStorageBackend
+        from testrange.backends.libvirt.storage import LocalStorageBackend
 
         run = RunDir(LocalStorageBackend(tmp_path))
         spec = WindowsUnattendedBuilder().prepare_run_domain(

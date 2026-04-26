@@ -1,10 +1,10 @@
 """Cloud-init :class:`~testrange.vms.builders.base.Builder` for Linux
 cloud images.
 
-The install phase boots a NoCloud seed ISO on top of an overlay of the
-resolved ``.qcow2`` / ``.img`` base, lets cloud-init create users,
-install packages, run post-install commands, and power the VM off.
-The run phase rotates the ``instance-id`` via a phase-2 seed ISO so
+The install phase boots a NoCloud seed ISO on top of an overlay of
+the resolved base image, lets cloud-init create users, install
+packages, run post-install commands, and power the VM off.  The run
+phase rotates the ``instance-id`` via a phase-2 seed ISO so
 cloud-init treats each test run as a new instance (without
 reinstalling packages).
 """
@@ -54,6 +54,19 @@ if TYPE_CHECKING:
     from testrange.credentials import Credential
     from testrange.packages import AbstractPackage
     from testrange.vms.base import AbstractVM as VM
+
+
+def _seed_iso_ref(run: "RunDir", vm_name: str, *, install: bool) -> str:
+    """Backend-local ref for *vm_name*'s NoCloud cloud-init seed ISO.
+
+    The cloud-init seed convention (filename + presence on a CD-ROM
+    device) belongs to this builder, not to the generic per-run
+    scratch-dir abstraction — different builders ship different seed
+    shapes.  ``install=True`` is the phase-1 (build) seed; ``False``
+    is the phase-2 (run) seed.
+    """
+    suffix = "-install-seed.iso" if install else "-seed.iso"
+    return run.path_for(f"{vm_name}{suffix}")
 
 
 def _hash_password(plaintext: str) -> str:
@@ -137,7 +150,7 @@ class CloudInitBuilder(Builder):
         work_disk = run.create_install_disk(
             vm.name, base_ref, vm._primary_disk_size()
         )
-        seed_ref = run.seed_iso_path(vm.name, install=True)
+        seed_ref = _seed_iso_ref(run, vm.name, install=True)
         run.storage.transport.write_bytes(
             seed_ref,
             build_seed_iso_bytes(
@@ -170,7 +183,7 @@ class CloudInitBuilder(Builder):
         run: RunDir,
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> RunDomain:
-        seed_ref = run.seed_iso_path(vm.name, install=False)
+        seed_ref = _seed_iso_ref(run, vm.name, install=False)
         run.storage.transport.write_bytes(
             seed_ref,
             build_seed_iso_bytes(

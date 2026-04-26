@@ -8,8 +8,8 @@ from testrange.devices import (
     AbstractDevice,
     HardDrive,
     Memory,
-    VirtualNetworkRef,
-    normalise_qemu_size,
+    vNIC,
+    normalise_size,
     parse_size,
     vCPU,
 )
@@ -45,7 +45,7 @@ class TestParseSize:
             parse_size(bad)
 
 
-class TestNormaliseQemuSize:
+class TestNormaliseSize:
     @pytest.mark.parametrize(
         "text,expected",
         [
@@ -59,7 +59,7 @@ class TestNormaliseQemuSize:
         ],
     )
     def test_normalisation(self, text: str, expected: str) -> None:
-        assert normalise_qemu_size(text) == expected
+        assert normalise_size(text) == expected
 
 
 class TestVCPU:
@@ -107,34 +107,18 @@ class TestMemory:
 
 
 class TestHardDrive:
+    """Tests for the generic, backend-neutral HardDrive."""
+
     def test_default(self) -> None:
         d = HardDrive()
         assert d.size == "20GB"
-        assert d.nvme is False
 
     def test_custom_size(self) -> None:
         d = HardDrive("64GB")
         assert d.size_bytes == 64 * 1024 ** 3
 
-    def test_qemu_size(self) -> None:
-        assert HardDrive("64GB").qemu_size == "64G"
-
-    def test_nvme_bus(self) -> None:
-        assert HardDrive(nvme=True).bus == "nvme"
-
-    def test_default_bus_is_none_for_backend_to_pick(self) -> None:
-        # Regression: the documented contract is that ``bus=None`` lets
-        # the backend choose — libvirt picks virtio on Linux guests and
-        # sata on Windows (so Windows Setup doesn't need virtio-win
-        # drivers pre-threaded).  Forcing a default here would break
-        # the Windows install path.
-        assert HardDrive().bus is None
-
-    def test_explicit_virtio_bus(self) -> None:
-        # Callers who want to pin virtio across backends do so
-        # explicitly — the default path (bus=None) intentionally
-        # declines to answer on behalf of the backend.
-        assert HardDrive(bus="virtio").bus == "virtio"
+    def test_size_string(self) -> None:
+        assert HardDrive("64GB").size_string == "64G"
 
     def test_invalid_size_rejected_at_construction(self) -> None:
         with pytest.raises(ValueError):
@@ -143,7 +127,7 @@ class TestHardDrive:
     def test_int_size_interpreted_as_gib(self) -> None:
         d = HardDrive(32)
         assert d.size_bytes == 32 * 1024 ** 3
-        assert d.qemu_size == "32G"
+        assert d.size_string == "32G"
 
     def test_float_size_interpreted_as_gib(self) -> None:
         d = HardDrive(1.5)
@@ -159,33 +143,84 @@ class TestHardDrive:
     def test_device_type(self) -> None:
         assert HardDrive().device_type == "harddrive"
 
-    def test_repr_default(self) -> None:
-        # Regression: default nvme=False is omitted from repr.
+    def test_repr(self) -> None:
         assert repr(HardDrive("32GB")) == "HardDrive('32GB')"
 
+    def test_no_backend_specific_attrs(self) -> None:
+        """The generic HardDrive must not carry libvirt's bus/nvme
+        knobs — those live on LibvirtHardDrive.  Regression guard
+        against accidentally re-leaking backend specifics into the
+        generic class."""
+        d = HardDrive(32)
+        assert not hasattr(d, "bus")
+        assert not hasattr(d, "nvme")
+
+
+class TestLibvirtHardDrive:
+    """Tests for the libvirt-specific HardDrive subclass."""
+
+    def test_default_bus_is_none_for_backend_to_pick(self) -> None:
+        # Regression: the documented contract is that ``bus=None`` lets
+        # the backend choose — libvirt picks virtio on Linux guests and
+        # sata on Windows (so Windows Setup doesn't need virtio-win
+        # drivers pre-threaded).  Forcing a default here would break
+        # the Windows install path.
+        from testrange.backends.libvirt import LibvirtHardDrive
+        assert LibvirtHardDrive().bus is None
+
+    def test_nvme_bus(self) -> None:
+        from testrange.backends.libvirt import LibvirtHardDrive
+        d = LibvirtHardDrive(nvme=True)
+        assert d.bus == "nvme"
+        assert d.nvme is True
+
+    def test_explicit_virtio_bus(self) -> None:
+        from testrange.backends.libvirt import LibvirtHardDrive
+        assert LibvirtHardDrive(bus="virtio").bus == "virtio"
+
+    def test_invalid_bus_rejected(self) -> None:
+        from testrange.backends.libvirt import LibvirtHardDrive
+        with pytest.raises(ValueError, match="bus="):
+            LibvirtHardDrive(bus="bogus")  # type: ignore[arg-type]
+
     def test_repr_nvme(self) -> None:
-        assert repr(HardDrive("64GB", nvme=True)) == "HardDrive('64GB', nvme=True)"
+        from testrange.backends.libvirt import LibvirtHardDrive
+        assert (
+            repr(LibvirtHardDrive("64GB", nvme=True))
+            == "LibvirtHardDrive('64GB', nvme=True)"
+        )
+
+    def test_is_a_hard_drive(self) -> None:
+        """Sibling-of-HardDrive contract: LibvirtHardDrive is an
+        AbstractHardDrive (so cache + run-dir treat it uniformly) but
+        NOT a HardDrive (so type-narrowing against HardDrive doesn't
+        accidentally accept it in cross-backend contexts)."""
+        from testrange.backends.libvirt import LibvirtHardDrive
+        from testrange.devices import AbstractHardDrive
+        d = LibvirtHardDrive(10)
+        assert isinstance(d, AbstractHardDrive)
+        assert not isinstance(d, HardDrive)
 
 
-class TestVirtualNetworkRef:
+class TestvNIC:
     def test_dhcp_default(self) -> None:
-        ref = VirtualNetworkRef("NetA")
-        assert ref.name == "NetA"
+        ref = vNIC("NetA")
+        assert ref.ref == "NetA"
         assert ref.ip is None
 
     def test_static_ip(self) -> None:
-        ref = VirtualNetworkRef("NetA", ip="10.0.0.5")
+        ref = vNIC("NetA", ip="10.0.0.5")
         assert ref.ip == "10.0.0.5"
 
     def test_device_type(self) -> None:
-        assert VirtualNetworkRef("NetA").device_type == "network_ref"
+        assert vNIC("NetA").device_type == "vnic"
 
     def test_repr_dhcp(self) -> None:
-        assert repr(VirtualNetworkRef("NetA")) == "VirtualNetworkRef('NetA')"
+        assert repr(vNIC("NetA")) == "vNIC('NetA')"
 
     def test_repr_static(self) -> None:
-        r = VirtualNetworkRef("NetA", ip="10.0.0.5")
-        assert repr(r) == "VirtualNetworkRef('NetA', ip='10.0.0.5')"
+        r = vNIC("NetA", ip="10.0.0.5")
+        assert repr(r) == "vNIC('NetA', ip='10.0.0.5')"
 
 
 class TestAbstractDevice:

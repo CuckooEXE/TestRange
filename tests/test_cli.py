@@ -29,6 +29,103 @@ class TestMainGroup:
         assert "testrange" in r.output.lower()
 
 
+class TestCleanupCommand:
+    """Smoke tests for ``testrange cleanup MODULE[:FACTORY] RUN_ID``.
+
+    The deep semantics of cleanup are exercised in test_cleanup.py;
+    these just confirm the CLI wiring (target parsing, run_id
+    pass-through, exit codes) is right."""
+
+    _RUN_ID = "00000000-0000-0000-0000-000000000000"
+
+    def _empty_factory(self, tmp_path: Path) -> Path:
+        # An empty list of tests is a valid cleanup target — the
+        # cleanup CLI prints "no tests" and exits 0.  The next test
+        # exercises the path with an actual test in the list.
+        f = tmp_path / "bare.py"
+        f.write_text("def gen_tests():\n    return []\n")
+        return f
+
+    def test_no_tests_exits_zero(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        f = self._empty_factory(tmp_path)
+        r = runner.invoke(main, ["cleanup", str(f), self._RUN_ID])
+        assert r.exit_code == 0
+
+    def test_invokes_orchestrator_cleanup(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Loads the factory, finds the orchestrator, calls cleanup
+        with the supplied run id."""
+        f = tmp_path / "case.py"
+        f.write_text(
+            "from testrange import (\n"
+            "    Test, Orchestrator, VM, Credential, vCPU, Memory, vNIC,\n"
+            ")\n"
+            "def gen_tests():\n"
+            "    return [\n"
+            "        Test(\n"
+            "            Orchestrator(vms=[\n"
+            "                VM(name='web', iso='https://x/y.qcow2',\n"
+            "                   users=[Credential('root', 'pw')],\n"
+            "                   devices=[vCPU(1), Memory(1)]),\n"
+            "            ]),\n"
+            "            lambda o: None,\n"
+            "        ),\n"
+            "    ]\n"
+        )
+
+        called: list[str] = []
+
+        def _fake_cleanup(self, run_id: str) -> None:  # noqa: ARG001
+            called.append(run_id)
+
+        from testrange.backends.libvirt.orchestrator import Orchestrator
+        monkeypatch.setattr(Orchestrator, "cleanup", _fake_cleanup)
+
+        r = runner.invoke(main, ["cleanup", str(f), self._RUN_ID])
+
+        assert r.exit_code == 0, r.output
+        assert called == [self._RUN_ID]
+        assert "cleanup ok" in r.output
+
+    def test_failure_exits_one(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup raising bumps the exit code to 1 so scripts can
+        fail loudly on partial sweeps."""
+        f = tmp_path / "case.py"
+        f.write_text(
+            "from testrange import (\n"
+            "    Test, Orchestrator, VM, Credential,\n"
+            ")\n"
+            "def gen_tests():\n"
+            "    return [Test(Orchestrator(vms=[VM('a', 'b', \n"
+            "        [Credential('r','p')])]), lambda o: None)]\n"
+        )
+
+        from testrange.backends.libvirt.orchestrator import Orchestrator
+        monkeypatch.setattr(
+            Orchestrator,
+            "cleanup",
+            lambda self, run_id: (_ for _ in ()).throw(  # noqa: ARG005
+                RuntimeError("simulated leftover"),
+            ),
+        )
+
+        r = runner.invoke(main, ["cleanup", str(f), self._RUN_ID])
+
+        assert r.exit_code == 1
+        assert "simulated leftover" in r.output
+
+
 class TestRunCommand:
     def test_bare_target_defaults_to_gen_tests(
         self, runner: CliRunner, tmp_path: Path
@@ -345,13 +442,14 @@ class TestBackendUrlDispatch:
             "qemu+ssh://vm/system", self._fake_original(),
         ) is None
 
-    def test_proxmox_user_password(self) -> None:
+    def test_proxmox_user_password(self, tmp_path: Path) -> None:
         from testrange.backends.proxmox import (
             ProxmoxOrchestrator,
             cli_build_orchestrator,
         )
         orch = cli_build_orchestrator(
-            "proxmox://root:hunter2@pve.example.com", self._fake_original(),
+            "proxmox://root:hunter2@pve.example.com",
+            self._fake_original(tmp_path),
         )
         assert isinstance(orch, ProxmoxOrchestrator)
         assert orch._host == "pve.example.com"
@@ -360,11 +458,11 @@ class TestBackendUrlDispatch:
         assert orch._user == "root"
         assert orch._password == "hunter2"
 
-    def test_proxmox_token_in_userinfo(self) -> None:
+    def test_proxmox_token_in_userinfo(self, tmp_path: Path) -> None:
         from testrange.backends.proxmox import cli_build_orchestrator
         orch = cli_build_orchestrator(
             "proxmox://abcdefghij@pve.example.com/pve01",
-            self._fake_original(),
+            self._fake_original(tmp_path),
         )
         assert orch is not None
         # Userinfo without a colon is treated as a token.  The
@@ -374,7 +472,7 @@ class TestBackendUrlDispatch:
         assert orch._legacy_token == "abcdefghij"
         assert orch._node == "pve01"
 
-    def test_proxmox_token_query_param(self) -> None:
+    def test_proxmox_token_query_param(self, tmp_path: Path) -> None:
         """``?token=`` takes precedence over userinfo (lets callers
         pass the full ``user@realm!name=secret`` blob without
         URL-encoding)."""
@@ -384,7 +482,7 @@ class TestBackendUrlDispatch:
         )
         orch = cli_build_orchestrator(
             "proxmox://pve.example.com?token=root!auto&storage=local-lvm",
-            self._fake_original(),
+            self._fake_original(tmp_path),
         )
         assert isinstance(orch, ProxmoxOrchestrator)
         assert orch._legacy_token == "root!auto"
@@ -421,7 +519,7 @@ class TestBackendUrlDispatch:
 _PLAIN_DESCRIBE_MODULE = '''
 from testrange import (
     VM, Credential, HardDrive, Memory, Orchestrator,
-    Test, VirtualNetwork, VirtualNetworkRef, vCPU,
+    Test, VirtualNetwork, vNIC, vCPU,
 )
 
 def gen_tests():
@@ -437,7 +535,7 @@ def gen_tests():
                     users=[Credential("root", "pw")],
                     devices=[
                         vCPU(1), Memory(1), HardDrive(10),
-                        VirtualNetworkRef("Net", ip="10.0.0.5"),
+                        vNIC("Net", ip="10.0.0.5"),
                     ],
                 ),
             ],
@@ -451,7 +549,7 @@ def gen_tests():
 _NESTED_DESCRIBE_MODULE = '''
 from testrange import (
     VM, Credential, HardDrive, Hypervisor, LibvirtOrchestrator, Memory,
-    Orchestrator, Test, VirtualNetwork, VirtualNetworkRef, vCPU,
+    Orchestrator, Test, VirtualNetwork, vNIC, vCPU,
 )
 
 def gen_tests():
@@ -468,7 +566,7 @@ def gen_tests():
                     users=[root],
                     devices=[
                         vCPU(1), Memory(1), HardDrive(10),
-                        VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
+                        vNIC("OuterNet", ip="10.0.0.11"),
                     ],
                 ),
                 Hypervisor(
@@ -478,7 +576,7 @@ def gen_tests():
                     communicator="ssh",
                     devices=[
                         vCPU(2), Memory(4), HardDrive(40),
-                        VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                        vNIC("OuterNet", ip="10.0.0.10"),
                     ],
                     orchestrator=LibvirtOrchestrator,
                     networks=[
@@ -492,7 +590,7 @@ def gen_tests():
                             users=[root],
                             devices=[
                                 vCPU(1), Memory(1), HardDrive(10),
-                                VirtualNetworkRef("PublicNet", ip="10.42.0.5"),
+                                vNIC("PublicNet", ip="10.42.0.5"),
                             ],
                         ),
                     ],
@@ -552,7 +650,7 @@ class TestDescribeCommand:
     def test_nested_inner_nic_resolves_against_inner_networks(
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:
-        """An inner VM's VirtualNetworkRef must be interpreted against
+        """An inner VM's vNIC must be interpreted against
         the *inner* networks list, not the outer — otherwise a nic ref
         like 'PublicNet' would show as 'auto-reserved' instead of
         static."""

@@ -170,7 +170,7 @@ overlay disks), overlay + blank-disk + seed-ISO + NVRAM path
 generation, and cleanup idempotency.
 
 ### `test_devices.py`
-`vCPU`, `Memory`, `HardDrive`, `VirtualNetworkRef` validation (size
+`vCPU`, `Memory`, `HardDrive`, `vNIC` validation (size
 parsing, `nvme=` toggles, default values), plus shared helpers
 (`parse_size`, `normalise_qemu_size`).
 
