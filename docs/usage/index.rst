@@ -11,6 +11,7 @@ User Guide
    windows
    packages
    caching
+   http_cache
    communication
    debugging
    extending
