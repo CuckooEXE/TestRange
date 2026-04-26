@@ -91,12 +91,16 @@ class TestRootOnVm:
         assert inner._client is None
 
     def test_inherits_inner_vms_and_networks(self) -> None:
+        from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
+
         hv = _hypervisor_with_communicator("10.0.0.10")
         # Stash some inner specs so we can verify they propagate.
         sentinel_vm = MagicMock()
         sentinel_vm.name = "inner-vm"
-        sentinel_net = MagicMock()
-        sentinel_net.name = "inner-net"
+        # Use a real ProxmoxVirtualNetwork — the orchestrator's
+        # __init__ promotes non-Proxmox networks, which involves
+        # subnet validation that a bare MagicMock can't satisfy.
+        sentinel_net = ProxmoxVirtualNetwork("inner-net", "10.42.0.0/24")
         hv.vms = [sentinel_vm]
         hv.networks = [sentinel_net]
 
@@ -107,6 +111,8 @@ class TestRootOnVm:
         # ProxmoxVM; our MagicMock is treated as already-native and
         # passes through the isinstance check unchanged.)
         assert inner._vm_list == [sentinel_vm]
+        # Already a ProxmoxVirtualNetwork — promotion is a no-op so
+        # the same instance comes through.
         assert inner._networks == [sentinel_net]
 
     def test_no_users_raises(self) -> None:
@@ -134,6 +140,37 @@ class TestRootOnVm:
         hv._require_communicator.return_value._host = None
         with pytest.raises(OrchestratorError, match="static IP"):
             ProxmoxOrchestrator.root_on_vm(hv, _outer_orchestrator())
+
+    def test_libvirt_network_is_promoted_to_proxmox(self) -> None:
+        """The top-level ``testrange.VirtualNetwork`` re-export
+        resolves to the libvirt backend's class.  When a user
+        constructs ``Hypervisor(orchestrator=ProxmoxOrchestrator,
+        networks=[VirtualNetwork(...)])`` the inner
+        ProxmoxOrchestrator must promote those into
+        ProxmoxVirtualNetwork — otherwise the libvirt-flavoured
+        ``start()`` reaches for ``context._conn`` and crashes."""
+        from testrange.backends.libvirt.network import (
+            VirtualNetwork as LibvirtVirtualNetwork,
+        )
+        from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
+
+        hv = _hypervisor_with_communicator("10.0.0.10")
+        hv.networks = [
+            LibvirtVirtualNetwork("PublicNet", "10.42.0.0/24", internet=True),
+        ]
+
+        inner = ProxmoxOrchestrator.root_on_vm(hv, _outer_orchestrator())
+
+        # Inner network is now a ProxmoxVirtualNetwork — and the
+        # five public fields round-trip identically.
+        assert len(inner._networks) == 1
+        promoted = inner._networks[0]
+        assert isinstance(promoted, ProxmoxVirtualNetwork)
+        assert promoted.name == "PublicNet"
+        assert promoted.subnet == "10.42.0.0/24"
+        assert promoted.internet is True
+        assert promoted.dhcp is True
+        assert promoted.dns is True
 
     def test_pveproxy_failure_raises(
         self, monkeypatch: pytest.MonkeyPatch,

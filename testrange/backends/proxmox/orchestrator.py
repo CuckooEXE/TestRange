@@ -127,6 +127,35 @@ def _promote_to_proxmox(vm: ProxmoxVM | "GenericVM") -> ProxmoxVM:
     return vm
 
 
+def _promote_to_proxmox_network(
+    net: "AbstractVirtualNetwork",
+) -> ProxmoxVirtualNetwork:
+    """Convert any :class:`AbstractVirtualNetwork` to the proxmox
+    backend's concrete :class:`ProxmoxVirtualNetwork`.
+
+    Same shape-preserving translation as :func:`_promote_to_proxmox`
+    but for networks: copy the five user-facing fields (name, subnet,
+    dhcp, internet, dns) into a fresh ProxmoxVirtualNetwork.  An
+    already-ProxmoxVirtualNetwork input passes through unchanged.
+
+    The translation is necessary because ``testrange.VirtualNetwork``
+    re-exports the libvirt backend's class for top-level ergonomics —
+    a user constructing ``Hypervisor(orchestrator=ProxmoxOrchestrator,
+    networks=[VirtualNetwork(...)])`` would otherwise hand the inner
+    ProxmoxOrchestrator a libvirt-flavoured network whose
+    :meth:`start` reaches for ``context._conn`` and fails.
+    """
+    if isinstance(net, ProxmoxVirtualNetwork):
+        return net
+    return ProxmoxVirtualNetwork(
+        name=net.name,
+        subnet=net.subnet,
+        dhcp=net.dhcp,
+        internet=net.internet,
+        dns=net.dns,
+    )
+
+
 class ProxmoxOrchestrator(AbstractOrchestrator):
     """Proxmox VE implementation of
     :class:`~testrange.orchestrator_base.AbstractOrchestrator`.
@@ -210,14 +239,18 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._storage_backend_override = storage_backend
         self._host = host
         self._port = port
-        # Narrow the abstract list back to our concrete subclass —
-        # mixing backend types in one orchestrator is a user error
-        # we don't try to handle gracefully.  Same convention as
-        # the libvirt backend (see orchestrator.py:272).
-        self._networks = cast(  # pyright: ignore[reportIncompatibleVariableOverride]
-            "list[ProxmoxVirtualNetwork]",
-            list(networks) if networks else [],
-        )
+        # Promote any non-Proxmox networks to ProxmoxVirtualNetwork
+        # up front so the rest of the orchestrator only ever sees
+        # backend-native instances.  The top-level
+        # ``testrange.VirtualNetwork`` re-export resolves to libvirt's
+        # class, so a user constructing
+        # ``Hypervisor(orchestrator=ProxmoxOrchestrator,
+        # networks=[VirtualNetwork(...)])`` would otherwise hand us
+        # libvirt-flavoured networks whose start() reaches for
+        # ``context._conn`` and explodes.
+        self._networks = [  # pyright: ignore[reportIncompatibleVariableOverride]
+            _promote_to_proxmox_network(n) for n in (networks or [])
+        ]
         # Promote any backend-agnostic GenericVM specs to ProxmoxVM
         # up front so the rest of the orchestrator (and external
         # readers of ``self._vm_list``) see only the backend-native
