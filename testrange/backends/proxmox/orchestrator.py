@@ -66,6 +66,7 @@ Non-goals (for v1 of the Proxmox backend)
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -253,6 +254,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._run_id: str | None = None
         self._started_networks = []
         self._provisioned_vms = []
+        # Nested-orchestrator state.  ``_nested_stack`` owns the
+        # unwind for every entered inner orchestrator; closing it in
+        # ``__exit__`` unwinds them in LIFO order before this
+        # orchestrator's own teardown runs.  Mirrors libvirt's
+        # convention so a Hypervisor VM hosted on PVE behaves the
+        # same way as one hosted on libvirt.
+        self._nested_stack: contextlib.ExitStack | None = None
+        self._inner_orchestrators: list[AbstractOrchestrator] = []
         # CacheManager creation involves filesystem mutation
         # (mkdir/chmod on the cache root); defer it to __enter__ so
         # cheap construction patterns — CLI URL dispatch, tests
@@ -347,9 +356,19 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             self._start_networks()
             self._warn_if_unroutable()
             self._provision_vms()
+            # Enter inner orchestrators for any Hypervisor VMs.
+            # Same contract as the libvirt backend: ExitStack owns
+            # the unwind so a partial failure here exits every
+            # already-entered inner orchestrator before we propagate
+            # to the outer teardown path.
+            self._enter_nested_orchestrators()
         except Exception:
             # Roll back in reverse provisioning order so we don't
             # leak any SDN / VMID state into the user's exception.
+            if self._nested_stack is not None:
+                self._nested_stack.close()
+                self._nested_stack = None
+                self._inner_orchestrators = []
             self._teardown_vms()
             self._teardown_networks()
             self._client = None
@@ -370,6 +389,21 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         any other unexpected error here is logged.
         """
         try:
+            # Unwind nested inner orchestrators first (LIFO) so each
+            # inner orchestrator's __exit__ runs while its hosting
+            # PVE VM is still alive.  Tear down our own VMs / vnets
+            # only after the inner stack is closed.
+            if self._nested_stack is not None:
+                try:
+                    self._nested_stack.close()
+                except Exception as exc:  # pragma: no cover — defensive
+                    _log.warning(
+                        "unexpected error while unwinding nested "
+                        "orchestrators: %s", exc,
+                    )
+                self._nested_stack = None
+                self._inner_orchestrators = []
+
             if self._leaked:
                 hints = self.keep_alive_hints()
                 _log.info(
@@ -862,6 +896,45 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 )
             self.vms[vm.name] = vm
 
+    def _enter_nested_orchestrators(self) -> None:
+        """Enter an inner orchestrator for each
+        :class:`AbstractHypervisor` VM in the run.
+
+        Symmetric with the libvirt backend — called last in the
+        provisioning sequence so every outer VM is already running
+        and its communicator is ready.  Each hypervisor's declared
+        ``orchestrator`` class is responsible for whatever inner
+        bring-up it needs (auth, control-plane probe, etc.) inside
+        its own :meth:`root_on_vm`.
+        """
+        from testrange.vms.hypervisor_base import AbstractHypervisor
+
+        hypervisors = [
+            vm for vm in self._vm_list
+            if isinstance(vm, AbstractHypervisor)
+        ]
+        if not hypervisors:
+            return
+
+        stack = contextlib.ExitStack()
+        entered: list[AbstractOrchestrator] = []
+        try:
+            for hv in hypervisors:
+                with log_duration(
+                    _log, f"enter inner orchestrator on {hv.name!r}",
+                ):
+                    inner = hv.orchestrator.root_on_vm(hv, self)
+                    stack.enter_context(inner)
+                    entered.append(inner)
+        except BaseException:
+            # ExitStack closes in LIFO order — whatever succeeded
+            # gets unwound before the original exception propagates.
+            stack.close()
+            raise
+
+        self._nested_stack = stack
+        self._inner_orchestrators = entered
+
     def _teardown_vms(self) -> None:
         """Stop and DELETE each provisioned VMID, in reverse order.
 
@@ -992,29 +1065,138 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         cls,
         hypervisor: AbstractHypervisor,
         outer: AbstractOrchestrator,
-    ) -> AbstractOrchestrator:
-        """Not yet implemented.
+    ) -> ProxmoxOrchestrator:
+        """Build a nested :class:`ProxmoxOrchestrator` rooted on
+        *hypervisor*.
 
-        Nested Proxmox-in-libvirt will:
+        The outer orchestrator (typically libvirt) has just booted a
+        VM that's been provisioned with PVE via
+        :class:`~testrange.vms.builders.proxmox_answer.ProxmoxAnswerBuilder`.
+        That gives us a reachable IP, a ``root@pam`` account whose
+        password matches the outer credential we seeded into
+        ``answer.toml``, and ``pveproxy`` listening on 8006.  This
+        method packages those into a fresh ``ProxmoxOrchestrator``
+        that the outer orchestrator's ExitStack will enter, at which
+        point the inner orchestrator authenticates against the PVE
+        REST API and goes through its own normal provisioning of
+        ``hypervisor.networks`` and ``hypervisor.vms``.
 
-        1. Obtain an API token for the inner cluster by POSTing to
-           ``/api2/json/access/ticket`` with credentials injected by
-           the Proxmox ISO unattended installer.
-        2. Construct a fresh :class:`ProxmoxOrchestrator` pointing at
-           ``https://<hypervisor-ip>:8006`` with the new token.
-        3. Return it so the outer orchestrator can enter it via
-           :class:`ExitStack`.
+        Auth flow: prefers an explicit token if one is set on a
+        :class:`~testrange.credentials.Credential` (via the
+        ``ssh_key`` slot used as a generic secret carrier — kept
+        lightweight to avoid a credential schema change just for
+        nested PVE), otherwise falls back to the root credential's
+        plaintext password.  ``verify_ssl=False`` because PVE ships a
+        self-signed cert by default — flipping to ``True`` is the
+        operator's call once they've replaced the cert.
 
-        Step (1) needs an unattended Proxmox installer (a dedicated
-        :class:`~testrange.vms.builders.base.Builder` subclass) that
-        pre-seeds the cluster's root password and enables HTTPS.
-        That's scheduled as its own track.
+        The resulting orchestrator is **not yet entered** — the outer
+        orchestrator manages that lifecycle via :class:`ExitStack`.
+
+        :param hypervisor: The just-booted PVE hypervisor VM.  Must
+            have a static IP (see :class:`vNIC`) and a
+            ``root@pam``-shaped credential whose password matches
+            the one the unattended installer set.
+        :param outer: The outer orchestrator that booted
+            ``hypervisor``; used to source the shared cache root.
+        :returns: A configured (not yet entered) inner orchestrator.
+        :raises OrchestratorError: If the hypervisor's communicator
+            has no resolvable host, or no usable root credential is
+            present.
         """
-        del hypervisor, outer
-        raise NotImplementedError(
-            "ProxmoxOrchestrator.root_on_vm is not yet implemented. "
-            "Nested Proxmox-in-libvirt needs an unattended Proxmox "
-            "installer (tracked separately).  Use "
-            "LibvirtOrchestrator for nested libvirt-in-libvirt in the "
-            "meantime."
+        if not hypervisor.users:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r} has no users — "
+                "ProxmoxOrchestrator.root_on_vm needs at least one "
+                "Credential to authenticate against PVE."
+            )
+        # PVE's unattended installer creates ``root@pam`` with the
+        # ``root-password`` value from answer.toml.  Pick the
+        # credential whose username starts with ``"root"`` (handles
+        # both ``"root"`` and ``"root@pam"``) so we hit the right
+        # account regardless of how the user spelled it.
+        root_cred = next(
+            (c for c in hypervisor.users if c.username.startswith("root")),
+            hypervisor.users[0],
+        )
+        if not root_cred.password:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r}: root credential "
+                "has no password.  PVE's REST ticket auth needs the "
+                "plaintext password the unattended installer set "
+                "into ``answer.toml``."
+            )
+
+        # The hypervisor VM's live communicator stores its reachable
+        # host.  Both SSHCommunicator and (eventually) any future
+        # transport expose ``_host``; we only support the SSH /
+        # static-IP case here because the nested PVE REST endpoint
+        # is on the same IP.
+        comm = hypervisor._require_communicator()
+        host = getattr(comm, "_host", None)
+        if not host:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r}: communicator "
+                "has no resolvable host.  Nested Proxmox requires "
+                "communicator='ssh' + a static IP "
+                "(vNIC('Net', ip='10.x.x.x'))."
+            )
+
+        # Reuse the outer cache root so artefacts stay in one place
+        # — same convention as the libvirt backend's root_on_vm.
+        outer_cache_root: Path | None = None
+        outer_cache = getattr(outer, "_cache", None)
+        if outer_cache is not None:
+            outer_cache_root = outer_cache.root
+
+        # PVE's pveproxy.service depends on pve-cluster + pvedaemon
+        # and reaches active state noticeably later than sshd on a
+        # freshly-installed VM (see ``examples/nested_proxmox_*``'s
+        # ``_wait_for_pveproxy`` helper).  Without this wait, the
+        # inner orchestrator's ``__enter__`` races pveproxy startup
+        # and intermittently fails with "Connection refused".  Doing
+        # the wait here keeps ``__enter__`` simple — by the time
+        # the ExitStack enters the returned orchestrator, the API
+        # is ready.
+        cls._wait_for_pveproxy(hypervisor)
+
+        return cls(
+            host=host,
+            user="root@pam",
+            password=root_cred.password,
+            verify_ssl=False,
+            networks=hypervisor.networks,  # pyright: ignore[reportArgumentType]
+            vms=hypervisor.vms,  # pyright: ignore[reportArgumentType]
+            cache_root=outer_cache_root,
+        )
+
+    @staticmethod
+    def _wait_for_pveproxy(
+        hypervisor: AbstractHypervisor,
+        timeout_s: float = 120.0,
+    ) -> None:
+        """Poll ``systemctl is-active pveproxy`` on the hypervisor
+        until active or *timeout_s* elapses.
+
+        Used by :meth:`root_on_vm` to bridge the gap between sshd
+        readiness (which the outer orchestrator's communicator wait
+        already keys on) and PVE REST API readiness.
+
+        :raises OrchestratorError: If pveproxy doesn't reach active
+            within the timeout.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout_s
+        last_stderr = b""
+        while time.monotonic() < deadline:
+            r = hypervisor.exec(["systemctl", "is-active", "pveproxy"])
+            if r.exit_code == 0 and b"active" in r.stdout:
+                return
+            last_stderr = r.stderr
+            time.sleep(2)
+        raise OrchestratorError(
+            f"pveproxy on hypervisor {hypervisor.name!r} did not "
+            f"reach active within {timeout_s:.0f}s; last stderr: "
+            f"{last_stderr!r}"
         )
