@@ -10,7 +10,7 @@ import pytest
 
 from testrange.cache import CacheManager, _sha256_file, vm_config_hash
 from testrange.exceptions import ImageNotFoundError
-from testrange.storage import LocalStorageBackend
+from testrange.backends.libvirt.storage import LocalStorageBackend
 
 
 def _local_backend(cache_root: Path) -> LocalStorageBackend:

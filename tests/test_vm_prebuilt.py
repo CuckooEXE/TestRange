@@ -32,7 +32,7 @@ def _writable_qcow2(path: Path) -> Path:
 def _local_run(cache_root: Path):
     """Return a RunDir backed by a LocalStorageBackend at *cache_root*."""
     from testrange._run import RunDir
-    from testrange.storage import LocalStorageBackend
+    from testrange.backends.libvirt.storage import LocalStorageBackend
     return RunDir(LocalStorageBackend(cache_root))
 
 

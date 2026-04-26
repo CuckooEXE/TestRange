@@ -32,13 +32,8 @@ doesn't require knowing whether its target filesystem is local.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from testrange.storage.disk.base import AbstractDiskFormat
-from testrange.storage.disk.qcow2 import Qcow2DiskFormat
 from testrange.storage.transport.base import AbstractFileTransport
-from testrange.storage.transport.local import LocalFileTransport
-from testrange.storage.transport.ssh import SSHFileTransport
 
 
 class StorageBackend:
@@ -79,69 +74,12 @@ class StorageBackend:
                 pass
 
 
-# ---------------------------------------------------------------------------
-# Pre-composed convenience subclasses.
-#
-# The vast majority of current users want "local filesystem + qcow2"
-# or "SSH-reachable remote filesystem + qcow2".  Expose those as
-# single-argument constructors so ``Orchestrator(host=…)``'s
-# auto-selection stays a one-liner per URI shape; callers with more
-# exotic pairings (different transport × different format) build a
-# :class:`StorageBackend` directly.
-# ---------------------------------------------------------------------------
-
-
-class LocalStorageBackend(StorageBackend):
-    """Convenience: :class:`LocalFileTransport` + :class:`Qcow2DiskFormat`.
-
-    Pre-composed pairing that fits any backend whose hypervisor reads
-    qcow2 from a local filesystem (libvirt's local URIs being the
-    canonical case).  Backends with a different disk format compose
-    a :class:`StorageBackend` directly with their own
-    :class:`AbstractDiskFormat`; backends with a different transport
-    pick or build the matching transport class.
-    """
-
-    def __init__(self, cache_root: Path) -> None:
-        transport = LocalFileTransport(cache_root)
-        super().__init__(
-            transport=transport,
-            disk=Qcow2DiskFormat(transport),
-        )
-
-
-class SSHStorageBackend(StorageBackend):
-    """Convenience: :class:`SSHFileTransport` + :class:`Qcow2DiskFormat`.
-
-    Pre-composed pairing for any backend whose hypervisor reads qcow2
-    over SSH-reachable storage (libvirt's ``qemu+ssh://`` form being
-    the canonical case).  Backends using a different transport
-    (WinRM, SMB, REST) or a different disk format compose a
-    :class:`StorageBackend` directly with the matching components.
-    All keyword args forward to :class:`SSHFileTransport`.
-    """
-
-    def __init__(
-        self,
-        host: str,
-        username: str | None = None,
-        port: int = 22,
-        key_filename: str | None = None,
-        cache_root: str | None = None,
-        connect_timeout: float = 30.0,
-    ) -> None:
-        transport = SSHFileTransport(
-            host=host,
-            username=username,
-            port=port,
-            key_filename=key_filename,
-            cache_root=cache_root,
-            connect_timeout=connect_timeout,
-        )
-        super().__init__(
-            transport=transport,
-            disk=Qcow2DiskFormat(transport),
-        )
+# Pre-composed convenience subclasses (e.g. ``LocalFileTransport +
+# Qcow2DiskFormat``) that pin a specific disk format are
+# **backend-flavoured** — the format binding is the libvirt-leaning
+# bit.  Each backend that wants its own pairings publishes them in
+# its backend module (see :mod:`testrange.backends.libvirt.storage`).
+# The generic storage layer here intentionally stays format-agnostic.
 
 
 # ---------------------------------------------------------------------------

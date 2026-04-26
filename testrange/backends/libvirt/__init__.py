@@ -35,6 +35,10 @@ from testrange.backends.libvirt.orchestrator import (
     LibvirtOrchestrator,
     Orchestrator,
 )
+from testrange.backends.libvirt.storage import (
+    LocalStorageBackend,
+    SSHStorageBackend,
+)
 from testrange.backends.libvirt.vm import LibvirtVM
 
 if TYPE_CHECKING:
@@ -96,7 +100,9 @@ __all__ = [
     "LibvirtHardDrive",
     "LibvirtOrchestrator",
     "LibvirtVM",
+    "LocalStorageBackend",
     "Orchestrator",
+    "SSHStorageBackend",
     "VirtualNetwork",
     "cli_build_orchestrator",
 ]
