@@ -1,35 +1,46 @@
-"""ProxMox VE as an L1 guest with a sibling sidecar L1 peer (v0, non-nested).
+"""ProxMox VE as a nested L1 hypervisor with inner L2 VMs.
 
-This example is the ProxMox-flavoured counterpart of
-:mod:`examples.nested_public_private` — the end-state is a ``Hypervisor``
-running ProxMox VE with inner networks and VMs on top, but **v0 stops
-short of the nested layer**.  The inner orchestrator, inner networks,
-and inner VMs are commented out behind ``TODO(proxmox-nest):`` markers
-and light up once the ProxMox backend's ``root_on_vm()`` implementation
-lands.
+ProxMox-flavoured counterpart of :mod:`examples.nested_public_private`:
+the outer libvirt orchestrator boots a PVE installer unattended into
+a cached image, the resulting :class:`Hypervisor` VM runs
+``pveproxy`` on its REST endpoint, and a nested
+:class:`ProxmoxOrchestrator` provisions inner networks + VMs against
+that endpoint.
 
-Topology (v0)
-=============
+Topology
+========
 
 ::
 
-    Outer (L1):
+    Outer (L1, libvirt):
     └── OuterNet (10.0.0.0/24, internet=True)
-        ├── proxmox @ 10.0.0.10   (ProxMox VE VM, auto-installed
-        │                          via ProxmoxAnswerBuilder)
+        ├── proxmox @ 10.0.0.10   (PVE Hypervisor, auto-installed
+        │   │                      via ProxmoxAnswerBuilder)
+        │   └── Inner (L2, ProxmoxOrchestrator on the PVE API):
+        │       ├── PublicNet  (10.42.0.0/24, internet=True)
+        │       │   ├── webpublic @ 10.42.0.5  (nginx)
+        │       │   └── client   @ 10.42.0.6  (dual-homed)
+        │       └── PrivateNet (10.43.0.0/24, internet=False)
+        │           ├── dbprivate @ 10.43.0.5  (nginx)
+        │           └── client    @ 10.43.0.6  (dual-homed)
         └── sidecar @ 10.0.0.11   (Debian + curl, smoke tests the
                                    ProxMox API over HTTPS/8006)
 
-What v0 demonstrates
-====================
+What the example demonstrates
+=============================
 
 1. The :class:`ProxmoxAnswerBuilder` + pure-Python
    :mod:`testrange.vms.builders._proxmox_prepare` pipeline boots a
    vanilla PVE ISO unattended and lands in a cached post-install
-   qcow2 exactly like CloudInitBuilder does for Debian.
+   image exactly like CloudInitBuilder does for Debian.
 2. A sibling Debian VM on the same outer network can reach the
    ProxMox API — the canonical first hop for anything that'll drive
    ProxMox over its REST API.
+3. :meth:`ProxmoxOrchestrator.root_on_vm` constructs an inner
+   orchestrator pointing at the PVE VM's REST endpoint, which the
+   outer orchestrator's :class:`ExitStack` enters as a normal
+   nested orchestrator.  The inner orchestrator then provisions
+   the L2 networks + VMs declared on the :class:`Hypervisor`.
 
 Prerequisites
 =============
@@ -68,8 +79,6 @@ from testrange import (
     Apt,
     Credential,
     HardDrive,
-    # Hypervisor,  # TODO(proxmox-nest): re-enable once ProxmoxOrchestrator lands
-    # LibvirtOrchestrator,  # TODO(proxmox-nest): inner orchestrator type
     Memory,
     Orchestrator,
     Test,
@@ -78,6 +87,8 @@ from testrange import (
     run_tests,
     vCPU,
 )
+from testrange.backends.libvirt import Hypervisor
+from testrange.backends.proxmox import ProxmoxOrchestrator
 
 DEBIAN_CLOUD = (
     "https://cloud.debian.org/images/cloud/bookworm/latest/" "debian-12-generic-amd64.qcow2"
@@ -258,31 +269,54 @@ def _verify_outer_layer(orch: Orchestrator) -> None:
     )
 
 
-# TODO(proxmox-nest): re-enable once ProxmoxOrchestrator implements
-# root_on_vm().  At that point, the hypervisor-wrapper form below
-# replaces the plain VM form in gen_tests(), and this helper exercises
-# the inner L2 → L2 and L2 → L1 reachability contract the way
-# examples/nested_public_private.py does.
-#
-# def _verify_inner_reachability(orch: Orchestrator) -> None:
-#     inner_orchestrators = getattr(orch, "_inner_orchestrators", [])
-#     assert inner_orchestrators, "no inner orchestrator entered"
-#     inner = inner_orchestrators[0]
-#     client = inner.vms["client"]
-#     r = client.exec(
-#         ["curl", "-fsS", "--max-time", "10", "http://10.42.0.5/"],
-#         timeout=20,
-#     ).check()
-#     assert b"Public webserver" in r.stdout, r.stdout_text
+def _verify_inner_reachability(orch: Orchestrator) -> None:
+    """Inner-layer reachability: L2 → L2 + L2 → L1.
+
+    Mirrors the assertions the libvirt-on-libvirt counterpart in
+    :mod:`examples.nested_public_private` makes, just with the
+    inner orchestrator coming from
+    :meth:`ProxmoxOrchestrator.root_on_vm` instead of libvirt.
+
+    1. The outer libvirt orchestrator stashed any inner
+       orchestrators it entered on ``_inner_orchestrators``.  Pull
+       the PVE-rooted one out — there's exactly one in this
+       example.
+    2. From the dual-homed inner ``client``, curl
+       ``http://10.42.0.5/`` reaches the L2 public webserver.
+       Failure here means the inner ``ProxmoxOrchestrator`` either
+       didn't provision the network or didn't bring the inner
+       ``webpublic`` up.
+    3. From the same client on its private NIC, curl
+       ``http://10.43.0.5/`` reaches the L2 private DB.  This
+       proves cross-network reachability *within* the inner layer
+       and that the ``PrivateNet`` (``internet=False``) doesn't
+       isolate inner peers from each other.
+    """
+    inner_orchestrators = getattr(orch, "_inner_orchestrators", [])
+    assert inner_orchestrators, (
+        "no inner orchestrator entered — outer libvirt orchestrator "
+        "did not detect the Hypervisor or root_on_vm raised."
+    )
+    inner = inner_orchestrators[0]
+    client = inner.vms["client"]
+
+    pub = client.exec(
+        ["curl", "-fsS", "--max-time", "10", "http://10.42.0.5/"],
+        timeout=20,
+    ).check()
+    assert b"Public webserver" in pub.stdout, pub.stdout_text
+
+    priv = client.exec(
+        ["curl", "-fsS", "--max-time", "10", "http://10.43.0.5/"],
+        timeout=20,
+    ).check()
+    assert b"Private DB" in priv.stdout, priv.stdout_text
 
 
 def verify(orch: Orchestrator) -> None:
-    """v0 runs the outer-layer smoke test only.
-
-    The inner-layer reachability checks live in the commented-out
-    block above and get re-enabled alongside the nested orchestrator.
-    """
+    """Outer-layer smoke + inner-layer reachability."""
     _verify_outer_layer(orch)
+    _verify_inner_reachability(orch)
 
 
 def _nginx_post_install(body: str) -> list[str]:
@@ -331,13 +365,16 @@ def gen_tests() -> list[Test]:
                             vNIC("OuterNet", ip="10.0.0.11"),
                         ],
                     ),
-                    # ProxMox VE VM — the eventual nested hypervisor.
-                    # Auto-selected builder via the registry:
-                    # ``is_proxmox_installer_iso("proxmox-ve_9.1-1.iso")``
-                    # routes to :class:`ProxmoxAnswerBuilder`, which
-                    # defaults to UEFI (OVMF) because BIOS-mode GRUB
-                    # triple-faults on libvirt's SATA-CD attach.
-                    VM(
+                    # ProxMox VE Hypervisor — auto-installed via
+                    # ProxmoxAnswerBuilder, then driven by an inner
+                    # ProxmoxOrchestrator that the outer libvirt
+                    # orchestrator enters via root_on_vm().  The
+                    # registry auto-selects ``ProxmoxAnswerBuilder``
+                    # for any ISO whose filename matches
+                    # ``proxmox-ve[-_]*.iso``; UEFI (OVMF) is the
+                    # default because BIOS-mode GRUB triple-faults
+                    # on the SATA-CD attach pattern.
+                    Hypervisor(
                         name="proxmox",
                         iso=PROXMOX_ISO,
                         users=[root_cred],
@@ -354,7 +391,7 @@ def gen_tests() -> list[Test]:
                             # preflight on a 16 GiB dev box where
                             # the host is already ~8 GiB in.  Bump
                             # to 6–8 GiB on a bigger host if you
-                            # want to actually run nested VMs later.
+                            # want to actually run more inner VMs.
                             Memory(4),
                             # Min recommended is 8 GiB, but the
                             # installer balks on <32 GiB at its
@@ -364,89 +401,74 @@ def gen_tests() -> list[Test]:
                             HardDrive(64),
                             vNIC("OuterNet", ip="10.0.0.10"),
                         ],
-                        # TODO(proxmox-nest): swap VM → Hypervisor
-                        # and uncomment the nested plumbing below
-                        # once ProxmoxOrchestrator.root_on_vm() is
-                        # implemented.  The outer/inner resource
-                        # counts, static IPs, and smoke-test hooks
-                        # are kept verbatim from
-                        # examples/nested_public_private.py so the
-                        # diff is just `git diff nested_public_private
-                        # nested_proxmox_public_private` minus this
-                        # comment block.
-                        #
-                        # orchestrator=LibvirtOrchestrator,  # NOTE:
-                        # will become ProxmoxOrchestrator once
-                        # available.  LibvirtOrchestrator running
-                        # *inside* a PVE guest works in principle —
-                        # PVE ships libvirtd-dev-friendly enough —
-                        # but the point of the ProxMox-as-hypervisor
-                        # cut is to drive PVE's own API, not layer
-                        # libvirt on top of it.
-                        #
-                        # networks=[
-                        #     VirtualNetwork(
-                        #         "PublicNet", "10.42.0.0/24",
-                        #         internet=True, dhcp=True,
-                        #     ),
-                        #     VirtualNetwork(
-                        #         "PrivateNet", "10.43.0.0/24",
-                        #         internet=False, dhcp=False,
-                        #     ),
-                        # ],
-                        # vms=[
-                        #     VM(
-                        #         name="webpublic",
-                        #         iso=DEBIAN_CLOUD,
-                        #         users=[root_cred],
-                        #         pkgs=[Apt("nginx")],
-                        #         post_install_cmds=_nginx_post_install(
-                        #             "Public webserver"
-                        #         ),
-                        #         devices=[
-                        #             vCPU(1),
-                        #             Memory(0.5),
-                        #             HardDrive(10),
-                        #             vNIC(
-                        #                 "PublicNet", ip="10.42.0.5",
-                        #             ),
-                        #         ],
-                        #     ),
-                        #     VM(
-                        #         name="dbprivate",
-                        #         iso=DEBIAN_CLOUD,
-                        #         users=[root_cred],
-                        #         pkgs=[Apt("nginx")],
-                        #         post_install_cmds=_nginx_post_install(
-                        #             "Private DB"
-                        #         ),
-                        #         devices=[
-                        #             vCPU(1),
-                        #             Memory(0.5),
-                        #             HardDrive(10),
-                        #             vNIC(
-                        #                 "PrivateNet", ip="10.43.0.5",
-                        #             ),
-                        #         ],
-                        #     ),
-                        #     VM(
-                        #         name="client",
-                        #         iso=DEBIAN_CLOUD,
-                        #         users=[root_cred],
-                        #         pkgs=[Apt("curl"), Apt("iputils-ping")],
-                        #         devices=[
-                        #             vCPU(1),
-                        #             Memory(0.5),
-                        #             HardDrive(10),
-                        #             vNIC(
-                        #                 "PublicNet", ip="10.42.0.6",
-                        #             ),
-                        #             vNIC(
-                        #                 "PrivateNet", ip="10.43.0.6",
-                        #             ),
-                        #         ],
-                        #     ),
-                        # ],
+                        # ProxmoxOrchestrator.root_on_vm() will
+                        # construct an inner orchestrator pointing
+                        # at this VM's REST endpoint and provision
+                        # the networks + vms below inside it.
+                        orchestrator=ProxmoxOrchestrator,
+                        networks=[
+                            VirtualNetwork(
+                                "PublicNet", "10.42.0.0/24",
+                                internet=True, dhcp=True,
+                            ),
+                            VirtualNetwork(
+                                "PrivateNet", "10.43.0.0/24",
+                                internet=False, dhcp=False,
+                            ),
+                        ],
+                        vms=[
+                            VM(
+                                name="webpublic",
+                                iso=DEBIAN_CLOUD,
+                                users=[root_cred],
+                                pkgs=[Apt("nginx")],
+                                post_install_cmds=_nginx_post_install(
+                                    "Public webserver"
+                                ),
+                                devices=[
+                                    vCPU(1),
+                                    Memory(0.5),
+                                    HardDrive(10),
+                                    vNIC(
+                                        "PublicNet", ip="10.42.0.5",
+                                    ),
+                                ],
+                            ),
+                            VM(
+                                name="dbprivate",
+                                iso=DEBIAN_CLOUD,
+                                users=[root_cred],
+                                pkgs=[Apt("nginx")],
+                                post_install_cmds=_nginx_post_install(
+                                    "Private DB"
+                                ),
+                                devices=[
+                                    vCPU(1),
+                                    Memory(0.5),
+                                    HardDrive(10),
+                                    vNIC(
+                                        "PrivateNet", ip="10.43.0.5",
+                                    ),
+                                ],
+                            ),
+                            VM(
+                                name="client",
+                                iso=DEBIAN_CLOUD,
+                                users=[root_cred],
+                                pkgs=[Apt("curl"), Apt("iputils-ping")],
+                                devices=[
+                                    vCPU(1),
+                                    Memory(0.5),
+                                    HardDrive(10),
+                                    vNIC(
+                                        "PublicNet", ip="10.42.0.6",
+                                    ),
+                                    vNIC(
+                                        "PrivateNet", ip="10.43.0.6",
+                                    ),
+                                ],
+                            ),
+                        ],
                     ),
                 ],
             ),
