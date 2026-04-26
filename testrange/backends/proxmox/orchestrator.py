@@ -376,12 +376,20 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             self._node, self._storage, self._zone,
         )
 
-        # Run setup — every entry generates a fresh ID so concurrent
-        # runs against the same PVE namespace cleanly.  RunDir
-        # (scratch space for install overlays / seed ISOs) is
-        # deferred until VM provisioning lands; for now the run ID
-        # is enough to bind networks against.
-        self._run_id = uuid.uuid4().hex
+        # Run setup — every entry gets a fresh RunDir so concurrent
+        # runs against the same PVE namespace partition cleanly.
+        # Even though ProxmoxVM uploads disks via REST and never
+        # touches the local scratch path, ``run.run_id`` flows into
+        # the deterministic clone / phase-2-seed names downstream.
+        # The local scratch dir lands under the cache root and is
+        # cleaned up in __exit__; nothing inside it is load-bearing
+        # for the proxmox path today, but having it means any
+        # future builder that wants a backend-local scratch file
+        # gets the same ergonomics as the libvirt path.
+        from testrange._run import RunDir
+        from testrange.backends.libvirt.storage import LocalStorageBackend
+        self._run = RunDir(LocalStorageBackend(cache_root=self._cache.root))
+        self._run_id = self._run.run_id
         _log.info("run id: %s", self._run_id[:8])
 
         try:
@@ -404,6 +412,12 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 self._inner_orchestrators = []
             self._teardown_vms()
             self._teardown_networks()
+            if self._run is not None:
+                try:
+                    self._run.cleanup()
+                except Exception:  # pragma: no cover — defensive
+                    pass
+                self._run = None
             self._client = None
             self._run_id = None
             raise
@@ -450,11 +464,19 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             else:
                 self._teardown_vms()
                 self._teardown_networks()
+                if self._run is not None:
+                    try:
+                        self._run.cleanup()
+                    except Exception as exc:  # pragma: no cover — defensive
+                        _log.warning(
+                            "unexpected error cleaning run dir: %s", exc,
+                        )
         except Exception as exc:  # pragma: no cover — defensive
             _log.warning("unexpected error during PVE teardown: %s", exc)
         finally:
             self._client = None
             self._run_id = None
+            self._run = None
 
     def cleanup(self, run_id: str) -> None:
         """Reconstruct + tear down per-run PVE resources for *run_id*.
