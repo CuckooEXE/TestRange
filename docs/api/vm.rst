@@ -8,11 +8,33 @@ methods that need a live VM (``exec``, ``hostname``, the file helpers,
 ``shutdown``) raise :class:`~testrange.exceptions.VMNotRunningError`
 if called before provisioning.
 
+Generic vs backend-specific
+---------------------------
+
+Two flavours, same architecture as the device split:
+
+* :class:`~testrange.GenericVM` — backend-agnostic spec.  Use this
+  when the test doesn't need anything backend-specific.  The
+  orchestrator translates each ``GenericVM`` into its own concrete
+  VM type (e.g. :class:`~testrange.LibvirtVM`) at ``__enter__``
+  time, so backend code never sees a ``GenericVM``.
+* :class:`~testrange.LibvirtVM` — the libvirt backend's concrete
+  implementation.  Re-exported as the top-level
+  :class:`~testrange.VM` for convenience (libvirt is the default
+  backend).  Future :class:`ProxmoxVM` / :class:`HyperVVM` are
+  siblings under :class:`~testrange.vms.base.AbstractVM`, not
+  children of ``LibvirtVM``.
+
+The two share their entire constructor surface (since promotion is a
+field-for-field copy), so swapping ``LibvirtVM(...)`` for
+``GenericVM(...)`` in a test is mechanical.
+
 Building the spec
 -----------------
 
-:class:`~testrange.backends.libvirt.VM` takes a small set of keyword
-arguments:
+:class:`~testrange.GenericVM`,
+:class:`~testrange.backends.libvirt.LibvirtVM`, and the top-level
+alias :class:`~testrange.VM` all take the same keyword arguments:
 
 - ``name`` — unique per test run; shows up as hostname, in DNS, and in
   libvirt domain names.
@@ -139,7 +161,11 @@ Prerequisites and cross-layer behaviour are documented in
 Reference
 ---------
 
-.. autoclass:: testrange.backends.libvirt.VM
+.. autoclass:: testrange.GenericVM
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.LibvirtVM
    :members:
    :show-inheritance:
 

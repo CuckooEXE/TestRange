@@ -45,6 +45,7 @@ from testrange.backends.libvirt.network import (
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
+from testrange.vms.generic import GenericVM
 from testrange.storage import (
     AbstractStorageBackend,
     LocalStorageBackend,
@@ -54,7 +55,7 @@ from testrange.storage import (
 _log = get_logger(__name__)
 
 if TYPE_CHECKING:
-    from testrange.backends.libvirt.vm import VM
+    from testrange.backends.libvirt.vm import LibvirtVM
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
@@ -122,6 +123,30 @@ def check_name_collisions(
                 "first 6 characters (case- and underscore-insensitive)."
             )
         seen_net_trunc[trunc] = net.name
+
+
+def _promote_to_libvirt(vm: LibvirtVM | GenericVM) -> LibvirtVM:
+    """Convert a backend-agnostic :class:`GenericVM` to the libvirt
+    backend's concrete :class:`LibvirtVM`.
+
+    The two share their entire constructor surface (since GenericVM
+    exists exactly to be pluggable into any backend), so the
+    translation is a field-for-field copy.  An already-LibvirtVM
+    input passes through unchanged.
+    """
+    if isinstance(vm, GenericVM):
+        from testrange.backends.libvirt.vm import LibvirtVM as _LibvirtVM
+        return _LibvirtVM(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,  # type: ignore[arg-type]  # device-type union narrows on construction
+            builder=vm.builder,
+            communicator=vm.communicator,
+        )
+    return vm
 
 
 _INSTALL_SUBNET_POOL = tuple(f"192.168.{o}.0/24" for o in range(240, 255))
@@ -194,7 +219,7 @@ class Orchestrator(AbstractOrchestrator):
         orchestrator = Orchestrator(
             host="localhost",
             networks=[VirtualNetwork("TestNet", "10.1.0.0/24", internet=True)],
-            vms=[VM("server", "debian-12", users=[...], devices=[vCPU(2)])],
+            vms=[LibvirtVM("server", "debian-12", users=[...], devices=[vCPU(2)])],
         )
         with orchestrator as orch:
             result = orch.vms["server"].exec(["uname", "-r"])
@@ -217,7 +242,7 @@ class Orchestrator(AbstractOrchestrator):
     _networks: list[VirtualNetwork]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Test networks to create for this run."""
 
-    _vm_list: list[VM]  # pyright: ignore[reportIncompatibleVariableOverride]
+    _vm_list: list[LibvirtVM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """VM specifications to provision."""
 
     _cache: CacheManager
@@ -229,7 +254,7 @@ class Orchestrator(AbstractOrchestrator):
     # per-symbol ignore suppresses Pyright's strict-override rule
     # which doesn't accept a narrower mutable override even though
     # nothing external mutates this attribute.
-    vms: dict[str, VM]  # pyright: ignore[reportIncompatibleVariableOverride]
+    vms: dict[str, LibvirtVM]  # pyright: ignore[reportIncompatibleVariableOverride]
     """Running VMs keyed by name; populated after :meth:`__enter__`."""
 
     _conn: libvirt.virConnect | None
@@ -259,7 +284,7 @@ class Orchestrator(AbstractOrchestrator):
         self,
         host: str = "localhost",
         networks: Sequence[VirtualNetwork] | None = None,
-        vms: Sequence[VM] | None = None,
+        vms: Sequence[LibvirtVM | GenericVM] | None = None,
         cache_root: Path | None = None,
         cache: str | None = None,
         cache_verify: bool | str = True,
@@ -272,7 +297,10 @@ class Orchestrator(AbstractOrchestrator):
         # assignment too; ignore per-line here for the same reason
         # we ignored the class-body declarations above.
         self._networks = list(networks) if networks else []  # pyright: ignore[reportIncompatibleVariableOverride]
-        self._vm_list = list(vms) if vms else []  # pyright: ignore[reportIncompatibleVariableOverride]
+        # Convert any GenericVM specs to LibvirtVM up front so the
+        # rest of the orchestrator (and external readers of
+        # ``self._vm_list``) see only the backend-native type.
+        self._vm_list = [_promote_to_libvirt(v) for v in (vms or [])]  # pyright: ignore[reportIncompatibleVariableOverride]
         check_name_collisions(self._vm_list, self._networks)
         remote = None
         if cache is not None:
@@ -993,7 +1021,7 @@ class Orchestrator(AbstractOrchestrator):
         return None
 
     def _build_nic_entries(
-        self, vm: VM
+        self, vm: LibvirtVM
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
         """Build the NIC parameters needed for domain XML and network-config.
 

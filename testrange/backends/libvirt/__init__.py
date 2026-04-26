@@ -35,7 +35,13 @@ from testrange.backends.libvirt.orchestrator import (
     LibvirtOrchestrator,
     Orchestrator,
 )
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.vm import LibvirtVM
+
+# ``VM`` is the historical name and the one re-exported as
+# :class:`testrange.VM` (libvirt is the default backend).  Code that
+# wants to be explicit about the backend reaches for ``LibvirtVM``;
+# everything else uses the alias and gets the same class.
+VM = LibvirtVM
 
 if TYPE_CHECKING:
     from testrange.orchestrator_base import AbstractOrchestrator
@@ -95,6 +101,7 @@ __all__ = [
     "LibvirtDriveBus",
     "LibvirtHardDrive",
     "LibvirtOrchestrator",
+    "LibvirtVM",
     "Orchestrator",
     "VM",
     "VirtualNetwork",
