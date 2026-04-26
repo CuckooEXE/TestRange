@@ -47,6 +47,33 @@ reconstructs per-run clone names
 pattern match points at one — they're persistent cache state, the
 same way the libvirt qcow2 snapshot cache is.
 
+**Added: template-cache CLI.** ``testrange proxmox-list-templates``
+shows every TestRange-managed PVE template on a node;
+``testrange proxmox-prune-templates`` deletes them, optionally
+filtered by ``--name``.  Both commands open their own connection
+and don't require ``__enter__``, so they're safe to invoke from a
+shell with the same ``--orchestrator`` URL the run uses.
+
+**Added: crash-recovery for half-promoted templates.** If an
+install dies between ``qm create`` and ``qm template`` it leaves a
+VMID with the target template's display name but no ``template``
+flag.  The next install attempt for the same spec now sweeps such
+orphans automatically (logged at WARNING) before re-running
+``qm create`` so the install doesn't abort with a duplicate-name
+error.
+
+**Added: linked-then-full clone fallback.** Run-phase clones now
+attempt ``full=0`` first (snapshot-backed, seconds) and fall back
+to ``full=1`` automatically if the storage pool refuses linked
+clones (raw LVM, NFS, Ceph without snapshot support).  Same code
+path, no user-visible config knob — the user just gets a working
+clone either way.
+
+**Added: ``GenericVM`` → ``ProxmoxVM`` promotion.** Backend-agnostic
+``GenericVM`` specs are promoted to ``ProxmoxVM`` at orchestrator
+construction, mirroring the libvirt backend.  The same test fixture
+now runs across both backends without per-backend wrapping.
+
 ProxMox VE install path
 ~~~~~~~~~~~~~~~~~~~~~~~
 
