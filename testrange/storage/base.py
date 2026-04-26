@@ -94,8 +94,12 @@ class StorageBackend:
 class LocalStorageBackend(StorageBackend):
     """Convenience: :class:`LocalFileTransport` + :class:`Qcow2DiskFormat`.
 
-    What ``Orchestrator(host="localhost")`` ends up with by default.
-    Preserves today's behaviour bit-for-bit.
+    Pre-composed pairing that fits any backend whose hypervisor reads
+    qcow2 from a local filesystem (libvirt's local URIs being the
+    canonical case).  Backends with a different disk format compose
+    a :class:`StorageBackend` directly with their own
+    :class:`AbstractDiskFormat`; backends with a different transport
+    pick or build the matching transport class.
     """
 
     def __init__(self, cache_root: Path) -> None:
@@ -109,8 +113,12 @@ class LocalStorageBackend(StorageBackend):
 class SSHStorageBackend(StorageBackend):
     """Convenience: :class:`SSHFileTransport` + :class:`Qcow2DiskFormat`.
 
-    What ``Orchestrator(host="qemu+ssh://...")`` auto-selects.  All
-    keyword args forward to :class:`SSHFileTransport`.
+    Pre-composed pairing for any backend whose hypervisor reads qcow2
+    over SSH-reachable storage (libvirt's ``qemu+ssh://`` form being
+    the canonical case).  Backends using a different transport
+    (WinRM, SMB, REST) or a different disk format compose a
+    :class:`StorageBackend` directly with the matching components.
+    All keyword args forward to :class:`SSHFileTransport`.
     """
 
     def __init__(
