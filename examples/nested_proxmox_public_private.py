@@ -37,9 +37,11 @@ Prerequisites
 - KVM on the physical host (nested-virt support is only required
   once the inner orchestrator is re-enabled — v0 doesn't boot any
   inner VMs).
-- An SSH public key at ``~/.ssh/id_ed25519.pub`` — written into
-  ``answer.toml`` so ``root@<proxmox-ip>`` is reachable without a
-  password prompt.
+- A running ssh-agent (``echo $SSH_AUTH_SOCK`` returns a path).
+  This example generates a fresh ed25519 keypair per run and loads
+  it via ``ssh-add`` so the test runner can SSH into the booted PVE
+  + sidecar without ever touching the user's ``~/.ssh/`` keys.  No
+  pre-existing key required.
 - The vanilla ProxMox VE installer ISO URL.  Upstream mirrors
   require no login for the community installer; pin a specific
   version via :data:`PROXMOX_ISO` below when you iterate.
@@ -87,7 +89,79 @@ DEBIAN_CLOUD = (
 # for any ISO whose filename matches ``proxmox-ve[-_]*.iso``.
 PROXMOX_ISO = "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso"
 
-SSH_PUBLIC_KEY = Path("~/.ssh/id_ed25519.pub").expanduser().read_text().strip()
+def _generate_run_keypair() -> str:
+    """Generate a fresh ed25519 keypair for this run, write the
+    private key to a temp file, load it into ``ssh-agent``, and
+    return the public-key string.
+
+    The pubkey lands in ``answer.toml`` (PVE) and the sidecar's
+    cloud-init ``user-data`` (Debian); the matching private key in
+    the agent lets paramiko's
+    :class:`~testrange.communication.ssh.SSHCommunicator` connect
+    without ever touching ``~/.ssh/``.
+
+    Cleaned up on interpreter exit (``atexit``):
+    ``ssh-add -d`` removes it from the agent and the temp file is
+    unlinked, so repeated runs don't accumulate cruft.
+    """
+    import atexit
+    import os
+    import subprocess
+    import tempfile
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+        Ed25519PrivateKey,
+    )
+
+    if "SSH_AUTH_SOCK" not in os.environ:
+        raise RuntimeError(
+            "ssh-agent is not running.  Start one before this "
+            "example so the per-run key can be loaded — e.g. "
+            "`eval $(ssh-agent -s)`."
+        )
+
+    private_key = Ed25519PrivateKey.generate()
+
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_openssh = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.OpenSSH,
+        format=serialization.PublicFormat.OpenSSH,
+    ).decode("ascii")
+
+    fd, key_path = tempfile.mkstemp(prefix="testrange-runkey-", suffix=".key")
+    os.close(fd)
+    os.chmod(key_path, 0o600)
+    with open(key_path, "wb") as fh:
+        fh.write(private_pem)
+
+    add = subprocess.run(
+        ["ssh-add", key_path],
+        capture_output=True, text=True, timeout=10,
+    )
+    if add.returncode != 0:
+        os.unlink(key_path)
+        raise RuntimeError(
+            f"ssh-add {key_path} failed (exit {add.returncode}): "
+            f"{add.stderr.strip()}"
+        )
+
+    def _cleanup() -> None:
+        subprocess.run(
+            ["ssh-add", "-d", key_path],
+            capture_output=True, timeout=10, check=False,
+        )
+        try:
+            os.unlink(key_path)
+        except OSError:
+            pass
+
+    atexit.register(_cleanup)
+    return f"{public_openssh.strip()} testrange-run"
 
 
 _PVEPROXY_READY_TIMEOUT_S = 120
@@ -220,7 +294,9 @@ def _nginx_post_install(body: str) -> list[str]:
 
 
 def gen_tests() -> list[Test]:
-    root_cred = Credential("root", "testrange", ssh_key=SSH_PUBLIC_KEY)
+    root_cred = Credential(
+        "root", "testrange", ssh_key=_generate_run_keypair(),
+    )
 
     return [
         Test(
