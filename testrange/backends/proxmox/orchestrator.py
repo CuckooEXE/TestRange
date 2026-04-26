@@ -120,6 +120,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         cache_root: Path | None = None,
         cache: str | None = None,
         cache_verify: bool | str = True,
+        storage_backend: object | None = None,
         node: str | None = None,
         storage: str | None = None,
         token: object | None = None,
@@ -127,7 +128,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         super().__init__(
             host=host, networks=networks, vms=vms, cache_root=cache_root,
             cache=cache, cache_verify=cache_verify,
+            storage_backend=storage_backend,  # type: ignore[arg-type]
         )
+        # Proxmox doesn't yet honour storage_backend (the orchestrator
+        # is a stub).  Stash it for forward-compatibility so the
+        # contract test passes today and the wiring follows when the
+        # PVE REST integration lands.
+        self._storage_backend_override = storage_backend
         self._host = host
         self._networks = list(networks) if networks else []
         self._vm_list = list(vms) if vms else []

@@ -65,9 +65,12 @@ class TestOrchestratorContract:
 
     @pytest.mark.parametrize("cls", ORCHESTRATORS)
     def test_constructor_accepts_standard_kwargs(self, cls) -> None:
-        """host/networks/vms/cache_root must be accepted by every backend."""
+        """The kwargs every backend must accept (cross-backend contract)."""
         sig = inspect.signature(cls.__init__)
-        expected = {"host", "networks", "vms", "cache_root"}
+        expected = {
+            "host", "networks", "vms", "cache_root",
+            "cache", "cache_verify", "storage_backend",
+        }
         missing = expected - set(sig.parameters)
         assert not missing, (
             f"{cls.__name__} is missing kwargs: {missing}"

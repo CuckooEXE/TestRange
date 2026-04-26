@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.networks.base import AbstractVirtualNetwork
+    from testrange.storage.base import StorageBackend
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
@@ -110,6 +111,7 @@ class AbstractOrchestrator(ABC):
         cache_root: Path | None = None,
         cache: str | None = None,
         cache_verify: bool | str = True,
+        storage_backend: StorageBackend | None = None,
     ) -> None:
         """Store inputs — subclasses override to open the backend
         connection and initialise handles.
@@ -124,8 +126,21 @@ class AbstractOrchestrator(ABC):
             ``False`` accepts self-signed (matches the bundled
             ``cache/`` docker setup); a string is treated as a path
             to a CA bundle.  Ignored when *cache* is ``None``.
+        :param storage_backend: Optional explicit
+            :class:`~testrange.storage.StorageBackend` (transport +
+            disk format) for this run.  When ``None`` (default) each
+            backend infers a sensible default from *host* and its
+            own URL conventions — the libvirt backend picks
+            :class:`~testrange.storage.LocalStorageBackend` for
+            local URIs and :class:`~testrange.storage.SSHStorageBackend`
+            for ``qemu+ssh://``; other backends document their own
+            inference in their concrete subclass docstring.  Pass
+            explicitly when the auto-selection logic can't guess
+            (custom remote paths, a fake backend in tests, an
+            uncommon transport+format pairing).
         """
         del host, networks, vms, cache_root, cache, cache_verify  # subclasses wire these
+        del storage_backend
 
     @abstractmethod
     def __enter__(self) -> AbstractOrchestrator:
