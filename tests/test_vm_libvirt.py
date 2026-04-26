@@ -134,8 +134,27 @@ class TestDomainXml:
         assert vcpu.text == "8"
         assert mem.text is not None and int(mem.text) == 16 * 1024 * 1024
 
+    def test_rejects_foreign_backend_device_at_runtime(self) -> None:
+        """The pyright union type catches cross-backend devices at
+        edit time; this regression covers the runtime path for
+        callers who bypass the type checker (dynamic test factories,
+        YAML loaders, plain `# type: ignore`)."""
+        from testrange.devices import AbstractHardDrive
+
+        class ProxmoxHardDrive(AbstractHardDrive):
+            def __init__(self, size: int) -> None:
+                self.size = f"{size}GiB"
+
+        from testrange.exceptions import VMBuildError as _VMBuildError
+        with pytest.raises(_VMBuildError, match="not accepted by the libvirt backend"):
+            VM(
+                "x", "y.qcow2", [],
+                devices=[ProxmoxHardDrive(10)],  # type: ignore[list-item]
+            )
+
     def test_nvme_disk_uses_nvme_bus(self) -> None:
-        vm = VM("a", "b", [], devices=[HardDrive("20GB", nvme=True)])
+        from testrange.backends.libvirt import LibvirtHardDrive
+        vm = VM("a", "b", [], devices=[LibvirtHardDrive("20GB", nvme=True)])
         xml = vm._base_domain_xml(
             "n", Path("/d.qcow2"), Path("/s.iso"), [], "r",
         )

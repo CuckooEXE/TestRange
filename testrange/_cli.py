@@ -420,7 +420,20 @@ def _print_single_vm(
     :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`,
     appends an ``Inner networks`` + ``Inner VMs`` section.
     """
-    from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+    from testrange.backends.libvirt.devices import LibvirtHardDrive
+    from testrange.devices import (
+        AbstractHardDrive,
+        AbstractVirtualNetworkRef,
+        Memory,
+        vCPU,
+    )
+
+    def _drive_tag(d: AbstractHardDrive) -> str:
+        # NVMe is libvirt-specific; only the LibvirtHardDrive subclass
+        # carries the flag.  Generic HardDrive renders untagged.
+        if isinstance(d, LibvirtHardDrive) and d.nvme:
+            return " NVMe"
+        return ""
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
     vm_head = "└──" if is_last else "├──"
@@ -442,11 +455,13 @@ def _print_single_vm(
 
     vcpu = next((d.count for d in vm.devices if isinstance(d, vCPU)), 2)
     mem = next((d.gib for d in vm.devices if isinstance(d, Memory)), 2.0)
-    drives = [d for d in vm.devices if isinstance(d, HardDrive)]
-    nics = [d for d in vm.devices if isinstance(d, VirtualNetworkRef)]
+    drives = [d for d in vm.devices if isinstance(d, AbstractHardDrive)]
+    nics = [
+        d for d in vm.devices if isinstance(d, AbstractVirtualNetworkRef)
+    ]
 
     disk_desc = (
-        ", ".join(f"{d.size}{' NVMe' if d.nvme else ''}" for d in drives)
+        ", ".join(f"{d.size}{_drive_tag(d)}" for d in drives)
         if drives else "20GB (default)"
     )
     pkg_desc = (

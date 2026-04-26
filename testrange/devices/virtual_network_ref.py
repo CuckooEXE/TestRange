@@ -5,23 +5,13 @@ from __future__ import annotations
 from testrange.devices.base import AbstractDevice
 
 
-class VirtualNetworkRef(AbstractDevice):
-    """Attaches a VM to a named
-    :class:`~testrange.networks.base.AbstractVirtualNetwork`.
+class AbstractVirtualNetworkRef(AbstractDevice):
+    """Sealed base class for NIC-shaped device specs.
 
-    A VM can have multiple ``VirtualNetworkRef`` entries in its ``devices``
-    list.  Each entry results in one virtual NIC on the VM.
-
-    :param name: The ``name`` of the network to attach to.  Must match
-        a network declared in the orchestrator's ``networks=`` list.
-    :param ip: An optional static IPv4 address to assign to this NIC (e.g.
-        ``'10.0.100.55'``).  If ``None`` (the default), the address is
-        obtained via DHCP or a deterministic reservation.
-
-    Example::
-
-        VirtualNetworkRef("OfflineNet", ip="10.0.100.55")
-        VirtualNetworkRef("NetA")   # DHCP
+    Backend-specific NIC subclasses (with options like model
+    selection, queue depth, VLAN tagging, firewall toggles) live in
+    their backend module and extend this directly — siblings of
+    :class:`VirtualNetworkRef`, not children.
     """
 
     name: str
@@ -30,17 +20,34 @@ class VirtualNetworkRef(AbstractDevice):
     ip: str | None
     """Optional static IPv4 address for this NIC; ``None`` means DHCP."""
 
+    @property
+    def device_type(self) -> str:
+        return "network_ref"
+
+
+class VirtualNetworkRef(AbstractVirtualNetworkRef):
+    """Generic NIC spec — accepted by every backend.
+
+    Attaches a VM to a named
+    :class:`~testrange.networks.base.AbstractVirtualNetwork`.  A VM
+    can have multiple ``VirtualNetworkRef`` entries; each results in
+    one virtual NIC.
+
+    :param name: The ``name`` of the network to attach to.  Must
+        match a network declared in the orchestrator's ``networks=``
+        list.
+    :param ip: Optional static IPv4 address (e.g. ``"10.0.100.55"``).
+        ``None`` (default) means DHCP / deterministic reservation.
+
+    Example::
+
+        VirtualNetworkRef("OfflineNet", ip="10.0.100.55")
+        VirtualNetworkRef("NetA")   # DHCP
+    """
+
     def __init__(self, name: str, ip: str | None = None) -> None:
         self.name = name
         self.ip = ip
-
-    @property
-    def device_type(self) -> str:
-        """Return ``'network_ref'``.
-
-        :returns: The string ``'network_ref'``.
-        """
-        return "network_ref"
 
     def __repr__(self) -> str:
         if self.ip:
@@ -48,4 +55,4 @@ class VirtualNetworkRef(AbstractDevice):
         return f"VirtualNetworkRef({self.name!r})"
 
 
-__all__ = ["VirtualNetworkRef"]
+__all__ = ["AbstractVirtualNetworkRef", "VirtualNetworkRef"]

@@ -29,8 +29,8 @@ from testrange.packages import Apt
 from testrange.vms.hypervisor_base import AbstractHypervisor
 
 if TYPE_CHECKING:
+    from testrange.backends.libvirt.vm import LibvirtAcceptedDevice
     from testrange.credentials import Credential
-    from testrange.devices import AbstractDevice
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.orchestrator_base import AbstractOrchestrator
     from testrange.packages import AbstractPackage
@@ -142,7 +142,7 @@ class Hypervisor(VM, AbstractHypervisor):
         networks: list[AbstractVirtualNetwork] | None = None,
         pkgs: list[AbstractPackage] | None = None,
         post_install_cmds: list[str] | None = None,
-        devices: list[AbstractDevice] | None = None,
+        devices: list["LibvirtAcceptedDevice"] | None = None,
         builder: Builder | None = None,
         communicator: str | None = None,
     ) -> None:

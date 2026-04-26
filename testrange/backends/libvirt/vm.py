@@ -31,7 +31,14 @@ from testrange._logging import get_logger, log_duration
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.cache import CacheManager
 from testrange.communication.base import AbstractCommunicator
-from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange.backends.libvirt.devices import LibvirtHardDrive
+from testrange.devices import (
+    AbstractHardDrive,
+    HardDrive,
+    Memory,
+    VirtualNetworkRef,
+    vCPU,
+)
 from testrange.exceptions import VMBuildError
 from testrange.vms.base import AbstractVM
 from testrange.vms.builders import Builder, auto_select_builder
@@ -47,6 +54,22 @@ if TYPE_CHECKING:
     from testrange.devices import AbstractDevice
     from testrange.orchestrator_base import AbstractOrchestrator
     from testrange.packages import AbstractPackage
+
+
+# Pyright-checked union of devices this backend's VM accepts.  Generic
+# devices (vCPU, Memory, VirtualNetworkRef, HardDrive) live in
+# :mod:`testrange.devices`; libvirt-specific drives (and any future
+# libvirt-specific NIC / vCPU / RNG) come from
+# :mod:`testrange.backends.libvirt.devices`.  A backend-specific device
+# from a different backend (ProxmoxHardDrive, HyperVHardDrive, …) is
+# rejected here at type-check time and again at runtime in
+# :meth:`VM.__init__` for callers who bypass the type checker.
+LibvirtAcceptedDevice = (
+    vCPU | Memory | VirtualNetworkRef | HardDrive | LibvirtHardDrive
+)
+_ACCEPTED_DEVICE_TYPES: tuple[type, ...] = (
+    vCPU, Memory, VirtualNetworkRef, HardDrive, LibvirtHardDrive,
+)
 
 
 def _libvirt_conn(context: AbstractOrchestrator) -> libvirt.virConnect:
@@ -113,6 +136,19 @@ def _destroy_and_undefine(domain: libvirt.virDomain) -> None:
             domain.undefine()
         except libvirt.libvirtError:
             pass
+
+
+def _resolve_bus(drive: AbstractHardDrive, *, windows: bool = False) -> str:
+    """Pick the libvirt disk bus to render for *drive*.
+
+    :class:`LibvirtHardDrive` carries an explicit bus selector when
+    the user wants one; the generic :class:`HardDrive` doesn't, and
+    we fall back to the libvirt-default of SATA for Windows guests
+    (driver-free install) and virtio for everything else.
+    """
+    if isinstance(drive, LibvirtHardDrive) and drive.bus is not None:
+        return drive.bus
+    return "sata" if windows else "virtio"
 
 
 def _nvram_run_path(run: RunDir, vm_name: str) -> str:
@@ -256,7 +292,7 @@ class VM(AbstractVM):
         users: list[Credential],
         pkgs: list[AbstractPackage] | None = None,
         post_install_cmds: list[str] | None = None,
-        devices: list[AbstractDevice] | None = None,
+        devices: list[LibvirtAcceptedDevice] | None = None,
         builder: Builder | None = None,
         communicator: str | None = None,
     ) -> None:
@@ -265,7 +301,20 @@ class VM(AbstractVM):
         self.users = users
         self.pkgs: list[AbstractPackage] = pkgs or []
         self.post_install_cmds: list[str] = post_install_cmds or []
-        self.devices: list[AbstractDevice] = devices or []
+        self.devices: list[AbstractDevice] = list(devices or [])
+        # Runtime check for callers who bypass the type checker.  The
+        # union typing above lets pyright catch a foreign-backend
+        # device at edit time; this catches the same mistake when the
+        # spec is constructed dynamically (test factories, YAML
+        # loaders, etc.).
+        for d in self.devices:
+            if not isinstance(d, _ACCEPTED_DEVICE_TYPES):
+                accepted = ", ".join(t.__name__ for t in _ACCEPTED_DEVICE_TYPES)
+                raise VMBuildError(
+                    f"VM {name!r}: device {d!r} of type "
+                    f"{type(d).__name__} is not accepted by the "
+                    f"libvirt backend (accepted: {accepted})"
+                )
 
         # Auto-select a builder from iso= when the caller doesn't pass
         # one.  The registry (testrange.vms.builders.BUILDER_REGISTRY)
@@ -314,8 +363,8 @@ class VM(AbstractVM):
         mems = [d for d in self.devices if isinstance(d, Memory)]
         return mems[0].kib if mems else 2 * 1024 * 1024
 
-    def _hard_drives(self) -> list[HardDrive]:
-        return [d for d in self.devices if isinstance(d, HardDrive)]
+    def _hard_drives(self) -> list[AbstractHardDrive]:
+        return [d for d in self.devices if isinstance(d, AbstractHardDrive)]
 
     def _network_refs(self) -> list[VirtualNetworkRef]:
         return [d for d in self.devices if isinstance(d, VirtualNetworkRef)]
@@ -444,18 +493,19 @@ class VM(AbstractVM):
 
         # Primary disk
         drives = self._hard_drives()
-        primary_drive = drives[0] if drives else HardDrive()
+        primary_drive: AbstractHardDrive = drives[0] if drives else HardDrive()
+        primary_bus = _resolve_bus(primary_drive, windows=windows)
         disk_el = ET.SubElement(devices, "disk", type="file", device="disk")
         ET.SubElement(disk_el, "driver", name="qemu", type="qcow2", discard="unmap")
         ET.SubElement(disk_el, "source", file=disk_path)
-        if primary_drive.nvme:
+        if primary_bus == "nvme":
             ET.SubElement(disk_el, "target", dev="nvme0n1", bus="nvme")
-        elif windows:
+        elif primary_bus == "sata":
             # Windows Setup has native AHCI/SATA drivers but not virtio-blk;
             # using SATA sidesteps the DriverPaths dance with virtio-win.
             ET.SubElement(disk_el, "target", dev="sda", bus="sata")
         else:
-            ET.SubElement(disk_el, "target", dev="vda", bus="virtio")
+            ET.SubElement(disk_el, "target", dev="vda", bus=primary_bus)
 
         # Additional data drives (index 1+).  They sit alongside the
         # primary disk in the run dir, so derive the path by string
@@ -472,7 +522,8 @@ class VM(AbstractVM):
                 f"{primary_parent}/{data_name}" if primary_parent else data_name
             )
             ET.SubElement(d, "source", file=data_ref)
-            if drive.nvme:
+            data_bus = _resolve_bus(drive, windows=windows)
+            if data_bus == "nvme":
                 ET.SubElement(d, "target", dev=f"nvme{idx}n1", bus="nvme")
             else:
                 dev_names = "bcdefghijklmnop"
@@ -501,7 +552,7 @@ class VM(AbstractVM):
                 cdrom_sources.extend(extra_cdroms)
 
         _sd_letters = "abcdefghijklmnop"
-        cdrom_letter_offset = 1 if (windows and not primary_drive.nvme) else 0
+        cdrom_letter_offset = 1 if (windows and primary_bus != "nvme") else 0
         for cd_idx, cdrom_path in enumerate(cdrom_sources):
             cdrom = ET.SubElement(devices, "disk", type="file", device="cdrom")
             ET.SubElement(cdrom, "driver", name="qemu", type="raw")
