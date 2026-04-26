@@ -59,6 +59,7 @@ from testrange.backends.libvirt import (
     VM,
     Hypervisor,
     LibvirtOrchestrator,
+    LibvirtVM,
     Orchestrator,
     VirtualNetwork,
 )
@@ -87,6 +88,7 @@ from testrange.storage import (
 )
 from testrange.test import Test, TestResult, run_tests
 from testrange.vms.base import AbstractVM
+from testrange.vms.generic import GenericVM
 from testrange.vms.builders import (
     Builder,
     CloudInitBuilder,
@@ -106,6 +108,8 @@ __all__ = [
     "AbstractOrchestrator",
     # VM + credentials
     "VM",
+    "GenericVM",
+    "LibvirtVM",
     "AbstractVM",
     "Hypervisor",
     "AbstractHypervisor",

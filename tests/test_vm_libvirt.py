@@ -8,7 +8,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.vm import LibvirtVM as VM
 from testrange.credentials import Credential
 from testrange.devices import HardDrive, Memory, vNIC, vCPU
 from testrange.packages import Apt

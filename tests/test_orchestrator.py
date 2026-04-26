@@ -542,7 +542,7 @@ class TestProvisionInstallFreeVMs:
 
     def _make_noop_vm(self, tmp_path, name="byoi"):
         from testrange import NoOpBuilder
-        from testrange.backends.libvirt.vm import VM
+        from testrange.backends.libvirt.vm import LibvirtVM as VM
         from testrange.credentials import Credential
         from testrange.devices import vNIC
 
@@ -602,7 +602,7 @@ class TestProvisionInstallFreeVMs:
     ) -> None:
         """_create_install_network only registers VMs whose builders
         want an install phase."""
-        from testrange.backends.libvirt.vm import VM
+        from testrange.backends.libvirt.vm import LibvirtVM as VM
         from testrange.credentials import Credential
         from testrange.devices import vNIC
 

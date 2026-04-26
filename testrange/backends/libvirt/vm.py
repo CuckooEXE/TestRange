@@ -195,12 +195,16 @@ def _press_any_key_loop(
         stop.wait(interval_s)
 
 
-class VM(AbstractVM):
+class LibvirtVM(AbstractVM):
     """A KVM/QEMU virtual machine managed by libvirt.
+
+    Re-exported as :class:`testrange.VM` because libvirt is the
+    default backend; users who want explicit naming can import this
+    class directly from :mod:`testrange.backends.libvirt`.
 
     .. code-block:: python
 
-        VM(
+        LibvirtVM(
             name="MyVM",
             iso="https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
             users=[Credential("root", "Password123!")],
@@ -916,4 +920,4 @@ class VM(AbstractVM):
         self._communicator = None
 
     def __repr__(self) -> str:
-        return f"VM(name={self._name!r}, iso={self.iso!r})"
+        return f"LibvirtVM(name={self._name!r}, iso={self.iso!r})"

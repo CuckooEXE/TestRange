@@ -9,7 +9,7 @@ from xml.etree import ElementTree as ET
 
 import pytest
 
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.vm import LibvirtVM as VM
 from testrange.cache import CacheManager
 from testrange.communication.winrm import WinRMCommunicator
 from testrange.credentials import Credential

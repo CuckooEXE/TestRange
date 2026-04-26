@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from testrange.backends.libvirt.orchestrator import check_name_collisions
-from testrange.backends.libvirt.vm import VM
+from testrange.backends.libvirt.vm import LibvirtVM
 from testrange.packages import Apt
 from testrange.vms.hypervisor_base import AbstractHypervisor
 
@@ -80,7 +80,7 @@ def _default_post_install_cmds(users: list[Credential]) -> list[str]:
     return cmds
 
 
-class Hypervisor(VM, AbstractHypervisor):
+class Hypervisor(LibvirtVM, AbstractHypervisor):
     """A libvirt VM that hosts an inner libvirt orchestrator.
 
     .. code-block:: python

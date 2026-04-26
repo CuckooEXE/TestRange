@@ -15,7 +15,7 @@ import pytest
 from testrange import AbstractOrchestrator, AbstractVirtualNetwork, AbstractVM
 from testrange.backends.libvirt.network import VirtualNetwork as LibvirtNetwork
 from testrange.backends.libvirt.orchestrator import Orchestrator as LibvirtOrch
-from testrange.backends.libvirt.vm import VM as LibvirtVM
+from testrange.backends.libvirt.vm import LibvirtVM
 from testrange.backends.proxmox import (
     ProxmoxOrchestrator,
     ProxmoxVirtualNetwork,

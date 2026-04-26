@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from testrange.backends.libvirt.vm import VM as _LibvirtVM
+from testrange.backends.libvirt.vm import LibvirtVM as _LibvirtVM
 from testrange.vms.base import AbstractVM
 
 if TYPE_CHECKING:
