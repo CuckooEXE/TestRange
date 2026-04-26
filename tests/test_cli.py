@@ -29,6 +29,103 @@ class TestMainGroup:
         assert "testrange" in r.output.lower()
 
 
+class TestCleanupCommand:
+    """Smoke tests for ``testrange cleanup MODULE[:FACTORY] RUN_ID``.
+
+    The deep semantics of cleanup are exercised in test_cleanup.py;
+    these just confirm the CLI wiring (target parsing, run_id
+    pass-through, exit codes) is right."""
+
+    _RUN_ID = "00000000-0000-0000-0000-000000000000"
+
+    def _empty_factory(self, tmp_path: Path) -> Path:
+        # An empty list of tests is a valid cleanup target — the
+        # cleanup CLI prints "no tests" and exits 0.  The next test
+        # exercises the path with an actual test in the list.
+        f = tmp_path / "bare.py"
+        f.write_text("def gen_tests():\n    return []\n")
+        return f
+
+    def test_no_tests_exits_zero(
+        self, runner: CliRunner, tmp_path: Path,
+    ) -> None:
+        f = self._empty_factory(tmp_path)
+        r = runner.invoke(main, ["cleanup", str(f), self._RUN_ID])
+        assert r.exit_code == 0
+
+    def test_invokes_orchestrator_cleanup(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Loads the factory, finds the orchestrator, calls cleanup
+        with the supplied run id."""
+        f = tmp_path / "case.py"
+        f.write_text(
+            "from testrange import (\n"
+            "    Test, Orchestrator, VM, Credential, vCPU, Memory, vNIC,\n"
+            ")\n"
+            "def gen_tests():\n"
+            "    return [\n"
+            "        Test(\n"
+            "            Orchestrator(vms=[\n"
+            "                VM(name='web', iso='https://x/y.qcow2',\n"
+            "                   users=[Credential('root', 'pw')],\n"
+            "                   devices=[vCPU(1), Memory(1)]),\n"
+            "            ]),\n"
+            "            lambda o: None,\n"
+            "        ),\n"
+            "    ]\n"
+        )
+
+        called: list[str] = []
+
+        def _fake_cleanup(self, run_id: str) -> None:  # noqa: ARG001
+            called.append(run_id)
+
+        from testrange.backends.libvirt.orchestrator import Orchestrator
+        monkeypatch.setattr(Orchestrator, "cleanup", _fake_cleanup)
+
+        r = runner.invoke(main, ["cleanup", str(f), self._RUN_ID])
+
+        assert r.exit_code == 0, r.output
+        assert called == [self._RUN_ID]
+        assert "cleanup ok" in r.output
+
+    def test_failure_exits_one(
+        self,
+        runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cleanup raising bumps the exit code to 1 so scripts can
+        fail loudly on partial sweeps."""
+        f = tmp_path / "case.py"
+        f.write_text(
+            "from testrange import (\n"
+            "    Test, Orchestrator, VM, Credential,\n"
+            ")\n"
+            "def gen_tests():\n"
+            "    return [Test(Orchestrator(vms=[VM('a', 'b', \n"
+            "        [Credential('r','p')])]), lambda o: None)]\n"
+        )
+
+        from testrange.backends.libvirt.orchestrator import Orchestrator
+        monkeypatch.setattr(
+            Orchestrator,
+            "cleanup",
+            lambda self, run_id: (_ for _ in ()).throw(  # noqa: ARG005
+                RuntimeError("simulated leftover"),
+            ),
+        )
+
+        r = runner.invoke(main, ["cleanup", str(f), self._RUN_ID])
+
+        assert r.exit_code == 1
+        assert "simulated leftover" in r.output
+
+
 class TestRunCommand:
     def test_bare_target_defaults_to_gen_tests(
         self, runner: CliRunner, tmp_path: Path

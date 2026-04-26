@@ -94,6 +94,46 @@ with ``virsh``, ``ssh``, etc.:
 Use ``--keep`` carefully — it leaks libvirt state if you forget to
 clean up.
 
+Cleaning up after a SIGKILL'd run
+---------------------------------
+
+When a TestRange process exits cleanly — normal completion, an
+exception inside a test, even ``Ctrl+C`` — the orchestrator's
+``__exit__`` runs and tears down every VM, network, and scratch
+file it created.  When the process exits *un*\ cleanly (``kill -9``,
+OOM killer, host reboot, anything that bypasses Python cleanup),
+none of that runs and resources stay live.
+
+``testrange cleanup`` reconstructs every resource the test factory
++ run id would have produced and best-effort destroys each.  Backend
+resource names are deterministic functions of the spec and the run
+id — so given both, TestRange can compute exactly what to delete.
+
+.. code-block:: bash
+
+    testrange cleanup ./my_tests.py:gen_tests \
+        deadbeef-1111-2222-3333-444455556666
+
+Find the run id in the original run's log output (the orchestrator
+prints ``run id <uuid>`` on entry) or in the leftover scratch
+directory at ``<cache_root>/runs/<uuid>/``.  Idempotent —
+already-deleted resources are silently skipped, so it's safe to run
+repeatedly.
+
+Per-backend semantics:
+
+* **libvirt.**  Destroys + undefines ``tr-<vm[:10]>-<runid[:8]>``,
+  ``tr-build-<vm[:10]>-<runid[:8]>``, ``tr-<net[:6]>-<runid[:4]>``
+  for each spec'd VM/network, plus the ephemeral install network
+  ``tr-instal-<runid[:4]>``, plus the per-run scratch dir.
+* **Other backends** (Proxmox, Hyper-V) raise
+  :class:`NotImplementedError` until they wire their own
+  :meth:`~testrange.orchestrator_base.AbstractOrchestrator.cleanup`.
+
+When in doubt, ``testrange cleanup`` is always the right first
+step before falling back to manual ``virsh destroy`` / ``qm
+destroy`` / equivalent.
+
 Watching an install-phase VM
 ----------------------------
 
