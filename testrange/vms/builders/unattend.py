@@ -27,6 +27,15 @@ if TYPE_CHECKING:
     from testrange.vms.base import AbstractVM as VM
 
 
+def _unattend_iso_ref(run: "RunDir", vm_name: str) -> str:
+    """Backend-local ref for *vm_name*'s autounattend seed ISO.
+
+    The autounattend convention (file shape, naming) belongs to this
+    builder, not to the generic per-run scratch-dir abstraction.
+    """
+    return run.path_for(f"{vm_name}-unattend.iso")
+
+
 _NS = "urn:schemas-microsoft-com:unattend"
 """XML namespace URI for Windows autounattend documents."""
 
@@ -144,7 +153,7 @@ class WindowsUnattendedBuilder(Builder):
         # 3. Autounattend seed ISO — generated in memory, written via
         # the storage backend so it lands wherever the hypervisor will
         # be reading from.
-        unattend_ref = run.unattend_iso_path(vm.name)
+        unattend_ref = _unattend_iso_ref(run, vm.name)
         run.storage.transport.write_bytes(
             unattend_ref,
             build_autounattend_iso_bytes(self.build_xml(vm)),

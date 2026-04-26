@@ -125,26 +125,6 @@ class RunDir:
         self._storage.disk.create_blank(work_ref, disk_size)
         return work_ref
 
-    def unattend_iso_path(self, vm_name: str) -> str:
-        """Return the backend-local ref for an unattended-install seed ISO.
-
-        :param vm_name: VM name; becomes the file stem.
-        :returns: ``<run>/<vm_name>-unattend.iso``.
-        """
-        return self._join(f"{vm_name}-unattend.iso")
-
-    def seed_iso_path(self, vm_name: str, *, install: bool) -> str:
-        """Return the backend-local ref for a cloud-init seed ISO.
-
-        :param vm_name: VM name; becomes the file stem.
-        :param install: ``True`` for the phase-1 (install) seed,
-            ``False`` for the phase-2 (run) seed.
-        :returns: ``<run>/<vm_name>-install-seed.iso`` or
-            ``<run>/<vm_name>-seed.iso``.
-        """
-        suffix = "-install-seed.iso" if install else "-seed.iso"
-        return self._join(f"{vm_name}{suffix}")
-
     def cleanup(self) -> None:
         """Remove the run directory.  Safe to call multiple times."""
         self._storage.transport.cleanup_run(self.run_id)

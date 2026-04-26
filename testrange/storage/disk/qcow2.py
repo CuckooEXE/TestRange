@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from testrange._qemu_img import info as _qemu_img_info
+from testrange.storage.disk._qemu_img import info as _qemu_img_info
 from testrange.exceptions import CacheError, VMBuildError
 from testrange.storage.disk.base import AbstractDiskFormat
 
