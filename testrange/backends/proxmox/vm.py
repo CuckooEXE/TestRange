@@ -1,15 +1,13 @@
 """Proxmox VE VM lifecycle.
 
-First-cut implementation for **Debian-12-style cloud-init VMs reached
-over SSH**.  Scope explicitly excludes:
+Implementation for **Debian-12-style cloud-init VMs reached over
+SSH**, backed by PVE templates as the install-once-clone-many cache
+(symmetric with the libvirt backend's qcow2-snapshot cache).
+
+Scope explicitly excludes:
 
 - the QEMU guest-agent communicator (use ``communicator='ssh'``);
-- the Windows installer flow;
-- the outer cache (every run does a full install — PVE-template-as-cache
-  is slated for a follow-up slice);
-- the phase-2 seed ISO (the install-phase seed is also used at run
-  start — cloud-init treats it as the same instance unless we rotate
-  the instance-id, which we don't yet).
+- the Windows installer flow.
 
 Gotchas
 -------
@@ -48,33 +46,76 @@ Gotchas
 The flow
 --------
 
-:meth:`build` runs once per orchestrator entry:
+The cache is per-PVE: a "VM cache hit" means a previous run for the
+same spec already ran and left a PVE template behind.  Hits skip
+the install entirely (~minutes saved); misses install once and then
+every subsequent run for the same spec is a clone.
 
-1. Resolve the VM's ``iso=`` URL to a local qcow2 in TestRange's
-   outer cache (existing :func:`testrange.vms.images.resolve_image`).
-2. Upload that qcow2 into PVE's ``local`` directory storage as
-   ``import`` content.  This is the file an upcoming
-   ``POST /qemu`` will pull from.
-3. Render the cloud-init seed (NoCloud user-data + meta-data) via
-   the existing :class:`~testrange.vms.builders.CloudInitBuilder`
-   helpers, write it to a tempfile, upload as ``iso`` content.
-4. Allocate a fresh VMID via ``GET /cluster/nextid``.
-5. ``POST /nodes/{node}/qemu`` with ``scsi0=<storage>:0,import-from=
-   local:import/<file>``, which makes PVE 7+ auto-import the qcow2
-   into the target pool as a real VM disk in a single step.  No
-   ``qm importdisk`` shell-out, no SSH access to the PVE node
-   required.
-6. Start the VMID and poll ``status/current`` until the guest powers
-   itself off — that's cloud-init's ``power_state: poweroff``
-   handshake, the same install-done signal the libvirt backend
-   already keys on.
+:meth:`build` per orchestrator entry:
 
-:meth:`start_run` re-starts the same VMID, polls for SSH
-reachability on the configured static IP, and constructs an
-:class:`~testrange.communication.ssh.SSHCommunicator`.
+1. Compute the spec's ``cache_key`` (same hash the libvirt cache
+   uses).  Look for a PVE template named
+   ``tr-template-<config_hash[:12]>`` on the target node.
 
-:meth:`shutdown` stops the VMID and DELETEs it so the orchestrator
-exits clean.
+2. **Cache miss** — run the install path, then promote to template:
+
+   a. Resolve the VM's ``iso=`` URL to a local qcow2 (existing
+      :func:`testrange.vms.images.resolve_image`).
+   b. Upload to PVE's ``local`` directory storage as ``import``.
+   c. Render the install-phase cloud-init seed (NoCloud
+      user-data + meta-data + run-phase network-config).  PVE
+      SDN subnets don't run DHCP, so the install seed has to
+      carry the static IP.
+   d. Allocate the install VMID via ``GET /cluster/nextid``.
+   e. ``POST /nodes/{node}/qemu`` with the install VMID's
+      display name == the template name (so the post-install
+      lookup picks it up directly), and
+      ``scsi0=<storage>:0,import-from=local:import/<file>`` so
+      PVE 7+ auto-imports the qcow2 in one shot.
+   f. Start, poll ``status/current`` until poweroff (cloud-init's
+      ``power_state: poweroff`` handshake — same signal libvirt
+      uses).
+   g. ``POST /nodes/{node}/qemu/{install_vmid}/template`` —
+      promotes the install VMID to a template.  Irreversible:
+      the VMID can no longer be started directly, only cloned.
+
+3. **Always** — clone the template:
+
+   a. Allocate a run VMID via ``GET /cluster/nextid``.
+   b. ``POST /nodes/{node}/qemu/{template_vmid}/clone`` with
+      ``newid=<run_vmid>`` and ``full=0`` (linked clone — fast
+      on LVM-thin / ZFS / qcow2 file storage).
+   c. Return the run VMID; orchestrator passes it to
+      :meth:`start_run`.
+
+Concurrency: a per-config-hash file lock around steps 2 + 3 (via
+:func:`~testrange._concurrency.vm_build_lock`) prevents two test
+processes from racing to install the same template.
+
+:meth:`start_run` per orchestrator entry:
+
+1. Build a phase-2 cloud-init seed with a **rotated instance-id**
+   (cloud-init re-runs first-boot logic on the clone) and the
+   run-phase ``mac_ip_pairs`` (static IP, gateway, DNS).
+2. Upload the phase-2 seed to ``local:iso/`` with a run-id-
+   suffixed filename so concurrent runs don't collide.
+3. ``PUT /nodes/{node}/qemu/{run_vmid}/config`` to:
+   - swap ``ide2`` from the install seed (inherited from the
+     template) to the phase-2 seed;
+   - replace ``net0`` with the run-phase NIC (new MAC, run
+     bridge from the orchestrator's SDN setup).
+4. Start the run VMID, wait for SSH on the static IP, attach the
+   :class:`~testrange.communication.ssh.SSHCommunicator`.
+
+:meth:`shutdown` stops + deletes the cloned run VMID and its
+phase-2 seed.  The template + install seed survive — they're
+shared cache state.
+
+:meth:`testrange.backends.proxmox.ProxmoxOrchestrator.cleanup`
+mirrors this asymmetry: run clones are reconstructed by name
+(``tr-<vm[:10]>-<run_id[:8]>``) and deleted; templates
+(``tr-template-*``) are explicitly preserved even if a name
+pattern match somehow points at one.
 """
 
 from __future__ import annotations
@@ -85,6 +126,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from testrange._concurrency import vm_build_lock
 from testrange._logging import get_logger, log_duration
 from testrange.exceptions import VMBuildError, VMTimeoutError
 from testrange.vms.base import AbstractVM
@@ -140,19 +182,20 @@ class ProxmoxVM(AbstractVM):
     """
 
     _vmid: int | None
-    """PVE VMID once :meth:`build` has allocated it; ``None``
-    until then."""
+    """Run-phase VMID — the clone of the template.  Allocated in
+    :meth:`build`; deleted in :meth:`shutdown`."""
+
+    _template_vmid: int | None
+    """VMID of the cached PVE template this run cloned from.  Survives
+    :meth:`shutdown` because the template *is* the cache."""
 
     _node: str | None
     """PVE node the VM landed on."""
 
-    _import_filename: str | None
-    """Filename in PVE's ``local:import/`` of the staged base
-    qcow2 — kept so :meth:`shutdown` can clean it up."""
-
-    _seed_filename: str | None
-    """Filename in PVE's ``local:iso/`` of the cloud-init seed
-    ISO — kept for cleanup."""
+    _phase2_seed_filename: str | None
+    """Filename in PVE's ``local:iso/`` of the run-phase
+    cloud-init seed (rotated instance-id + run-phase network config).
+    Per-run; deleted in :meth:`shutdown` along with the run VMID."""
 
     def __init__(
         self,
@@ -176,9 +219,9 @@ class ProxmoxVM(AbstractVM):
             communicator=communicator,
         )
         self._vmid = None
+        self._template_vmid = None
         self._node = None
-        self._import_filename = None
-        self._seed_filename = None
+        self._phase2_seed_filename = None
 
     # ------------------------------------------------------------------
     # build / start_run / shutdown
@@ -192,22 +235,23 @@ class ProxmoxVM(AbstractVM):
         install_network_name: str,
         install_network_mac: str,
     ) -> str:
-        """Provision a fresh VMID and run cloud-init to completion.
+        """Find or build a PVE template for this spec, clone it for
+        the run phase, and return the cloned VMID.
 
-        Returns the allocated VMID as a stringified integer — the
-        "backend-local ref" the orchestrator hands back to
-        :meth:`start_run`.
+        Cache key is :meth:`Builder.cache_key` (same hash the libvirt
+        backend uses for its qcow2 cache).  On a hit (template already
+        exists in PVE) the install path is skipped entirely; on a miss
+        we run the install, ``qm template`` the install VMID, and
+        clone from there.
 
+        :returns: Stringified run-phase VMID — the "backend-local ref"
+            the orchestrator hands back to :meth:`start_run`.
         :raises VMBuildError: If any REST call fails or the resolved
             base image can't be uploaded.
         :raises VMTimeoutError: If the install-phase domain doesn't
             power off within :data:`_INSTALL_TIMEOUT_S`.
         """
-        from testrange.vms.builders.cloud_init import (
-            CloudInitBuilder,
-            build_seed_iso_bytes,
-        )
-        from testrange.vms.images import resolve_image
+        from testrange.vms.builders.cloud_init import CloudInitBuilder
 
         if not isinstance(self.builder, CloudInitBuilder):
             raise VMBuildError(
@@ -219,100 +263,195 @@ class ProxmoxVM(AbstractVM):
 
         client = _proxmox_client(context)
         node = _proxmox_node(context)
-        storage = _proxmox_storage(context)
         self._node = node
 
-        # 1. Resolve the base qcow2 to a local file in the cache.
+        config_hash = self.builder.cache_key(self)
+        template_name = _template_name(config_hash)
+
+        # Concurrency: two test processes building the same spec at
+        # the same time would both miss, both install, both try to
+        # promote to a template with the same name.  The lock is
+        # keyed by config_hash so concurrent runs of *different*
+        # specs don't serialise on each other.
+        with vm_build_lock(config_hash):
+            template_vmid = _find_template(client, node, template_name)
+            if template_vmid is None:
+                _log.info(
+                    "vm %r: PVE template cache MISS for %s — installing",
+                    self.name, config_hash[:12],
+                )
+                template_vmid = self._install_and_template(
+                    context, cache, run,
+                    install_network_name=install_network_name,
+                    install_network_mac=install_network_mac,
+                    template_name=template_name,
+                    config_hash=config_hash,
+                )
+            else:
+                _log.info(
+                    "vm %r: PVE template cache HIT (%s, VMID %d) — "
+                    "skipping install",
+                    self.name, config_hash[:12], template_vmid,
+                )
+
+        self._template_vmid = template_vmid
+
+        # Clone for the run phase.  Each test run gets its own VMID;
+        # the template stays untouched.  ``full=0`` asks for a linked
+        # clone — fast on storage backends that support it (LVM-thin,
+        # ZFS, qcow2 file storage).  PVE rejects with a clear error
+        # on raw LVM / Ceph-no-snap; if you hit that, override the
+        # storage in your orchestrator config.
+        run_vmid = int(client.cluster.nextid.get())
+        self._vmid = run_vmid
+        clone_name = f"tr-{self.name[:10]}-{run.run_id[:8]}"
+        try:
+            clone_upid = client.nodes(node).qemu(template_vmid).clone.post(
+                newid=run_vmid,
+                name=clone_name,
+                full=0,
+            )
+            with log_duration(
+                _log, f"clone template {template_vmid} → VMID {run_vmid}",
+            ):
+                self._wait_for_task(
+                    client, node, clone_upid, timeout=600,
+                )
+        except Exception as exc:
+            # Best-effort cleanup of a partially-cloned VMID so the
+            # next run doesn't trip over an orphan.
+            try:
+                client.nodes(node).qemu(run_vmid).delete()
+            except Exception:
+                pass
+            self._vmid = None
+            raise VMBuildError(
+                f"VM {self.name!r}: clone of template {template_vmid} "
+                f"to VMID {run_vmid} failed: {exc}"
+            ) from exc
+
+        return str(run_vmid)
+
+    def _install_and_template(
+        self,
+        context: AbstractOrchestrator,
+        cache: CacheManager,
+        run: RunDir,
+        *,
+        install_network_name: str,
+        install_network_mac: str,
+        template_name: str,
+        config_hash: str,
+    ) -> int:
+        """Run the full install flow and convert the result to a PVE
+        template.  Returns the template's VMID.
+
+        The install VM is created with ``name=template_name`` from
+        the start so the find-template lookup picks it up after
+        promotion (no rename round-trip).
+        """
+        from testrange.vms.builders.cloud_init import build_seed_iso_bytes
+        from testrange.vms.images import resolve_image
+
+        client = _proxmox_client(context)
+        node = _proxmox_node(context)
+        storage = _proxmox_storage(context)
+
+        # 1. Resolve + upload the base qcow2.
         base_path = resolve_image(self.iso, cache)
         _log.info(
             "vm %r: base image at %s (%.0f MiB)",
             self.name, base_path, base_path.stat().st_size / 1024 / 1024,
         )
-
-        # 2. Upload to PVE ``local:import/``.
         import_filename = f"tr-{self.name}-{self._short_hash(base_path)}.qcow2"
-        self._import_filename = import_filename
         self._upload_disk_image(client, node, "local", base_path, import_filename)
 
-        # 3. Build + upload the cloud-init seed ISO.  Unlike the
-        # libvirt backend (which uses a DHCP-enabled install network
-        # for phase 1 and only configures static IPs in the phase-2
-        # seed), the Proxmox SDN subnets we create don't run DHCP —
-        # so the install seed has to carry the network-config too,
-        # otherwise the install-phase guest comes up with no IP and
-        # cloud-init can't reach package mirrors.  We synthesise
-        # ``mac_ip_pairs`` from the orchestrator-derived
-        # ``install_network_*`` plus this VM's own
-        # :class:`vNIC` entries so the seed pins the
-        # right IPs.
+        # 2. Build + upload the install-phase cloud-init seed.
+        # Static IPs go in here too — the SDN install network doesn't
+        # run DHCP, so the guest needs a network-config ISO to bring
+        # eth0 up at all.  See _build_install_mac_ip_pairs for the
+        # rationale.
         mac_ip_pairs = self._build_install_mac_ip_pairs(
             context, install_network_name, install_network_mac,
         )
-        config_hash = self.builder.cache_key(self)
         seed_bytes = build_seed_iso_bytes(
             meta_data=self.builder.install_meta_data(self, config_hash),
             user_data=self.builder.install_user_data(self),
             network_config=self.builder.run_network_config(mac_ip_pairs),
         )
-        seed_filename = f"tr-{self.name}-seed.iso"
-        self._seed_filename = seed_filename
-        self._upload_iso_bytes(client, node, "local", seed_bytes, seed_filename)
+        install_seed_filename = f"tr-template-{config_hash[:12]}-seed.iso"
+        self._upload_iso_bytes(
+            client, node, "local", seed_bytes, install_seed_filename,
+        )
 
-        # 4. Allocate VMID.
-        vmid = int(client.cluster.nextid.get())
-        self._vmid = vmid
-        _log.info("vm %r: allocated VMID %d", self.name, vmid)
+        # 3. Allocate the install VMID.
+        install_vmid = int(client.cluster.nextid.get())
+        _log.info(
+            "vm %r: allocated install VMID %d (template name %r)",
+            self.name, install_vmid, template_name,
+        )
 
-        # 5. POST /qemu with the install-phase config.
+        # 4. Create the install VM.  Use ``template_name`` as the PVE
+        # display name so the post-install ``qm template`` makes the
+        # name lookup work directly.
         params = self._install_qemu_params(
-            vmid=vmid,
+            vmid=install_vmid,
             storage=storage,
             import_filename=import_filename,
-            seed_filename=seed_filename,
+            seed_filename=install_seed_filename,
             install_network_name=install_network_name,
             install_network_mac=install_network_mac,
+            display_name=template_name,
         )
-        # ``qemu.post`` with ``import-from`` is async: PVE returns a
-        # UPID immediately and runs the import in a background task.
-        # If we start the VM before that task finishes, PVE either
-        # blocks the start until the import completes or fails with
-        # "qcow2 still locked".  Wait for the create/import task to
-        # report "stopped" (PVE's term for "done") before we start.
         try:
             create_upid = client.nodes(node).qemu.post(**params)
             with log_duration(
-                _log, f"create + import-disk for VMID {vmid}",
+                _log, f"create + import-disk for install VMID {install_vmid}",
             ):
                 self._wait_for_task(
                     client, node, create_upid, timeout=600,
                 )
         except Exception as exc:
-            self._cleanup_partial_create(client, node)
+            self._best_effort_delete(client, node, install_vmid)
             raise VMBuildError(
-                f"VM {self.name!r}: failed to create VMID {vmid}: {exc}"
+                f"VM {self.name!r}: failed to create install VMID "
+                f"{install_vmid}: {exc}"
             ) from exc
 
-        # 6. Start, wait for the start-task to complete (otherwise the
-        # next status poll races against the still-pending start and
-        # sees ``stopped`` from before the start kicked in), then poll
-        # until the guest powers itself off via cloud-init's
-        # ``power_state: poweroff``.
+        # 5. Boot, wait for cloud-init's power_state: poweroff.
         try:
-            start_upid = client.nodes(node).qemu(vmid).status.start.post()
+            start_upid = client.nodes(node).qemu(install_vmid).status.start.post()
             self._wait_for_task(client, node, start_upid, timeout=60)
             with log_duration(
-                _log, f"VMID {vmid} install-phase poweroff"
+                _log, f"install VMID {install_vmid} cloud-init poweroff"
             ):
                 self._wait_for_status(
-                    client, node, vmid, "stopped", _INSTALL_TIMEOUT_S,
+                    client, node, install_vmid, "stopped", _INSTALL_TIMEOUT_S,
                 )
         except Exception as exc:
-            self._cleanup_partial_create(client, node)
+            self._best_effort_delete(client, node, install_vmid)
             raise VMBuildError(
                 f"VM {self.name!r}: install phase failed: {exc}"
             ) from exc
 
-        return str(vmid)
+        # 6. Promote to template (irreversible — the VMID can no longer
+        # be started directly, only cloned).
+        try:
+            client.nodes(node).qemu(install_vmid).template.post()
+            _log.info(
+                "vm %r: promoted install VMID %d to template %r",
+                self.name, install_vmid, template_name,
+            )
+        except Exception as exc:
+            # Best-effort delete the half-promoted VMID — easier to
+            # rebuild from scratch than diagnose a partial template.
+            self._best_effort_delete(client, node, install_vmid)
+            raise VMBuildError(
+                f"VM {self.name!r}: promote VMID {install_vmid} to "
+                f"template failed: {exc}"
+            ) from exc
+
+        return install_vmid
 
     def start_run(
         self,
@@ -322,20 +461,82 @@ class ProxmoxVM(AbstractVM):
         network_entries: list[tuple[str, str]],
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> None:
-        """Boot the VMID, wait for SSH, attach the communicator.
+        """Configure the cloned VMID for this run, boot it, wait for
+        SSH, attach the communicator.
+
+        The clone inherited its NIC + cloud-init seed from the
+        template.  Both need replacing for the run phase: the NIC so
+        the VM lands on the run-phase SDN bridge with a fresh MAC,
+        and the seed so cloud-init re-runs (with a new instance-id)
+        and applies the run-phase static IP.  Without these, the
+        clone keeps the install-network NIC + install-time IP and
+        the SSH attach times out.
 
         :param installed_disk: VMID returned by :meth:`build`,
-            stringified.
+            stringified.  This is the cloned run-phase VMID, not
+            the template's.
+        :param network_entries: ``(backend_network_name, mac)`` per
+            NIC in the order they should attach.
         :param mac_ip_pairs: ``(mac, ip_with_cidr, gateway, dns)``
             per NIC.  At least one must carry a static IP — DHCP
             discovery is a future slice.
         """
+        from testrange.vms.builders.cloud_init import build_seed_iso_bytes
+
         client = _proxmox_client(context)
         node = _proxmox_node(context)
         vmid = int(installed_disk)
         self._vmid = vmid
         self._node = node
 
+        # 1. Build the phase-2 cloud-init seed.  Rotated instance-id
+        #    forces cloud-init to treat this as a new instance and
+        #    re-apply network-config; the run-phase ``mac_ip_pairs``
+        #    carry the static IPs the orchestrator allocated for
+        #    this run.
+        seed_bytes = build_seed_iso_bytes(
+            meta_data=self.builder.run_meta_data(self, run.run_id),
+            user_data=self.builder.run_user_data(self),
+            network_config=self.builder.run_network_config(mac_ip_pairs),
+        )
+        # Filename includes the run_id so concurrent runs of the same
+        # spec don't overwrite each other's phase-2 seed in the
+        # shared ``local:iso/`` storage.
+        phase2_filename = f"tr-{self.name[:10]}-{run.run_id[:8]}-seed.iso"
+        self._phase2_seed_filename = phase2_filename
+        try:
+            self._upload_iso_bytes(
+                client, node, "local", seed_bytes, phase2_filename,
+            )
+        except Exception as exc:
+            raise VMBuildError(
+                f"VM {self.name!r}: failed to upload phase-2 seed: {exc}"
+            ) from exc
+
+        # 2. Reconfigure the cloned VMID for the run phase:
+        #    - swap CD-ROM at ide2 from the install seed to the
+        #      phase-2 seed
+        #    - replace net0 with the run-phase NIC (new MAC, run
+        #      bridge).  ``network_entries[0]`` is the primary;
+        #      ``ProxmoxVM`` only handles single-NIC VMs in v1, but
+        #      future multi-NIC support extends here.
+        try:
+            config_updates: dict[str, Any] = {
+                "ide2": f"local:iso/{phase2_filename},media=cdrom",
+            }
+            if network_entries:
+                net_name, net_mac = network_entries[0]
+                config_updates["net0"] = (
+                    f"virtio={net_mac},bridge={net_name}"
+                )
+            client.nodes(node).qemu(vmid).config.put(**config_updates)
+        except Exception as exc:
+            raise VMBuildError(
+                f"VM {self.name!r}: failed to reconfigure clone "
+                f"VMID {vmid} for run phase: {exc}"
+            ) from exc
+
+        # 3. Start, wait for the start-task to complete.
         try:
             current = client.nodes(node).qemu(vmid).status.current.get()
             if current.get("status") != "running":
@@ -346,11 +547,13 @@ class ProxmoxVM(AbstractVM):
                 f"VM {self.name!r}: failed to start VMID {vmid}: {exc}"
             ) from exc
 
+        # 4. Wait for SSH on the configured static IP.  The cloud-init
+        #    re-run needs a few seconds to apply the new network-config
+        #    after boot — the existing _wait_for_ssh retry loop
+        #    tolerates that.
         host = self._resolve_communicator_host(mac_ip_pairs)
         self._wait_for_ssh(host, _RUN_BOOT_TIMEOUT_S)
         self._communicator = self._make_communicator(mac_ip_pairs)
-        # Force the SSH connection to establish so a busted communicator
-        # surfaces here rather than at the first user-facing exec().
         self._communicator.wait_ready()
         _log.info(
             "vm %r: VMID %d ready; SSH communicator attached at %s",
@@ -358,7 +561,9 @@ class ProxmoxVM(AbstractVM):
         )
 
     def shutdown(self) -> None:
-        """Stop the VMID and DELETE it.
+        """Stop and delete the per-run cloned VMID and its phase-2
+        seed ISO.  The cached PVE template + install seed are left
+        intact — they're shared cache state.
 
         Best-effort: errors are logged but never raised so this can
         be called from teardown paths.
@@ -386,40 +591,32 @@ class ProxmoxVM(AbstractVM):
         except Exception as exc:
             _log.warning("vm %r: stop VMID %d: %s", self.name, vmid, exc)
 
-        # Delete.
+        # Delete the clone (NOT the template — that's persistent
+        # cache state).
         try:
             client.nodes(node).qemu(vmid).delete()
         except Exception as exc:
             _log.warning("vm %r: delete VMID %d: %s", self.name, vmid, exc)
 
-        # Best-effort: clean up the staged import file too.  Leaving it
-        # behind is cheap (PVE keeps it as a reusable artifact in
-        # local:import/) but uncontrolled growth bothers operators.
-        if self._import_filename:
+        # Per-run phase-2 seed ISO.  The template's install seed
+        # stays; only this run's seed gets removed.
+        if self._phase2_seed_filename:
             try:
                 client.nodes(node).storage("local").content(
-                    f"local:import/{self._import_filename}",
+                    f"local:iso/{self._phase2_seed_filename}",
                 ).delete()
             except Exception as exc:
                 _log.debug(
-                    "vm %r: clean up import file %r: %s",
-                    self.name, self._import_filename, exc,
-                )
-        if self._seed_filename:
-            try:
-                client.nodes(node).storage("local").content(
-                    f"local:iso/{self._seed_filename}",
-                ).delete()
-            except Exception as exc:
-                _log.debug(
-                    "vm %r: clean up seed ISO %r: %s",
-                    self.name, self._seed_filename, exc,
+                    "vm %r: clean up phase-2 seed ISO %r: %s",
+                    self.name, self._phase2_seed_filename, exc,
                 )
 
         self._vmid = None
         self._node = None
-        self._import_filename = None
-        self._seed_filename = None
+        self._phase2_seed_filename = None
+        # Note: ``_template_vmid`` is intentionally not cleared —
+        # leaks no resources (templates persist across runs by
+        # design) and lets debuggers see what we cloned from.
 
     # ------------------------------------------------------------------
     # Orchestrator hooks
@@ -448,17 +645,23 @@ class ProxmoxVM(AbstractVM):
         seed_filename: str,
         install_network_name: str,
         install_network_mac: str,
+        display_name: str | None = None,
     ) -> dict[str, Any]:
         """Build the JSON body for ``POST /nodes/{node}/qemu``.
 
         The disk is created via ``import-from`` so PVE pulls the
         qcow2 out of ``local:import/`` into the target pool as a
         proper VM disk in one shot — no separate import step.
+
+        :param display_name: Override for the VM's PVE display name.
+            When the install VMID will be promoted to a template,
+            pass the template name here so the post-install
+            find-template lookup succeeds without a separate rename.
         """
         memory_mib = max(self._memory_mib(), 512)
         params: dict[str, Any] = {
             "vmid": vmid,
-            "name": self.name[:63],  # PVE name length limit
+            "name": (display_name or self.name)[:63],  # PVE name length limit
             "ostype": "l26",  # Linux 2.6+ — covers Debian 12
             "cores": self._vcpu_count(),
             "memory": memory_mib,
@@ -761,15 +964,14 @@ class ProxmoxVM(AbstractVM):
             f"SSH (TCP 22) on {host!r} not reachable within {timeout:.0f}s"
         )
 
-    def _cleanup_partial_create(self, client: Any, node: str) -> None:
-        """Best-effort tear-down of a half-created VMID + import file.
+    @staticmethod
+    def _best_effort_delete(client: Any, node: str, vmid: int) -> None:
+        """Stop + delete *vmid*, swallowing every error.
 
-        Called from the rollback paths in :meth:`build`; never raises
-        so the original error keeps propagating.
+        Used in the install-phase rollback paths so the original
+        :class:`VMBuildError` reaches the caller without being
+        masked by a teardown exception.
         """
-        if self._vmid is None:
-            return
-        vmid = self._vmid
         try:
             client.nodes(node).qemu(vmid).status.stop.post()
         except Exception:
@@ -778,10 +980,65 @@ class ProxmoxVM(AbstractVM):
             client.nodes(node).qemu(vmid).delete()
         except Exception as exc:
             _log.warning(
-                "vm %r: rollback delete VMID %d: %s",
-                self.name, vmid, exc,
+                "rollback delete VMID %d: %s", vmid, exc,
             )
-        self._vmid = None
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers for the PVE template cache.
+#
+# Templates persist across runs by design — they're the cache.  These
+# helpers find an existing template by name and compute the canonical
+# template name from a config hash.
+# ---------------------------------------------------------------------------
+
+
+_TEMPLATE_NAME_PREFIX = "tr-template-"
+"""Prefix that marks a VM as a TestRange-managed PVE template.
+
+Used by :func:`_template_name` to compute the canonical name from a
+config hash, and by ``ProxmoxOrchestrator.cleanup`` to decide which
+VMIDs are template cache (preserve) versus per-run clones (delete)."""
+
+
+def _template_name(config_hash: str) -> str:
+    """Return the canonical PVE template name for *config_hash*.
+
+    Trims the hash to 12 chars to leave headroom under PVE's 63-char
+    name limit while keeping collision risk negligible (12 hex chars
+    = 48 bits)."""
+    return f"{_TEMPLATE_NAME_PREFIX}{config_hash[:12]}"
+
+
+def _find_template(client: Any, node: str, name: str) -> int | None:
+    """Look up an existing PVE template by display name.
+
+    Returns the VMID if a VM with display name == *name* exists on
+    *node* and has ``template: 1`` in its config.  Returns ``None``
+    on miss.  A name match without the template flag is treated as
+    a miss (probably a half-promoted install that died) — the
+    caller will rebuild over it.
+    """
+    try:
+        vms = client.nodes(node).qemu.get()
+    except Exception as exc:
+        # If we can't list VMs, treat as miss and let the install
+        # path fail loudly with a more useful error.
+        _log.debug("template lookup: list-VMs failed: %s", exc)
+        return None
+    for vm in vms or []:
+        if vm.get("name") != name:
+            continue
+        if not vm.get("template"):
+            _log.warning(
+                "template lookup: VMID %s has matching name %r but is "
+                "not a template (template flag not set) — treating as "
+                "cache miss; install will overwrite",
+                vm.get("vmid"), name,
+            )
+            return None
+        return int(vm["vmid"])
+    return None
 
 
 __all__ = ["ProxmoxVM"]

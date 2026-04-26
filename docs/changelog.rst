@@ -8,6 +8,45 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+ProxMox VE template cache
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Added: PVE-template-as-cache for ``ProxmoxVM``.** ``build()``
+now looks up an existing PVE template named
+``tr-template-<config_hash[:12]>`` before doing anything; on a hit
+the install path is skipped entirely and the template is cloned
+into a fresh run VMID.  On a miss, the install runs, then
+``POST /qemu/{vmid}/template`` promotes the install VMID to a
+template that subsequent runs hit.  Cache key is the same hash the
+libvirt qcow2 cache uses — same spec, same hit, two physical
+caches.
+
+Phase-2 cloud-init seed: the cloned VMID inherits the install seed
++ install NIC from the template, both of which need replacing
+before the run-phase boot.  ``start_run()`` writes a phase-2 seed
+ISO with a rotated instance-id and the run-phase
+``mac_ip_pairs``, uploads it, and ``PUT``\ s the cloned VMID's
+config to swap ``ide2`` (install seed → phase-2 seed) and ``net0``
+(install NIC → run-phase NIC with fresh MAC + run bridge).
+Without the rotation cloud-init treats the clone as the same
+instance and skips applying the new network-config — VM keeps the
+install-network DHCP and SSH attach times out.
+
+Concurrency: a per-config-hash file lock around the find-template
++ install + promote sequence so two test processes building the
+same spec at the same time don't race to create duplicate
+templates.  Same lock primitive
+(:func:`~testrange._concurrency.vm_build_lock`) the libvirt
+backend uses.
+
+Cleanup symmetry: ``ProxmoxOrchestrator.cleanup(run_id)``
+reconstructs per-run clone names
+(``tr-<vm[:10]>-<run_id[:8]>``) + per-run phase-2 seed filenames
++ per-run SDN vnet names and deletes them.  Templates
+(``tr-template-*``) are explicitly preserved even if a name
+pattern match points at one — they're persistent cache state, the
+same way the libvirt qcow2 snapshot cache is.
+
 ProxMox VE install path
 ~~~~~~~~~~~~~~~~~~~~~~~
 
