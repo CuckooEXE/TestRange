@@ -4,7 +4,7 @@
 — the qemu project does not publish a Python library for image I/O, and
 no third-party PyPI package covers the create/convert/resize surface we
 need.  This module centralises the three subprocess invocations we make
-so the rest of the codebase reads like typed function calls.
+so the rest of the backend reads like typed function calls.
 
 All functions raise :class:`~testrange.exceptions.CacheError` on
 subprocess failure, with the tool's stderr included in the message.

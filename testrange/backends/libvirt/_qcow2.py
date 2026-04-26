@@ -1,4 +1,5 @@
-"""qcow2 operations via ``qemu-img``.
+"""qcow2 :class:`~testrange.storage.disk.AbstractDiskFormat` for the
+libvirt backend.
 
 Every method is a single ``qemu-img`` invocation routed through the
 transport's :meth:`~AbstractFileTransport.run_tool` — runs locally
@@ -6,16 +7,17 @@ against :class:`LocalFileTransport`, remotely against
 :class:`SSHFileTransport`, or anywhere else the transport reaches.
 
 The format knows nothing about transports beyond "here's an argv, run
-it."  That's the whole separation-of-concerns benefit of the two-axis
-decomposition: QEMU-specific tool arguments live here; transport
-specifics live in the transport.
+it."  That's the whole separation-of-concerns benefit of the storage
+layer's two-axis decomposition: the qcow2-specific tool arguments
+live here in the libvirt backend; transport specifics live in the
+generic transport.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from testrange.storage.disk._qemu_img import info as _qemu_img_info
+from testrange.backends.libvirt._qemu_img import info as _qemu_img_info
 from testrange.exceptions import CacheError, VMBuildError
 from testrange.storage.disk.base import AbstractDiskFormat
 
@@ -39,8 +41,8 @@ exceeds it is a real stall, not a normal tail."""
 class Qcow2DiskFormat(AbstractDiskFormat):
     """``qemu-img``-based qcow2 operations.
 
-    The qcow2 format ships with QEMU and is what the libvirt / KVM
-    family expects; Proxmox storage pools serve it natively too.
+    The qcow2 format is what the libvirt-backed hypervisor families
+    expect natively.
     """
 
     primary_disk_filename = "disk.qcow2"

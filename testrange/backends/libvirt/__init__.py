@@ -35,6 +35,7 @@ from testrange.backends.libvirt.orchestrator import (
     LibvirtOrchestrator,
     Orchestrator,
 )
+from testrange.backends.libvirt._qcow2 import Qcow2DiskFormat
 from testrange.backends.libvirt.storage import (
     LocalStorageBackend,
     SSHStorageBackend,
@@ -102,6 +103,7 @@ __all__ = [
     "LibvirtVM",
     "LocalStorageBackend",
     "Orchestrator",
+    "Qcow2DiskFormat",
     "SSHStorageBackend",
     "VirtualNetwork",
     "cli_build_orchestrator",

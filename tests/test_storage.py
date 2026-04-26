@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from testrange.exceptions import CacheError
+from testrange.backends.libvirt import Qcow2DiskFormat
 from testrange.backends.libvirt.storage import (
     LocalStorageBackend,
     SSHStorageBackend,
@@ -30,7 +31,6 @@ from testrange.backends.libvirt.storage import (
 from testrange.storage import (
     AbstractFileTransport,
     LocalFileTransport,
-    Qcow2DiskFormat,
     SSHFileTransport,
     StorageBackend,
 )

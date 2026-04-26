@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from testrange.backends.libvirt._qcow2 import Qcow2DiskFormat
 from testrange.storage.base import StorageBackend
-from testrange.storage.disk.qcow2 import Qcow2DiskFormat
 from testrange.storage.transport.local import LocalFileTransport
 from testrange.storage.transport.ssh import SSHFileTransport
 

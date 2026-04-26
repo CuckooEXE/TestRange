@@ -276,7 +276,7 @@ class TestStoreVm:
         src = tmp_cache_root / "work.qcow2"
         src.write_bytes(b"x")
 
-        from testrange.storage.disk import qcow2 as _qcow2_mod
+        from testrange.backends.libvirt import _qcow2 as _qcow2_mod
 
         def _boom(self: object, src_ref: str, dest_ref: str) -> None:
             # Simulate a compress that writes a partial file and then
