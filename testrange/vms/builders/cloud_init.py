@@ -114,10 +114,11 @@ class CloudInitBuilder(Builder):
         self.dnf_insecure = dnf_insecure
 
     def default_communicator(self) -> str:
-        """Linux images default to the QEMU guest agent channel.
+        """Linux images default to the host-mediated guest-agent channel.
 
-        Cloud-init always installs ``qemu-guest-agent`` as part of
-        :meth:`install_user_data`, so this is always available.
+        Cloud-init always installs the matching guest-agent package
+        as part of :meth:`install_user_data`, so this channel is
+        always available.
         """
         return "guest-agent"
 
@@ -394,7 +395,7 @@ def _runcmd_entries(
     # Verify cloud-init actually installed every native package.  If apt
     # (or dnf) hit a cert/mirror error, the ``packages:`` module logs
     # and moves on — without this check we'd cache a broken image and
-    # then hang in the run phase waiting on qemu-guest-agent.
+    # then hang in the run phase waiting on the guest-agent service.
     if native_packages:
         pkgs_sh = " ".join(_sh_quote(p) for p in native_packages)
         cmds.append(

@@ -52,10 +52,9 @@ def normalise_size(size: str) -> str:
     """Return the size string in the canonical ``<integer>G`` form used
     by every shipped backend's disk-sizing tools.
 
-    Converts to the nearest GiB integer with a ``G`` suffix.  This
-    form is widely accepted (libvirt's ``qemu-img``, proxmox storage
-    tools, Hyper-V's ``New-VHD``, …); backends that need a different
-    syntax can re-parse the canonical string.
+    Converts to the nearest GiB integer with a ``G`` suffix — the
+    form most disk-sizing tools accept directly; backends that need
+    a different syntax can re-parse the canonical string.
 
     :param size: Human-readable size string.
     :returns: String like ``'64G'``.

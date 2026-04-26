@@ -336,9 +336,10 @@ class TestOrchestratorOption:
         r = runner.invoke(main, ["run", "--help"])
         assert r.exit_code == 0
         assert "--orchestrator" in r.output
-        # URL examples appear inline in the help text.
-        assert "qemu:///system" in r.output
-        assert "proxmox://" in r.output
+        # The CLI help is backend-neutral and points at each
+        # backend module for the exact URL shape it accepts —
+        # we should NOT name specific backends here.
+        assert "testrange.backends" in r.output
 
     def test_unknown_scheme_rejected(
         self, runner: CliRunner, tmp_path: Path

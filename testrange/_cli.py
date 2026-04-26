@@ -27,15 +27,10 @@ from testrange.test import Test, run_tests
 
 _ORCHESTRATOR_HELP = (
     "Hypervisor backend URL.  Overrides the backend the test factory "
-    "constructed.  Examples:\n\n"
-    "\b\n"
-    "  --orchestrator qemu:///system\n"
-    "  --orchestrator qemu+ssh://alice@vmhost/system\n"
-    "  --orchestrator proxmox://TOKENID:SECRET@pve.example.com/pve01?storage=local-lvm\n"
-    "  --orchestrator proxmox://root:hunter2@pve.example.com\n"
-    "\n"
-    "Omit to keep the test's own orchestrator.  Each backend in "
-    ":mod:`testrange.backends` self-describes the URL shapes it accepts."
+    "constructed.  Each backend in :mod:`testrange.backends` "
+    "self-describes the URL shapes it accepts — see its module "
+    "docstring for the exact form.  Omit to keep the test's own "
+    "orchestrator."
 )
 
 
@@ -420,20 +415,12 @@ def _print_single_vm(
     :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`,
     appends an ``Inner networks`` + ``Inner VMs`` section.
     """
-    from testrange.backends.libvirt.devices import LibvirtHardDrive
     from testrange.devices import (
         AbstractHardDrive,
         AbstractVNIC,
         Memory,
         vCPU,
     )
-
-    def _drive_tag(d: AbstractHardDrive) -> str:
-        # NVMe is libvirt-specific; only the LibvirtHardDrive subclass
-        # carries the flag.  Generic HardDrive renders untagged.
-        if isinstance(d, LibvirtHardDrive) and d.nvme:
-            return " NVMe"
-        return ""
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
     vm_head = "└──" if is_last else "├──"
@@ -461,7 +448,7 @@ def _print_single_vm(
     ]
 
     disk_desc = (
-        ", ".join(f"{d.size}{_drive_tag(d)}" for d in drives)
+        ", ".join(f"{d.size}{d.display_tag()}" for d in drives)
         if drives else "20GB (default)"
     )
     pkg_desc = (
@@ -585,10 +572,9 @@ def repl_cmd(
         testrange repl examples/hello_world.py --test smoke
         testrange repl examples/two_networks_three_vms.py --keep
 
-    Use ``--orchestrator`` to point at a remote backend::
-
-        testrange repl tests \\
-            --orchestrator qemu+ssh://alice@vmhost/system
+    Use ``--orchestrator`` to point at a remote backend; the URL
+    format is documented in each backend module under
+    :mod:`testrange.backends`.
 
     The REPL prefers IPython if installed, otherwise falls back to the
     standard library's ``code.InteractiveConsole`` (works everywhere).

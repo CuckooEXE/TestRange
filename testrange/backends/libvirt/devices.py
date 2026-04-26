@@ -89,6 +89,14 @@ class LibvirtHardDrive(AbstractHardDrive):
         """``True`` iff :attr:`bus` is ``"nvme"``."""
         return self.bus == "nvme"
 
+    def display_tag(self) -> str:
+        """Surface NVMe in human-facing topology renders.
+
+        Other buses pick the backend's default rendering so the
+        topology view stays terse for the common case.
+        """
+        return " NVMe" if self.nvme else ""
+
     def resolved_bus(self, *, windows: bool = False) -> str:
         """Return the bus the backend should render for this drive.
 

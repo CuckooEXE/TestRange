@@ -5,17 +5,16 @@ Two-tier hierarchy:
 * :class:`AbstractHardDrive` — sealed abstract base.  Backend-specific
   drives subclass this directly so they're **siblings** of the
   generic :class:`HardDrive`, not children — that's the key to making
-  pyright catch ``LibvirtHardDrive`` being passed to a Proxmox VM (an
-  inheritance hierarchy would let the type check pass).
+  pyright catch one backend's drive being passed to another backend's
+  VM (an inheritance hierarchy would let the type check pass).
 * :class:`HardDrive` — the generic disk every backend accepts.  Just
   a size; the backend picks a sensible bus and other format-specific
   flags.  Use this when you want a portable spec.
 
-Backend-specific drives live in their backend module
-(``testrange.backends.libvirt.LibvirtHardDrive``,
-``testrange.backends.proxmox.ProxmoxHardDrive``, …) and expose
-backend-specific knobs (libvirt: bus / nvme; proxmox: storage pool /
-cache mode; …).
+Backend-specific drives live in each backend's module under
+``testrange.backends.<backend>`` and expose whatever extra knobs that
+backend's disk-attachment layer supports (bus selection, storage pool,
+cache mode, …).
 """
 
 from __future__ import annotations
@@ -53,16 +52,26 @@ class AbstractHardDrive(AbstractDevice):
         backends feed to their disk-sizing tools (e.g. ``'64G'``)."""
         return normalise_size(self.size)
 
+    def display_tag(self) -> str:
+        """Short label appended to this drive in human-facing renders
+        (the ``testrange show`` topology output, log lines).
+
+        Backend-specific drives override to surface their backend-
+        specific knobs (e.g. ``" NVMe"``, ``" cache=writeback"``).
+        Default returns the empty string — the generic
+        :class:`HardDrive` has nothing extra to advertise.
+        """
+        return ""
+
 
 class HardDrive(AbstractHardDrive):
     """Generic virtual hard drive — accepted by every backend.
 
     Carries only the fields every hypervisor needs (size).  Backends
     pick sensible defaults for bus, cache mode, and any format-
-    specific flags.  When you need backend-specific knobs, import the
-    backend's drive subclass instead — for example
-    :class:`testrange.backends.libvirt.LibvirtHardDrive` for libvirt's
-    bus selection and NVMe shortcut.
+    specific flags.  When you need backend-specific knobs, import
+    the matching ``<Backend>HardDrive`` subclass from that backend's
+    module instead.
 
     Multiple ``HardDrive`` entries in a VM's ``devices=[...]`` list
     attach multiple disks.  **The first entry is always the OS disk**

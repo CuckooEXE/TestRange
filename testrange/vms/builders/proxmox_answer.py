@@ -74,10 +74,10 @@ class ProxmoxAnswerBuilder(Builder):
         scope for v0 — override the builder and extend
         :meth:`build_answer_toml` if you need them.
     :param disk_device: Guest-visible device name the installer
-        partitions.  Defaults to ``"vda"`` — the libvirt backend
-        attaches the install disk as ``virtio-blk``, so it shows up as
-        ``/dev/vda`` inside the guest.  Override for backends that use
-        a different bus.
+        partitions.  Defaults to ``"vda"`` — virtio-blk attachments
+        (the cross-backend default) show up as ``/dev/vda`` inside
+        the guest.  Override for backends that attach the install
+        disk on a different bus.
     :param partition_label: Volume label the prepared installer
         searches for at install time to read ``answer.toml`` off a
         seed ISO.  Defaults to the stock ProxMox value,
@@ -85,14 +85,14 @@ class ProxmoxAnswerBuilder(Builder):
     :param uefi: If ``True`` (default), boot the install + run
         domains under OVMF (UEFI).  PVE installer media is hybrid
         BIOS + UEFI, but BIOS-mode GRUB (``i386-pc``) triple-faults
-        under SeaBIOS + q35 + SATA-CD — the specific combination the
-        libvirt backend generates for CD-ROMs.  UEFI sidesteps the
+        under SeaBIOS + q35 + SATA-CD — a combination some backends
+        generate by default for CD-ROMs.  UEFI sidesteps the
         problem by running through OVMF + ``x86_64-efi`` GRUB, which
         reads the ISO via ``EFI_BLOCK_IO_PROTOCOL`` instead of
         BIOS INT 13h.  Flip to ``False`` only if you're chasing a
         firmware-specific bug or provisioning a VM that must match
         a BIOS-only production layout — and be prepared for the
-        install to reboot-loop if your libvirt still attaches the
+        install to reboot-loop if your backend still attaches the
         CD on SATA.
     :param network_cidr_prefix: Prefix length to assume for a VM's
         static IP when emitting the ``[network]`` block.  Defaults
@@ -101,22 +101,21 @@ class ProxmoxAnswerBuilder(Builder):
     :param network_gateway: Explicit gateway IP.  Defaults to
         ``None`` → auto-derived as the first host of the VM's
         static-IP subnet (``.1``), which is the convention
-        TestRange's libvirt networks ship with.
+        TestRange's default networks ship with.
     :param network_dns: Explicit DNS server IP.  Defaults to
-        ``None`` → falls back to *network_gateway* (libvirt's
-        dnsmasq answers on the gateway).
+        ``None`` → falls back to *network_gateway* (the network's
+        DHCP/DNS service typically answers on the gateway).
     :param network_interface: Interface name the PVE installer's
         ``[network] filter.ID_NET_NAME`` matches against.  Defaults
         to ``"enp1s0"`` — systemd-udev's predictable name for
-        virtio-net on libvirt's q35 pcie-root-port slot 0x1, which
-        is what the libvirt backend assigns to the single NIC in
-        both install and run phases.  Filter must match a NIC
+        virtio-net on q35 pcie-root-port slot 0x1, the topology
+        TestRange's default-bus backends assign to the single NIC
+        in both install and run phases.  Filter must match a NIC
         *present during install* (PVE's installer validates this
         before writing config), and the written config references
         the NIC by name — so interface-name filtering is stable
         across the install-to-run MAC change.  Override for
-        multi-NIC layouts or non-libvirt backends with different
-        PCI topology.
+        multi-NIC layouts or backends with different PCI topology.
 
     .. note::
 
@@ -181,9 +180,9 @@ class ProxmoxAnswerBuilder(Builder):
         self.network_interface = network_interface
 
     def default_communicator(self) -> str:
-        """PVE installs ship OpenSSH on by default; the qemu-guest-agent
-        package isn't part of the base install, so SSH is the reliable
-        channel."""
+        """PVE installs ship OpenSSH on by default; the host-side
+        guest-agent socket isn't wired by the base install, so SSH is
+        the reliable channel."""
         return "ssh"
 
     def needs_boot_keypress(self) -> bool:
@@ -287,7 +286,7 @@ class ProxmoxAnswerBuilder(Builder):
         # needed.  The static config uses a MAC-filtered
         # ``[network]`` block in answer.toml, so the PVE installer's
         # generated ``/etc/network/interfaces`` matches whichever
-        # NIC TestRange's libvirt backend assigns at run time.
+        # NIC the backend assigns at run time.
         # Firmware family MUST match what install used; mismatched
         # OVMF vs SeaBIOS produces a disk that panics on boot.
         return RunDomain(seed_iso=None, uefi=self.uefi, windows=False)
@@ -314,15 +313,13 @@ class ProxmoxAnswerBuilder(Builder):
         #
         # reboot-mode = "power-off" is critical: it tells the
         # installer to POWER OFF (not reboot) after a successful
-        # install, which the libvirt backend's
-        # ``<on_poweroff>destroy</on_poweroff>`` turns into the
-        # SHUTOFF edge the install-phase wait loop keys on.  Without
-        # it, the default ``reboot`` mode would kick the domain
-        # back into the installer ISO and loop forever until the
-        # build timeout — and we can't use
-        # ``<on_reboot>destroy</on_reboot>`` as a workaround because
-        # early-boot failures also issue sysrq reboots, which would
-        # silently cache a blank disk.
+        # install, so the install-phase wait loop sees the SHUTOFF
+        # edge it keys on.  Without it, the default ``reboot`` mode
+        # would kick the VM back into the installer ISO and loop
+        # forever until the build timeout — and a reboot-as-poweroff
+        # backend hook isn't a workaround because early-boot failures
+        # also issue sysrq reboots, which would silently cache a
+        # blank disk.
         global_block = [
             f"country = {_toml_str(self.country)}",
             f"keyboard = {_toml_str(self.keyboard)}",
@@ -389,13 +386,13 @@ class ProxmoxAnswerBuilder(Builder):
         # the filter to match a NIC currently present during install
         # (it fails loud with "filter did not match any device" if
         # not), and the install-phase NIC has a different MAC than
-        # the run-phase NIC under TestRange (see
-        # ``testrange.backends.libvirt.network._mac_for_vm_network``'s
-        # use of ``"__install__"``).  Interface-name filtering
-        # sidesteps the mismatch: systemd-udev names virtio-net on
-        # libvirt's pcie-root-port 0x1 as ``enp1s0`` deterministically
-        # from the PCI path, so the install-phase NIC and the
-        # run-phase NIC share the name.  The written
+        # the run-phase NIC under TestRange (backends rotate the MAC
+        # to keep the install vs. test networks isolated).
+        # Interface-name filtering sidesteps the mismatch:
+        # systemd-udev names virtio-net on the standard q35
+        # pcie-root-port 0x1 as ``enp1s0`` deterministically from
+        # the PCI path, so the install-phase NIC and the run-phase
+        # NIC share the name.  The written
         # ``/etc/network/interfaces`` references the NIC by name
         # too, so the config applies cleanly at run time regardless
         # of the MAC change.

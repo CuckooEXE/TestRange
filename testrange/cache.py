@@ -33,8 +33,8 @@ built — and any backend may drop additional files alongside them
 snapshots, …) without the cache layer needing to know about them.
 The primary disk's filename is owned by the backend's disk format
 (see :attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`),
-so a backend that uses a non-qcow2 format produces the right
-extension automatically.  The ``manifest.json`` records the exact
+so each backend gets the right extension for its native format
+automatically.  The ``manifest.json`` records the exact
 set of modifications applied to the base image; inspect it with
 any JSON viewer to audit a cached build without booting it.
 
@@ -412,8 +412,8 @@ class CacheManager:
         """Return the local path to the virtio-win ISO, downloading once.
 
         Windows Setup can't see the virtio-blk / virtio-net / SCSI
-        devices QEMU exposes without these drivers.  The ISO also
-        bundles the ``qemu-guest-agent`` MSI installer, which our
+        devices the hypervisor presents without these drivers.  The
+        ISO also bundles the guest-agent MSI installer, which our
         autounattend ``FirstLogonCommands`` uses to bootstrap the
         guest-agent channel.
 
@@ -615,7 +615,7 @@ class CacheManager:
     ) -> str:
         """Return the backend-local ref for a cached UEFI NVRAM sidecar.
 
-        Lives alongside the qcow2 / manifest at
+        Lives alongside the primary disk + manifest at
         ``<vms_dir>/<config_hash>.nvram.fd``.  Absence means this VM
         was installed in BIOS mode (no NVRAM to preserve) or nothing
         has populated it yet for this hash.
@@ -636,12 +636,11 @@ class CacheManager:
 
         The installer writes EFI boot entries into NVRAM during
         install; without this snapshot those entries die with the
-        per-run NVRAM file (libvirt's
-        ``VIR_DOMAIN_UNDEFINE_NVRAM`` flag deletes it at teardown),
-        and run-phase UEFI comes up with an empty ``BootOrder``.
-        For distros that don't also write the removable-path
-        fallback (``/EFI/BOOT/BOOTX64.EFI``) that leaves the VM
-        hanging at an empty EFI shell.
+        per-run NVRAM file the backend deletes at teardown, and
+        run-phase UEFI comes up with an empty ``BootOrder``.  For
+        distros that don't also write the removable-path fallback
+        (``/EFI/BOOT/BOOTX64.EFI``) that leaves the VM hanging at
+        an empty EFI shell.
 
         Atomic: writes to a ``.partial`` sibling and renames on
         success, matching :meth:`store_vm`'s discipline.

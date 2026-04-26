@@ -130,14 +130,10 @@ class AbstractOrchestrator(ABC):
             :class:`~testrange.storage.StorageBackend` (transport +
             disk format) for this run.  When ``None`` (default) each
             backend infers a sensible default from *host* and its
-            own URL conventions — the libvirt backend picks
-            :class:`~testrange.storage.LocalStorageBackend` for
-            local URIs and :class:`~testrange.storage.SSHStorageBackend`
-            for ``qemu+ssh://``; other backends document their own
-            inference in their concrete subclass docstring.  Pass
-            explicitly when the auto-selection logic can't guess
-            (custom remote paths, a fake backend in tests, an
-            uncommon transport+format pairing).
+            own URL conventions; concrete subclasses document the
+            exact inference they perform.  Pass explicitly when the
+            auto-selection can't guess (custom remote paths, a fake
+            backend in tests, an uncommon transport+format pairing).
         """
         del host, networks, vms, cache_root, cache, cache_verify  # subclasses wire these
         del storage_backend
@@ -195,8 +191,8 @@ class AbstractOrchestrator(ABC):
 
         Each entry is a self-contained shell line (no chaining needed
         by the caller).  The default returns an empty list — backends
-        that can meaningfully advise on manual cleanup (virsh destroy,
-        ``qm destroy``, REST DELETE via curl, …) override this.
+        that can meaningfully advise on manual cleanup (a CLI tool's
+        destroy verb, REST DELETE via curl, …) override this.
         """
         return []
 

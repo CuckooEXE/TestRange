@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 _COMMUNICATOR_KINDS: tuple[str, ...] = ("guest-agent", "ssh", "winrm")
 """Legal values for the ``communicator=`` kwarg.  Shared across every
 backend — the transport kind is part of the hypervisor-neutral spec,
-not the libvirt-specific runtime."""
+not any backend-specific runtime."""
 
 
 class AbstractVM(ABC):

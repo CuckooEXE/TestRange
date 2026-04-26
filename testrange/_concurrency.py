@@ -64,7 +64,7 @@ def vm_build_lock(config_hash: str, timeout: float = 3600.0) -> BaseFileLock:
     Two concurrent tests whose VMs have identical iso/users/packages/
     post-install-commands/disk-size produce the same
     :func:`~testrange.cache.vm_config_hash` and therefore target the
-    same cached qcow2 file.  Without coordination they'd both run the
+    same cached image.  Without coordination they'd both run the
     full install phase in parallel and then race on the write side of
     the snapshot-compress step.
 

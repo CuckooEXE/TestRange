@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-# Connect/read timeouts.  PUT bodies can be multi-GiB qcow2s, so the
-# read timeout is per-chunk, not for the whole transfer.
+# Connect/read timeouts.  PUT bodies can be multi-GiB disk images,
+# so the read timeout is per-chunk, not for the whole transfer.
 _CONNECT_TIMEOUT_S = 10
 _READ_TIMEOUT_S = 60
 

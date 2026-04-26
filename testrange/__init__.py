@@ -88,8 +88,8 @@ from testrange.vms.generic import GenericVM
 # ``VM`` at the top level is the generic, backend-agnostic spec
 # (:class:`GenericVM`).  The orchestrator promotes it to its native
 # concrete type at provisioning time.  Users who want to pin a VM
-# to a specific backend reach for that backend's class explicitly
-# (``LibvirtVM``, future ``ProxmoxVM``, …).
+# to a specific backend reach for that backend's concrete class
+# directly from :mod:`testrange.backends`.
 VM = GenericVM
 from testrange.vms.builders import (
     Builder,
@@ -122,8 +122,7 @@ __all__ = [
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
     # Storage backends — generic composer.  Backend-flavoured pre-
-    # composed pairings (LocalStorageBackend / SSHStorageBackend
-    # for libvirt) live in their backend module.
+    # composed pairings live in their backend module.
     "StorageBackend",
     "AbstractStorageBackend",
     # Networks

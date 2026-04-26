@@ -2,7 +2,7 @@
 
 The install phase boots the Windows installer from the supplied ISO
 with an autounattend seed ISO attached.  Windows Setup partitions a
-blank qcow2, installs Windows, reboots into OOBE, and the
+blank disk, installs Windows, reboots into OOBE, and the
 FirstLogonCommands install virtio drivers, enable WinRM, run Winget
 packages, run any caller ``post_install_cmds``, and finally
 ``shutdown /s /t 0`` so the orchestrator can cache the disk.
@@ -160,7 +160,7 @@ class WindowsUnattendedBuilder(Builder):
         )
 
         # 4. virtio-win driver ISO so FirstLogonCommands can install
-        # NetKVM and the qemu-guest-agent MSI.  Same stage-to-backend
+        # NetKVM and the guest-agent MSI.  Same stage-to-backend
         # dance as the Windows ISO.
         local_virtio = cache.get_virtio_win_iso()
         virtio_iso_ref = cache.stage_source(local_virtio, run.storage)
@@ -391,7 +391,7 @@ def _first_logon_commands(
 ) -> list[str]:
     """Build the PowerShell command list for FirstLogonCommands.
 
-    Installs virtio drivers and the qemu-guest-agent MSI from the
+    Installs virtio drivers and the guest-agent MSI from the
     virtio-win ISO, opens WinRM for basic auth, runs Winget packages,
     runs caller-supplied ``post_install_cmds``, and finally powers the
     VM off so the orchestrator can snapshot the disk into the cache.
