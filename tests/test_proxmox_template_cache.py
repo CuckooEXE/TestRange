@@ -22,6 +22,7 @@ from testrange import Credential, Memory, vCPU, vNIC
 from testrange.backends.libvirt.storage import LocalStorageBackend
 from testrange.backends.proxmox.vm import (
     ProxmoxVM,
+    _delete_orphan_templates,
     _find_template,
     _template_name,
 )
@@ -413,3 +414,281 @@ class TestOrchestratorCleanupPreservesTemplates:
                 # Allowed: config.get().  Not allowed: delete().
                 pass
         client.nodes.return_value.qemu(555).delete.assert_not_called()
+
+
+# =====================================================================
+# _delete_orphan_templates — crash-recovery sweep
+# =====================================================================
+
+
+class TestDeleteOrphanTemplates:
+    """Sweep VMIDs whose display name matches a template name but
+    whose ``template`` flag isn't set — the footprint of an install
+    that died between create and ``qm template``."""
+
+    def _client_with_vms(self, vms: list[dict[str, Any]]) -> Any:
+        client = MagicMock()
+        client.nodes.return_value.qemu.get.return_value = vms
+        return client
+
+    def test_deletes_unflagged_name_match(self) -> None:
+        client = self._client_with_vms([
+            {"vmid": 700, "name": "tr-template-abc"},  # no template flag
+        ])
+        deleted = _delete_orphan_templates(client, "pve01", "tr-template-abc")
+        assert deleted == 1
+        client.nodes.return_value.qemu(700).delete.assert_called_once()
+
+    def test_skips_proper_templates(self) -> None:
+        """A real template with the same name is left alone — the
+        find-then-clone path will pick it up on the very next
+        lookup."""
+        client = self._client_with_vms([
+            {"vmid": 700, "name": "tr-template-abc", "template": 1},
+        ])
+        deleted = _delete_orphan_templates(client, "pve01", "tr-template-abc")
+        assert deleted == 0
+        client.nodes.return_value.qemu(700).delete.assert_not_called()
+
+    def test_skips_unrelated_names(self) -> None:
+        client = self._client_with_vms([
+            {"vmid": 700, "name": "something-else"},
+            {"vmid": 701, "name": "tr-template-other"},
+        ])
+        deleted = _delete_orphan_templates(client, "pve01", "tr-template-abc")
+        assert deleted == 0
+
+    def test_stops_orphan_before_delete(self) -> None:
+        """If the orphan is somehow still running (interrupted before
+        poweroff), stop it first so the delete doesn't fail with
+        VM-is-running."""
+        client = self._client_with_vms([
+            {"vmid": 700, "name": "tr-template-abc"},
+        ])
+        _delete_orphan_templates(client, "pve01", "tr-template-abc")
+        client.nodes.return_value.qemu(700).status.stop.post.assert_called()
+
+    def test_returns_zero_when_listing_fails(self) -> None:
+        """REST list call failing is logged and treated as 'no orphans
+        found' — the install path will surface the actual error."""
+        client = MagicMock()
+        client.nodes.return_value.qemu.get.side_effect = RuntimeError("nope")
+        assert _delete_orphan_templates(client, "pve01", "tr-template-x") == 0
+
+    def test_per_vmid_failure_does_not_raise(self) -> None:
+        """Best-effort: a delete failure is logged but never raises so
+        the caller (build()'s install path) can still proceed."""
+        client = MagicMock()
+        client.nodes.return_value.qemu.get.return_value = [
+            {"vmid": 700, "name": "tr-template-abc"},
+            {"vmid": 701, "name": "tr-template-abc"},
+        ]
+        # First delete fails, second succeeds.
+        delete_mock = client.nodes.return_value.qemu.return_value.delete
+        delete_mock.side_effect = [RuntimeError("PVE busy"), None]
+        deleted = _delete_orphan_templates(client, "pve01", "tr-template-abc")
+        # The second succeeded.
+        assert deleted == 1
+
+
+class TestBuildSweepsOrphansBeforeRetry:
+    """build()'s cache-miss path runs the sweep BEFORE attempting
+    install so a left-over orphan from a previous crash doesn't
+    block ``qm create`` with a duplicate display-name error."""
+
+    def test_orphan_sweep_called_on_cache_miss(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        vm = _vm()
+        client = MagicMock()
+        # Find-template miss.
+        client.nodes.return_value.qemu.get.return_value = []
+
+        sweep_calls: list[tuple[Any, str, str]] = []
+
+        def _spy_sweep(c, n, name):
+            sweep_calls.append((c, n, name))
+            return 0
+
+        # Patch on the module ProxmoxVM was actually loaded from —
+        # the scaffold test re-imports the proxmox package, so the
+        # name in sys.modules can drift from what this file's import
+        # captured.  Going through ProxmoxVM.__module__ keeps the
+        # patch glued to the real running code.
+        import sys as _sys
+        monkeypatch.setattr(
+            _sys.modules[ProxmoxVM.__module__],
+            "_delete_orphan_templates",
+            _spy_sweep,
+        )
+        # Short-circuit the whole install so we only assert sweep
+        # ordering, not the install's own behaviour.
+        monkeypatch.setattr(
+            ProxmoxVM, "_install_and_template",
+            lambda self, *a, **kw: 200,
+        )
+        # Clone path stubs.
+        client.cluster.nextid.get.return_value = 999
+        client.nodes.return_value.qemu.return_value.clone.post.return_value = (
+            "UPID:clone"
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_task", lambda *a, **kw: None,
+        )
+
+        run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
+        run.storage = LocalStorageBackend(Path("/tmp"))
+        vm.build(
+            context=MagicMock(_client=client, _node="pve01", _storage="local-lvm"),
+            cache=MagicMock(),
+            run=run,
+            install_network_name="install-net",
+            install_network_mac="52:54:00:01:02:03",
+        )
+
+        # Sweep was called once with the expected template name.
+        assert len(sweep_calls) == 1
+        _, node, name = sweep_calls[0]
+        assert node == "pve01"
+        assert name.startswith("tr-template-")
+
+    def test_orphan_sweep_skipped_on_cache_hit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """On a cache hit there's no install to re-run, so there's no
+        reason to sweep — and sweeping would risk deleting a name-
+        matched non-template the user might want to keep."""
+        vm = _vm()
+        client = MagicMock()
+        config_hash = vm.builder.cache_key(vm)
+        tname = _template_name(config_hash)
+        client.nodes.return_value.qemu.get.return_value = [
+            {"vmid": 100, "name": tname, "template": 1},
+        ]
+        client.cluster.nextid.get.return_value = 999
+        client.nodes.return_value.qemu.return_value.clone.post.return_value = (
+            "UPID:clone"
+        )
+
+        sweep_calls: list[Any] = []
+        # See sibling test for why we patch via ProxmoxVM.__module__.
+        import sys as _sys
+        monkeypatch.setattr(
+            _sys.modules[ProxmoxVM.__module__],
+            "_delete_orphan_templates",
+            lambda *a, **kw: sweep_calls.append(a) or 0,
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_task", lambda *a, **kw: None,
+        )
+
+        run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
+        run.storage = LocalStorageBackend(Path("/tmp"))
+        vm.build(
+            context=MagicMock(_client=client, _node="pve01", _storage="local-lvm"),
+            cache=MagicMock(),
+            run=run,
+            install_network_name="install-net",
+            install_network_mac="52:54:00:01:02:03",
+        )
+
+        assert sweep_calls == []
+
+
+# =====================================================================
+# build() — linked-then-full clone fallback
+# =====================================================================
+
+
+class TestCloneFallback:
+    """Linked clone is faster but only works on storage that supports
+    snapshots (LVM-thin, ZFS, qcow2 file).  On raw LVM / Ceph-without-
+    snapshots / NFS the linked-clone POST raises; we transparently
+    retry with full=1 so the run still succeeds."""
+
+    def _wire_clone(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        clone_post,
+    ) -> tuple[ProxmoxVM, MagicMock]:
+        vm = _vm()
+        client = MagicMock()
+        # Cache hit so we skip straight to the clone path.
+        config_hash = vm.builder.cache_key(vm)
+        tname = _template_name(config_hash)
+        client.nodes.return_value.qemu.get.return_value = [
+            {"vmid": 100, "name": tname, "template": 1},
+        ]
+        client.cluster.nextid.get.return_value = 999
+        client.nodes.return_value.qemu.return_value.clone.post = clone_post
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_task", lambda *a, **kw: None,
+        )
+        return vm, client
+
+    def test_uses_linked_clone_when_supported(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        clone_post = MagicMock(return_value="UPID:clone")
+        vm, client = self._wire_clone(monkeypatch, clone_post)
+        run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
+        run.storage = LocalStorageBackend(Path("/tmp"))
+        vm.build(
+            context=MagicMock(_client=client, _node="pve01", _storage="local-lvm"),
+            cache=MagicMock(),
+            run=run,
+            install_network_name="install-net",
+            install_network_mac="52:54:00:01:02:03",
+        )
+        # First (and only) clone attempt was full=0.
+        assert clone_post.call_count == 1
+        assert clone_post.call_args.kwargs["full"] == 0
+
+    def test_falls_back_to_full_when_linked_fails(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # First call raises (linked unsupported); second succeeds.
+        clone_post = MagicMock(
+            side_effect=[RuntimeError("storage refuses linked"), "UPID:clone"],
+        )
+        vm, client = self._wire_clone(monkeypatch, clone_post)
+        run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
+        run.storage = LocalStorageBackend(Path("/tmp"))
+        vm.build(
+            context=MagicMock(_client=client, _node="pve01", _storage="local-lvm"),
+            cache=MagicMock(),
+            run=run,
+            install_network_name="install-net",
+            install_network_mac="52:54:00:01:02:03",
+        )
+        # Two attempts: full=0 then full=1.
+        assert clone_post.call_count == 2
+        assert clone_post.call_args_list[0].kwargs["full"] == 0
+        assert clone_post.call_args_list[1].kwargs["full"] == 1
+        # newid + name preserved across both attempts.
+        assert (
+            clone_post.call_args_list[0].kwargs["newid"]
+            == clone_post.call_args_list[1].kwargs["newid"]
+        )
+
+    def test_full_clone_failure_raises_vmbuild_error(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from testrange.exceptions import VMBuildError
+        clone_post = MagicMock(
+            side_effect=[
+                RuntimeError("linked unsupported"),
+                RuntimeError("full also failed"),
+            ],
+        )
+        vm, client = self._wire_clone(monkeypatch, clone_post)
+        run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
+        run.storage = LocalStorageBackend(Path("/tmp"))
+        with pytest.raises(VMBuildError):
+            vm.build(
+                context=MagicMock(_client=client, _node="pve01", _storage="local-lvm"),
+                cache=MagicMock(),
+                run=run,
+                install_network_name="install-net",
+                install_network_mac="52:54:00:01:02:03",
+            )

@@ -126,13 +126,71 @@ Per-backend semantics:
   ``tr-build-<vm[:10]>-<runid[:8]>``, ``tr-<net[:6]>-<runid[:4]>``
   for each spec'd VM/network, plus the ephemeral install network
   ``tr-instal-<runid[:4]>``, plus the per-run scratch dir.
-* **Other backends** (Proxmox, Hyper-V) raise
+* **Proxmox.**  Destroys per-run clone VMIDs named
+  ``tr-<vm[:10]>-<runid[:8]>`` plus the SDN vnets named
+  ``<net[:4]><runid[:4]>`` for the run.  PVE templates
+  (``tr-template-<config_hash[:12]>``) are the install-once-clone-
+  many cache and are *never* touched by per-run cleanup — use
+  ``testrange proxmox-prune-templates`` to evict them
+  (see :ref:`proxmox-template-cache`).
+* **Other backends** (Hyper-V) raise
   :class:`NotImplementedError` until they wire their own
   :meth:`~testrange.orchestrator_base.AbstractOrchestrator.cleanup`.
 
 When in doubt, ``testrange cleanup`` is always the right first
 step before falling back to manual ``virsh destroy`` / ``qm
 destroy`` / equivalent.
+
+.. _proxmox-template-cache:
+
+Proxmox template cache
+~~~~~~~~~~~~~~~~~~~~~~
+
+The Proxmox backend caches the result of each VM install as a PVE
+template (``qm template``).  Subsequent runs for the same spec
+(same ``cache_key``) skip the install entirely and ``qm clone`` the
+template instead.  Templates persist across runs and across
+``testrange cleanup`` invocations on purpose — they're the
+expensive thing the cache exists to keep.
+
+To inspect and evict the template cache:
+
+.. code-block:: bash
+
+    # Show every TestRange-managed template on the node.
+    testrange proxmox-list-templates \
+        --orchestrator proxmox://root:pw@pve.example.com/pve01
+
+    # Delete every TestRange-managed template (full cache wipe).
+    # The next run for any spec will re-install from scratch.
+    testrange proxmox-prune-templates \
+        --orchestrator proxmox://root:pw@pve.example.com/pve01 \
+        --yes
+
+    # Or evict a specific template by display name.  --name is
+    # repeatable.
+    testrange proxmox-prune-templates \
+        --orchestrator proxmox://root:pw@pve.example.com/pve01 \
+        --name tr-template-deadbeefcafe \
+        --yes
+
+Both commands open their own PVE connection and do **not** require
+``__enter__`` — they're safe to run while a separate testrange run
+is in progress (the prune command refuses to touch active per-run
+clones since those don't carry the ``template`` flag).
+
+Crash-recovery sweep
+~~~~~~~~~~~~~~~~~~~~
+
+If a previous testrange process was killed mid-install — after
+``qm create`` but before ``qm template`` — the half-promoted VM
+gets left behind with the target template's display name but no
+``template`` flag.  On the next install attempt for the same spec
+the orchestrator detects this case via
+:func:`~testrange.backends.proxmox.vm._delete_orphan_templates` and
+sweeps the orphan automatically before retrying ``qm create``.  No
+operator action required, but the sweep is logged at WARNING so
+you can spot post-incident.
 
 Watching an install-phase VM
 ----------------------------

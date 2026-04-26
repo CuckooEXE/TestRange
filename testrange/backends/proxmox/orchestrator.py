@@ -84,6 +84,7 @@ from testrange.orchestrator_base import AbstractOrchestrator
 if TYPE_CHECKING:
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
+    from testrange.vms.generic import GenericVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
 _log = get_logger(__name__)
@@ -99,6 +100,30 @@ characters of headroom for users who want to override the default
 with a deployment-specific zone name (``"trtest"``, ``"trprod"``,
 …).  The default name itself is namespaced enough; it never conflicts
 with PVE's built-in zones (which all start with ``localnetwork``)."""
+
+
+def _promote_to_proxmox(vm: ProxmoxVM | "GenericVM") -> ProxmoxVM:
+    """Convert a backend-agnostic :class:`GenericVM` to the
+    proxmox backend's concrete :class:`ProxmoxVM`.
+
+    Field-for-field translation since GenericVM exists exactly to
+    be pluggable into any backend.  An already-ProxmoxVM input
+    passes through unchanged.  Symmetric with
+    :func:`testrange.backends.libvirt.orchestrator._promote_to_libvirt`.
+    """
+    from testrange.vms.generic import GenericVM as _GenericVM
+    if isinstance(vm, _GenericVM):
+        return ProxmoxVM(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,
+            builder=vm.builder,
+            communicator=vm.communicator,
+        )
+    return vm
 
 
 class ProxmoxOrchestrator(AbstractOrchestrator):
@@ -192,7 +217,11 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             "list[ProxmoxVirtualNetwork]",
             list(networks) if networks else [],
         )
-        self._vm_list = list(vms) if vms else []
+        # Promote any backend-agnostic GenericVM specs to ProxmoxVM
+        # up front so the rest of the orchestrator (and external
+        # readers of ``self._vm_list``) see only the backend-native
+        # type — same pattern as ``LibvirtOrchestrator._promote_to_libvirt``.
+        self._vm_list = [_promote_to_proxmox(v) for v in (vms or [])]
         self._cache_root = cache_root
         self._cache_url = cache
         self._cache_verify = cache_verify
@@ -384,37 +413,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         )
         from testrange.backends.proxmox.vm import _TEMPLATE_NAME_PREFIX
 
-        try:
-            from proxmoxer import ProxmoxAPI  # pyright: ignore[reportMissingImports]
-        except ImportError as exc:
-            raise OrchestratorError(
-                "ProxmoxOrchestrator.cleanup needs the ``proxmoxer`` "
-                "Python package — install with "
-                "``pip install testrange[proxmox]``."
-            ) from exc
-
-        client_kwargs = self._resolve_client_kwargs()
-        try:
-            client = ProxmoxAPI(self._host, **client_kwargs)
-        except Exception as exc:
-            raise OrchestratorError(
-                f"cleanup: cannot connect to PVE at {self._host!r}: {exc}"
-            ) from exc
-
-        # Resolve node — re-runs the same logic __enter__ uses so
-        # cleanup picks the same node the original run did.
-        try:
-            nodes = list(client.nodes.get())
-        except Exception as exc:
-            raise OrchestratorError(
-                f"cleanup: cannot list PVE nodes: {exc}"
-            ) from exc
-        try:
-            self._resolve_node(nodes)
-        except OrchestratorError:
-            raise
-        node = self._node
-        assert node is not None  # _resolve_node sets it or raises
+        client, node = self._open_admin_connection()
 
         # 1. Per-VM clones.  Reconstruct the clone name from
         #    (vm.name, run_id) — same formula ProxmoxVM.build uses
@@ -516,6 +515,101 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         except Exception:
             return False
         return bool(cfg.get("template"))
+
+    def list_templates(self) -> list[dict[str, Any]]:
+        """Return TestRange-managed PVE templates on the configured node.
+
+        Each entry is a ``{"vmid": int, "name": str}`` dict.  Names
+        always start with the
+        :data:`~testrange.backends.proxmox.vm._TEMPLATE_NAME_PREFIX`
+        prefix so accidental matches against operator-managed templates
+        are filtered out.
+
+        Used by ``testrange proxmox-list-templates`` to surface the
+        cache contents and by
+        :meth:`prune_templates` to enumerate eviction candidates.
+        Opens its own connection — does NOT call :meth:`__enter__`.
+        """
+        from testrange.backends.proxmox.vm import _TEMPLATE_NAME_PREFIX
+
+        client, node = self._open_admin_connection()
+        try:
+            vms = client.nodes(node).qemu.get()
+        except Exception as exc:
+            raise OrchestratorError(
+                f"list_templates: cannot list VMs on node {node!r}: {exc}"
+            ) from exc
+
+        return [
+            {"vmid": int(vm["vmid"]), "name": vm["name"]}
+            for vm in vms or []
+            if vm.get("template")
+            and vm.get("name", "").startswith(_TEMPLATE_NAME_PREFIX)
+        ]
+
+    def prune_templates(self, *, names: list[str] | None = None) -> int:
+        """Delete TestRange-managed PVE templates from the configured node.
+
+        :param names: Restrict the prune to templates with these
+            display names.  ``None`` (default) deletes every
+            ``tr-template-*`` VMID — careful with shared PVE hosts.
+        :returns: Number of templates actually deleted.
+        """
+        client, node = self._open_admin_connection()
+        candidates = self.list_templates()
+        if names is not None:
+            wanted = set(names)
+            candidates = [t for t in candidates if t["name"] in wanted]
+
+        deleted = 0
+        for tpl in candidates:
+            vmid = tpl["vmid"]
+            try:
+                client.nodes(node).qemu(vmid).delete()
+                _log.info(
+                    "prune: deleted template VMID %d (%r)",
+                    vmid, tpl["name"],
+                )
+                deleted += 1
+            except Exception as exc:
+                _log.warning(
+                    "prune: delete template VMID %d (%r) failed: %s",
+                    vmid, tpl["name"], exc,
+                )
+        return deleted
+
+    def _open_admin_connection(self) -> tuple[Any, str]:
+        """Open a proxmoxer connection + resolve the target node.
+
+        Shared between :meth:`cleanup`, :meth:`list_templates`, and
+        :meth:`prune_templates` — none of which need ``__enter__``'s
+        provisioning side effects but all need the same auth +
+        node-resolution dance.
+        """
+        try:
+            from proxmoxer import ProxmoxAPI  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:
+            raise OrchestratorError(
+                "ProxmoxOrchestrator: proxmoxer is required.  Install "
+                "with ``pip install testrange[proxmox]``."
+            ) from exc
+        client_kwargs = self._resolve_client_kwargs()
+        try:
+            client = ProxmoxAPI(self._host, **client_kwargs)
+        except Exception as exc:
+            raise OrchestratorError(
+                f"cannot connect to PVE at {self._host!r}: {exc}"
+            ) from exc
+        try:
+            nodes = list(client.nodes.get())
+        except Exception as exc:
+            raise OrchestratorError(
+                f"cannot list PVE nodes: {exc}"
+            ) from exc
+        self._resolve_node(nodes)
+        node = self._node
+        assert node is not None
+        return client, node
 
     def keep_alive_hints(self) -> list[str]:
         """Return cleanup commands for resources left behind by

@@ -261,22 +261,12 @@ class TestScenarioConstructionContract:
 
     @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
     def test_promotes_generic_vm_to_native(
-        self, orch_cls, vm_cls, net_cls, request,
+        self, orch_cls, vm_cls, net_cls,
     ) -> None:
         """GenericVM is the backend-agnostic spec; every orchestrator
         must convert it to its own native VM type at __init__ so the
-        rest of provisioning operates on backend-specific instances.
-
-        Proxmox is xfail until its orchestrator wires _promote_to_proxmox;
-        the test will turn green automatically when that happens, which
-        is the point — divergence detection."""
+        rest of provisioning operates on backend-specific instances."""
         del net_cls
-        if orch_cls is ProxmoxOrchestrator:
-            request.node.add_marker(pytest.mark.xfail(
-                reason="ProxmoxOrchestrator scaffolding doesn't promote "
-                       "GenericVM yet; xfail flips to pass when it does",
-                strict=True,
-            ))
 
         from testrange import GenericVM
         spec = _spec("web")
