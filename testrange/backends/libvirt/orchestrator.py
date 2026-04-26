@@ -25,7 +25,7 @@ import contextlib
 import ipaddress
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 from xml.etree import ElementTree as ET
 
 import libvirt
@@ -278,13 +278,16 @@ class Orchestrator(AbstractOrchestrator):
         if cache is not None:
             from testrange.cache_http import HttpCache  # noqa: PLC0415
             remote = HttpCache(cache, verify=cache_verify)
-        cache_kwargs: dict[str, Any] = {
-            "backend_name": self.backend_type(),
-            "remote": remote,
-        }
-        if cache_root:
-            cache_kwargs["root"] = cache_root
-        self._cache = CacheManager(**cache_kwargs)
+        self._cache = (
+            CacheManager(root=cache_root, remote=remote)
+            if cache_root
+            else CacheManager(remote=remote)
+        )
+        # The orchestrator owns the cache for its lifetime; tag it
+        # with our backend identity so HTTP-cache URL keys are
+        # namespaced correctly when more than one backend shares a
+        # remote.  Not user-facing.
+        self._cache.backend_name = self.backend_type()
         # Explicit override wins.  When ``None``, _select_storage_backend
         # inspects the libvirt URI at __enter__ and picks LocalStorage
         # for ``qemu:///system`` or SSHStorage for ``qemu+ssh://…``.

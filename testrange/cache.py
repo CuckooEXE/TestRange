@@ -23,16 +23,18 @@ Two things live in the cache, and nothing else:
         └── <config_hash>/                # one directory per cached VM
             ├── disk.qcow2                # primary post-install disk
             ├── manifest.json             # build manifest (what installed)
-            └── nvram.fd                  # UEFI variables (when applicable)
+            └── ...                       # backend-specific resources
 
 Each cached VM lives in its own directory under ``vms/`` so all of
-its **resources** — disk images, manifest, NVRAM, future per-VM config
-files, additional drives — sit together.  Multi-disk VMs extend
-naturally as ``disk-1.qcow2``, ``disk-2.qcow2``, etc.  The
-``manifest.json`` records the exact set of modifications applied to
-the base image (packages, user accounts, post-install shell commands,
-target disk size); inspect it with any JSON viewer to audit a cached
-build without booting it.
+its **resources** sit together.  Two are universal — the primary
+``disk.qcow2`` and the ``manifest.json`` describing how it was
+built — and any backend may drop additional files alongside them
+(extra drives, hypervisor-specific config blobs, firmware-state
+snapshots, …) without the cache layer needing to know about them.
+Multi-disk VMs extend naturally as ``disk-1.qcow2``,
+``disk-2.qcow2``, etc.  The ``manifest.json`` records the exact set
+of modifications applied to the base image; inspect it with any
+JSON viewer to audit a cached build without booting it.
 
 Ephemeral per-run scratch space (install-phase overlays, seed ISOs) is
 **not** part of the cache — see :class:`~testrange._run.RunDir`.
@@ -101,14 +103,6 @@ class CacheManager:
 
     :param root: Base directory for all cached data.  Defaults to
         ``/var/tmp/testrange/<user>`` (overridable via ``TESTRANGE_CACHE_DIR``).
-    :param backend_name: Short label identifying the hypervisor backend
-        this cache is being driven by (``"libvirt"``, ``"proxmox"``,
-        eventually ``"hyperv"``).  Used as the top-level prefix in the
-        :doc:`HTTP cache </usage/http_cache>` URL keyspace so a single
-        remote can serve multiple backends without artifact format
-        collisions.  The local layout doesn't include this prefix —
-        each backend's storage transport already provides its own
-        cache root.
     :param remote: Optional :class:`~testrange.cache_http.HttpCache`
         consulted as a second-tier fill source.  When set, base-image
         downloads and VM-snapshot lookups check the remote on local
@@ -127,7 +121,11 @@ class CacheManager:
     """Subdirectory holding per-VM resource directories (``<root>/vms``)."""
 
     backend_name: str
-    """Backend label used as the HTTP-cache URL prefix."""
+    """Top-level prefix added to remote-cache VM-resource URL keys so
+    one HTTP cache can serve multiple hypervisor backends without
+    artifact-format collisions.  Set by the orchestrator that owns
+    this CacheManager (the user never specifies it); defaults to
+    ``"local"`` for ad-hoc / test-direct construction."""
 
     remote: HttpCache | None
     """Optional second-tier remote cache; ``None`` disables it."""
@@ -135,13 +133,12 @@ class CacheManager:
     def __init__(
         self,
         root: Path = _DEFAULT_CACHE_ROOT,
-        backend_name: str = "local",
         remote: HttpCache | None = None,
     ) -> None:
         self.root = root
         self.images_dir = root / "images"
         self.vms_dir = root / "vms"
-        self.backend_name = backend_name
+        self.backend_name = "local"
         self.remote = remote
         self._ensure_dirs()
 
@@ -445,11 +442,14 @@ class CacheManager:
     # Per-VM resource layout.
     #
     # Each cached VM owns a directory ``<vms_dir>/<config_hash>/`` and
-    # all of its files — disk image, manifest, NVRAM, future per-VM
-    # configs, additional drives — live inside it.  Multi-disk VMs
-    # extend naturally as ``disk-1.qcow2``, ``disk-2.qcow2``, etc.
-    # The :doc:`HTTP cache </usage/http_cache>` URL keyspace mirrors
-    # this layout under a backend prefix.
+    # every file belonging to that VM — primary disk, manifest,
+    # any additional drives, plus whatever backend-specific blobs
+    # the hypervisor wants to keep alongside them — lives inside it.
+    # The cache layer only knows about the universal pair (disk +
+    # manifest); backends drop their own resources via
+    # :meth:`vm_resource_ref` with arbitrary names.  The
+    # :doc:`HTTP cache </usage/http_cache>` URL keyspace mirrors this
+    # layout under a per-orchestrator backend prefix.
     # ------------------------------------------------------------------
 
     DISK_RESOURCE = "disk.qcow2"
@@ -457,9 +457,6 @@ class CacheManager:
 
     MANIFEST_RESOURCE = "manifest.json"
     """Conventional filename of the build manifest."""
-
-    NVRAM_RESOURCE = "nvram.fd"
-    """Conventional filename of the cached UEFI variables blob."""
 
     def vm_dir(
         self,
@@ -486,10 +483,11 @@ class CacheManager:
 
         :param config_hash: Hash key from :func:`vm_config_hash`.
         :param resource: Filename inside the VM's directory.  Use the
-            ``DISK_RESOURCE`` / ``MANIFEST_RESOURCE`` / ``NVRAM_RESOURCE``
-            constants for the well-known ones, or pass an arbitrary
-            name for custom per-VM artifacts (additional disks,
-            backend-specific config blobs, etc.).
+            ``DISK_RESOURCE`` / ``MANIFEST_RESOURCE`` constants for
+            the universal ones, or pass an arbitrary name for
+            backend-specific resources (additional disks, hypervisor
+            config blobs, UEFI variable blobs — anything the backend
+            wants to keep in the per-VM directory).
         :param backend: Backend whose ``vms/`` dir hosts the VM.
         :returns: ``<transport.vms_dir>/<config_hash>/<resource>``.
         """
@@ -511,14 +509,6 @@ class CacheManager:
     ) -> str:
         """Convenience for ``vm_resource_ref(hash, MANIFEST_RESOURCE, backend)``."""
         return self.vm_resource_ref(config_hash, self.MANIFEST_RESOURCE, backend)
-
-    def vm_nvram_ref(
-        self,
-        config_hash: str,
-        backend: StorageBackend,
-    ) -> str:
-        """Convenience for ``vm_resource_ref(hash, NVRAM_RESOURCE, backend)``."""
-        return self.vm_resource_ref(config_hash, self.NVRAM_RESOURCE, backend)
 
     def _remote_vm_resource_key(
         self,

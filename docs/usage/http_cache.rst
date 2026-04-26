@@ -148,16 +148,21 @@ backends without artifact-format collisions::
 
     <backend>/vms/<config_hash>/disk.qcow2     # primary disk
     <backend>/vms/<config_hash>/manifest.json  # build manifest
-    <backend>/vms/<config_hash>/nvram.fd       # UEFI vars (when applicable)
-    <backend>/vms/<config_hash>/disk-1.qcow2   # additional drives, if any
+    <backend>/vms/<config_hash>/...            # backend-specific resources
 
 Where ``<backend>`` is ``libvirt``, ``proxmox``, eventually
 ``hyperv`` — the orchestrator's
-:meth:`~testrange.orchestrator_base.AbstractOrchestrator.backend_type`.
-This mirrors the per-VM-directory layout TestRange uses on the
-local filesystem (see :doc:`caching`); the backend prefix is added
-to the URL because the local layout is already namespaced by each
-backend's storage transport.
+:meth:`~testrange.orchestrator_base.AbstractOrchestrator.backend_type`,
+set by the orchestrator that owns the cache (the user never
+specifies it).  This mirrors the per-VM-directory layout TestRange
+uses on the local filesystem (see :doc:`caching`); the backend
+prefix is added to the URL because the local layout is already
+namespaced by each backend's storage transport.
+
+Backends drop additional resources into the same per-VM directory
+without the cache layer caring what they mean — extra drives
+(``disk-1.qcow2``…), hypervisor-specific config blobs,
+firmware-state snapshots.  ``vms/<hash>/`` is just a folder.
 
 Base images sit at the top level — they're upstream-keyed and
 backend-agnostic::
@@ -174,9 +179,11 @@ for the same URL or VM spec.
 Not yet on the remote
 ~~~~~~~~~~~~~~~~~~~~~
 
-* **NVRAM** (``<config_hash>/nvram.fd``) — UEFI installs still
-  cache it locally; a follow-up will mirror it as a peer resource
-  alongside ``disk.qcow2``.
+* **Backend-specific per-VM resources** beyond ``disk.qcow2`` and
+  ``manifest.json`` — backends store these locally today (e.g. the
+  libvirt backend keeps UEFI variables in the per-VM directory for
+  UEFI installs); a follow-up will mirror any extra files the
+  backend writes through :meth:`~testrange.cache.CacheManager.vm_resource_ref`.
 * **virtio-win.iso** and **staged Windows ISOs** — fetched
   upstream / staged locally as today.
 * **Proxmox prepared ISOs** — local-only; PVE-side caching is

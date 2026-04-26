@@ -168,11 +168,9 @@ class TestGetVm:
             c.vm_manifest_ref("abc", b)
             == str(tmp_cache_root / "vms" / "abc" / "manifest.json")
         )
-        assert (
-            c.vm_nvram_ref("abc", b)
-            == str(tmp_cache_root / "vms" / "abc" / "nvram.fd")
-        )
-        # Custom resource (e.g. additional disk on a multi-disk VM).
+        # Backends drop additional resources (extra disks, hypervisor-
+        # specific config blobs, …) into the same per-VM directory by
+        # passing an arbitrary name to vm_resource_ref.
         assert (
             c.vm_resource_ref("abc", "disk-1.qcow2", b)
             == str(tmp_cache_root / "vms" / "abc" / "disk-1.qcow2")

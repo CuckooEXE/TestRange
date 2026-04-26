@@ -145,9 +145,8 @@ def test_get_vm_fills_from_remote(tmp_cache: Path) -> None:
     remote.seed(f"libvirt/vms/{config_hash}/disk.qcow2", b"disk-bytes")
     remote.seed(f"libvirt/vms/{config_hash}/manifest.json", b'{"name": "vm"}')
 
-    cm = CacheManager(  # type: ignore[arg-type]
-        root=tmp_cache, backend_name="libvirt", remote=remote,
-    )
+    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm.backend_name = "libvirt"
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     ref = cm.get_vm(config_hash, backend)
@@ -160,9 +159,8 @@ def test_get_vm_fills_from_remote(tmp_cache: Path) -> None:
 def test_get_vm_remote_miss_returns_none(tmp_cache: Path) -> None:
     """No local + no remote = miss, no synthetic state left behind."""
     remote = _FakeRemote()
-    cm = CacheManager(  # type: ignore[arg-type]
-        root=tmp_cache, backend_name="libvirt", remote=remote,
-    )
+    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm.backend_name = "libvirt"
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     assert cm.get_vm("missing" + "0" * 17, backend) is None
@@ -177,9 +175,8 @@ def test_get_vm_remote_partial_hit_drops_orphan(tmp_cache: Path) -> None:
     remote.seed(f"libvirt/vms/{config_hash}/disk.qcow2", b"disk-bytes")
     # No manifest seeded.
 
-    cm = CacheManager(  # type: ignore[arg-type]
-        root=tmp_cache, backend_name="libvirt", remote=remote,
-    )
+    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm.backend_name = "libvirt"
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     assert cm.get_vm(config_hash, backend) is None
@@ -196,9 +193,8 @@ def test_store_vm_publishes_to_remote(
     """A successful store mirrors the disk + manifest to the remote
     under the configured backend's URL prefix."""
     remote = _FakeRemote()
-    cm = CacheManager(  # type: ignore[arg-type]
-        root=tmp_cache, backend_name="libvirt", remote=remote,
-    )
+    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm.backend_name = "libvirt"
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     # Stand in for the disk-format compress step: just copy the bytes.
@@ -224,9 +220,13 @@ def test_store_vm_publishes_to_remote(
 
 def test_remote_keys_include_backend_prefix() -> None:
     """Different backend_name values produce sibling URL keyspaces so
-    a single remote can serve multiple backends without collisions."""
-    libvirt_cm = CacheManager(backend_name="libvirt")
-    proxmox_cm = CacheManager(backend_name="proxmox")
+    a single remote can serve multiple backends without collisions.
+    backend_name is set by the orchestrator that owns the cache,
+    not by user code."""
+    libvirt_cm = CacheManager()
+    libvirt_cm.backend_name = "libvirt"
+    proxmox_cm = CacheManager()
+    proxmox_cm.backend_name = "proxmox"
     h = "x" * 24
     assert (
         libvirt_cm._remote_vm_resource_key(h, "disk.qcow2")

@@ -17,17 +17,22 @@ uses the same URL skips the download.
 the resulting disk is compressed with ``qemu-img convert -c`` and
 stored under a per-VM directory at
 ``<cache_root>/vms/<config_hash>/``.  Each cached VM owns a
-directory of *resources* — disk image, manifest, NVRAM (when
-applicable), additional drives — sitting together::
+directory of *resources* — two universal ones (the primary disk
+and the manifest) plus any backend-specific files the hypervisor
+keeps alongside them::
 
     <cache_root>/vms/<config_hash>/
     ├── disk.qcow2          # primary post-install disk
     ├── manifest.json       # build manifest (what installed)
-    ├── nvram.fd            # UEFI variables (UEFI installs only)
-    └── disk-1.qcow2 ...    # additional drives, if any
+    └── ...                 # backend-specific resources
 
-The ``manifest.json`` records exactly what went into the image —
-open it in any JSON viewer to audit a cached build.
+Backends drop additional files in the same directory using
+:meth:`~testrange.cache.CacheManager.vm_resource_ref` with an
+arbitrary name — additional drives (``disk-1.qcow2``, ``disk-2.qcow2``…),
+hypervisor-specific config blobs, firmware-state snapshots — without
+the cache layer needing to know what they mean.  The
+``manifest.json`` records exactly what went into the image; open
+it in any JSON viewer to audit a cached build.
 
 **Staged prebuilt (BYOI) images.**  When a VM is declared with
 ``builder=NoOpBuilder()`` the source qcow2 is content-hashed and
