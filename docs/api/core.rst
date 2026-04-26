@@ -69,9 +69,5 @@ Reference
 
 .. autofunction:: testrange.test.run_tests
 
-The abstract base class is documented in :doc:`backends`; the
-default libvirt implementation is below.
-
-.. autoclass:: testrange.backends.libvirt.Orchestrator
-   :members:
-   :show-inheritance:
+The abstract orchestrator base class and every shipped backend's
+concrete implementation are documented under :doc:`backends`.

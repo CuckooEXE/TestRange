@@ -4,8 +4,7 @@ Architecture
 TestRange's design philosophy in one sentence: **the entire project
 is abstract except in the backends**.  Generic code talks to
 abstract bases and protocols; concrete implementations of "how to
-talk to libvirt" / "how to talk to Proxmox" / "how to talk to
-Hyper-V" all live under :mod:`testrange.backends`.
+talk to <hypervisor>" all live under :mod:`testrange.backends`.
 
 This page walks the layers.  If you're confused why there's both a
 "cache" and a "rundir" and a "storage backend" and an "HTTP cache,"
@@ -18,13 +17,12 @@ Terminology
 
    Backend
        A concrete hypervisor integration.  Lives at
-       ``testrange.backends.<name>`` (e.g.
-       ``testrange.backends.libvirt``, ``testrange.backends.proxmox``).
-       A backend module exposes its own VM class
-       (``LibvirtVM``, ``ProxmoxVM``), orchestrator class
-       (``LibvirtOrchestrator``, ``ProxmoxOrchestrator``), network
-       class, etc., all subclassing the abstract bases.  Generic
-       code never imports from a backend directly; users do.
+       ``testrange.backends.<name>``.  Each backend module exposes
+       its own ``<Backend>VM``, ``<Backend>Orchestrator``,
+       ``<Backend>VirtualNetwork``, etc., all subclassing the
+       abstract bases.  Generic code never imports from a backend
+       directly; users do.  See :doc:`/api/backends` for the
+       shipped backend list.
 
    Generic class
        A backend-agnostic implementation that any backend accepts.
@@ -36,14 +34,12 @@ Terminology
 
    Backend-specific class
        A concrete subclass of a sealed abstract base, exposing
-       backend-specific knobs.  Example:
-       :class:`~testrange.backends.libvirt.LibvirtHardDrive` adds
-       libvirt's bus selector and NVMe shortcut to the generic
-       :class:`~testrange.HardDrive`.  Backend-specific classes are
-       **siblings** of the generic — both extend the same abstract
-       base directly.  That sibling-not-child relationship is what
-       makes the type checker reject one backend's class being passed
-       to another's VM.
+       backend-specific knobs (bus selection, storage pool, cache
+       mode, …).  Backend-specific classes are **siblings** of the
+       generic — both extend the same abstract base directly.  That
+       sibling-not-child relationship is what makes the type
+       checker reject one backend's class being passed to another's
+       VM.
 
    Sealed abstract base
        The abstract class that backend-specific siblings extend
@@ -63,8 +59,8 @@ Terminology
        output.
 
    Communicator
-       Runtime channel into a started VM.  The QEMU guest agent
-       (libvirt's default), SSH, or WinRM.  ``vm.exec(...)``,
+       Runtime channel into a started VM.  A host-mediated
+       guest-agent socket, SSH, or WinRM.  ``vm.exec(...)``,
        ``vm.get_file(...)``, etc. all delegate through the active
        communicator.
 
@@ -72,9 +68,9 @@ Terminology
        Owner of one test run's resources.  Constructs networks +
        VMs at ``__enter__``, hands them to the test function, tears
        everything down at ``__exit__``.  Each backend has its own
-       concrete orchestrator;
-       :class:`testrange.Orchestrator` aliases libvirt's as the
-       default.
+       concrete orchestrator; :class:`testrange.Orchestrator`
+       aliases the default-backend orchestrator (see
+       :doc:`/api/backends`).
 
 Storage and caching
 -------------------
@@ -89,8 +85,7 @@ where most of the "what is this?" questions cluster.
     │  ──────────────                                                │
     │  "How do I read+write bytes for the hypervisor?"               │
     │  Used by BOTH CacheManager and RunDir.                         │
-    │  Pre-composed pairings (LocalStorageBackend / SSHStorageBackend│
-    │  for libvirt) live in their backend module.                    │
+    │  Pre-composed pairings live in their backend module.           │
     └────────────────────────────────────────────────────────────────┘
                 │ underneath ↓               │ underneath ↓
     ┌──────────────────────────┐    ┌──────────────────────────┐
@@ -105,7 +100,7 @@ where most of the "what is this?" questions cluster.
     │  phase entirely          │    │   - install scratch disks│
     └────────┬─────────────────┘    │   - seed ISOs            │
              │                      │   - firmware state       │
-             │ optional fill        │     (NVRAM on libvirt)   │
+             │ optional fill        │     (UEFI NVRAM, …)      │
              ↓ source               └──────────────────────────┘
     ┌──────────────────────────┐
     │  HTTP cache              │
@@ -116,7 +111,7 @@ where most of the "what is this?" questions cluster.
     │  local CacheManager,     │
     │  prefixed by backend     │
     │  name in the URL         │
-    │  (libvirt/vms/<hash>/...)│
+    │  (<backend>/vms/<hash>/.)│
     └──────────────────────────┘
 
 What each one does
@@ -136,14 +131,14 @@ What each one does
    :class:`~testrange.storage.SSHFileTransport` (SFTP + remote
    exec).
 
-   Disk formats: :class:`~testrange.storage.Qcow2DiskFormat`
-   today; future ``VhdxDiskFormat`` for Hyper-V, etc.
+   Disk formats: each backend ships its own concrete
+   :class:`~testrange.storage.AbstractDiskFormat` implementation
+   under ``testrange.backends.<backend>``.
 
    **Pre-composed convenience pairings are backend-flavoured** —
-   :class:`testrange.backends.libvirt.LocalStorageBackend` is
-   ``Local + qcow2`` because libvirt reads qcow2.  A future Hyper-V
-   backend would publish ``HyperVLocalStorage = Local + VHDX`` in
-   its own backend module.
+   each backend that ships pre-composed pairings publishes them in
+   its own backend module so the format binding lines up with the
+   backend's native disk format.
 
 :class:`~testrange.cache.CacheManager` — **the persistent cache**
 
@@ -174,9 +169,9 @@ What each one does
      seed ISOs (built by :class:`~testrange.CloudInitBuilder`)
    - ``<vm>-unattend.iso`` — Windows autounattend seed (built by
      :class:`~testrange.WindowsUnattendedBuilder`)
-   - ``<vm>_VARS.fd`` — per-run UEFI NVRAM (libvirt; other
-     backends compose their own per-run firmware-state filenames
-     via :meth:`~testrange._run.RunDir.path_for`)
+   - per-run firmware-state files (e.g. UEFI NVRAM) — each backend
+     composes its own filenames via
+     :meth:`~testrange._run.RunDir.path_for`
 
    Created at ``__enter__``, deleted at ``__exit__``.  When a test
    process is killed (``kill -9``, OOM, host reboot) the dir is
@@ -189,8 +184,8 @@ What each one does
    by ``CacheManager`` as a second-tier fill source.  Local hit
    short-circuits; local miss checks the HTTP cache; HTTP miss
    does the cold install and publishes back.  Backend prefix in
-   the URL (``libvirt/vms/<hash>/disk.qcow2``) lets multiple
-   backends share one server without artifact collisions.
+   the URL (``<backend>/vms/<hash>/<primary-disk-filename>``) lets
+   multiple backends share one server without artifact collisions.
 
    Optional — opt in by passing ``cache="https://..."`` to the
    orchestrator.  Bundled in ``cache/`` as a docker-compose nginx
@@ -259,7 +254,6 @@ talks to abstract bases**.  Concrete behaviour lives in
 - An ``Orchestrator`` subclass of
   :class:`~testrange.orchestrator_base.AbstractOrchestrator`
 - A ``VM`` subclass of :class:`~testrange.vms.base.AbstractVM`
-  (e.g. :class:`~testrange.LibvirtVM`)
 - A ``VirtualNetwork`` subclass of
   :class:`~testrange.networks.base.AbstractVirtualNetwork`
 - Optionally: backend-specific device classes (siblings of
@@ -281,9 +275,10 @@ Adding a new backend is three things:
 The abstract surface is what every test author writes against.
 Pinning a test to one backend is opt-in (import the backend's
 concrete class explicitly) — the default
-:class:`~testrange.Orchestrator` /
-:class:`~testrange.VM` aliases give you the libvirt backend, but
-nothing in your test code is forced to know that.
+:class:`~testrange.Orchestrator` / :class:`~testrange.VM` aliases
+resolve to the project's default backend (see
+:doc:`/api/backends`), but nothing in your test code is forced to
+know that.
 
 The cross-backend test contract
 -------------------------------

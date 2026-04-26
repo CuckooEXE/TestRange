@@ -184,10 +184,9 @@ Not yet on the remote
 ~~~~~~~~~~~~~~~~~~~~~
 
 * **Backend-specific per-VM resources** beyond the primary disk
-  and ``manifest.json`` — backends store these locally today (the
-  libvirt backend, for instance, keeps firmware-state files in the
-  per-VM directory for UEFI installs); a follow-up will mirror any
-  extra files the backend writes through
+  and ``manifest.json`` — backends store these locally today
+  (firmware-state files for UEFI installs, etc.); a follow-up will
+  mirror any extra files the backend writes through
   :meth:`~testrange.cache.CacheManager.vm_resource_ref`.
 * **virtio-win.iso** and **staged Windows ISOs** — fetched
   upstream / staged locally as today.

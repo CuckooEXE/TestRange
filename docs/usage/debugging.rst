@@ -10,7 +10,7 @@ statements and re-run.
 would, then drops you into a Python REPL with the same names a test
 function receives:
 
-* ``orch`` — the started :class:`~testrange.backends.libvirt.Orchestrator`.
+* ``orch`` — the started :class:`~testrange.Orchestrator`.
 * ``vms`` — ``list[VM]``, in the order they were declared.
 * One binding per VM, named after the VM (e.g. ``web``, ``db``), so you
   can type ``web.exec([...])`` instead of ``orch.vms["web"].exec([...])``.
@@ -72,9 +72,12 @@ Keeping VMs alive after the REPL exits
 --------------------------------------
 
 By default the orchestrator's normal teardown runs when you ``exit()``
-or hit Ctrl-D. Pass ``--keep`` to skip teardown and print the libvirt
-domain/network names plus the run scratch dir, so you can keep poking
-with ``virsh``, ``ssh``, etc.:
+or hit Ctrl-D. Pass ``--keep`` to skip teardown and print the
+backend-resource names plus the run scratch dir, so you can keep
+poking with the backend's CLI, ``ssh``, etc.  The exact suggested
+cleanup commands are produced by the backend (each backend's
+:meth:`~testrange.orchestrator_base.AbstractOrchestrator.keep_alive_hints`
+returns the right verbs for its own toolchain) — example output:
 
 .. code-block:: console
 
@@ -83,15 +86,14 @@ with ``virsh``, ``ssh``, etc.:
    >>> exit()
 
    Run kept alive. To clean up manually:
-     Domains:  tr-web-abcdef12
+     VMs:      tr-web-abcdef12
      Networks: tr-net-abcd
      Run dir:  /tmp/testrange-run-abcdef12
    Suggested:
-     sudo virsh destroy tr-web-abcdef12 && sudo virsh undefine tr-web-abcdef12
-     sudo virsh net-destroy tr-net-abcd && sudo virsh net-undefine tr-net-abcd
+     <backend-specific cleanup commands>
      rm -rf /tmp/testrange-run-abcdef12
 
-Use ``--keep`` carefully — it leaks libvirt state if you forget to
+Use ``--keep`` carefully — it leaks backend state if you forget to
 clean up.
 
 Cleaning up after a SIGKILL'd run
@@ -199,17 +201,22 @@ Most of the time the orchestrator's install phase is a black box —
 the logs say "waiting for builder to finish and power off (timeout
 1800s)" and 15–30 minutes later the cached disk shows up.  When a
 Windows install misbehaves (answer file rejected, Setup stuck at a
-prompt) you need to *see the screen*.  Two complementary tools:
+prompt) you need to *see the screen*.  Two complementary tools.
 
-**Opt-in VNC** (``TESTRANGE_VNC=1``).  The default libvirt domain XML
-is headless (``<graphics>`` omitted, QEMU runs ``-display none``).
-Setting ``TESTRANGE_VNC=1`` in the environment of the ``testrange``
-process tells
-:func:`~testrange.backends.libvirt.VM._base_domain_xml` to attach a
-``<graphics type='vnc' listen='127.0.0.1' autoport='yes'/>`` plus a
-QXL video device.  The listener is pinned to ``127.0.0.1`` so nothing
-is exposed beyond the host.  Find the port with
-``virsh -c qemu:///system domdisplay <domain>``.
+.. note::
+
+   The shell snippets below use the CLI tools that ship with one
+   particular backend.  Other backends provide equivalent verbs
+   through their own CLI; check that backend's docs for the matching
+   commands.
+
+**Opt-in VNC** (``TESTRANGE_VNC=1``).  By default the backend
+defines a headless install-phase domain (no graphics device, no
+display).  Setting ``TESTRANGE_VNC=1`` in the environment of the
+``testrange`` process tells the backend to attach a VNC graphics
+device pinned to ``127.0.0.1`` plus a QXL video device, so nothing
+is exposed beyond the host.  Find the port via the backend's
+domain-display command.
 
 From a remote machine, tunnel the port over your existing SSH
 connection:

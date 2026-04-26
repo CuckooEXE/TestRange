@@ -67,9 +67,9 @@ it from whichever VM subclass instantiates the communicator.
 New VM backends
 ---------------
 
-Subclass :class:`~testrange.vms.base.AbstractVM` if you're
-integrating with something other than libvirt — say VirtualBox, or
-a cloud provider's VM API.  You need to:
+Subclass :class:`~testrange.vms.base.AbstractVM` to integrate with
+a new hypervisor — VirtualBox, a cloud provider's VM API, anything
+the existing backends don't cover.  You need to:
 
 1. Implement a ``name`` property returning the VM's human name.
 2. Implement ``shutdown()``.
@@ -77,11 +77,11 @@ a cloud provider's VM API.  You need to:
    :class:`~testrange.communication.base.AbstractCommunicator` by the
    time test code calls methods on the VM.
 
-The orchestrator doesn't assume libvirt — it calls ``vm.build(...)``
+The orchestrator is backend-agnostic — it calls ``vm.build(...)``
 and ``vm.start_run(...)`` if those exist, but the AbstractVM
 interface itself is just the runtime surface (``exec``, ``hostname``,
-file helpers, ``shutdown``).  For a non-libvirt backend you'd write
-your own driver logic that produces running VMs with a populated
+file helpers, ``shutdown``).  For a new backend you'd write your
+own driver logic that produces running VMs with a populated
 communicator, then pass those VMs to whatever subset of the
 orchestrator makes sense.
 
@@ -90,9 +90,10 @@ New virtual networks
 
 Subclass :class:`~testrange.networks.base.AbstractVirtualNetwork`
 and implement ``start`` / ``stop`` / ``bind_run`` / ``register_vm``
-/ ``backend_name``.  The network-XML generation in the libvirt
-subclass is a reasonable reference for what those calls need to
-produce.
+/ ``backend_name``.  The shipped backends'
+``<Backend>VirtualNetwork`` subclasses under
+:mod:`testrange.backends` are reasonable references for what those
+calls need to produce.
 
 Design principles
 -----------------

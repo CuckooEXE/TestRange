@@ -7,9 +7,9 @@ provisioning strategy — how the VM gets from ``iso=`` to a runnable
 disk image.  The VM delegates everything install-pipeline related to
 the builder: disk preparation, seed ISO generation, domain hints
 (UEFI, Windows device models, extra CD-ROMs), and cache key
-derivation.  The hints are *backend-neutral* — the libvirt backend
-renders them into domain XML; the Proxmox backend would render them
-into REST parameters.
+derivation.  The hints are *backend-neutral* — each backend renders
+them into its own native representation (domain XML, REST payload,
+PowerShell calls, …).
 
 Why a strategy object?
 ----------------------
@@ -70,7 +70,7 @@ Concrete builders
   install ISOs.  Generates an autounattend answer file, attaches the
   Windows ISO plus ``virtio-win.iso`` as CD-ROMs, runs Setup under
   OVMF/UEFI.  See :doc:`/usage/windows`.
-- :class:`~testrange.vms.builders.NoOpBuilder` — prebuilt qcow2
+- :class:`~testrange.vms.builders.NoOpBuilder` — prebuilt image
   (BYOI).  No install phase; the image is content-hash staged into
   the cache and booted from an overlay.  See :ref:`BYOI <byoi>`.
 - :class:`~testrange.vms.builders.ProxmoxAnswerBuilder` — ProxMox VE

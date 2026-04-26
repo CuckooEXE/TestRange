@@ -58,7 +58,7 @@ runnable disk image.  Four concrete builders ship today:
   ``from-dhcp`` mode freezes the install-phase lease as static
   config, which doesn't survive into the run-phase network.
 - :class:`~testrange.vms.builders.NoOpBuilder` — no install phase;
-  the user's qcow2 is already ready (BYOI, see :ref:`byoi`).
+  the user's image is already ready (BYOI, see :ref:`byoi`).
 
 The builder is auto-selected from ``iso=`` when you don't pass one.
 Override with ``builder=`` when you need to:
@@ -68,7 +68,7 @@ Override with ``builder=`` when you need to:
     VM(
         iso="/srv/golden/debian.qcow2",
         users=[...],
-        # No install phase — stage the qcow2 into the cache and boot it.
+        # No install phase — stage the image into the cache and boot it.
         builder=NoOpBuilder(),
     )
 
@@ -95,7 +95,7 @@ Bring your own image (BYOI)
 For images you already build elsewhere — Packer, Buildroot, a manual
 golden build — pass ``builder=NoOpBuilder()`` alongside the local path.
 TestRange skips the install phase entirely: no users are created, no
-packages installed, no post-install commands run.  The qcow2 is staged
+packages installed, no post-install commands run.  The image is staged
 into the cache and booted from an overlay as-is.
 
 .. code-block:: python
@@ -127,13 +127,13 @@ Rules for the :class:`NoOpBuilder`:
 - ``communicator="ssh"`` and ``communicator="winrm"`` (see
   :doc:`communication`) require at least one
   :class:`~testrange.devices.vNIC` with a static ``ip=``.
-  The orchestrator registers that IP as a libvirt DHCP reservation on
-  the MAC it assigns the NIC, so the VM comes up at the address you
-  declared.
+  The orchestrator pins that IP to the MAC it assigns the NIC
+  (via the backend's DHCP-reservation mechanism), so the VM comes
+  up at the address you declared.
 - ``communicator="guest-agent"`` (the Linux default) still works if
-  you installed ``qemu-guest-agent`` in the image — same interface as
-  a cloud-init VM, no network required.
-- Pass ``NoOpBuilder(windows=True)`` for a pre-built Windows qcow2:
+  you installed the matching guest-agent package in the image —
+  same interface as a cloud-init VM, no network required.
+- Pass ``NoOpBuilder(windows=True)`` for a pre-built Windows image:
   the run-phase domain gets UEFI firmware + SATA primary disk +
   e1000e NIC (matching what the Windows install path would have used)
   and the default communicator flips to ``"winrm"``.
@@ -141,10 +141,11 @@ Rules for the :class:`NoOpBuilder`:
 How the cache behaves
 ~~~~~~~~~~~~~~~~~~~~~
 
-The qcow2 you hand over is content-hashed (SHA-256) and staged into
-``<cache_root>/vms/byoi-<hash>.qcow2`` on first use.  Subsequent runs
-with the same file skip the copy.  Files already under the cache
-root are used in place.
+The image you hand over is content-hashed (SHA-256) and staged
+into ``<cache_root>/vms/byoi-<hash>.<ext>`` (where ``<ext>`` is
+the backend's native disk-format extension) on first use.
+Subsequent runs with the same file skip the copy.  Files already
+under the cache root are used in place.
 
 See ``examples/bring_your_own_image.py`` for an end-to-end walkthrough
 that bakes a golden image once and reuses it for BYOI runs.
@@ -255,7 +256,8 @@ Hardware (devices)
 like ``"200GB"`` / ``"1.5TiB"``.  **The first entry is always the OS
 disk** — the installer writes to it and the post-install snapshot is
 what the cache stores.  Any additional ``HardDrive`` entries are
-empty qcow2 data volumes, ephemeral per-run.
+empty data volumes (in the backend's native disk format),
+ephemeral per-run.
 
 Bus mapping:
 

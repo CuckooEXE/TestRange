@@ -2,11 +2,21 @@ Windows VMs
 ===========
 
 TestRange boots Linux and Windows guests through the same
-:class:`~testrange.backends.libvirt.Orchestrator` and the same
-:class:`~testrange.backends.libvirt.VM` spec, but the machinery underneath
-is different.  This page covers how the Windows build path differs
+:class:`~testrange.Orchestrator` and the same
+:class:`~testrange.VM` spec, but the machinery underneath is
+different.  This page covers how the Windows build path differs
 from the Linux flow and what you have to get right to make the
 one-command ``testrange run`` work end-to-end on a Windows guest.
+
+.. note::
+
+   Many implementation details below describe how a hypervisor
+   backend that builds Windows from an installer ISO has to wire
+   the install-phase domain (UEFI firmware, AHCI primary disk,
+   e1000e NIC, virtio-win driver CD-ROM, …).  Specific class
+   references resolve to whichever backend you're running; check
+   that backend's source under :mod:`testrange.backends` for the
+   exact wiring it ships.
 
 .. _linux-vs-windows:
 
@@ -64,7 +74,7 @@ How the Windows install phase works
 When you construct a VM with an ``iso=`` that looks like a Windows
 installer (matched by
 :func:`~testrange.vms.images.is_windows_image` — ``.iso`` + Windows-ish
-filename), :meth:`~testrange.backends.libvirt.VM.build` routes to the
+filename), :meth:`~testrange.vms.base.AbstractVM.build` routes to the
 Windows install path instead of the cloud-init one.  The path is:
 
 1. **Resolve + stage the installer ISO.**
@@ -91,17 +101,16 @@ Windows install path instead of the cloud-init one.  The path is:
    NetKVM/viostor/vioscsi/pvpanic drivers and the ``qemu-guest-agent``
    MSI that first-logon commands install.
 
-5. **Define a UEFI libvirt domain.**
-   ``<loader>`` points at ``/usr/share/OVMF/OVMF_CODE_4M.fd``;
-   ``<nvram template="OVMF_VARS_4M.fd">`` refers to a per-run copy in
-   the run scratch dir so OVMF variable writes don't leak between runs.
-   Four SATA devices are attached: the blank disk at ``sda``, the
-   **Windows install ISO at** ``sdb`` **(the bootable CD-ROM)**, then
-   ``virtio-win.iso`` at ``sdc``, and the autounattend seed at
-   ``sdd``.  The bootable CD-ROM is listed first so libvirt assigns
-   it ``bootindex=1`` when expanding ``<boot dev='cdrom'/>``; the
-   unattend seed is merely attached so Setup scans its volume for
-   ``autounattend.xml``.  NIC model is ``e1000e``.
+5. **Define a UEFI install-phase domain.**
+   The backend points the firmware loader at the OVMF code blob and
+   refers to a per-run NVRAM copy in the run scratch dir so OVMF
+   variable writes don't leak between runs.  Four SATA devices are
+   attached: the blank disk at ``sda``, the **Windows install ISO
+   at** ``sdb`` **(the bootable CD-ROM)**, then ``virtio-win.iso``
+   at ``sdc``, and the autounattend seed at ``sdd``.  The bootable
+   CD-ROM is listed first so the backend assigns it ``bootindex=1``;
+   the unattend seed is merely attached so Setup scans its volume
+   for ``autounattend.xml``.  NIC model is ``e1000e``.
 
 6. **Start the domain, spam spacebars past the 'Press any key' prompt.**
    Windows install ISOs show a ~5-second *Press any key to boot from
@@ -122,37 +131,38 @@ Windows install path instead of the cloud-init one.  The path is:
    ``VIR_DOMAIN_SHUTOFF`` exactly like the Linux path.
 
    The install-phase domain is wrapped in a ``try/finally`` so the
-   libvirt domain is always destroyed and undefined on exit — including
-   on ``KeyboardInterrupt``, timeout, or cache-write failure.
-   :class:`~testrange.backends.libvirt.Orchestrator.__enter__` catches
-   ``BaseException`` (not just ``Exception``) so Ctrl+C during the
-   30-minute install runs teardown before the interrupt propagates,
-   and the install domain is also stashed on the VM instance so
-   :meth:`~testrange.backends.libvirt.VM.shutdown` can clean it up as a
-   safety net.  Net result: no orphaned ``tr-build-winbox-*`` domains
-   under ``qemu:///system``.
+   backend always destroys and undefines it on exit — including on
+   ``KeyboardInterrupt``, timeout, or cache-write failure.
+   :meth:`~testrange.orchestrator_base.AbstractOrchestrator.__enter__`
+   catches ``BaseException`` (not just ``Exception``) so Ctrl+C
+   during the 30-minute install runs teardown before the interrupt
+   propagates, and the install domain is also stashed on the VM
+   instance so :meth:`~testrange.vms.base.AbstractVM.shutdown` can
+   clean it up as a safety net.  Net result: no orphaned
+   ``tr-build-winbox-*`` resources left behind on the host.
 
 8. **Compress + cache.**  The installed disk is written to
-   ``<cache_root>/vms/<config_hash>.qcow2`` with a matching ``.json``
-   manifest.  Subsequent runs overlay this cached disk and boot
-   directly into Windows.
+   ``<cache_root>/vms/<config_hash>/<primary-disk-filename>`` with a
+   matching ``manifest.json``.  Subsequent runs overlay this cached
+   disk and boot directly into Windows.
 
 How the Windows run phase works
 -------------------------------
 
 Once a cached disk exists,
-:meth:`~testrange.backends.libvirt.VM.start_run` creates a qcow2 overlay on
-it and boots a UEFI domain (no autounattend, no install ISO, no
-virtio-win ISO attached).  The NVRAM is per-run scratch so Windows can
-update UEFI vars without leaking between tests.  The orchestrator
-constructs a :class:`~testrange.communication.winrm.WinRMCommunicator`
-pointed at the first static IP on the VM's
-:class:`~testrange.devices.vNIC` and waits for port 5985
-to answer.  From there your test function uses the normal
+:meth:`~testrange.vms.base.AbstractVM.start_run` creates a copy-on-
+write overlay on it and boots a UEFI domain (no autounattend, no
+install ISO, no virtio-win ISO attached).  The NVRAM is per-run
+scratch so Windows can update UEFI vars without leaking between
+tests.  The orchestrator constructs a
+:class:`~testrange.communication.winrm.WinRMCommunicator` pointed
+at the first static IP on the VM's
+:class:`~testrange.devices.vNIC` and waits for port 5985 to
+answer.  From there your test function uses the normal
 :meth:`~testrange.vms.base.AbstractVM.exec` /
 :meth:`~testrange.vms.base.AbstractVM.get_file` /
-:meth:`~testrange.vms.base.AbstractVM.put_file` helpers; WinRM is the
-transport instead of the QEMU guest agent.
+:meth:`~testrange.vms.base.AbstractVM.put_file` helpers; WinRM is
+the transport instead of the host-mediated guest agent.
 
 Writing a Windows VM spec
 -------------------------
@@ -197,9 +207,9 @@ Things to notice:
   support DHCP-lease discovery; see :doc:`communication`).
 
 The ``winrm`` communicator is selected automatically when ``iso=``
-points at a Windows ISO.  For a prebuilt Windows qcow2 pass
-``builder=NoOpBuilder(windows=True)`` — the ``windows=`` flag propagates
-UEFI / SATA / e1000e / WinRM defaults to the run phase.
+points at a Windows ISO.  For a prebuilt Windows image pass
+``builder=NoOpBuilder(windows=True)`` — the ``windows=`` flag
+propagates UEFI / SATA / e1000e / WinRM defaults to the run phase.
 
 Prerequisites
 -------------
@@ -248,7 +258,7 @@ Tuning the unattend
 :class:`~testrange.vms.builders.WindowsUnattendedBuilder` accepts
 ``product_key=``, ``ui_language=``, and ``timezone=`` keyword
 arguments.  They aren't exposed on
-:class:`~testrange.backends.libvirt.VM` yet — if you need them, subclass
+:class:`~testrange.VM` yet — if you need them, subclass
 the VM or use the builder directly and set the XML into a custom
 autounattend ISO before orchestrating.  That's a v1 gap we'll close
 when there's demand.
@@ -290,16 +300,16 @@ Install hangs at ``Press any key to boot from CD or DVD``
   spacebars for 30 seconds after the install domain boots (see
   :meth:`~testrange.vms.builders.base.Builder.needs_boot_keypress`).
   If you see this symptom on a run-phase boot the install phase did
-  not complete cleanly last time — check the cached manifest at
-  ``<cache_root>/vms/<hash>.json`` and delete the matching
-  ``<hash>.qcow2`` if necessary.
+  not complete cleanly last time — check the cached manifest under
+  ``<cache_root>/vms/<hash>/manifest.json`` and delete the matching
+  cached primary disk if necessary.
 
 Install drops to a UEFI shell (``Shell>``)
   OVMF tried every boot target and found nothing bootable.  Almost
   always means the Windows ISO isn't the first CD-ROM in the device
   list — a regression in this area would break the
   ``<boot dev='cdrom'/>`` → ``bootindex=1`` assignment (see
-  :func:`~testrange.backends.libvirt.VM._base_domain_xml` and the
+  the backend's base domain XML helper and the
   ``test_bootable_cdrom_is_first`` regression test).
 
 ``Can't read product key from the answer file``
@@ -314,12 +324,13 @@ Install drops to a UEFI shell (``Shell>``)
   Either (a) Windows finished Setup but FirstLogonCommands didn't
   enable WinRM, (b) the static IP on the
   :class:`~testrange.devices.vNIC` doesn't match what the
-  guest's DHCP client was handed (libvirt dnsmasq reservations need
-  the MAC to match — ``register_vm`` computes a deterministic MAC),
-  or (c) the Windows Firewall is still blocking 5985 because the
-  network profile is ``Public`` and the ``-SkipNetworkProfileCheck``
-  flag on ``Enable-PSRemoting`` didn't take.  Connect with
-  ``virt-viewer`` on the host to inspect.
+  guest's DHCP client was handed (the backend's bridge-local DHCP
+  reservation needs the MAC to match — ``register_vm`` computes a
+  deterministic MAC), or (c) the Windows Firewall is still blocking
+  5985 because the network profile is ``Public`` and the
+  ``-SkipNetworkProfileCheck`` flag on ``Enable-PSRemoting`` didn't
+  take.  Connect with the backend's console viewer on the host to
+  inspect.
 
 End-to-end example
 ------------------

@@ -7,10 +7,13 @@ flows through an
 :class:`~testrange.communication.base.AbstractCommunicator`.  Three
 concrete backends ship in-tree:
 
-:class:`~testrange.backends.libvirt.GuestAgentCommunicator`
-    The default for Linux guests.  Speaks QEMU Guest Agent JSON over
-    a ``virtio-serial`` channel.  Requires no TCP exposure from the
-    VM, which is why it works on fully isolated networks.
+Each backend's ``<Backend>GuestAgentCommunicator``
+    The default for Linux guests.  Speaks the guest-agent JSON
+    protocol over a ``virtio-serial`` channel managed by the
+    backend's host-side socket.  Requires no TCP exposure from the
+    VM, which is why it works on fully isolated networks.  Each
+    backend ships its own concrete subclass under
+    ``testrange.backends.<backend>``.
 
 :class:`~testrange.communication.ssh.SSHCommunicator`
     Fallback for situations where the guest-agent channel isn't
@@ -67,11 +70,11 @@ All three communicators return
 Readiness
 ---------
 
-:meth:`~testrange.backends.libvirt.GuestAgentCommunicator.wait_ready`
-polls ``guest-ping`` until the channel opens, with libvirt's default
-"agent not connected" stderr noise suppressed during the poll loop
-(real errors from other code paths are unaffected).  The orchestrator
-calls this once per VM after ``domain.create()``; tests never need
+The backend's guest-agent communicator implements ``wait_ready``,
+which polls ``guest-ping`` until the channel opens (with backend-
+side "agent not connected" stderr noise suppressed during the poll
+loop — real errors from other code paths are unaffected).  The
+orchestrator calls this once per VM after start; tests never need
 to invoke it.
 
 Reference
@@ -85,10 +88,6 @@ Reference
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.backends.libvirt.GuestAgentCommunicator
-   :members:
-   :show-inheritance:
-
 .. autoclass:: testrange.communication.ssh.SSHCommunicator
    :members:
    :show-inheritance:
@@ -96,3 +95,6 @@ Reference
 .. autoclass:: testrange.communication.winrm.WinRMCommunicator
    :members:
    :show-inheritance:
+
+Backend-specific guest-agent communicators are documented under
+:doc:`backends`.

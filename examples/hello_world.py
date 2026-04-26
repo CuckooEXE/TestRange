@@ -1,9 +1,9 @@
 """Smallest possible TestRange example: one VM, one assertion.
 
 Spins up a Debian VM on a NAT network, runs ``uname -r`` over the
-QEMU guest agent, and asserts the kernel string looks like a Linux
-kernel version.  Cache-hits on the second run so the whole thing
-takes a few seconds.
+guest-agent channel, and asserts the kernel string looks like a
+Linux kernel version.  Cache-hits on the second run so the whole
+thing takes a few seconds.
 
 Run with::
 
@@ -29,8 +29,9 @@ from testrange import (
 def smoke(orch: Orchestrator) -> None:
     vm = orch.vms["hello"]
 
-    # exec() runs a command via the QEMU guest agent and returns a
-    # (exit_code, stdout, stderr) NamedTuple.
+    # exec() runs a command via the configured communicator (default
+    # guest-agent on Linux) and returns a (exit_code, stdout, stderr)
+    # NamedTuple.
     result = vm.exec(["uname", "-r"])
     result.check()
 

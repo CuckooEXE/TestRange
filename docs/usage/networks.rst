@@ -4,9 +4,8 @@ Networks
 TestRange networks describe an isolated network segment for a test
 run.  Three boolean flags shape the topology; each can be toggled
 independently.  The concrete realisation depends on the hypervisor
-backend — under the default libvirt backend each network becomes a
-libvirt-managed bridge with dnsmasq-served DHCP and DNS; under
-Proxmox it would map to an SDN vnet (see :doc:`/api/backends`).
+backend — see :doc:`/api/backends` for the per-backend mapping
+(host-managed bridges with bridge-local DHCP/DNS, SDN vnets, …).
 
 Topology flags
 --------------
@@ -20,18 +19,19 @@ Topology flags
      - ``False``
    * - ``internet``
      - NAT forwarding to the host's default route.  Guests can reach
-       the public internet.  Libvirt installs MASQUERADE iptables
+       the public internet.  The backend installs the forwarding
        rules when the network starts and tears them down on stop.
      - No forwarding rules.  Guests on this bridge can only talk to
        each other.  Useful for asserting that a service works (or
        correctly fails) without internet access.
    * - ``dhcp``
-     - dnsmasq hands out DHCP leases.  NICs without an explicit
-       ``ip=`` get a deterministic address via MAC reservation.
+     - The backend's bridge-local DHCP service hands out leases.
+       NICs without an explicit ``ip=`` get a deterministic address
+       via MAC reservation.
      - No DHCP.  Every ``vNIC`` attached to this network
        must pass ``ip="..."``; the orchestrator raises otherwise.
    * - ``dns``
-     - dnsmasq listens on port 53 on the bridge IP and resolves
+     - The backend's bridge-local DNS service resolves
        ``<vmname>.<netname>`` for every VM registered on the
        network.  The network name acts as a pseudo-TLD — from the
        ``client`` VM, ``curl http://webpublic.Internet/`` reaches the
@@ -39,8 +39,8 @@ Topology flags
        Bare ``<vmname>`` is intentionally *not* registered; it
        forces every cross-VM lookup to spell out which network the
        name lives on.
-     - dnsmasq runs with ``--port=0`` — DHCP only, no DNS socket.
-       Useful when the host has its own dnsmasq bound wildcard (see
+     - DNS is disabled — DHCP only.  Useful when the host has its
+       own DNS service bound wildcard (see
        :doc:`/usage/installation` for the coexistence note).
 
 Typical recipes
@@ -80,14 +80,15 @@ Static IPs
 ----------
 
 Passing ``vNIC("NetA", ip="10.0.0.5")`` registers that
-MAC/IP pair as a dnsmasq reservation (if DHCP is on) and writes it
-into the guest's cloud-init network-config.  Two consequences:
+MAC/IP pair with the backend's DHCP/DNS service (when DHCP is on)
+and writes it into the guest's cloud-init network-config.  Two
+consequences:
 
 1. The guest sees a stable address across reboots and across
    TestRange runs (MAC is derived from ``sha256("<vm>:<net>")``).
 
-2. The dnsmasq ``<host>`` entry also feeds DNS, so
-   ``curl http://server.NetA/`` works even on a DHCP-less network
+2. The DNS entry that pairs with the reservation makes
+   ``curl http://server.NetA/`` work even on a DHCP-less network
    (note: always FQDN — bare ``server`` does not resolve across the
    bridge).
 
@@ -95,23 +96,13 @@ Static IPs *without* ``internet=True`` also omit ``gateway4`` from
 the cloud-init network-config, so an isolated NIC cannot accidentally
 become the VM's default route.
 
-Coexisting with a host-level dnsmasq
-------------------------------------
+Coexisting with a host-level DNS service
+----------------------------------------
 
-If the host is already running its own ``dnsmasq`` (bound wildcard
-on ``0.0.0.0:53``), libvirt's per-bridge dnsmasq will fail to bind
-``<bridge-ip>:53`` with ``EADDRINUSE``.  The fix is host-level: make
-the system dnsmasq bind dynamically to specific interfaces and
-except libvirt's bridges:
-
-.. code-block:: ini
-
-    # /etc/dnsmasq.d/90-libvirt-compat.conf
-    bind-dynamic
-    except-interface=virbr*
-    except-interface=vbr*
-    except-interface=vnet*
-
-Then ``sudo systemctl restart dnsmasq``.  Now the system resolver
-keeps answering queries on your real interfaces, but the libvirt
-bridges are left alone for their own dnsmasq instances.
+If the backend brings its own bridge-local DNS service and the
+host already runs a wildcard-bound DNS server on
+``0.0.0.0:53``, the two can collide with ``EADDRINUSE`` when a
+test starts.  The fix is host-level — the exact configuration
+depends on which DNS server you run and which backend you use;
+each backend's docstring under :mod:`testrange.backends` lists
+the bridge-interface name patterns to except.

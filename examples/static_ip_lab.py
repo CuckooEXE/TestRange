@@ -1,10 +1,10 @@
 """A DHCP-less lab: every VM gets an explicit static address.
 
-``VirtualNetwork(dhcp=False, ...)`` disables libvirt's DHCP server
-entirely.  In that mode every attached NIC must come with an
-explicit ``ip=`` on its ``vNIC`` — TestRange's
-orchestrator checks this at provisioning time and raises if you miss
-one.
+``VirtualNetwork(dhcp=False, ...)`` disables the backend's
+bridge-local DHCP server entirely.  In that mode every attached
+NIC must come with an explicit ``ip=`` on its ``vNIC`` —
+TestRange's orchestrator checks this at provisioning time and
+raises if you miss one.
 
 Good fit for:
 

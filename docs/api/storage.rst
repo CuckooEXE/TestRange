@@ -10,9 +10,10 @@ independent axes:
   subprocess primitives against a filesystem (local, SSH-reachable
   remote, future REST-based).
 - :class:`~testrange.storage.AbstractDiskFormat` — disk-image
-  operations parameterised over a transport (qcow2 via ``qemu-img``
-  today; VHDX via PowerShell, VMDK, Proxmox storage volumes are
-  plug-ins of the same shape).
+  operations parameterised over a transport.  Each shipped backend
+  contributes its own concrete subclass under
+  ``testrange.backends.<backend>``; future formats plug in the same
+  way.
 
 Why two axes
 ------------
@@ -43,18 +44,14 @@ Shipped pairings
 The generic storage layer here is **format-agnostic** — it ships
 the composer (:class:`StorageBackend`), both transports
 (:class:`LocalFileTransport`, :class:`SSHFileTransport`), and the
-disk-format ABC plus the qcow2 implementation.  Pre-composed
-pairings (``transport + disk-format``) are
-**backend-flavoured** because the disk-format binding is what makes
-a pairing libvirt- / Hyper-V- / Proxmox-flavoured.  Each backend
-publishes its own:
+disk-format ABC.  Concrete disk-format implementations and any
+pre-composed pairings live in their owning backend module under
+``testrange.backends.<backend>`` because the disk-format binding
+is what pins a pairing to a specific hypervisor family.
 
-- :class:`testrange.backends.libvirt.LocalStorageBackend` — local
-  filesystem + qcow2.  Default for the libvirt backend at
-  ``Orchestrator(host="localhost")``.
-- :class:`testrange.backends.libvirt.SSHStorageBackend` — SFTP/SSH
-  + qcow2.  Auto-selected by the libvirt backend for
-  ``Orchestrator(host="qemu+ssh://...")``.
+See each backend module (:doc:`backends`) for its own pre-composed
+``<Backend>LocalStorageBackend`` /
+``<Backend>SSHStorageBackend`` etc.
 
 Callers that need a custom pairing (different transport × different
 disk format) build a :class:`~testrange.storage.StorageBackend`
@@ -82,9 +79,8 @@ Disk-format axis
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.storage.Qcow2DiskFormat
-   :members:
-   :show-inheritance:
+Concrete disk-format implementations live in each backend module —
+see :doc:`backends`.
 
 Composition
 -----------

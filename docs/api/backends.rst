@@ -160,6 +160,48 @@ Reference
    :members:
    :show-inheritance:
 
+Libvirt backend
+~~~~~~~~~~~~~~~
+
+.. autoclass:: testrange.backends.libvirt.LibvirtOrchestrator
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.LibvirtVM
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.VirtualNetwork
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.GuestAgentCommunicator
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.Hypervisor
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.LibvirtHardDrive
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.Qcow2DiskFormat
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.LocalStorageBackend
+   :members:
+   :show-inheritance:
+
+.. autoclass:: testrange.backends.libvirt.SSHStorageBackend
+   :members:
+   :show-inheritance:
+
+Proxmox backend
+~~~~~~~~~~~~~~~
+
 .. autoclass:: testrange.backends.proxmox.ProxmoxOrchestrator
    :members:
    :show-inheritance:
@@ -175,6 +217,9 @@ Reference
 .. autoclass:: testrange.backends.proxmox.ProxmoxGuestAgentCommunicator
    :members:
    :show-inheritance:
+
+Builders auto-selection
+~~~~~~~~~~~~~~~~~~~~~~~
 
 .. autofunction:: testrange.vms.builders.auto_select_builder
 

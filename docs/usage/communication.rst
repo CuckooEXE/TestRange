@@ -6,18 +6,19 @@ Every interaction with a running VM flows through a
 page covers the three shipped backends, the primitives they expose,
 and the file helpers layered on top.
 
-The default: QEMU Guest Agent
------------------------------
+The default: host-mediated guest agent
+--------------------------------------
 
-Linux VMs default to
-:class:`~testrange.backends.libvirt.GuestAgentCommunicator`,
-which speaks the QEMU Guest Agent JSON protocol over a
-``virtio-serial`` channel.  This has three useful properties:
+Linux VMs default to a guest-agent communicator that speaks the
+agent's JSON protocol over a ``virtio-serial`` channel.  Each
+backend ships its own concrete subclass under
+``testrange.backends.<backend>``.  This default has three useful
+properties:
 
 1. **No TCP exposure.**  The agent doesn't listen on any port — host
-   and guest talk through a Unix socket managed by libvirt.  Tests
-   can assert network isolation without losing the ability to inspect
-   the isolated VMs.
+   and guest talk through a host-mediated socket.  Tests can assert
+   network isolation without losing the ability to inspect the
+   isolated VMs.
 
 2. **Works before DHCP.**  The channel is up as soon as the kernel
    initialises the virtio drivers, which happens well before network
@@ -96,13 +97,12 @@ host file exists before touching the VM — if it doesn't, you get
 Guest agent readiness
 ---------------------
 
-The orchestrator calls
-:meth:`~testrange.backends.libvirt.GuestAgentCommunicator.wait_ready`
-once per VM after ``domain.create()``, polling ``guest-ping`` until
-the channel opens.  Libvirt's stderr warnings during that window
-(``Guest agent is not responding``) are suppressed only for the
-duration of the poll; real errors from other code paths still print
-normally.
+The orchestrator calls the guest-agent communicator's
+``wait_ready`` once per VM after start, polling ``guest-ping``
+until the channel opens.  Backend-side stderr warnings during
+that window (e.g. ``Guest agent is not responding``) are
+suppressed only for the duration of the poll; real errors from
+other code paths still print normally.
 
 You can see the readiness timing in the ``testrange`` logs::
 
@@ -118,8 +118,8 @@ Fallbacks: SSH and WinRM
 
 :class:`~testrange.communication.ssh.SSHCommunicator` is available
 for cases where the guest agent isn't an option (e.g. custom base
-images without ``qemu-guest-agent`` installed) or when a test wants
-to exercise the real network stack.  It needs a reachable IP, plus
+images that don't ship the matching guest-agent package) or when a
+test wants to exercise the real network stack.  It needs a reachable IP, plus
 either a provisioned SSH key (``key_filename=``) or the account's
 password (``password=``).  Password auth on non-root users works
 out of the box: cloud-init's ``ssh_pwauth: True`` is set both at
@@ -130,17 +130,16 @@ re-locked between reboots.
 See ``examples/ssh_communicator.py`` for an end-to-end example that
 opens both a key-auth and a password-auth session to the same VM.
 
-Selecting the backend
+Selecting the channel
 ~~~~~~~~~~~~~~~~~~~~~
 
-Pass ``communicator=`` to :class:`~testrange.backends.libvirt.VM` to pick
-the backend the orchestrator wires up on start.  Three values are
-accepted:
+Pass ``communicator=`` to your VM spec to pick the channel the
+orchestrator wires up on start.  Three values are accepted:
 
-- ``"guest-agent"`` — virtio-serial; requires ``qemu-guest-agent`` in
-  the image.  Cloud-init-built Linux VMs get it for free; Windows VMs
-  get it once the autounattend FirstLogonCommands install the MSI
-  from the virtio-win ISO.
+- ``"guest-agent"`` — virtio-serial; requires the matching
+  guest-agent package in the image.  Cloud-init-built Linux VMs
+  get it for free; Windows VMs get it once the autounattend
+  FirstLogonCommands install the MSI from the virtio-win ISO.
 - ``"ssh"`` — uses the first
   :class:`~testrange.devices.vNIC` with a static ``ip=``
   as the host, and the first :class:`~testrange.credentials.Credential`
@@ -153,7 +152,7 @@ accepted:
 
 Defaults:
 
-- Linux images (cloud qcow2, URL, or local .qcow2/.img) →
+- Linux images (cloud disk image, URL, or local disk file) →
   ``"guest-agent"``.
 - Windows install ISOs (detected by
   :func:`~testrange.vms.images.is_windows_image`) → ``"winrm"``.

@@ -16,8 +16,8 @@ no teardown on exit) call :meth:`Orchestrator.leak` before the
     with Orchestrator(networks=[net], vms=[vm]) as orch:
         orch.vms["box"].exec(["apt-get", "install", "-y", "my-tool"]).check()
         orch.leak()
-    # ``box`` is still running.  The teardown log lists the virsh
-    # commands you'd run later to destroy it manually.
+    # ``box`` is still running.  The teardown log lists the
+    # backend's CLI commands you'd run later to destroy it manually.
 
 See :meth:`Orchestrator.leak` for the full contract (disk retention,
 install-subnet pool pressure, memory accounting).
