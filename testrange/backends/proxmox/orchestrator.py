@@ -360,6 +360,163 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             self._client = None
             self._run_id = None
 
+    def cleanup(self, run_id: str) -> None:
+        """Reconstruct + tear down per-run PVE resources for *run_id*.
+
+        Symmetric with :meth:`testrange.backends.libvirt.Orchestrator.cleanup`:
+        reconstructs the deterministic backend names this orchestrator's
+        ``__enter__`` would have created and destroys them.
+
+        **Templates are preserved.**  ``tr-template-<config_hash[:12]>``
+        VMIDs are persistent cache state — a second run with the same
+        spec hits them and skips install.  ``cleanup`` only removes the
+        per-run clones (named ``tr-<vm_name[:10]>-<run_id[:8]>``) plus
+        any per-run phase-2 seed ISOs.
+
+        SDN vnets named ``<net[:4]><run_id[:4]>`` get destroyed.  The
+        SDN zone (a global resource shared across runs) is left intact.
+
+        Opens its own proxmoxer client; does NOT call ``__enter__``
+        (no provisioning to redo).
+        """
+        from testrange.backends.proxmox.network import (
+            ProxmoxVirtualNetwork,
+        )
+        from testrange.backends.proxmox.vm import _TEMPLATE_NAME_PREFIX
+
+        try:
+            from proxmoxer import ProxmoxAPI  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:
+            raise OrchestratorError(
+                "ProxmoxOrchestrator.cleanup needs the ``proxmoxer`` "
+                "Python package — install with "
+                "``pip install testrange[proxmox]``."
+            ) from exc
+
+        client_kwargs = self._resolve_client_kwargs()
+        try:
+            client = ProxmoxAPI(self._host, **client_kwargs)
+        except Exception as exc:
+            raise OrchestratorError(
+                f"cleanup: cannot connect to PVE at {self._host!r}: {exc}"
+            ) from exc
+
+        # Resolve node — re-runs the same logic __enter__ uses so
+        # cleanup picks the same node the original run did.
+        try:
+            nodes = list(client.nodes.get())
+        except Exception as exc:
+            raise OrchestratorError(
+                f"cleanup: cannot list PVE nodes: {exc}"
+            ) from exc
+        try:
+            self._resolve_node(nodes)
+        except OrchestratorError:
+            raise
+        node = self._node
+        assert node is not None  # _resolve_node sets it or raises
+
+        # 1. Per-VM clones.  Reconstruct the clone name from
+        #    (vm.name, run_id) — same formula ProxmoxVM.build uses
+        #    for the clone's display name.
+        for vm in self._vm_list:
+            clone_name = f"tr-{vm.name[:10]}-{run_id[:8]}"
+            clone_vmid = self._find_vm_by_name(client, node, clone_name)
+            if clone_vmid is None:
+                continue
+            # Refuse to touch a template even if the name pattern
+            # somehow matches.  Templates are persistent cache state.
+            if self._is_template(client, node, clone_vmid):
+                _log.warning(
+                    "cleanup: skipping VMID %d (matches clone name %r "
+                    "but is flagged as template)",
+                    clone_vmid, clone_name,
+                )
+                continue
+            _log.info(
+                "cleanup: stopping + deleting clone VMID %d (%s)",
+                clone_vmid, clone_name,
+            )
+            try:
+                client.nodes(node).qemu(clone_vmid).status.stop.post()
+            except Exception:
+                pass
+            try:
+                client.nodes(node).qemu(clone_vmid).delete()
+            except Exception as exc:
+                _log.warning(
+                    "cleanup: delete VMID %d failed: %s",
+                    clone_vmid, exc,
+                )
+
+        # 2. Per-run phase-2 seed ISOs.  Filename pattern is
+        #    ``tr-<vm[:10]>-<run_id[:8]>-seed.iso`` (see
+        #    ProxmoxVM.start_run).
+        for vm in self._vm_list:
+            seed_name = f"tr-{vm.name[:10]}-{run_id[:8]}-seed.iso"
+            try:
+                client.nodes(node).storage("local").content(
+                    f"local:iso/{seed_name}",
+                ).delete()
+            except Exception as exc:
+                _log.debug(
+                    "cleanup: phase-2 seed %r not deleted (probably "
+                    "already gone): %s",
+                    seed_name, exc,
+                )
+
+        # 3. Per-run SDN vnets.  ProxmoxVirtualNetwork.backend_name
+        #    is a pure function of (network.name, run_id), so we
+        #    can reconstruct each name without state.
+        for net_spec in self._networks:
+            if not isinstance(net_spec, ProxmoxVirtualNetwork):
+                continue
+            net_spec.bind_run(run_id)
+            vnet_name = net_spec.backend_name()
+            try:
+                client.cluster.sdn.vnets(vnet_name).delete()
+                _log.info("cleanup: deleted SDN vnet %r", vnet_name)
+            except Exception as exc:
+                _log.debug(
+                    "cleanup: SDN vnet %r not deleted (probably "
+                    "already gone): %s",
+                    vnet_name, exc,
+                )
+        # Reload SDN config so the vnet deletes take effect.
+        try:
+            client.cluster.sdn.put()
+        except Exception:
+            pass
+
+        _log.info(
+            "cleanup: done for run %s; templates (%s*) preserved",
+            run_id[:8], _TEMPLATE_NAME_PREFIX,
+        )
+
+    @staticmethod
+    def _find_vm_by_name(
+        client: Any, node: str, name: str,
+    ) -> int | None:
+        """Return the VMID of the VM on *node* with display name
+        *name*, or ``None``."""
+        try:
+            vms = client.nodes(node).qemu.get()
+        except Exception:
+            return None
+        for vm in vms or []:
+            if vm.get("name") == name:
+                return int(vm["vmid"])
+        return None
+
+    @staticmethod
+    def _is_template(client: Any, node: str, vmid: int) -> bool:
+        """Return True if VMID is a PVE template."""
+        try:
+            cfg = client.nodes(node).qemu(vmid).config.get()
+        except Exception:
+            return False
+        return bool(cfg.get("template"))
+
     def keep_alive_hints(self) -> list[str]:
         """Return cleanup commands for resources left behind by
         :meth:`leak`.

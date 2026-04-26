@@ -369,17 +369,26 @@ class TestScenarioLifecycleContract:
     ) -> None:
         """Cleanup is the SIGKILL-recovery hook (``testrange cleanup
         MODULE RUN_ID``).  Backends either implement it cleanly
-        (idempotent best-effort) or raise NotImplementedError with a
-        clear message naming the backend.  Anything else (silent
-        AttributeError, generic exception) breaks the recovery CLI."""
+        (idempotent best-effort) or raise a documented exception
+        kind: ``NotImplementedError`` (backend hasn't wired it yet)
+        or :class:`~testrange.exceptions.OrchestratorError` (couldn't
+        connect, missing credentials, …).  Anything else — silent
+        AttributeError, raw KeyError, or a generic ``Exception`` —
+        breaks the recovery CLI."""
+        from testrange.exceptions import OrchestratorError
+
         del vm_cls, net_cls
         orch = orch_cls()
         run_id = "00000000-0000-0000-0000-000000000000"
         try:
             orch.cleanup(run_id)
         except NotImplementedError as exc:
-            # Default fallback shape: clear message naming the backend.
             assert orch_cls.__name__ in str(exc) or "cleanup" in str(exc).lower()
+        except OrchestratorError:
+            # Connection / credential failures are an acceptable
+            # documented shape — same exception surface ``__enter__``
+            # uses for the same kind of problem.
+            pass
 
 
 class TestScenarioDeterministicNaming:

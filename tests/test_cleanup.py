@@ -229,12 +229,20 @@ class TestCleanupRunDir:
         orch.cleanup("00000000-0000-0000-0000-000000000000")
 
 
-class TestAbstractCleanupDefault:
-    """Backends that haven't wired cleanup yet raise NotImplementedError
-    with a helpful message."""
+class TestProxmoxCleanupCredentialFailure:
+    """ProxmoxOrchestrator.cleanup is implemented but raises
+    OrchestratorError when invoked without enough credentials to
+    open a PVE connection — same failure shape its ``__enter__``
+    uses, so callers get a consistent error to handle.
 
-    def test_proxmox_orchestrator_raises_not_implemented(self) -> None:
+    (Live behaviour — clones-vs-templates distinction, name
+    reconstruction — is exercised in
+    tests/test_proxmox_template_cache.py against a mocked client.)"""
+
+    def test_raises_orchestrator_error_without_credentials(self) -> None:
         from testrange.backends.proxmox.orchestrator import ProxmoxOrchestrator
+        from testrange.exceptions import OrchestratorError
+
         orch = ProxmoxOrchestrator(host="x")
-        with pytest.raises(NotImplementedError, match="cleanup"):
+        with pytest.raises(OrchestratorError, match="credentials"):
             orch.cleanup("00000000-0000-0000-0000-000000000000")
