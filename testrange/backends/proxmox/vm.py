@@ -1,12 +1,23 @@
 """Proxmox VE VM lifecycle.
 
-Implementation for **Debian-12-style cloud-init VMs reached over
-SSH**, backed by PVE templates as the install-once-clone-many cache
-(symmetric with the libvirt backend's qcow2-snapshot cache).
+Implementation for **Debian-12-style cloud-init VMs**, backed by
+PVE templates as the install-once-clone-many cache (symmetric with
+the libvirt backend's qcow2-snapshot cache).  Two communicators
+are supported:
+
+* ``communicator='ssh'`` (default for the moment): the orchestrator
+  waits for sshd on the VM's static IP, then attaches an
+  :class:`SSHCommunicator`.  Requires the inner-VM IP to be
+  routable from the test runner host.
+* ``communicator='guest-agent'``: drives qemu-guest-agent over
+  PVE's REST ``/agent/`` endpoints (see
+  :class:`~testrange.backends.proxmox.guest_agent.ProxmoxGuestAgentCommunicator`).
+  The inner-VM IP does not need to be reachable — useful for
+  nested topologies whose SDN subnets aren't routed back to the
+  outer host.
 
 Scope explicitly excludes:
 
-- the QEMU guest-agent communicator (use ``communicator='ssh'``);
 - the Windows installer flow.
 
 Gotchas
@@ -568,18 +579,35 @@ class ProxmoxVM(AbstractVM):
                 f"VM {self.name!r}: failed to start VMID {vmid}: {exc}"
             ) from exc
 
-        # 4. Wait for SSH on the configured static IP.  The cloud-init
-        #    re-run needs a few seconds to apply the new network-config
-        #    after boot — the existing _wait_for_ssh retry loop
-        #    tolerates that.
-        host = self._resolve_communicator_host(mac_ip_pairs)
-        self._wait_for_ssh(host, _RUN_BOOT_TIMEOUT_S)
-        self._communicator = self._make_communicator(mac_ip_pairs)
-        self._communicator.wait_ready()
-        _log.info(
-            "vm %r: VMID %d ready; SSH communicator attached at %s",
-            self.name, vmid, host,
-        )
+        # 4. Construct the communicator.  Two paths:
+        #
+        #    * ``communicator='ssh'`` — wait for sshd on the
+        #      configured static IP, then attach SSHCommunicator.
+        #      Needs the inner-VM IP to be routable from the test
+        #      runner host.
+        #
+        #    * ``communicator='guest-agent'`` — skip the SSH wait
+        #      entirely; agent traffic hops through PVE's local
+        #      virtio-serial channel so the inner VM's IP doesn't
+        #      need to be reachable from the runner.  ``wait_ready``
+        #      below polls ``/agent/ping`` until qemu-guest-agent
+        #      inside the VM finishes starting.
+        if self.communicator == "ssh":
+            host = self._resolve_communicator_host(mac_ip_pairs)
+            self._wait_for_ssh(host, _RUN_BOOT_TIMEOUT_S)
+            self._communicator = self._make_communicator(mac_ip_pairs)
+            self._communicator.wait_ready()
+            _log.info(
+                "vm %r: VMID %d ready; SSH communicator attached at %s",
+                self.name, vmid, host,
+            )
+        else:
+            self._communicator = self._make_communicator(mac_ip_pairs)
+            self._communicator.wait_ready()
+            _log.info(
+                "vm %r: VMID %d ready; %s communicator attached",
+                self.name, vmid, self.communicator,
+            )
 
     def shutdown(self) -> None:
         """Stop and delete the per-run cloned VMID and its phase-2
@@ -652,6 +680,39 @@ class ProxmoxVM(AbstractVM):
         can call REST without a context arg.  Called by the
         orchestrator on entry."""
         self._client = client
+
+    def _make_guest_agent_communicator(self):
+        """Construct the PVE-backed guest-agent communicator.
+
+        Reached via
+        :meth:`~testrange.vms.base.AbstractVM._make_communicator`
+        when ``communicator='guest-agent'`` — the SSH branch lives
+        in the ABC and works against any backend unchanged.
+
+        The communicator drives qemu-guest-agent over PVE's REST
+        ``/agent/`` endpoints, so the inner VM's IP does not need
+        to be reachable from the test runner host — useful for
+        nested topologies where SDN subnets aren't routed back to
+        the outer host.
+        """
+        from testrange.backends.proxmox.guest_agent import (
+            ProxmoxGuestAgentCommunicator,
+        )
+        assert self._client is not None, (
+            f"VM {self.name!r}: no proxmoxer client set — "
+            "set_client() must run before guest-agent attach."
+        )
+        assert self._node is not None, (
+            f"VM {self.name!r}: node not resolved yet."
+        )
+        assert self._vmid is not None, (
+            f"VM {self.name!r}: VMID not allocated yet."
+        )
+        return ProxmoxGuestAgentCommunicator(
+            client=self._client,
+            node=self._node,
+            vmid=self._vmid,
+        )
 
     # ------------------------------------------------------------------
     # Private helpers
