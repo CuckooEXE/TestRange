@@ -107,18 +107,34 @@ class TestCreateInstallDisk:
 
 
 class TestSeedIsoPath:
+    """The cloud-init seed-ISO and Windows autounattend-ISO path
+    helpers used to live on RunDir, but the filename conventions
+    belong to their respective builders.  The generic
+    :meth:`RunDir.path_for` helper that backs them is exercised here
+    instead — that's the contract these helpers actually need."""
+
     def test_install_variant(self, tmp_path: Path) -> None:
+        from testrange.vms.builders.cloud_init import _seed_iso_ref
         run = _make_run(tmp_path)
         assert (
-            run.seed_iso_path("web01", install=True)
+            _seed_iso_ref(run, "web01", install=True)
             == f"{run.path}/web01-install-seed.iso"
         )
 
     def test_run_variant(self, tmp_path: Path) -> None:
+        from testrange.vms.builders.cloud_init import _seed_iso_ref
         run = _make_run(tmp_path)
         assert (
-            run.seed_iso_path("web01", install=False)
+            _seed_iso_ref(run, "web01", install=False)
             == f"{run.path}/web01-seed.iso"
+        )
+
+    def test_unattend_iso_ref(self, tmp_path: Path) -> None:
+        from testrange.vms.builders.unattend import _unattend_iso_ref
+        run = _make_run(tmp_path)
+        assert (
+            _unattend_iso_ref(run, "winbox")
+            == f"{run.path}/winbox-unattend.iso"
         )
 
 

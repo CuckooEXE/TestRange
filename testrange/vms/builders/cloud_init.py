@@ -56,6 +56,19 @@ if TYPE_CHECKING:
     from testrange.vms.base import AbstractVM as VM
 
 
+def _seed_iso_ref(run: "RunDir", vm_name: str, *, install: bool) -> str:
+    """Backend-local ref for *vm_name*'s NoCloud cloud-init seed ISO.
+
+    The cloud-init seed convention (filename + presence on a CD-ROM
+    device) belongs to this builder, not to the generic per-run
+    scratch-dir abstraction — different builders ship different seed
+    shapes.  ``install=True`` is the phase-1 (build) seed; ``False``
+    is the phase-2 (run) seed.
+    """
+    suffix = "-install-seed.iso" if install else "-seed.iso"
+    return run.path_for(f"{vm_name}{suffix}")
+
+
 def _hash_password(plaintext: str) -> str:
     """Return a Linux-compatible SHA-512 crypt hash for *plaintext*.
 
@@ -137,7 +150,7 @@ class CloudInitBuilder(Builder):
         work_disk = run.create_install_disk(
             vm.name, base_ref, vm._primary_disk_size()
         )
-        seed_ref = run.seed_iso_path(vm.name, install=True)
+        seed_ref = _seed_iso_ref(run, vm.name, install=True)
         run.storage.transport.write_bytes(
             seed_ref,
             build_seed_iso_bytes(
@@ -170,7 +183,7 @@ class CloudInitBuilder(Builder):
         run: RunDir,
         mac_ip_pairs: list[tuple[str, str, str, str]],
     ) -> RunDomain:
-        seed_ref = run.seed_iso_path(vm.name, install=False)
+        seed_ref = _seed_iso_ref(run, vm.name, install=False)
         run.storage.transport.write_bytes(
             seed_ref,
             build_seed_iso_bytes(
