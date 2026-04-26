@@ -142,27 +142,41 @@ Behaviour
 URL keyspace
 ~~~~~~~~~~~~
 
-The remote keyspace mirrors the local cache directory layout, one
-URL path per file:
+VM artifacts live under one directory per cached VM, prefixed by
+the hypervisor backend so a single remote can serve multiple
+backends without artifact-format collisions::
 
-============================================  =================================
-``images/<url_hash>.qcow2`` (or ``.img``)     Base image bytes
-``images/<url_hash>.meta.json``               URL + sha256 + size + timestamp
-``vms/<config_hash>.qcow2``                   Compressed post-install snapshot
-``vms/<config_hash>.json``                    Build manifest (packages, cmds…)
-============================================  =================================
+    <backend>/vms/<config_hash>/disk.qcow2     # primary disk
+    <backend>/vms/<config_hash>/manifest.json  # build manifest
+    <backend>/vms/<config_hash>/nvram.fd       # UEFI vars (when applicable)
+    <backend>/vms/<config_hash>/disk-1.qcow2   # additional drives, if any
 
-``url_hash`` and ``config_hash`` use the same 24-char SHA-256 prefix
-the local cache uses (see :func:`testrange.cache.vm_config_hash`),
-so artifacts produced by one host can be picked up unchanged by
-any other host that asks for the same URL or VM spec.
+Where ``<backend>`` is ``libvirt``, ``proxmox``, eventually
+``hyperv`` — the orchestrator's
+:meth:`~testrange.orchestrator_base.AbstractOrchestrator.backend_type`.
+This mirrors the per-VM-directory layout TestRange uses on the
+local filesystem (see :doc:`caching`); the backend prefix is added
+to the URL because the local layout is already namespaced by each
+backend's storage transport.
+
+Base images sit at the top level — they're upstream-keyed and
+backend-agnostic::
+
+    images/<url_hash>.qcow2 (or .img)
+    images/<url_hash>.meta.json
+
+``url_hash`` and ``config_hash`` are the same 24-char SHA-256
+prefixes the local cache uses (see
+:func:`testrange.cache.vm_config_hash`), so artifacts produced by
+one host can be picked up unchanged by any other host that asks
+for the same URL or VM spec.
 
 Not yet on the remote
 ~~~~~~~~~~~~~~~~~~~~~
 
-* **NVRAM sidecars** (``<config_hash>.nvram.fd``) — UEFI installs
-  still require the local sidecar; a follow-up will mirror it to
-  the remote alongside the qcow2.
+* **NVRAM** (``<config_hash>/nvram.fd``) — UEFI installs still
+  cache it locally; a follow-up will mirror it as a peer resource
+  alongside ``disk.qcow2``.
 * **virtio-win.iso** and **staged Windows ISOs** — fetched
   upstream / staged locally as today.
 * **Proxmox prepared ISOs** — local-only; PVE-side caching is

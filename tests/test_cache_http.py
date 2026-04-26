@@ -139,18 +139,20 @@ def test_get_image_no_remote_means_no_calls(
 
 
 def test_get_vm_fills_from_remote(tmp_cache: Path) -> None:
-    """Remote hit populates both qcow2 and manifest into the local backend."""
+    """Remote hit populates disk + manifest into the per-VM directory."""
     remote = _FakeRemote()
     config_hash = "abc123" + "0" * 18
-    remote.seed(f"vms/{config_hash}.qcow2", b"snapshot-bytes")
-    remote.seed(f"vms/{config_hash}.json", b'{"name": "vm"}')
+    remote.seed(f"libvirt/vms/{config_hash}/disk.qcow2", b"disk-bytes")
+    remote.seed(f"libvirt/vms/{config_hash}/manifest.json", b'{"name": "vm"}')
 
-    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm = CacheManager(  # type: ignore[arg-type]
+        root=tmp_cache, backend_name="libvirt", remote=remote,
+    )
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     ref = cm.get_vm(config_hash, backend)
     assert ref is not None
-    assert Path(ref).read_bytes() == b"snapshot-bytes"
+    assert Path(ref).read_bytes() == b"disk-bytes"
     manifest_ref = cm.vm_manifest_ref(config_hash, backend)
     assert Path(manifest_ref).read_bytes() == b'{"name": "vm"}'
 
@@ -158,7 +160,9 @@ def test_get_vm_fills_from_remote(tmp_cache: Path) -> None:
 def test_get_vm_remote_miss_returns_none(tmp_cache: Path) -> None:
     """No local + no remote = miss, no synthetic state left behind."""
     remote = _FakeRemote()
-    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm = CacheManager(  # type: ignore[arg-type]
+        root=tmp_cache, backend_name="libvirt", remote=remote,
+    )
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     assert cm.get_vm("missing" + "0" * 17, backend) is None
@@ -167,29 +171,34 @@ def test_get_vm_remote_miss_returns_none(tmp_cache: Path) -> None:
 
 
 def test_get_vm_remote_partial_hit_drops_orphan(tmp_cache: Path) -> None:
-    """Snapshot present remotely but no manifest → discard the partial fill."""
+    """Disk present remotely but no manifest → discard the partial fill."""
     remote = _FakeRemote()
     config_hash = "partial" + "0" * 17
-    remote.seed(f"vms/{config_hash}.qcow2", b"snapshot")
+    remote.seed(f"libvirt/vms/{config_hash}/disk.qcow2", b"disk-bytes")
     # No manifest seeded.
 
-    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm = CacheManager(  # type: ignore[arg-type]
+        root=tmp_cache, backend_name="libvirt", remote=remote,
+    )
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     assert cm.get_vm(config_hash, backend) is None
-    # Snapshot must NOT remain in the local cache — otherwise the next
-    # get_vm would see a qcow2-without-manifest and log the
+    # Disk must NOT remain in the local cache — otherwise the next
+    # get_vm would see a disk-without-manifest and log the
     # "partial write" warning intended for crashed local stores.
-    snapshot_ref = cm.vm_snapshot_ref(config_hash, backend)
-    assert not Path(snapshot_ref).exists()
+    disk_ref = cm.vm_disk_ref(config_hash, backend)
+    assert not Path(disk_ref).exists()
 
 
 def test_store_vm_publishes_to_remote(
     tmp_cache: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful store mirrors the snapshot + manifest to the remote."""
+    """A successful store mirrors the disk + manifest to the remote
+    under the configured backend's URL prefix."""
     remote = _FakeRemote()
-    cm = CacheManager(root=tmp_cache, remote=remote)  # type: ignore[arg-type]
+    cm = CacheManager(  # type: ignore[arg-type]
+        root=tmp_cache, backend_name="libvirt", remote=remote,
+    )
     backend = LocalStorageBackend(cache_root=tmp_cache)
 
     # Stand in for the disk-format compress step: just copy the bytes.
@@ -203,10 +212,30 @@ def test_store_vm_publishes_to_remote(
     from testrange.storage.disk import qcow2 as _qcow2_mod
     monkeypatch.setattr(_qcow2_mod.Qcow2DiskFormat, "compress", _fake_compress)
 
-    cm.store_vm("hash" + "0" * 20, str(src), {"name": "vm"}, backend)
+    config_hash = "hash" + "0" * 20
+    cm.store_vm(config_hash, str(src), {"name": "vm"}, backend)
 
-    assert remote.store["vms/" + "hash" + "0" * 20 + ".qcow2"] == b"installed-disk"
-    assert "vms/" + "hash" + "0" * 20 + ".json" in remote.store
+    assert (
+        remote.store[f"libvirt/vms/{config_hash}/disk.qcow2"]
+        == b"installed-disk"
+    )
+    assert f"libvirt/vms/{config_hash}/manifest.json" in remote.store
+
+
+def test_remote_keys_include_backend_prefix() -> None:
+    """Different backend_name values produce sibling URL keyspaces so
+    a single remote can serve multiple backends without collisions."""
+    libvirt_cm = CacheManager(backend_name="libvirt")
+    proxmox_cm = CacheManager(backend_name="proxmox")
+    h = "x" * 24
+    assert (
+        libvirt_cm._remote_vm_resource_key(h, "disk.qcow2")
+        == f"libvirt/vms/{h}/disk.qcow2"
+    )
+    assert (
+        proxmox_cm._remote_vm_resource_key(h, "disk.qcow2")
+        == f"proxmox/vms/{h}/disk.qcow2"
+    )
 
 
 def test_store_vm_skips_remote_publish_when_remote_is_none(

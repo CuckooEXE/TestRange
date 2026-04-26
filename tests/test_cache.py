@@ -114,53 +114,73 @@ class TestGetVm:
         b = _local_backend(tmp_cache_root)
         assert c.get_vm("nonexistent", b) is None
 
-    def test_cache_hit_flat_layout(self, tmp_cache_root: Path) -> None:
+    def test_cache_hit_per_vm_dir(self, tmp_cache_root: Path) -> None:
+        """A populated <vms_dir>/<hash>/ directory with disk + manifest
+        is a cache hit; the returned ref points at the disk file
+        inside the per-VM directory."""
         c = CacheManager(root=tmp_cache_root)
         b = _local_backend(tmp_cache_root)
-        disk = c.vms_dir / "abc123.qcow2"
+        vm = c.vms_dir / "abc123"
+        vm.mkdir()
+        disk = vm / "disk.qcow2"
         disk.write_bytes(b"fake")
-        manifest = c.vms_dir / "abc123.json"
-        manifest.write_text("{}")
+        (vm / "manifest.json").write_text("{}")
         # For LocalStorageBackend, the ref is just the absolute path.
         assert c.get_vm("abc123", b) == str(disk)
 
-    def test_qcow2_without_manifest_is_cache_miss(
+    def test_disk_without_manifest_is_cache_miss(
         self, tmp_cache_root: Path
     ) -> None:
-        """A qcow2 with no sibling manifest is the footprint of a
+        """A disk with no sibling manifest is the footprint of a
         crashed ``store_vm`` — treat it as a miss so the rebuild
         overwrites it instead of booting from a truncated image."""
         c = CacheManager(root=tmp_cache_root)
         b = _local_backend(tmp_cache_root)
-        disk = c.vms_dir / "partial.qcow2"
-        disk.write_bytes(b"truncated")
+        vm = c.vms_dir / "partial"
+        vm.mkdir()
+        (vm / "disk.qcow2").write_bytes(b"truncated")
         assert c.get_vm("partial", b) is None
 
-    def test_manifest_without_qcow2_is_cache_miss(
+    def test_manifest_without_disk_is_cache_miss(
         self, tmp_cache_root: Path
     ) -> None:
         """Symmetric: an orphan manifest (e.g. someone deleted the
-        qcow2) should also miss."""
+        disk) should also miss."""
         c = CacheManager(root=tmp_cache_root)
         b = _local_backend(tmp_cache_root)
-        (c.vms_dir / "ghost.json").write_text("{}")
+        vm = c.vms_dir / "ghost"
+        vm.mkdir()
+        (vm / "manifest.json").write_text("{}")
         assert c.get_vm("ghost", b) is None
 
     def test_vm_paths(self, tmp_cache_root: Path) -> None:
         c = CacheManager(root=tmp_cache_root)
         b = _local_backend(tmp_cache_root)
         assert (
-            c.vm_snapshot_ref("abc", b)
-            == str(tmp_cache_root / "vms" / "abc.qcow2")
+            c.vm_dir("abc", b)
+            == str(tmp_cache_root / "vms" / "abc")
+        )
+        assert (
+            c.vm_disk_ref("abc", b)
+            == str(tmp_cache_root / "vms" / "abc" / "disk.qcow2")
         )
         assert (
             c.vm_manifest_ref("abc", b)
-            == str(tmp_cache_root / "vms" / "abc.json")
+            == str(tmp_cache_root / "vms" / "abc" / "manifest.json")
+        )
+        assert (
+            c.vm_nvram_ref("abc", b)
+            == str(tmp_cache_root / "vms" / "abc" / "nvram.fd")
+        )
+        # Custom resource (e.g. additional disk on a multi-disk VM).
+        assert (
+            c.vm_resource_ref("abc", "disk-1.qcow2", b)
+            == str(tmp_cache_root / "vms" / "abc" / "disk-1.qcow2")
         )
 
 
 class TestStoreVm:
-    def test_writes_flat_qcow2_and_json(
+    def test_writes_per_vm_dir(
         self,
         tmp_cache_root: Path,
         fake_qemu_img: list[list[str]],
@@ -174,17 +194,19 @@ class TestStoreVm:
         dest_ref = c.store_vm("abc123", str(src), manifest, b)
         dest = Path(dest_ref)
 
-        assert dest == tmp_cache_root / "vms" / "abc123.qcow2"
-        assert (tmp_cache_root / "vms" / "abc123.json").exists()
-        # No per-hash subdirectory anymore
-        assert not (tmp_cache_root / "vms" / "abc123").exists()
+        # Disk + manifest land inside the per-VM directory.
+        assert dest == tmp_cache_root / "vms" / "abc123" / "disk.qcow2"
+        assert (tmp_cache_root / "vms" / "abc123" / "manifest.json").exists()
+        # No flat-layout files left behind.
+        assert not (tmp_cache_root / "vms" / "abc123.qcow2").exists()
+        assert not (tmp_cache_root / "vms" / "abc123.json").exists()
 
     def test_manifest_contents(
         self,
         tmp_cache_root: Path,
         fake_qemu_img: list[list[str]],
     ) -> None:
-        """The .json must be inspectable and record what built the image."""
+        """The manifest.json must be inspectable and record what built the image."""
         c = CacheManager(root=tmp_cache_root)
         b = _local_backend(tmp_cache_root)
         src = tmp_cache_root / "work.qcow2"
@@ -198,7 +220,7 @@ class TestStoreVm:
         c.store_vm("abc123", str(src), manifest, b)
 
         written = json.loads(
-            (tmp_cache_root / "vms" / "abc123.json").read_text()
+            (tmp_cache_root / "vms" / "abc123" / "manifest.json").read_text()
         )
         assert written == manifest
 
@@ -223,7 +245,7 @@ class TestStoreVm:
         tmp_cache_root: Path,
         fake_qemu_img: list[list[str]],
     ) -> None:
-        """qemu-img must target ``<hash>.qcow2.partial`` — not the
+        """qemu-img must target ``disk.qcow2.partial`` — not the
         final path — so a crash can't leave a plausible cache file."""
         c = CacheManager(root=tmp_cache_root)
         b = _local_backend(tmp_cache_root)
@@ -237,8 +259,9 @@ class TestStoreVm:
             f"compress must write to .partial, got argv={convert_calls[-1]!r}"
         )
         # After a successful store_vm the partial must be gone.
-        assert not (tmp_cache_root / "vms" / "abc.qcow2.partial").exists()
-        assert (tmp_cache_root / "vms" / "abc.qcow2").exists()
+        vm_dir = tmp_cache_root / "vms" / "abc"
+        assert not (vm_dir / "disk.qcow2.partial").exists()
+        assert (vm_dir / "disk.qcow2").exists()
 
     def test_compress_failure_leaves_no_partial_behind(
         self,
@@ -267,9 +290,10 @@ class TestStoreVm:
         with pytest.raises(RuntimeError, match="simulated OOM"):
             c.store_vm("abc", str(src), {"name": "v"}, b)
 
-        assert not (tmp_cache_root / "vms" / "abc.qcow2.partial").exists()
-        assert not (tmp_cache_root / "vms" / "abc.qcow2").exists()
-        assert not (tmp_cache_root / "vms" / "abc.json").exists()
+        vm_dir = tmp_cache_root / "vms" / "abc"
+        assert not (vm_dir / "disk.qcow2.partial").exists()
+        assert not (vm_dir / "disk.qcow2").exists()
+        assert not (vm_dir / "manifest.json").exists()
 
 
 class TestGetImage:

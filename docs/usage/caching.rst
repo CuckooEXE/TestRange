@@ -15,9 +15,19 @@ uses the same URL skips the download.
 **Post-install VM snapshots.**  After a VM's install phase runs
 (packages installed, users created, post-install commands executed),
 the resulting disk is compressed with ``qemu-img convert -c`` and
-stored at ``<cache_root>/vms/<config_hash>.qcow2``.  A sibling
-``<config_hash>.json`` records exactly what went into the image — open
-it in any JSON viewer to audit a cached build.
+stored under a per-VM directory at
+``<cache_root>/vms/<config_hash>/``.  Each cached VM owns a
+directory of *resources* — disk image, manifest, NVRAM (when
+applicable), additional drives — sitting together::
+
+    <cache_root>/vms/<config_hash>/
+    ├── disk.qcow2          # primary post-install disk
+    ├── manifest.json       # build manifest (what installed)
+    ├── nvram.fd            # UEFI variables (UEFI installs only)
+    └── disk-1.qcow2 ...    # additional drives, if any
+
+The ``manifest.json`` records exactly what went into the image —
+open it in any JSON viewer to audit a cached build.
 
 **Staged prebuilt (BYOI) images.**  When a VM is declared with
 ``builder=NoOpBuilder()`` the source qcow2 is content-hashed and
