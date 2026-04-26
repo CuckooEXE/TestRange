@@ -17,14 +17,15 @@ independent axes:
 Why two axes
 ------------
 
-Every non-trivial TestRange feature comes back to the same question:
-"where does this image live, and how do I manipulate one?"  Local KVM
-is a filesystem path + ``qemu-img`` subprocess.  Remote KVM is SFTP +
-``ssh remote qemu-img``.  A future Hyper-V host is SMB / PSSession +
-PowerShell ``New-VHD``.  Decomposing into ``(transport, format)``
-means adding a new transport doesn't force every format to re-learn
-it, and adding a new format doesn't force every transport to
-re-learn it.
+Every non-trivial TestRange feature comes back to the same
+question: "where does this image live, and how do I manipulate
+one?"  A local hypervisor is a filesystem path plus a local
+subprocess; a remote one is SFTP + remote-exec of the same tool;
+a different format on the same host is the same transport with a
+different tool.  Decomposing into ``(transport, format)`` means
+adding a new transport doesn't force every format to re-learn it,
+and adding a new format doesn't force every transport to re-learn
+it.
 
 Call sites use the two axes explicitly::
 
@@ -39,10 +40,12 @@ Call sites use the two axes explicitly::
 Shipped pairings
 ----------------
 
-- :class:`~testrange.storage.LocalStorageBackend` — local filesystem
-  + qcow2.  Default for ``Orchestrator(host="localhost")``.
-- :class:`~testrange.storage.SSHStorageBackend` — SFTP/SSH + qcow2.
-  Auto-selected for ``Orchestrator(host="qemu+ssh://...")``.
+- :class:`~testrange.storage.LocalStorageBackend` — local
+  filesystem + qcow2.  Default for the libvirt backend at
+  ``Orchestrator(host="localhost")``.
+- :class:`~testrange.storage.SSHStorageBackend` — SFTP/SSH +
+  qcow2.  Auto-selected by the libvirt backend for
+  ``Orchestrator(host="qemu+ssh://...")``.
 
 Callers that need a custom pairing build a
 :class:`~testrange.storage.StorageBackend` directly with whichever

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from testrange.devices.base import AbstractDevice
-from testrange.devices.sizes import normalise_qemu_size, parse_size
+from testrange.devices.sizes import normalise_size, parse_size
 
 _HARD_DRIVE_BUSES = ("virtio", "sata", "nvme", "scsi", "ide")
 """Supported :attr:`HardDrive.bus` values.  Backends map these to
@@ -18,9 +18,9 @@ class HardDrive(AbstractDevice):
     attach multiple disks.  **The first entry is always the OS disk**
     — it's the one cloud-init installs onto and the one whose
     post-install snapshot lands in the cache.  Every subsequent
-    ``HardDrive`` is provisioned as an empty data volume
-    (``<vm>-data<n>.qcow2`` in the per-run scratch dir) that the guest
-    sees as ``/dev/vdb``, ``/dev/vdc``, etc.
+    ``HardDrive`` is provisioned as an empty data volume in the
+    per-run scratch dir (file extension owned by the backend's disk
+    format) that the guest sees as ``/dev/vdb``, ``/dev/vdc``, etc.
 
     :param size: Disk size.  Accepts either a numeric value interpreted
         as GiB (``HardDrive(32)`` → 32 GiB) or a human-readable string
@@ -99,13 +99,13 @@ class HardDrive(AbstractDevice):
         return parse_size(self.size)
 
     @property
-    def qemu_size(self) -> str:
+    def size_string(self) -> str:
         """Return the size string in the canonical ``<integer>G`` form
         backends feed to their disk-sizing tools (e.g. ``'64G'``).
 
         :returns: Normalised size string.
         """
-        return normalise_qemu_size(self.size)
+        return normalise_size(self.size)
 
     def resolved_bus(self, *, windows: bool = False) -> str:
         """Return the bus the backend should render for this drive.

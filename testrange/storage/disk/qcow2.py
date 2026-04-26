@@ -13,7 +13,10 @@ specifics live in the transport.
 
 from __future__ import annotations
 
-from testrange.exceptions import CacheError
+from pathlib import Path
+
+from testrange._qemu_img import info as _qemu_img_info
+from testrange.exceptions import CacheError, VMBuildError
 from testrange.storage.disk.base import AbstractDiskFormat
 
 _FAST_OP_TIMEOUT = 60.0
@@ -39,6 +42,21 @@ class Qcow2DiskFormat(AbstractDiskFormat):
     The qcow2 format ships with QEMU and is what the libvirt / KVM
     family expects; Proxmox storage pools serve it natively too.
     """
+
+    primary_disk_filename = "disk.qcow2"
+
+    def validate_source_image(self, path: Path) -> None:
+        try:
+            meta = _qemu_img_info(path)
+        except Exception as exc:  # noqa: BLE001 — surface as VMBuildError
+            raise VMBuildError(
+                f"qemu-img info failed on {path}: {exc}"
+            ) from exc
+        if meta.get("format") != "qcow2":
+            raise VMBuildError(
+                f"prebuilt image {path} is not qcow2 "
+                f"(qemu-img reports format={meta.get('format')!r})."
+            )
 
     def create_overlay(self, backing_ref: str, dest_ref: str) -> None:
         self._run([

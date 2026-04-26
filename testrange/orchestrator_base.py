@@ -182,9 +182,10 @@ class AbstractOrchestrator(ABC):
 
         - **Disk leak:** the run directory at
           ``<cache_root>/runs/<run_id>/`` stays on disk indefinitely
-          (it holds the leaked VMs' overlay qcow2s and NVRAM).  The
-          log line on exit includes its path so you can ``rm -rf``
-          when you're done.
+          (it holds the leaked VMs' per-run scratch — overlays,
+          firmware-state files, seed ISOs, etc.).  The log line on
+          exit includes its path so you can ``rm -rf`` when you're
+          done.
         - **Install-subnet pool pressure:** each leaked run holds one
           of the 16 install-phase subnets from the 192.168.240-254/24
           pool until the associated network is destroyed.  Enough
@@ -200,10 +201,10 @@ class AbstractOrchestrator(ABC):
           the first place.
         - **Idempotent:** calling ``leak()`` twice is a no-op.
 
-        Non-libvirt backends (Proxmox, Hyper-V) honour the flag the
-        same way as long as they short-circuit their teardown on
-        ``self._leaked``.  The base class sets the bit; it's on each
-        backend's ``__exit__`` / ``_teardown`` to check it.
+        Every backend honours the flag the same way as long as its
+        ``__exit__`` / ``_teardown`` short-circuits on
+        ``self._leaked``.  The base class sets the bit; backends
+        check it.
         """
         self._leaked = True
 
@@ -221,12 +222,11 @@ class AbstractOrchestrator(ABC):
         The returned orchestrator is **not yet entered** — the caller
         does that via ``ExitStack``.
 
-        Different drivers build this differently:
-
-        - libvirt → ``qemu+ssh://<user>@<vm-ip>/system``, ingesting
-          the hypervisor's SSH key and grabbing its host key
-        - Proxmox → ``https://<vm-ip>:8006`` + API token obtained at
-          first boot
+        Each driver builds the inner control plane in its own
+        backend-native way (typically: bring up the inner control-
+        plane endpoint, authenticate against it with credentials
+        seeded into the hypervisor at install time, return a
+        configured orchestrator pointing at it).
 
         The *outer* orchestrator passes itself as ``outer`` so the
         inner driver can reuse shared state (cache root, storage
@@ -248,8 +248,7 @@ class AbstractOrchestrator(ABC):
         raise NotImplementedError(
             f"{cls.__name__} does not support nested orchestration "
             "yet — it cannot be rooted on a hypervisor VM.  Use a "
-            "driver that implements root_on_vm() (currently: "
-            "testrange.backends.libvirt.Orchestrator)."
+            "backend whose orchestrator implements root_on_vm()."
         )
 
 

@@ -38,7 +38,7 @@ Windows: one seed, install-only
 -------------------------------
 
 The Windows install path is single-phase.
-:func:`~testrange.vms.builders.write_autounattend_iso` produces a
+:func:`~testrange.vms.builders.build_autounattend_iso_bytes` produces a
 ``<vm>-unattend.iso`` containing a single file at the root:
 ``autounattend.xml`` (dual-named: ``AUTOUNATT.XML`` on the 9660 side,
 ``autounattend.xml`` on Joliet).  Windows Setup scans every attached

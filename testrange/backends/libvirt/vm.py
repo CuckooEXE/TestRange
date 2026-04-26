@@ -115,6 +115,19 @@ def _destroy_and_undefine(domain: libvirt.virDomain) -> None:
             pass
 
 
+def _nvram_run_path(run: RunDir, vm_name: str) -> str:
+    """Backend-local ref for *vm_name*'s per-run UEFI NVRAM file.
+
+    libvirt copies the OVMF_VARS template onto this path when the
+    domain first starts; cleanup happens with the rest of the run
+    dir.  Lives in the libvirt backend because NVRAM is how libvirt
+    surfaces UEFI state — other backends handle UEFI variables
+    differently (Proxmox via PVE templates, Hyper-V via the VHD,
+    …).
+    """
+    return run.path_for(f"{vm_name}_VARS.fd")
+
+
 def _press_any_key_loop(
     domain: libvirt.virDomain,
     stop: threading.Event,
@@ -309,7 +322,7 @@ class VM(AbstractVM):
 
     def _primary_disk_size(self) -> str:
         drives = self._hard_drives()
-        return drives[0].qemu_size if drives else "20G"
+        return drives[0].size_string if drives else "20G"
 
     def _base_domain_xml(
         self,
@@ -629,7 +642,7 @@ class VM(AbstractVM):
         """
         domain_spec = self.builder.prepare_install_domain(self, run, cache)
         nvram_ref = (
-            run.nvram_path(self._name) if domain_spec.uefi else None
+            _nvram_run_path(run, self._name) if domain_spec.uefi else None
         )
 
         domain_name = f"tr-build-{self._name[:10]}-{run.run_id[:8]}"
@@ -799,7 +812,7 @@ class VM(AbstractVM):
         # rotates instance-id here; Windows + NoOp don't) and which
         # firmware / device models the run domain needs.
         run_spec = self.builder.prepare_run_domain(self, run, mac_ip_pairs)
-        nvram_ref = run.nvram_path(self._name) if run_spec.uefi else None
+        nvram_ref = _nvram_run_path(run, self._name) if run_spec.uefi else None
 
         domain_name = f"tr-{self._name[:10]}-{run.run_id[:8]}"
         xml = self._base_domain_xml(

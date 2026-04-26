@@ -96,7 +96,7 @@ class TestReadyImage:
         cache = CacheManager(root=tmp_cache_root)
 
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -104,12 +104,12 @@ class TestReadyImage:
         dest = Path(vm.builder.ready_image(vm, cache, run))
 
         assert dest.exists()
-        assert dest.parent == cache.vms_dir
-        assert dest.name.startswith("byoi-")
-        assert dest.suffix == ".qcow2"
+        # New layout: BYOI sits in its own per-VM directory keyed by
+        # ``byoi-<sha>``, with the standard disk + manifest pair inside.
+        assert dest.parent.parent == cache.vms_dir
+        assert dest.parent.name.startswith("byoi-")
         assert dest.read_bytes() == b"PREBUILT_CONTENTS"
-        # Manifest sidecar written
-        manifest = dest.with_suffix(".json")
+        manifest = dest.parent / "manifest.json"
         assert manifest.exists()
         meta = json.loads(manifest.read_text())
         assert meta["prebuilt"] is True
@@ -131,7 +131,7 @@ class TestReadyImage:
         )
         cache = CacheManager(root=tmp_cache_root)
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -160,7 +160,7 @@ class TestReadyImage:
             builder=NoOpBuilder(),
         )
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -196,7 +196,7 @@ class TestReadyImage:
         )
         cache = CacheManager(root=tmp_cache_root)
         monkeypatch.setattr(
-            "testrange.vms.builders.noop._qemu_img_info",
+            "testrange.storage.disk.qcow2._qemu_img_info",
             lambda _: {"format": "raw"},
         )
         run = _local_run(tmp_cache_root)

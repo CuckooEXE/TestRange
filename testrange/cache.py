@@ -17,24 +17,26 @@ Two things live in the cache, and nothing else:
 
     <cache_root>/
     ├── images/
-    │   ├── <url_hash>.qcow2              # or .img
+    │   ├── <url_hash><ext>               # extension copied from source URL
     │   └── <url_hash>.meta.json          # URL, size, sha256, timestamp
     └── vms/
         └── <config_hash>/                # one directory per cached VM
-            ├── disk.qcow2                # primary post-install disk
+            ├── <primary disk>            # filename owned by the disk format
             ├── manifest.json             # build manifest (what installed)
             └── ...                       # backend-specific resources
 
 Each cached VM lives in its own directory under ``vms/`` so all of
-its **resources** sit together.  Two are universal — the primary
-``disk.qcow2`` and the ``manifest.json`` describing how it was
+its **resources** sit together.  Two are universal across backends
+— the primary disk and the ``manifest.json`` describing how it was
 built — and any backend may drop additional files alongside them
 (extra drives, hypervisor-specific config blobs, firmware-state
 snapshots, …) without the cache layer needing to know about them.
-Multi-disk VMs extend naturally as ``disk-1.qcow2``,
-``disk-2.qcow2``, etc.  The ``manifest.json`` records the exact set
-of modifications applied to the base image; inspect it with any
-JSON viewer to audit a cached build without booting it.
+The primary disk's filename is owned by the backend's disk format
+(see :attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`),
+so a backend that uses a non-qcow2 format produces the right
+extension automatically.  The ``manifest.json`` records the exact
+set of modifications applied to the base image; inspect it with
+any JSON viewer to audit a cached build without booting it.
 
 Ephemeral per-run scratch space (install-phase overlays, seed ISOs) is
 **not** part of the cache — see :class:`~testrange._run.RunDir`.
@@ -92,6 +94,20 @@ redirect always returns the most recent stable release."""
 def _copy_file(src: Path, dest: Path) -> None:
     """Copy *src* to *dest* with shutil, isolated for easy mocking in tests."""
     shutil.copyfile(src, dest)
+
+
+def _url_extension(url: str) -> str:
+    """Return *url*'s filename extension, including the leading dot.
+
+    Falls back to ``""`` when the URL has no recognisable extension.
+    Used by :meth:`CacheManager.get_image` to keep the cache
+    format-agnostic — whatever the user pointed at, that's what we
+    stash on disk.
+    """
+    name = url.rsplit("/", 1)[-1].rsplit("?", 1)[0]
+    if "." not in name:
+        return ""
+    return "." + name.rsplit(".", 1)[-1]
 
 
 class CacheManager:
@@ -155,15 +171,18 @@ class CacheManager:
             raise CacheError(f"Cannot create cache directory: {exc}") from exc
 
     def get_image(self, url: str) -> Path:
-        """Return the local path for a cloud image, downloading if necessary.
+        """Return the local path for a base image, downloading if necessary.
 
         Downloads are streamed with a progress bar.  A ``.meta.json``
         sidecar records the source URL, download timestamp, and SHA-256
         of the file content for integrity verification on subsequent
         cache hits.
 
-        :param url: An ``https://`` URL pointing to a ``.qcow2`` or
-            ``.img`` cloud image.
+        :param url: An ``https://`` URL pointing to a base image
+            (cloud disk, installer ISO, or any other artifact a
+            backend can build a VM from).  The cached file's
+            extension is taken verbatim from the URL so the cache
+            stays format-agnostic.
         :returns: Path to the locally cached image file.
         :raises ImageNotFoundError: If the download fails (HTTP error,
             network timeout, etc.).
@@ -171,7 +190,7 @@ class CacheManager:
         """
         url_hash = hashlib.sha256(url.encode()).hexdigest()[:24]
         meta_path = self.images_dir / f"{url_hash}.meta.json"
-        ext = ".qcow2" if url.endswith(".qcow2") else ".img"
+        ext = _url_extension(url)
         image_path = self.images_dir / f"{url_hash}{ext}"
 
         lock_path = self.images_dir / f"{url_hash}.lock"
@@ -420,7 +439,7 @@ class CacheManager:
         except ValueError:
             pass
 
-        ext = local_path.suffix or ".qcow2"
+        ext = local_path.suffix
         digest = _sha256_file(local_path)[:24]
         dest_ref = transport._join(
             transport.images_dir(), f"{digest}{ext}"
@@ -452,11 +471,14 @@ class CacheManager:
     # layout under a per-orchestrator backend prefix.
     # ------------------------------------------------------------------
 
-    DISK_RESOURCE = "disk.qcow2"
-    """Conventional filename of the primary cached disk."""
-
     MANIFEST_RESOURCE = "manifest.json"
-    """Conventional filename of the build manifest."""
+    """Conventional filename of the build manifest.
+
+    Universal across backends: every cached VM has a manifest
+    describing how it was built.  The primary disk's filename, by
+    contrast, is owned by the backend's disk format — see
+    :attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`.
+    """
 
     def vm_dir(
         self,
@@ -482,12 +504,15 @@ class CacheManager:
         cached VM.  Does not check existence.
 
         :param config_hash: Hash key from :func:`vm_config_hash`.
-        :param resource: Filename inside the VM's directory.  Use the
-            ``DISK_RESOURCE`` / ``MANIFEST_RESOURCE`` constants for
-            the universal ones, or pass an arbitrary name for
-            backend-specific resources (additional disks, hypervisor
-            config blobs, UEFI variable blobs — anything the backend
-            wants to keep in the per-VM directory).
+        :param resource: Filename inside the VM's directory.  Use
+            :attr:`MANIFEST_RESOURCE` for the manifest, the
+            backend's disk-format
+            :attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`
+            for the primary disk, or any arbitrary name for
+            backend-specific resources (additional disks,
+            hypervisor-specific config blobs, firmware-state blobs —
+            anything the backend wants to keep in the per-VM
+            directory).
         :param backend: Backend whose ``vms/`` dir hosts the VM.
         :returns: ``<transport.vms_dir>/<config_hash>/<resource>``.
         """
@@ -499,8 +524,14 @@ class CacheManager:
         config_hash: str,
         backend: StorageBackend,
     ) -> str:
-        """Convenience for ``vm_resource_ref(hash, DISK_RESOURCE, backend)``."""
-        return self.vm_resource_ref(config_hash, self.DISK_RESOURCE, backend)
+        """Backend-local ref for the cached primary disk.
+
+        Filename comes from the backend's disk format
+        (:attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`).
+        """
+        return self.vm_resource_ref(
+            config_hash, backend.disk.primary_disk_filename, backend,
+        )
 
     def vm_manifest_ref(
         self,
@@ -518,9 +549,9 @@ class CacheManager:
         """Build the HTTP-cache URL key for a per-VM resource.
 
         Form: ``<backend_name>/vms/<config_hash>/<resource>``.  The
-        backend prefix lets a single remote serve multiple hypervisor
-        backends without colliding (libvirt's qcow2 and Hyper-V's
-        vhdx live under sibling subtrees).
+        backend prefix lets a single remote serve multiple
+        hypervisor backends without artifact-format collisions —
+        each backend's resources sit under a sibling subtree.
         """
         return f"{self.backend_name}/vms/{config_hash}/{resource}"
 
@@ -529,19 +560,19 @@ class CacheManager:
         config_hash: str,
         backend: StorageBackend,
     ) -> str | None:
-        """Return the cached snapshot ref for *config_hash*, or ``None``.
+        """Return the cached primary-disk ref for *config_hash*, or ``None``.
 
-        A cache hit requires **both** the qcow2 and its ``.json``
-        manifest to exist.  The manifest is written last by
+        A cache hit requires **both** the disk and its
+        ``manifest.json`` to exist.  The manifest is written last by
         :meth:`store_vm`, so its absence is the canonical signal that
         a previous compress step crashed mid-write (OOM, SIGKILL,
-        power loss) and left a truncated qcow2 behind.  Returning
-        ``None`` in that case forces a rebuild; the stale qcow2 is
+        power loss) and left a truncated disk behind.  Returning
+        ``None`` in that case forces a rebuild; the stale disk is
         overwritten by the next :meth:`store_vm` invocation.
 
         When a remote :class:`~testrange.cache_http.HttpCache` is
         configured and the local backend cache is empty, the remote is
-        queried; on a remote hit both the qcow2 and the manifest are
+        queried; on a remote hit both the disk and the manifest are
         pulled into the local backend and the freshly-populated ref is
         returned, exactly as if a previous run had built it locally.
 
@@ -594,7 +625,9 @@ class CacheManager:
             )
             return False
 
-        disk_key = self._remote_vm_resource_key(config_hash, self.DISK_RESOURCE)
+        disk_key = self._remote_vm_resource_key(
+            config_hash, backend.disk.primary_disk_filename,
+        )
         manifest_key = self._remote_vm_resource_key(
             config_hash, self.MANIFEST_RESOURCE,
         )
@@ -630,17 +663,17 @@ class CacheManager:
         manifest: dict[str, Any],
         backend: StorageBackend,
     ) -> str:
-        """Compress *src_ref* into the backend's snapshot cache.
+        """Compress *src_ref* into the backend's per-VM cache directory.
 
         Uses the backend's disk-format ``compress`` op so the
         compression runs wherever the source lives (remote for SSH
-        backends, local for the default).  The qcow2 is written via a
-        ``.qcow2.partial`` staging path and atomically renamed on
-        success, so a mid-compress crash can never leave a
-        plausible-looking-but-truncated file at the final name.  A
-        sibling manifest JSON is written *after* the rename — its
-        presence is what :meth:`get_vm` checks to distinguish a
-        complete cache entry from a partial one.
+        backends, local for the default).  The disk is written via a
+        ``.partial`` staging path and atomically renamed on success,
+        so a mid-compress crash can never leave a plausible-looking-
+        but-truncated file at the final name.  The ``manifest.json``
+        is written *after* the rename — its presence is what
+        :meth:`get_vm` checks to distinguish a complete cache entry
+        from a partial one.
 
         :param config_hash: Hash key for this VM configuration.
         :param src_ref: Backend-local ref to the post-install image.
@@ -658,8 +691,8 @@ class CacheManager:
         # into it.
         transport.makedirs(self.vm_dir(config_hash, backend))
         # A leftover .partial from an earlier crashed run would make
-        # qemu-img refuse to overwrite (or race the compress with
-        # another process); blow it away first.
+        # the disk-format tool refuse to overwrite (or race the
+        # compress with another process); blow it away first.
         transport.remove(partial_ref)
         try:
             with log_duration(
@@ -696,7 +729,9 @@ class CacheManager:
             return
         if not _transport_is_local(backend.transport):
             return
-        disk_key = self._remote_vm_resource_key(config_hash, self.DISK_RESOURCE)
+        disk_key = self._remote_vm_resource_key(
+            config_hash, backend.disk.primary_disk_filename,
+        )
         manifest_key = self._remote_vm_resource_key(
             config_hash, self.MANIFEST_RESOURCE,
         )

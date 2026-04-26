@@ -49,7 +49,7 @@ class AbstractVM(ABC):
 
     iso: str
     """Source image reference — URL or absolute local path to a
-    cloud image / installer ISO / prebuilt qcow2.  See
+    cloud image, installer ISO, or prebuilt disk image.  See
     :func:`testrange.vms.images.resolve_image`."""
 
     pkgs: list[AbstractPackage]
@@ -78,7 +78,7 @@ class AbstractVM(ABC):
         """
 
     def _primary_disk_size(self) -> str:
-        """Return the primary (OS) disk's size as a qcow2-compatible
+        """Return the primary (OS) disk's size as a backend-friendly
         string (e.g. ``'64G'``).
 
         Default implementation: the first
@@ -88,7 +88,7 @@ class AbstractVM(ABC):
         """
         from testrange.devices import HardDrive
         drives = [d for d in self.devices if isinstance(d, HardDrive)]
-        return drives[0].qemu_size if drives else "20G"
+        return drives[0].size_string if drives else "20G"
 
     def _require_communicator(self) -> AbstractCommunicator:
         """Return the active communicator or raise an error.

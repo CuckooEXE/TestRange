@@ -18,6 +18,8 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from testrange.storage.transport.base import AbstractFileTransport
 
 
@@ -37,8 +39,45 @@ class AbstractDiskFormat(ABC):
 
     _transport: AbstractFileTransport
 
+    primary_disk_filename: str = "disk"
+    """Conventional filename of a VM's primary disk in this format.
+
+    Generic code (cache layer) constructs disk paths by joining a
+    containing directory with this filename, so each format owns its
+    own extension/naming convention without the rest of the codebase
+    needing to know what's inside.  Subclasses override (e.g.
+    ``"disk.qcow2"`` for qcow2, ``"disk.vhdx"`` for VHDX,
+    ``"disk.vmdk"`` for VMDK).
+    """
+
+    @property
+    def disk_extension(self) -> str:
+        """Filename extension for disks in this format, with leading dot.
+
+        Derived from :attr:`primary_disk_filename` by default
+        (``"disk.qcow2"`` → ``".qcow2"``).  Used by per-run scratch
+        helpers that name overlays after the VM rather than after the
+        format (e.g. ``<vm_name>.qcow2``).
+        """
+        if "." in self.primary_disk_filename:
+            return "." + self.primary_disk_filename.split(".", 1)[1]
+        return ""
+
     def __init__(self, transport: AbstractFileTransport) -> None:
         self._transport = transport
+
+    def validate_source_image(self, path: Path) -> None:
+        """Validate that *path* (on the outer host) is in this disk format.
+
+        Used by :class:`~testrange.vms.builders.NoOpBuilder` to fail
+        loudly when the user hands a prebuilt image whose format the
+        backend can't actually use.  Default implementation accepts
+        anything; format-specific subclasses override (qcow2 runs
+        ``qemu-img info`` and checks the format field, etc.).
+
+        :raises testrange.exceptions.VMBuildError: When *path* is not
+            in the expected format.
+        """
 
     @abstractmethod
     def create_overlay(self, backing_ref: str, dest_ref: str) -> None:

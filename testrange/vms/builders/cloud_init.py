@@ -1,10 +1,10 @@
 """Cloud-init :class:`~testrange.vms.builders.base.Builder` for Linux
 cloud images.
 
-The install phase boots a NoCloud seed ISO on top of an overlay of the
-resolved ``.qcow2`` / ``.img`` base, lets cloud-init create users,
-install packages, run post-install commands, and power the VM off.
-The run phase rotates the ``instance-id`` via a phase-2 seed ISO so
+The install phase boots a NoCloud seed ISO on top of an overlay of
+the resolved base image, lets cloud-init create users, install
+packages, run post-install commands, and power the VM off.  The run
+phase rotates the ``instance-id`` via a phase-2 seed ISO so
 cloud-init treats each test run as a new instance (without
 reinstalling packages).
 """

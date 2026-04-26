@@ -8,7 +8,7 @@ own file, re-export from here.  Top-level imports
 from testrange.devices.base import AbstractDevice
 from testrange.devices.hard_drive import HardDrive
 from testrange.devices.memory import Memory
-from testrange.devices.sizes import normalise_qemu_size, parse_size
+from testrange.devices.sizes import normalise_size, parse_size
 from testrange.devices.vcpu import vCPU
 from testrange.devices.virtual_network_ref import VirtualNetworkRef
 
@@ -19,5 +19,5 @@ __all__ = [
     "HardDrive",
     "VirtualNetworkRef",
     "parse_size",
-    "normalise_qemu_size",
+    "normalise_size",
 ]

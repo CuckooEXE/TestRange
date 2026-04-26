@@ -8,38 +8,40 @@ What gets cached
 ----------------
 
 **Base images.**  The first time a test requests an ``https://``
-``iso=``, TestRange downloads the upstream cloud image into
-``<cache_root>/images/<url_hash>.qcow2``.  Every subsequent VM that
-uses the same URL skips the download.
+``iso=``, TestRange downloads the upstream image into
+``<cache_root>/images/<url_hash><ext>`` (extension copied verbatim
+from the URL).  Every subsequent VM that uses the same URL skips
+the download.
 
 **Post-install VM snapshots.**  After a VM's install phase runs
 (packages installed, users created, post-install commands executed),
-the resulting disk is compressed with ``qemu-img convert -c`` and
-stored under a per-VM directory at
-``<cache_root>/vms/<config_hash>/``.  Each cached VM owns a
-directory of *resources* — two universal ones (the primary disk
-and the manifest) plus any backend-specific files the hypervisor
-keeps alongside them::
+the resulting disk is compressed and stored under a per-VM
+directory at ``<cache_root>/vms/<config_hash>/``.  Each cached VM
+owns a directory of *resources* — two universal ones (the primary
+disk and the manifest) plus any backend-specific files the
+hypervisor keeps alongside them::
 
     <cache_root>/vms/<config_hash>/
-    ├── disk.qcow2          # primary post-install disk
+    ├── <primary disk>      # filename owned by the disk format
     ├── manifest.json       # build manifest (what installed)
     └── ...                 # backend-specific resources
 
+The primary disk's filename is owned by the backend's disk format
+(see :attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`).
 Backends drop additional files in the same directory using
 :meth:`~testrange.cache.CacheManager.vm_resource_ref` with an
-arbitrary name — additional drives (``disk-1.qcow2``, ``disk-2.qcow2``…),
-hypervisor-specific config blobs, firmware-state snapshots — without
-the cache layer needing to know what they mean.  The
-``manifest.json`` records exactly what went into the image; open
-it in any JSON viewer to audit a cached build.
+arbitrary name — additional drives, hypervisor-specific config
+blobs, firmware-state snapshots — without the cache layer needing
+to know what they mean.  The ``manifest.json`` records exactly
+what went into the image; open it in any JSON viewer to audit a
+cached build.
 
 **Staged prebuilt (BYOI) images.**  When a VM is declared with
-``builder=NoOpBuilder()`` the source qcow2 is content-hashed and
-copied to ``<cache_root>/vms/byoi-<sha256[:24]>.qcow2`` on first use.
-Files that already live inside the cache root are used in place.
-The sibling ``byoi-<sha256[:24]>.json`` records the source path and
-hash for auditing.  See :doc:`vms` for the full BYOI rules.
+``builder=NoOpBuilder()`` the source disk is content-hashed and
+copied into the same per-VM-directory layout at
+``<cache_root>/vms/byoi-<sha256[:24]>/``.  Files that already live
+inside the cache root are used in place.  See :doc:`vms` for the
+full BYOI rules.
 
 **Staged Windows install ISOs.**  On first use, TestRange
 content-hashes and copies the Windows ISO to
@@ -100,13 +102,13 @@ Design notes
 ------------
 
 **Base-image downloads are locked per-URL.**  Concurrent test runs
-requesting the same image serialise on a ``<hash>.lock`` file so you
-don't fetch the same 500 MiB qcow2 twice.
+requesting the same image serialise on a ``<hash>.lock`` file so
+you don't fetch the same 500 MiB blob twice.
 
-**Snapshots are compressed.**  A post-install Debian working disk is
-2-3 GiB; qemu-img's cluster-level compression typically shrinks it to
-300-500 MiB.  This trades a few seconds of CPU during the install
-phase for meaningful disk savings.
+**Snapshots are compressed.**  A post-install Debian working disk
+is 2-3 GiB; the backend's disk-format compress op typically shrinks
+it to 300-500 MiB.  This trades a few seconds of CPU during the
+install phase for meaningful disk savings.
 
 **Integrity is sha256-verified on download.**  The ``<hash>.meta.json``
 sidecar records the content hash and byte size; corrupted downloads

@@ -2,20 +2,24 @@ TestRange
 =========
 
 **TestRange** is a pip-installable Python package for orchestrating
-KVM/QEMU virtual machine environments for integration testing.
+hypervisor-backed virtual machine environments for integration
+testing.  The default backend drives KVM/QEMU through libvirt;
+additional backends are peer implementations of the same abstract
+surface (see :doc:`api/backends`).
 
 It handles:
 
 - Spinning up isolated or internet-connected virtual networks
 - Provisioning Linux (and Windows) VMs from cloud images using
-  cloud-init — just hand ``iso=`` an ``https://`` URL to any
-  upstream ``.qcow2`` / ``.img``
+  cloud-init — just hand ``iso=`` an ``https://`` URL to an
+  upstream cloud image
 - Caching installed VM snapshots so subsequent runs start in seconds
   (the first run does the slow install; every run after that is a
-  thin qcow2 overlay)
-- Talking to running VMs via the QEMU Guest Agent over
-  ``virtio-serial`` — **no network port is exposed to the host**,
-  so fully isolated networks can still be inspected
+  thin copy-on-write overlay on the cached primary disk)
+- Talking to running VMs via a backend-native side channel — the
+  default backend uses the QEMU guest agent over ``virtio-serial``
+  so no network port is exposed to the host, and fully isolated
+  networks can still be inspected
 
 .. code-block:: bash
 

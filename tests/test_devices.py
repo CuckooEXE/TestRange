@@ -9,7 +9,7 @@ from testrange.devices import (
     HardDrive,
     Memory,
     VirtualNetworkRef,
-    normalise_qemu_size,
+    normalise_size,
     parse_size,
     vCPU,
 )
@@ -45,7 +45,7 @@ class TestParseSize:
             parse_size(bad)
 
 
-class TestNormaliseQemuSize:
+class TestNormaliseSize:
     @pytest.mark.parametrize(
         "text,expected",
         [
@@ -59,7 +59,7 @@ class TestNormaliseQemuSize:
         ],
     )
     def test_normalisation(self, text: str, expected: str) -> None:
-        assert normalise_qemu_size(text) == expected
+        assert normalise_size(text) == expected
 
 
 class TestVCPU:
@@ -116,8 +116,8 @@ class TestHardDrive:
         d = HardDrive("64GB")
         assert d.size_bytes == 64 * 1024 ** 3
 
-    def test_qemu_size(self) -> None:
-        assert HardDrive("64GB").qemu_size == "64G"
+    def test_size_string(self) -> None:
+        assert HardDrive("64GB").size_string == "64G"
 
     def test_nvme_bus(self) -> None:
         assert HardDrive(nvme=True).bus == "nvme"
@@ -143,7 +143,7 @@ class TestHardDrive:
     def test_int_size_interpreted_as_gib(self) -> None:
         d = HardDrive(32)
         assert d.size_bytes == 32 * 1024 ** 3
-        assert d.qemu_size == "32G"
+        assert d.size_string == "32G"
 
     def test_float_size_interpreted_as_gib(self) -> None:
         d = HardDrive(1.5)

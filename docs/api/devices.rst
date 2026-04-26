@@ -85,4 +85,4 @@ Reference
 
 .. autofunction:: testrange.devices.parse_size
 
-.. autofunction:: testrange.devices.normalise_qemu_size
+.. autofunction:: testrange.devices.normalise_size

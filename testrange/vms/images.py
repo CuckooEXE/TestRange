@@ -1,7 +1,9 @@
 """OS image resolution utilities.
 
 :func:`resolve_image` accepts either an absolute local path or an
-``https://`` URL pointing to a ``.qcow2`` or ``.img`` cloud image.
+``https://`` URL.  The cache stores whatever extension the URL has
+verbatim — ``.qcow2``, ``.img``, ``.iso``, ``.vhdx`` are all fine
+inputs; the backend's builder decides what to do with the bytes.
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ def resolve_image(iso: str, cache: CacheManager) -> Path:
        :meth:`~testrange.cache.CacheManager.get_image`.
     3. Otherwise raise :class:`~testrange.exceptions.ImageNotFoundError`.
 
-    :param iso: An absolute local path or an ``https://`` URL pointing to a
-        ``.qcow2`` or ``.img`` cloud image.
+    :param iso: An absolute local path or an ``https://`` URL pointing
+        to an image file.  Format is up to the backend's builder; the
+        cache stores whatever extension the URL has.
     :param cache: An active :class:`~testrange.cache.CacheManager` instance.
     :returns: Absolute path to the local image file.
     :raises ImageNotFoundError: If *iso* is neither a valid local path nor
@@ -47,7 +50,7 @@ def resolve_image(iso: str, cache: CacheManager) -> Path:
 
     raise ImageNotFoundError(
         f"Cannot resolve image {iso!r}. "
-        "Pass an absolute path to a local .qcow2 / .img file, "
+        "Pass an absolute path to a local image file, "
         "or an https:// URL."
     )
 

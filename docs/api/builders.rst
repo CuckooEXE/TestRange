@@ -97,6 +97,6 @@ Reference
    :members:
    :show-inheritance:
 
-.. autofunction:: testrange.vms.builders.cloud_init.write_seed_iso
+.. autofunction:: testrange.vms.builders.cloud_init.build_seed_iso_bytes
 
-.. autofunction:: testrange.vms.builders.unattend.write_autounattend_iso
+.. autofunction:: testrange.vms.builders.unattend.build_autounattend_iso_bytes

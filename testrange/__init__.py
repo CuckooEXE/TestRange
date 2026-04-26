@@ -49,9 +49,9 @@ Quick-start example::
     ]
 
 ``Orchestrator`` / ``VM`` / ``VirtualNetwork`` re-exported at the top
-level resolve to the default backend (KVM / QEMU via libvirt).
-Alternative backends can be pulled in directly from
-:mod:`testrange.backends`.
+level resolve to the default backend.  Alternative backends can be
+pulled in directly from :mod:`testrange.backends` — each is a peer
+implementation of the same abstract surface.
 """
 
 from testrange._version import __version__

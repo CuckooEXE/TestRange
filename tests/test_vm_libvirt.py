@@ -299,7 +299,7 @@ class TestInstallPhaseCleanup:
 
         run = MagicMock(spec=RunDir)
         run.run_id = "deadbeef-1111-2222-3333-444455556666"
-        run.nvram_path.return_value = Path("/tmp/vars.fd")
+        run.path_for.return_value = "/tmp/vars.fd"
 
         install_spec = InstallDomain(
             work_disk="/tmp/winbox-install.qcow2",

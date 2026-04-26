@@ -6,8 +6,8 @@ nginx + docker-compose stack that serves as a remote artifact
 store.  It is **separate** from TestRange's per-host
 :doc:`local cache <caching>`: the local cache lives on each test
 runner's filesystem, while this HTTP cache is a service intended
-to be shared across multiple hosts (and eventually multiple
-hypervisor backends — libvirt, Proxmox, Hyper-V).
+to be shared across multiple hosts and (eventually) multiple
+hypervisor backends.
 
 Scope
 -----
@@ -71,14 +71,14 @@ Examples
 .. code-block:: bash
 
    # Store a file (-k accepts the self-signed cert)
-   curl -kT post-install-debian-12.qcow2 \
-       https://cache.example/vms/abc123.qcow2
+   curl -kT my-blob.bin \
+       https://cache.example/path/to/my-blob.bin
 
    # Fetch it
-   curl -k -o local.qcow2 https://cache.example/vms/abc123.qcow2
+   curl -k -o local.bin https://cache.example/path/to/my-blob.bin
 
    # Delete it
-   curl -k -X DELETE https://cache.example/vms/abc123.qcow2
+   curl -k -X DELETE https://cache.example/path/to/my-blob.bin
 
 PUT into a path whose parent directories don't exist yet just
 works — ``create_full_put_path on`` mirrors ``mkdir -p`` semantics
@@ -96,8 +96,8 @@ What's *not* in scope
 * **Range requests / resume.**  Stock nginx serves ``Range``
   headers on ``GET`` for free; ``PUT`` is all-or-nothing.
 * **Content addressing.**  Callers choose the URL path.  Hashing
-  conventions (e.g. ``vms/<config_hash>.qcow2``) are TestRange's
-  responsibility, not the cache's.
+  conventions (e.g. ``<backend>/vms/<config_hash>/...``) are
+  TestRange's responsibility, not the cache's.
 
 Wiring it into TestRange
 ------------------------
@@ -126,9 +126,10 @@ Behaviour
   local cache + synthesise a meta sidecar.  Remote miss → download
   from upstream URL → ``PUT`` to remote on success.
 * **VM snapshots** (``get_vm`` / ``store_vm``).  Local hit
-  short-circuits.  Local miss → ``GET`` qcow2 + manifest from
-  remote and land them in the local backend.  ``store_vm`` after
-  install ``PUT``\ s both back to the remote.
+  short-circuits.  Local miss → ``GET`` primary disk + manifest
+  from remote and land them in the local backend's per-VM
+  directory.  ``store_vm`` after install ``PUT``\ s both back to
+  the remote.
 * **Failure handling.**  Every remote operation is best-effort.
   Connection errors, timeouts, and unexpected status codes log a
   warning and fall through to the cold path; a flaky cache slows
@@ -146,28 +147,31 @@ VM artifacts live under one directory per cached VM, prefixed by
 the hypervisor backend so a single remote can serve multiple
 backends without artifact-format collisions::
 
-    <backend>/vms/<config_hash>/disk.qcow2     # primary disk
-    <backend>/vms/<config_hash>/manifest.json  # build manifest
-    <backend>/vms/<config_hash>/...            # backend-specific resources
+    <backend>/vms/<config_hash>/<primary disk>   # filename owned by disk format
+    <backend>/vms/<config_hash>/manifest.json    # build manifest
+    <backend>/vms/<config_hash>/...              # backend-specific resources
 
-Where ``<backend>`` is ``libvirt``, ``proxmox``, eventually
-``hyperv`` — the orchestrator's
+``<backend>`` is the orchestrator's
 :meth:`~testrange.orchestrator_base.AbstractOrchestrator.backend_type`,
 set by the orchestrator that owns the cache (the user never
-specifies it).  This mirrors the per-VM-directory layout TestRange
-uses on the local filesystem (see :doc:`caching`); the backend
-prefix is added to the URL because the local layout is already
-namespaced by each backend's storage transport.
+specifies it).  The primary-disk filename is owned by the
+backend's disk format
+(:attr:`~testrange.storage.disk.AbstractDiskFormat.primary_disk_filename`)
+so the URL ends in whatever extension the format uses.  This
+mirrors the per-VM-directory layout TestRange uses on the local
+filesystem (see :doc:`caching`); the backend prefix is added to
+the URL because the local layout is already namespaced by each
+backend's storage transport.
 
 Backends drop additional resources into the same per-VM directory
-without the cache layer caring what they mean — extra drives
-(``disk-1.qcow2``…), hypervisor-specific config blobs,
-firmware-state snapshots.  ``vms/<hash>/`` is just a folder.
+without the cache layer caring what they mean — extra drives,
+hypervisor-specific config blobs, firmware-state snapshots.
+``vms/<hash>/`` is just a folder.
 
 Base images sit at the top level — they're upstream-keyed and
 backend-agnostic::
 
-    images/<url_hash>.qcow2 (or .img)
+    images/<url_hash><ext>           # extension copied from source URL
     images/<url_hash>.meta.json
 
 ``url_hash`` and ``config_hash`` are the same 24-char SHA-256
@@ -179,11 +183,12 @@ for the same URL or VM spec.
 Not yet on the remote
 ~~~~~~~~~~~~~~~~~~~~~
 
-* **Backend-specific per-VM resources** beyond ``disk.qcow2`` and
-  ``manifest.json`` — backends store these locally today (e.g. the
-  libvirt backend keeps UEFI variables in the per-VM directory for
-  UEFI installs); a follow-up will mirror any extra files the
-  backend writes through :meth:`~testrange.cache.CacheManager.vm_resource_ref`.
+* **Backend-specific per-VM resources** beyond the primary disk
+  and ``manifest.json`` — backends store these locally today (the
+  libvirt backend, for instance, keeps firmware-state files in the
+  per-VM directory for UEFI installs); a follow-up will mirror any
+  extra files the backend writes through
+  :meth:`~testrange.cache.CacheManager.vm_resource_ref`.
 * **virtio-win.iso** and **staged Windows ISOs** — fetched
   upstream / staged locally as today.
 * **Proxmox prepared ISOs** — local-only; PVE-side caching is

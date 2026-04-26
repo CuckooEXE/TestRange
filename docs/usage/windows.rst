@@ -79,8 +79,8 @@ Windows install path instead of the cloud-init one.  The path is:
 3. **Generate an autounattend ISO.**
    :class:`~testrange.vms.builders.WindowsUnattendedBuilder` composes the
    answer file (disk partitioning, user accounts, locale, first-logon
-   commands); :func:`~testrange.vms.builders.write_autounattend_iso`
-   wraps it in an ISO 9660 seed volume that Windows Setup auto-detects.
+   commands); :func:`~testrange.vms.builders.build_autounattend_iso_bytes`
+   produces an ISO 9660 seed volume that Windows Setup auto-detects.
 
 4. **Fetch / reuse the virtio-win ISO.**
    :meth:`~testrange.cache.CacheManager.get_virtio_win_iso` downloads

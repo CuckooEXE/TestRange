@@ -3,9 +3,9 @@
 Each concrete :class:`Builder` encodes how a particular flavour of VM
 gets from ``iso=`` to a runnable disk image.  The two "install-phase"
 builders produce a cached post-install disk by booting a one-off
-domain (cloud-init for Linux cloud images, Windows Setup + autounattend
-for Windows install ISOs); the :class:`NoOpBuilder` skips the install
-entirely and just stages a user-supplied qcow2.
+domain (cloud-init for Linux cloud images, autounattend for Windows
+install ISOs); the :class:`NoOpBuilder` skips the install entirely
+and just stages a user-supplied prebuilt image.
 
 Every VM spec holds a ``builder`` attribute and delegates the
 install-pipeline work to it — backends consume the builder's output
@@ -15,8 +15,8 @@ hypervisor-neutrally:
    :class:`InstallDomain` spec (primary disk, optional seed ISO, extra
    CD-ROMs, and firmware hints).
 2. **Post-install caching** — :meth:`Builder.install_manifest` populates
-   the sibling JSON manifest stored next to
-   ``<cache_root>/vms/<config_hash>.qcow2``.
+   the per-VM ``manifest.json`` stored alongside the cached primary
+   disk under ``<cache_root>/vms/<config_hash>/``.
 3. **Run phase** — :meth:`Builder.prepare_run_domain` returns the
    :class:`RunDomain` spec.  No disk work here — the VM overlay is
    created by :class:`~testrange._run.RunDir` before the builder is
@@ -46,27 +46,28 @@ class InstallDomain:
     All disk-like fields are **backend-local refs** — strings that the
     hypervisor's host can open directly.  For the default
     :class:`~testrange.storage.LocalStorageBackend` these are absolute
-    outer-host paths (behaviourally identical to the pre-backend
-    code); for remote backends they are paths on the remote host
-    where the uploaded qcow2s live.
+    outer-host paths; for remote backends they are paths on the remote
+    host where the uploaded disks live.
 
     :param work_disk: Backend-local ref to the primary disk the
         install domain will boot and write to.  Cloud-init uses an
         overlay on the resolved base image; autounattend uses a blank
-        qcow2.
+        disk.
     :param seed_iso: Optional backend-local ref to the seed CD-ROM
         (cloud-init or autounattend seed) attached as the first
         CD-ROM device.
-    :param extra_cdroms: Additional CD-ROM refs, in SATA-target order
-        after the seed.  Used by Windows to surface the install ISO
-        and the ``virtio-win.iso`` driver disc.
-    :param uefi: If ``True``, emit ``<loader>`` + ``<nvram>`` OVMF
-        references.  Windows requires this for GPT installs.
-    :param windows: If ``True``, use device models with built-in
-        Windows Setup drivers: SATA primary disk, e1000e NIC.
+    :param extra_cdroms: Additional CD-ROM refs, in attach order after
+        the seed.  Used by the Windows install flow to surface the
+        install ISO and the driver disc.
+    :param uefi: If ``True``, the backend should boot the install
+        domain in UEFI mode; otherwise BIOS.  Windows GPT installs
+        require UEFI.
+    :param windows: If ``True``, the backend should use device models
+        compatible with stock Windows Setup (which lacks drivers for
+        the more modern paravirt devices).
     :param boot_cdrom: If ``True``, boot from CD-ROM before disk — the
-        Windows installer needs this; Linux cloud-init boots straight
-        off the qcow2.
+        Windows installer needs this; cloud-init boots straight off
+        the disk.
     """
 
     work_disk: str
