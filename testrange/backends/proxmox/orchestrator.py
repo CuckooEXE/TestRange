@@ -139,6 +139,24 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._token = token
         self.vms = {}
 
+        # CacheManager construction mirrors LibvirtOrchestrator's
+        # wiring so the cross-backend cache.backend_name invariant
+        # holds even though the rest of this orchestrator is still a
+        # stub.  Without it, the contract test in
+        # tests/test_backend_contract.py::TestScenarioConstructionContract
+        # catches the missing setup.
+        from testrange.cache import CacheManager
+        remote = None
+        if cache is not None:
+            from testrange.cache_http import HttpCache
+            remote = HttpCache(cache, verify=cache_verify)
+        self._cache = (
+            CacheManager(root=cache_root, remote=remote)
+            if cache_root
+            else CacheManager(remote=remote)
+        )
+        self._cache.backend_name = self.backend_type()
+
     @classmethod
     def backend_type(cls) -> str:
         """Return ``"proxmox"``."""
