@@ -932,7 +932,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 installed_disks[vm.name] = vm.build(
                     context=self,
                     cache=cache,
-                    run=None,  # type: ignore[arg-type]
+                    run=self._run,
                     install_network_name=install_net_name,
                     install_network_mac=install_mac,
                 )
@@ -944,7 +944,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             with log_duration(_log, f"start VM {vm.name!r}"):
                 vm.start_run(
                     context=self,
-                    run=None,  # type: ignore[arg-type]
+                    run=self._run,
                     installed_disk=installed_disks[vm.name],
                     network_entries=network_entries,
                     mac_ip_pairs=mac_ip_pairs,
