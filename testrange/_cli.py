@@ -423,7 +423,7 @@ def _print_single_vm(
     from testrange.backends.libvirt.devices import LibvirtHardDrive
     from testrange.devices import (
         AbstractHardDrive,
-        AbstractVirtualNetworkRef,
+        AbstractVNIC,
         Memory,
         vCPU,
     )
@@ -457,7 +457,7 @@ def _print_single_vm(
     mem = next((d.gib for d in vm.devices if isinstance(d, Memory)), 2.0)
     drives = [d for d in vm.devices if isinstance(d, AbstractHardDrive)]
     nics = [
-        d for d in vm.devices if isinstance(d, AbstractVirtualNetworkRef)
+        d for d in vm.devices if isinstance(d, AbstractVNIC)
     ]
 
     disk_desc = (
@@ -511,14 +511,14 @@ def _print_single_vm(
             # an inner VM's ref matches the hypervisor's own inner
             # networks, not the outer ones — ``networks`` is already
             # the correct scope by the time we recurse.
-            net = next((n for n in networks if n.name == nic.name), None)
+            net = next((n for n in networks if n.name == nic.ref), None)
             if nic.ip:
                 addr = f"static {nic.ip}"
             elif net is not None and net.dhcp:
                 addr = "DHCP"
             else:
                 addr = "auto-reserved"
-            net_tag = click.style(nic.name, fg="cyan")
+            net_tag = click.style(nic.ref, fg="cyan")
             click.echo(f"{nic_child_trunk}{nic_head} {net_tag:<20} ({addr})")
 
     # Hypervisor recursion: inner networks (not last) + inner VMs (last).

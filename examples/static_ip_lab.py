@@ -2,7 +2,7 @@
 
 ``VirtualNetwork(dhcp=False, ...)`` disables libvirt's DHCP server
 entirely.  In that mode every attached NIC must come with an
-explicit ``ip=`` on its ``VirtualNetworkRef`` — TestRange's
+explicit ``ip=`` on its ``vNIC`` — TestRange's
 orchestrator checks this at provisioning time and raises if you miss
 one.
 
@@ -28,7 +28,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -81,7 +81,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("Lab", ip="10.14.0.10"),
+                            vNIC("Lab", ip="10.14.0.10"),
                         ],
                     ),
                     VM(
@@ -96,7 +96,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("Lab", ip="10.14.0.11"),
+                            vNIC("Lab", ip="10.14.0.11"),
                         ],
                     ),
                     VM(
@@ -111,7 +111,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("Lab", ip="10.14.0.12"),
+                            vNIC("Lab", ip="10.14.0.12"),
                         ],
                     ),
                 ],

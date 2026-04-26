@@ -8,7 +8,7 @@ from testrange.devices import (
     AbstractDevice,
     HardDrive,
     Memory,
-    VirtualNetworkRef,
+    vNIC,
     normalise_size,
     parse_size,
     vCPU,
@@ -202,25 +202,25 @@ class TestLibvirtHardDrive:
         assert not isinstance(d, HardDrive)
 
 
-class TestVirtualNetworkRef:
+class TestvNIC:
     def test_dhcp_default(self) -> None:
-        ref = VirtualNetworkRef("NetA")
-        assert ref.name == "NetA"
+        ref = vNIC("NetA")
+        assert ref.ref == "NetA"
         assert ref.ip is None
 
     def test_static_ip(self) -> None:
-        ref = VirtualNetworkRef("NetA", ip="10.0.0.5")
+        ref = vNIC("NetA", ip="10.0.0.5")
         assert ref.ip == "10.0.0.5"
 
     def test_device_type(self) -> None:
-        assert VirtualNetworkRef("NetA").device_type == "network_ref"
+        assert vNIC("NetA").device_type == "vnic"
 
     def test_repr_dhcp(self) -> None:
-        assert repr(VirtualNetworkRef("NetA")) == "VirtualNetworkRef('NetA')"
+        assert repr(vNIC("NetA")) == "vNIC('NetA')"
 
     def test_repr_static(self) -> None:
-        r = VirtualNetworkRef("NetA", ip="10.0.0.5")
-        assert repr(r) == "VirtualNetworkRef('NetA', ip='10.0.0.5')"
+        r = vNIC("NetA", ip="10.0.0.5")
+        assert repr(r) == "vNIC('NetA', ip='10.0.0.5')"
 
 
 class TestAbstractDevice:

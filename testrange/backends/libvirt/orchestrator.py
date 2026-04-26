@@ -326,7 +326,7 @@ class Orchestrator(AbstractOrchestrator):
         orchestrator manages that lifecycle via :class:`ExitStack`.
 
         :param hypervisor: The just-booted hypervisor VM.  Must have a
-            static IP (see :class:`VirtualNetworkRef`) and a credential
+            static IP (see :class:`vNIC`) and a credential
             whose matching private key is reachable by ``ssh-agent`` or
             ``~/.ssh/`` — otherwise the nested libvirt URI will fail to
             authenticate.
@@ -358,7 +358,7 @@ class Orchestrator(AbstractOrchestrator):
                 f"Hypervisor VM {hypervisor.name!r}: communicator has "
                 "no resolvable host.  Nested libvirt requires "
                 "communicator='ssh' + a static IP "
-                "(VirtualNetworkRef('Net', ip='10.x.x.x'))."
+                "(vNIC('Net', ip='10.x.x.x'))."
             )
 
         # ``no_verify=1`` skips host-key checking for the ephemeral VM,
@@ -823,22 +823,22 @@ class Orchestrator(AbstractOrchestrator):
         net_counters: dict[str, int] = {net.name: 0 for net in self._networks}
 
         for vm in self._vm_list:
-            for ref in vm._network_refs():
-                net = self._find_network(ref.name)
+            for nic in vm._network_refs():
+                net = self._find_network(nic.ref)
                 if net is None:
                     raise NetworkError(
-                        f"VM {vm.name!r} references unknown network {ref.name!r}. "
+                        f"VM {vm.name!r} references unknown network {nic.ref!r}. "
                         f"Available networks: {[n.name for n in self._networks]}"
                     )
 
-                if ref.ip:
+                if nic.ip:
                     # Static IP — register with the explicit address
-                    net.register_vm(vm.name, ref.ip)
+                    net.register_vm(vm.name, nic.ip)
                 else:
                     # Auto-assign from the subnet
-                    idx = net_counters[ref.name]
+                    idx = net_counters[nic.ref]
                     ip = net.static_ip_for_index(idx)
-                    net_counters[ref.name] = idx + 1
+                    net_counters[nic.ref] = idx + 1
                     net.register_vm(vm.name, ip)
 
     def _find_network(self, name: str) -> VirtualNetwork | None:
@@ -869,11 +869,11 @@ class Orchestrator(AbstractOrchestrator):
         network_entries: list[tuple[str, str]] = []
         mac_ip_pairs: list[tuple[str, str, str, str]] = []
 
-        for ref in vm._network_refs():
-            net = self._find_network(ref.name)
+        for nic in vm._network_refs():
+            net = self._find_network(nic.ref)
             if net is None:
                 continue
-            mac = _mac_for_vm_network(vm.name, ref.name)
+            mac = _mac_for_vm_network(vm.name, nic.ref)
             lv_name = net.backend_name()
             network_entries.append((lv_name, mac))
 
@@ -885,7 +885,7 @@ class Orchestrator(AbstractOrchestrator):
             # gateway IP is not a listening DNS server).
             gateway = net.gateway_ip if net.internet else ""
             nameserver = net.gateway_ip if net.dns else ""
-            cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
+            cidr = f"{nic.ip}/{net.prefix_len}" if nic.ip else ""
             mac_ip_pairs.append((mac, cidr, gateway, nameserver))
 
         return network_entries, mac_ip_pairs

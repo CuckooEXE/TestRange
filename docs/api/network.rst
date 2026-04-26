@@ -19,7 +19,7 @@ upstream network.  Three boolean flags describe the topology:
 ``dhcp``
     Whether libvirt's dnsmasq hands out DHCP leases on the bridge.
     Turning this off forces every guest to be given a static IP via
-    :class:`~testrange.devices.VirtualNetworkRef`; the orchestrator
+    :class:`~testrange.devices.vNIC`; the orchestrator
     will raise if a network has ``dhcp=False`` and any attached NIC
     lacks an explicit ``ip=``.
 
@@ -61,7 +61,7 @@ stable across runs and lets the install-phase DHCP reservation line
 up with the run-phase reservation without any state being shared.
 
 **Static IPs are DHCP reservations, not manual config.**  Passing
-``VirtualNetworkRef("NetA", ip="10.0.0.5")`` registers that MAC/IP
+``vNIC("NetA", ip="10.0.0.5")`` registers that MAC/IP
 pair as a dnsmasq ``host`` entry, plus writes it into the VM's
 cloud-init network-config.  The guest sees a static IP; libvirt's
 dnsmasq still considers it a DHCP lease.

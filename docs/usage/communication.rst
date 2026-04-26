@@ -142,7 +142,7 @@ accepted:
   get it once the autounattend FirstLogonCommands install the MSI
   from the virtio-win ISO.
 - ``"ssh"`` — uses the first
-  :class:`~testrange.devices.VirtualNetworkRef` with a static ``ip=``
+  :class:`~testrange.devices.vNIC` with a static ``ip=``
   as the host, and the first :class:`~testrange.credentials.Credential`
   as the login (preferring one with an ``ssh_key`` set).
 - ``"winrm"`` — WinRM on HTTP 5985 with basic auth.  The ``root``
@@ -164,7 +164,7 @@ Defaults:
 
 ``"ssh"`` and ``"winrm"`` raise
 :class:`~testrange.exceptions.VMBuildError` at start time if no
-:class:`~testrange.devices.VirtualNetworkRef` carries a static
+:class:`~testrange.devices.vNIC` carries a static
 ``ip=``.  v1 doesn't do DHCP-lease discovery — the resolver hook
 (``_resolve_communicator_host``) is factored out so that's a
 drop-in addition later.

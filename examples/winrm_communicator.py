@@ -43,7 +43,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -131,7 +131,7 @@ def gen_tests() -> list[Test]:
                             # Static IP so the WinRM communicator can
                             # find the VM without relying on DHCP lease
                             # discovery (not yet implemented).
-                            VirtualNetworkRef("WinNet", ip="10.60.0.10"),
+                            vNIC("WinNet", ip="10.60.0.10"),
                         ],
                         # communicator= defaults to "winrm" for Windows
                         # ISOs; passed explicitly here for documentation.

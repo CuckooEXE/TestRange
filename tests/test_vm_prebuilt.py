@@ -19,7 +19,7 @@ from testrange import VM, Credential, NoOpBuilder
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.cache import CacheManager
 from testrange.communication.ssh import SSHCommunicator
-from testrange.devices import HardDrive, VirtualNetworkRef
+from testrange.devices import HardDrive, vNIC
 from testrange.exceptions import VMBuildError
 
 
@@ -50,7 +50,7 @@ def _noop_vm(
         name=name,
         iso=str(src),
         users=users or [Credential("deploy", "pw")],
-        devices=devices or [VirtualNetworkRef("Net", ip="10.0.0.5")],
+        devices=devices or [vNIC("Net", ip="10.0.0.5")],
         builder=NoOpBuilder(windows=windows),
         communicator=communicator,
     )
@@ -90,7 +90,7 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
@@ -126,7 +126,7 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
@@ -156,7 +156,7 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         monkeypatch.setattr(
@@ -191,7 +191,7 @@ class TestReadyImage:
             name="byoi",
             iso=str(src),
             users=[Credential("deploy", "pw")],
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
             builder=NoOpBuilder(),
         )
         cache = CacheManager(root=tmp_cache_root)
@@ -275,7 +275,7 @@ class TestBaseDomainXmlSeedOptional:
 
         vm = _noop_vm(
             tmp_path,
-            devices=[HardDrive(10), VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[HardDrive(10), vNIC("Net", ip="10.0.0.5")],
             communicator="ssh",
         )
         xml = vm._base_domain_xml(
@@ -296,7 +296,7 @@ class TestBaseDomainXmlSeedOptional:
             name="cloud",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
-            devices=[HardDrive(10), VirtualNetworkRef("Net")],
+            devices=[HardDrive(10), vNIC("Net")],
         )
         xml = vm._base_domain_xml(
             domain_name="tr-cloud-xxxx",

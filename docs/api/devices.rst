@@ -14,7 +14,7 @@ Generic vs backend-specific
 Each device kind ships in two flavours:
 
 * A **generic** version (:class:`vCPU`, :class:`Memory`,
-  :class:`HardDrive`, :class:`VirtualNetworkRef`) that every backend
+  :class:`HardDrive`, :class:`vNIC`) that every backend
   accepts.  Carries only the universal fields; backends pick
   sensible defaults for everything else.  Reach for these unless
   you need a backend-specific knob.
@@ -32,7 +32,7 @@ type checker at edit time and again at runtime in ``__init__``.
 
 .. code-block:: python
 
-    from testrange import VM, HardDrive, vCPU, Memory, VirtualNetworkRef
+    from testrange import VM, HardDrive, vCPU, Memory, vNIC
     from testrange.backends.libvirt import LibvirtHardDrive
 
     VM(
@@ -44,8 +44,8 @@ type checker at edit time and again at runtime in ``__init__``.
             Memory(8),
             LibvirtHardDrive(200, nvme=True),  # libvirt-specific knobs
             HardDrive(500),                    # generic — backend picks bus
-            VirtualNetworkRef("Internal"),
-            VirtualNetworkRef("Public", ip="10.0.0.5"),
+            vNIC("Internal"),
+            vNIC("Public", ip="10.0.0.5"),
         ],
     )
 
@@ -98,7 +98,7 @@ Reference
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.devices.VirtualNetworkRef
+.. autoclass:: testrange.devices.vNIC
    :members:
    :show-inheritance:
 
@@ -125,7 +125,7 @@ device being passed to a different backend's VM.
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.devices.AbstractVirtualNetworkRef
+.. autoclass:: testrange.devices.AbstractVNIC
    :members:
    :show-inheritance:
 

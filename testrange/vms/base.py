@@ -231,7 +231,7 @@ class AbstractVM(ABC):
         """Return the first non-empty static IP from *mac_ip_pairs*.
 
         The v1 SSH / WinRM paths require a static IP via a
-        :class:`~testrange.devices.VirtualNetworkRef`.  Future
+        :class:`~testrange.devices.vNIC`.  Future
         DHCP-lease discovery plugs in here by replacing / extending
         this method — no other caller inspects ``mac_ip_pairs`` for
         host resolution.
@@ -241,8 +241,8 @@ class AbstractVM(ABC):
                 return ip_cidr.split("/", 1)[0]
         raise VMBuildError(
             f"VM {self.name!r}: communicator={self.communicator!r} "
-            "requires a static IP on at least one VirtualNetworkRef "
-            "(e.g. VirtualNetworkRef('Net', ip='10.0.0.10')). "
+            "requires a static IP on at least one vNIC "
+            "(e.g. vNIC('Net', ip='10.0.0.10')). "
             "DHCP-only discovery is not supported in v1."
         )
 

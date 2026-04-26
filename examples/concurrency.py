@@ -37,7 +37,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -74,7 +74,7 @@ def _vm(name: str, subnet: str) -> tuple[VirtualNetwork, VM]:
             vCPU(1),
             Memory(1),
             HardDrive(10),
-            VirtualNetworkRef(f"Net-{name}"),
+            vNIC(f"Net-{name}"),
         ],
     )
     return net, vm

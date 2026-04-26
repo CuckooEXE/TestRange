@@ -11,7 +11,7 @@ Quick-start example::
 
     from testrange import (
         Test, Orchestrator, VM, VirtualNetwork,
-        Credential, Apt, vCPU, Memory, VirtualNetworkRef, HardDrive,
+        Credential, Apt, vCPU, Memory, vNIC, HardDrive,
     )
 
     def smoke_test(orchestrator: Orchestrator) -> None:
@@ -38,7 +38,7 @@ Quick-start example::
                         devices=[
                             vCPU(2),
                             Memory(2),
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                             HardDrive(20),  # 20 GiB OS disk
                         ],
                     ),
@@ -64,7 +64,7 @@ from testrange.backends.libvirt import (
 )
 from testrange.communication.base import ExecResult
 from testrange.credentials import Credential
-from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange.devices import HardDrive, Memory, vNIC, vCPU
 from testrange.exceptions import (
     CacheError,
     CloudInitError,
@@ -126,7 +126,7 @@ __all__ = [
     "vCPU",
     "Memory",
     "HardDrive",
-    "VirtualNetworkRef",
+    "vNIC",
     # Packages
     "Apt",
     "Dnf",

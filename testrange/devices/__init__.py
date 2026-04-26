@@ -10,7 +10,7 @@ passed to a different backend's VM.
 * :class:`AbstractHardDrive` ← :class:`HardDrive`
 * :class:`AbstractVCPU` ← :class:`vCPU`
 * :class:`AbstractMemory` ← :class:`Memory`
-* :class:`AbstractVirtualNetworkRef` ← :class:`VirtualNetworkRef`
+* :class:`AbstractVNIC` ← :class:`vNIC`
 
 Top-level imports (``from testrange.devices import vCPU``) continue
 to work unchanged.
@@ -21,9 +21,9 @@ from testrange.devices.hard_drive import AbstractHardDrive, HardDrive
 from testrange.devices.memory import AbstractMemory, Memory
 from testrange.devices.sizes import normalise_size, parse_size
 from testrange.devices.vcpu import AbstractVCPU, vCPU
-from testrange.devices.virtual_network_ref import (
-    AbstractVirtualNetworkRef,
-    VirtualNetworkRef,
+from testrange.devices.vnic import (
+    AbstractVNIC,
+    vNIC,
 )
 
 __all__ = [
@@ -31,11 +31,11 @@ __all__ = [
     "AbstractHardDrive",
     "AbstractMemory",
     "AbstractVCPU",
-    "AbstractVirtualNetworkRef",
+    "AbstractVNIC",
     "vCPU",
     "Memory",
     "HardDrive",
-    "VirtualNetworkRef",
+    "vNIC",
     "parse_size",
     "normalise_size",
 ]

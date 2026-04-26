@@ -420,7 +420,7 @@ class TestBackendUrlDispatch:
 _PLAIN_DESCRIBE_MODULE = '''
 from testrange import (
     VM, Credential, HardDrive, Memory, Orchestrator,
-    Test, VirtualNetwork, VirtualNetworkRef, vCPU,
+    Test, VirtualNetwork, vNIC, vCPU,
 )
 
 def gen_tests():
@@ -436,7 +436,7 @@ def gen_tests():
                     users=[Credential("root", "pw")],
                     devices=[
                         vCPU(1), Memory(1), HardDrive(10),
-                        VirtualNetworkRef("Net", ip="10.0.0.5"),
+                        vNIC("Net", ip="10.0.0.5"),
                     ],
                 ),
             ],
@@ -450,7 +450,7 @@ def gen_tests():
 _NESTED_DESCRIBE_MODULE = '''
 from testrange import (
     VM, Credential, HardDrive, Hypervisor, LibvirtOrchestrator, Memory,
-    Orchestrator, Test, VirtualNetwork, VirtualNetworkRef, vCPU,
+    Orchestrator, Test, VirtualNetwork, vNIC, vCPU,
 )
 
 def gen_tests():
@@ -467,7 +467,7 @@ def gen_tests():
                     users=[root],
                     devices=[
                         vCPU(1), Memory(1), HardDrive(10),
-                        VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
+                        vNIC("OuterNet", ip="10.0.0.11"),
                     ],
                 ),
                 Hypervisor(
@@ -477,7 +477,7 @@ def gen_tests():
                     communicator="ssh",
                     devices=[
                         vCPU(2), Memory(4), HardDrive(40),
-                        VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                        vNIC("OuterNet", ip="10.0.0.10"),
                     ],
                     orchestrator=LibvirtOrchestrator,
                     networks=[
@@ -491,7 +491,7 @@ def gen_tests():
                             users=[root],
                             devices=[
                                 vCPU(1), Memory(1), HardDrive(10),
-                                VirtualNetworkRef("PublicNet", ip="10.42.0.5"),
+                                vNIC("PublicNet", ip="10.42.0.5"),
                             ],
                         ),
                     ],
@@ -551,7 +551,7 @@ class TestDescribeCommand:
     def test_nested_inner_nic_resolves_against_inner_networks(
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:
-        """An inner VM's VirtualNetworkRef must be interpreted against
+        """An inner VM's vNIC must be interpreted against
         the *inner* networks list, not the outer — otherwise a nic ref
         like 'PublicNet' would show as 'auto-reserved' instead of
         static."""

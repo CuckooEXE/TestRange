@@ -83,7 +83,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -209,7 +209,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("OuterNet", ip="10.0.0.11"),
+                            vNIC("OuterNet", ip="10.0.0.11"),
                         ],
                     ),
                     # The hypervisor VM — hosts the inner orchestrator.
@@ -222,7 +222,7 @@ def gen_tests() -> list[Test]:
                             vCPU(2),
                             Memory(4),
                             HardDrive(60),
-                            VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                            vNIC("OuterNet", ip="10.0.0.10"),
                         ],
                         orchestrator=LibvirtOrchestrator,
                         networks=[
@@ -248,7 +248,7 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(0.5),
                                     HardDrive(10),
-                                    VirtualNetworkRef(
+                                    vNIC(
                                         "PublicNet", ip="10.42.0.5",
                                     ),
                                 ],
@@ -265,7 +265,7 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(0.5),
                                     HardDrive(10),
-                                    VirtualNetworkRef(
+                                    vNIC(
                                         "PrivateNet", ip="10.43.0.5",
                                     ),
                                 ],
@@ -283,10 +283,10 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(0.5),
                                     HardDrive(10),
-                                    VirtualNetworkRef(
+                                    vNIC(
                                         "PublicNet", ip="10.42.0.6",
                                     ),
-                                    VirtualNetworkRef(
+                                    vNIC(
                                         "PrivateNet", ip="10.43.0.6",
                                     ),
                                 ],

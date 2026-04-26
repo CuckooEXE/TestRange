@@ -32,7 +32,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -78,7 +78,7 @@ def gen_tests() -> list[Test]:
                         devices=[
                             vCPU(2),
                             Memory(2),
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                             # First HardDrive is always the OS disk.
                             HardDrive(20),  # 20 GiB primary (root filesystem)
                             HardDrive(5),   # 5 GiB data disk → /dev/vdb

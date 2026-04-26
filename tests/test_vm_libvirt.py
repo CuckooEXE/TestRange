@@ -10,7 +10,7 @@ import pytest
 
 from testrange.backends.libvirt.vm import VM
 from testrange.credentials import Credential
-from testrange.devices import HardDrive, Memory, VirtualNetworkRef, vCPU
+from testrange.devices import HardDrive, Memory, vNIC, vCPU
 from testrange.packages import Apt
 
 
@@ -21,7 +21,7 @@ def basic_vm() -> VM:
         iso="/tmp/fake.qcow2",
         users=[Credential("root", "pw")],
         pkgs=[Apt("nginx")],
-        devices=[vCPU(4), Memory(4), VirtualNetworkRef("NetA")],
+        devices=[vCPU(4), Memory(4), vNIC("NetA")],
     )
 
 
@@ -61,10 +61,10 @@ class TestDeviceAccessors:
     def test_network_refs_filter(self) -> None:
         vm = VM(
             "a", "b", [],
-            devices=[VirtualNetworkRef("X"), vCPU(), VirtualNetworkRef("Y")],
+            devices=[vNIC("X"), vCPU(), vNIC("Y")],
         )
         refs = vm._network_refs()
-        assert [r.name for r in refs] == ["X", "Y"]
+        assert [r.ref for r in refs] == ["X", "Y"]
 
     def test_primary_disk_size_default(self) -> None:
         vm = VM("a", "b", [], devices=[])

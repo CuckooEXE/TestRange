@@ -47,7 +47,7 @@ Roughly in dependency order:
 4. Create SDN vnets via ``/cluster/sdn/vnets`` for each
    :class:`~testrange.networks.base.AbstractVirtualNetwork`; reload
    SDN; reserve IPs via the IPAM endpoint for static-IP
-   :class:`~testrange.devices.VirtualNetworkRef` entries.
+   :class:`~testrange.devices.vNIC` entries.
 5. For each VM, delegate to
    :meth:`~testrange.backends.proxmox.vm.ProxmoxVM.build` which
    consumes the builder's :class:`InstallDomain` and:

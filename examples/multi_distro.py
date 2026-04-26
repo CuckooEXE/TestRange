@@ -23,7 +23,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -60,7 +60,7 @@ def gen_tests() -> list[Test]:
                         users=users,
                         devices=[
                             vCPU(1), Memory(1), HardDrive(10),
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                         ],
                     ),
                     VM(
@@ -72,7 +72,7 @@ def gen_tests() -> list[Test]:
                         users=users,
                         devices=[
                             vCPU(1), Memory(1), HardDrive(10),
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                         ],
                     ),
                     VM(
@@ -85,7 +85,7 @@ def gen_tests() -> list[Test]:
                         users=users,
                         devices=[
                             vCPU(1), Memory(1), HardDrive(15),  # Rocky needs a bit more
-                            VirtualNetworkRef("Net"),
+                            vNIC("Net"),
                         ],
                     ),
                 ],

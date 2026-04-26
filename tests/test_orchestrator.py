@@ -49,7 +49,7 @@ class TestNameCollisions:
     """Collision checks fire at construction time, not at defineXML."""
 
     def _vm(self, name: str):
-        from testrange import VM, Credential, HardDrive, Memory, VirtualNetworkRef, vCPU
+        from testrange import VM, Credential, HardDrive, Memory, vNIC, vCPU
 
         return VM(
             name=name,
@@ -57,7 +57,7 @@ class TestNameCollisions:
             users=[Credential("root", "pw")],
             devices=[
                 vCPU(1), Memory(1), HardDrive(10),
-                VirtualNetworkRef("NetA"),
+                vNIC("NetA"),
             ],
         )
 
@@ -118,7 +118,7 @@ class TestNameCollisions:
         """Inner-VM collisions surface from Hypervisor.__init__."""
         from testrange import (
             Credential, HardDrive, Hypervisor, LibvirtOrchestrator,
-            Memory, VirtualNetworkRef, vCPU,
+            Memory, vNIC, vCPU,
         )
 
         with pytest.raises(OrchestratorError, match="duplicate VM name 'client'"):
@@ -128,7 +128,7 @@ class TestNameCollisions:
                 users=[Credential("root", "pw")],
                 devices=[
                     vCPU(1), Memory(2), HardDrive(20),
-                    VirtualNetworkRef("Outer"),
+                    vNIC("Outer"),
                 ],
                 orchestrator=LibvirtOrchestrator,
                 networks=[VirtualNetwork("Inner", "10.42.0.0/24")],
@@ -149,13 +149,13 @@ class TestFindNetwork:
 
 class TestBuildNicEntries:
     def test_static_ip_included(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         net = VirtualNetwork("NetA", "10.0.50.0/24", internet=True, dns=True)
         net.bind_run("deadbeef")
         vm = MagicMock()
         vm.name = "web01"
-        vm._network_refs.return_value = [VirtualNetworkRef("NetA", ip="10.0.50.5")]
+        vm._network_refs.return_value = [vNIC("NetA", ip="10.0.50.5")]
         o = Orchestrator(networks=[net])
         entries, pairs = o._build_nic_entries(vm)
         assert len(entries) == 1
@@ -165,49 +165,49 @@ class TestBuildNicEntries:
         assert pairs[0][3] == "10.0.50.1"
 
     def test_isolated_network_omits_gateway(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         net = VirtualNetwork("Isolated", "10.1.0.0/24", internet=False, dns=False)
         net.bind_run("deadbeef")
         vm = MagicMock()
         vm.name = "web01"
-        vm._network_refs.return_value = [VirtualNetworkRef("Isolated", ip="10.1.0.5")]
+        vm._network_refs.return_value = [vNIC("Isolated", ip="10.1.0.5")]
         o = Orchestrator(networks=[net])
         _, pairs = o._build_nic_entries(vm)
         assert pairs[0][2] == ""
         assert pairs[0][3] == ""
 
     def test_dns_without_internet(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         net = VirtualNetwork("Inside", "10.2.0.0/24", internet=False, dns=True)
         net.bind_run("deadbeef")
         vm = MagicMock()
         vm.name = "web01"
-        vm._network_refs.return_value = [VirtualNetworkRef("Inside", ip="10.2.0.5")]
+        vm._network_refs.return_value = [vNIC("Inside", ip="10.2.0.5")]
         o = Orchestrator(networks=[net])
         _, pairs = o._build_nic_entries(vm)
         assert pairs[0][2] == ""  # no gateway — isolated
         assert pairs[0][3] == "10.2.0.1"  # resolver still present
 
     def test_dhcp_has_empty_ip(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         net = VirtualNetwork("NetA", "10.0.50.0/24")
         net.bind_run("deadbeef")
         vm = MagicMock()
         vm.name = "web01"
-        vm._network_refs.return_value = [VirtualNetworkRef("NetA")]
+        vm._network_refs.return_value = [vNIC("NetA")]
         o = Orchestrator(networks=[net])
         _, pairs = o._build_nic_entries(vm)
         assert pairs[0][1] == ""
 
     def test_unknown_network_ref_skipped(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         vm = MagicMock()
         vm.name = "web01"
-        vm._network_refs.return_value = [VirtualNetworkRef("Missing")]
+        vm._network_refs.return_value = [vNIC("Missing")]
         o = Orchestrator(networks=[])
         entries, pairs = o._build_nic_entries(vm)
         assert entries == []
@@ -216,25 +216,25 @@ class TestBuildNicEntries:
 
 class TestSetupTestNetworks:
     def test_unknown_network_raises(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         vm = MagicMock()
         vm.name = "web01"
-        vm._network_refs.return_value = [VirtualNetworkRef("Missing")]
+        vm._network_refs.return_value = [vNIC("Missing")]
         o = Orchestrator(vms=[vm])
         with pytest.raises(NetworkError):
             o._setup_test_networks("deadbeef")
 
     def test_auto_assigns_ips_to_successive_vms(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         net = VirtualNetwork("NetA", "10.0.50.0/24")
         vm1 = MagicMock()
         vm1.name = "a"
-        vm1._network_refs.return_value = [VirtualNetworkRef("NetA")]
+        vm1._network_refs.return_value = [vNIC("NetA")]
         vm2 = MagicMock()
         vm2.name = "b"
-        vm2._network_refs.return_value = [VirtualNetworkRef("NetA")]
+        vm2._network_refs.return_value = [vNIC("NetA")]
         o = Orchestrator(networks=[net], vms=[vm1, vm2])
         o._setup_test_networks("deadbeef")
         assigned = {name: ip for name, _mac, ip in net._vm_entries}
@@ -242,12 +242,12 @@ class TestSetupTestNetworks:
         assert assigned["b"] == "10.0.50.3"
 
     def test_static_ip_registered_as_is(self) -> None:
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         net = VirtualNetwork("NetA", "10.0.50.0/24")
         vm = MagicMock()
         vm.name = "a"
-        vm._network_refs.return_value = [VirtualNetworkRef("NetA", ip="10.0.50.99")]
+        vm._network_refs.return_value = [vNIC("NetA", ip="10.0.50.99")]
         o = Orchestrator(networks=[net], vms=[vm])
         o._setup_test_networks("deadbeef")
         ips = [ip for _n, _m, ip in net._vm_entries]
@@ -544,7 +544,7 @@ class TestProvisionInstallFreeVMs:
         from testrange import NoOpBuilder
         from testrange.backends.libvirt.vm import VM
         from testrange.credentials import Credential
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         src = tmp_path / f"{name}.qcow2"
         src.write_bytes(b"stub")
@@ -554,7 +554,7 @@ class TestProvisionInstallFreeVMs:
             users=[Credential("deploy", "pw")],
             builder=NoOpBuilder(),
             communicator="ssh",
-            devices=[VirtualNetworkRef("Net", ip="10.0.0.5")],
+            devices=[vNIC("Net", ip="10.0.0.5")],
         )
 
     def test_all_install_free_skips_install_network(
@@ -604,14 +604,14 @@ class TestProvisionInstallFreeVMs:
         want an install phase."""
         from testrange.backends.libvirt.vm import VM
         from testrange.credentials import Credential
-        from testrange.devices import VirtualNetworkRef
+        from testrange.devices import vNIC
 
         noop_vm = self._make_noop_vm(tmp_path, name="byoi")
         cloud = VM(
             name="cloud",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
-            devices=[VirtualNetworkRef("Net")],
+            devices=[vNIC("Net")],
         )
 
         o = Orchestrator(
@@ -646,7 +646,7 @@ class TestMemoryPreflight:
 
     def _vm(self, name: str, memory_gib: float):
         from testrange import (
-            VM, Credential, HardDrive, Memory, VirtualNetworkRef, vCPU,
+            VM, Credential, HardDrive, Memory, vNIC, vCPU,
         )
 
         return VM(
@@ -655,7 +655,7 @@ class TestMemoryPreflight:
             users=[Credential("root", "pw")],
             devices=[
                 vCPU(1), Memory(memory_gib), HardDrive(10),
-                VirtualNetworkRef("NetA"),
+                vNIC("NetA"),
             ],
         )
 
@@ -686,7 +686,7 @@ class TestMemoryPreflight:
         would over-report."""
         from testrange import (
             Credential, HardDrive, Hypervisor, LibvirtOrchestrator,
-            Memory, VirtualNetwork, VirtualNetworkRef, vCPU,
+            Memory, VirtualNetwork, vNIC, vCPU,
         )
         from testrange.backends.libvirt._preflight import declared_gib_per_vm
 
@@ -697,7 +697,7 @@ class TestMemoryPreflight:
             users=[Credential("root", "pw")],
             devices=[
                 vCPU(2), Memory(4), HardDrive(20),
-                VirtualNetworkRef("Outer"),
+                vNIC("Outer"),
             ],
             orchestrator=LibvirtOrchestrator,
             networks=[VirtualNetwork("Inner", "10.42.0.0/24")],

@@ -36,7 +36,7 @@ from testrange.devices import (
     AbstractHardDrive,
     HardDrive,
     Memory,
-    VirtualNetworkRef,
+    vNIC,
     vCPU,
 )
 from testrange.exceptions import VMBuildError
@@ -57,7 +57,7 @@ if TYPE_CHECKING:
 
 
 # Pyright-checked union of devices this backend's VM accepts.  Generic
-# devices (vCPU, Memory, VirtualNetworkRef, HardDrive) live in
+# devices (vCPU, Memory, vNIC, HardDrive) live in
 # :mod:`testrange.devices`; libvirt-specific drives (and any future
 # libvirt-specific NIC / vCPU / RNG) come from
 # :mod:`testrange.backends.libvirt.devices`.  A backend-specific device
@@ -65,10 +65,10 @@ if TYPE_CHECKING:
 # rejected here at type-check time and again at runtime in
 # :meth:`VM.__init__` for callers who bypass the type checker.
 LibvirtAcceptedDevice = (
-    vCPU | Memory | VirtualNetworkRef | HardDrive | LibvirtHardDrive
+    vCPU | Memory | vNIC | HardDrive | LibvirtHardDrive
 )
 _ACCEPTED_DEVICE_TYPES: tuple[type, ...] = (
-    vCPU, Memory, VirtualNetworkRef, HardDrive, LibvirtHardDrive,
+    vCPU, Memory, vNIC, HardDrive, LibvirtHardDrive,
 )
 
 
@@ -206,7 +206,7 @@ class VM(AbstractVM):
             users=[Credential("root", "Password123!")],
             pkgs=[Apt("nginx")],
             post_install_cmds=["systemctl enable --now nginx"],
-            devices=[vCPU(2), Memory(4), VirtualNetworkRef("NetA"), HardDrive(20)],
+            devices=[vCPU(2), Memory(4), vNIC("NetA"), HardDrive(20)],
         )
 
     :param name: Unique name for this VM within a test run.
@@ -366,8 +366,8 @@ class VM(AbstractVM):
     def _hard_drives(self) -> list[AbstractHardDrive]:
         return [d for d in self.devices if isinstance(d, AbstractHardDrive)]
 
-    def _network_refs(self) -> list[VirtualNetworkRef]:
-        return [d for d in self.devices if isinstance(d, VirtualNetworkRef)]
+    def _network_refs(self) -> list[vNIC]:
+        return [d for d in self.devices if isinstance(d, vNIC)]
 
     def _primary_disk_size(self) -> str:
         drives = self._hard_drives()

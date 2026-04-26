@@ -51,7 +51,7 @@ disk is booted directly on subsequent runs, and the WinRM communicator
 carries everything a test might want to do at runtime.  That means
 network-config changes between install and run are not automatic on
 Windows (yet); static IPs declared on
-:class:`~testrange.devices.VirtualNetworkRef` come from the libvirt
+:class:`~testrange.devices.vNIC` come from the libvirt
 dnsmasq DHCP reservation, not from an in-guest netplan.
 
 Design notes

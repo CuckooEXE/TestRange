@@ -27,7 +27,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -78,7 +78,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("Engineering"),
+                            vNIC("Engineering"),
                         ],
                     ),
                     VM(
@@ -92,7 +92,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("Ops"),
+                            vNIC("Ops"),
                         ],
                     ),
                     VM(
@@ -107,8 +107,8 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("Engineering"),
-                            VirtualNetworkRef("Ops"),
+                            vNIC("Engineering"),
+                            vNIC("Ops"),
                         ],
                     ),
                 ],

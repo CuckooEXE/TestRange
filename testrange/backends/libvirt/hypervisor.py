@@ -86,7 +86,7 @@ class Hypervisor(VM, AbstractHypervisor):
     .. code-block:: python
 
         from testrange import Hypervisor, LibvirtOrchestrator, VM
-        from testrange import Credential, VirtualNetworkRef, HardDrive, Memory
+        from testrange import Credential, vNIC, HardDrive, Memory
 
         hv = Hypervisor(
             name="hv",
@@ -95,7 +95,7 @@ class Hypervisor(VM, AbstractHypervisor):
             devices=[
                 Memory(8),
                 HardDrive(80),
-                VirtualNetworkRef("OuterNet", ip="10.0.0.10"),
+                vNIC("OuterNet", ip="10.0.0.10"),
             ],
             orchestrator=LibvirtOrchestrator,
             vms=[
@@ -103,7 +103,7 @@ class Hypervisor(VM, AbstractHypervisor):
                     name="inner-web",
                     iso="https://cloud.debian.org/.../debian-12-generic-amd64.qcow2",
                     users=[Credential("root", "Password123!")],
-                    devices=[VirtualNetworkRef("InnerNet", ip="10.42.0.5")],
+                    devices=[vNIC("InnerNet", ip="10.42.0.5")],
                 ),
             ],
             networks=[

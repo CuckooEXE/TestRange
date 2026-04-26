@@ -57,7 +57,7 @@ from testrange import (
     Orchestrator,
     Test,
     VirtualNetwork,
-    VirtualNetworkRef,
+    vNIC,
     run_tests,
     vCPU,
 )
@@ -186,7 +186,7 @@ def gen_tests() -> list[Test]:
                             vCPU(1),
                             Memory(1),
                             HardDrive(10),
-                            VirtualNetworkRef("SSHNet", ip="10.30.0.10"),
+                            vNIC("SSHNet", ip="10.30.0.10"),
                         ],
                     ),
                 ],

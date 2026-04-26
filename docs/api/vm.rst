@@ -34,7 +34,7 @@ arguments:
   ``runcmd``), PowerShell on Windows (autounattend
   ``FirstLogonCommands``).  Ignored by :class:`NoOpBuilder`.
 - ``devices`` — composable list of vCPU, Memory, HardDrive, and
-  VirtualNetworkRef entries.  Order doesn't matter; defaults apply to
+  vNIC entries.  Order doesn't matter; defaults apply to
   anything omitted (2 vCPU, 2 GiB RAM, 20 GB disk, no NICs).
 - ``builder`` — explicit
   :class:`~testrange.vms.builders.base.Builder` strategy.  When
