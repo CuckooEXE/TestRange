@@ -6,6 +6,7 @@ User Guide
 
    installation
    quickstart
+   architecture
    networks
    vms
    windows

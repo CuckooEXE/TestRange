@@ -46,11 +46,11 @@ from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.vms.generic import GenericVM
-from testrange.storage import (
-    AbstractStorageBackend,
+from testrange.backends.libvirt.storage import (
     LocalStorageBackend,
     SSHStorageBackend,
 )
+from testrange.storage import AbstractStorageBackend
 
 _log = get_logger(__name__)
 

@@ -40,16 +40,25 @@ Call sites use the two axes explicitly::
 Shipped pairings
 ----------------
 
-- :class:`~testrange.storage.LocalStorageBackend` — local
+The generic storage layer here is **format-agnostic** — it ships
+the composer (:class:`StorageBackend`), both transports
+(:class:`LocalFileTransport`, :class:`SSHFileTransport`), and the
+disk-format ABC plus the qcow2 implementation.  Pre-composed
+pairings (``transport + disk-format``) are
+**backend-flavoured** because the disk-format binding is what makes
+a pairing libvirt- / Hyper-V- / Proxmox-flavoured.  Each backend
+publishes its own:
+
+- :class:`testrange.backends.libvirt.LocalStorageBackend` — local
   filesystem + qcow2.  Default for the libvirt backend at
   ``Orchestrator(host="localhost")``.
-- :class:`~testrange.storage.SSHStorageBackend` — SFTP/SSH +
-  qcow2.  Auto-selected by the libvirt backend for
+- :class:`testrange.backends.libvirt.SSHStorageBackend` — SFTP/SSH
+  + qcow2.  Auto-selected by the libvirt backend for
   ``Orchestrator(host="qemu+ssh://...")``.
 
-Callers that need a custom pairing build a
-:class:`~testrange.storage.StorageBackend` directly with whichever
-transport and format they want.
+Callers that need a custom pairing (different transport × different
+disk format) build a :class:`~testrange.storage.StorageBackend`
+directly.
 
 Transport axis
 --------------

@@ -15,7 +15,7 @@ import pytest
 
 from testrange.cache import CacheManager
 from testrange.cache_http import HttpCache
-from testrange.storage import LocalStorageBackend
+from testrange.backends.libvirt.storage import LocalStorageBackend
 
 
 class _FakeRemote:

@@ -80,11 +80,7 @@ from testrange.exceptions import (
 from testrange.networks.base import AbstractVirtualNetwork
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.packages import Apt, Dnf, Homebrew, Pip, Winget
-from testrange.storage import (
-    AbstractStorageBackend,
-    LocalStorageBackend,
-    SSHStorageBackend,
-)
+from testrange.storage import AbstractStorageBackend, StorageBackend
 from testrange.test import Test, TestResult, run_tests
 from testrange.vms.base import AbstractVM
 from testrange.vms.generic import GenericVM
@@ -125,10 +121,11 @@ __all__ = [
     "CloudInitBuilder",
     "WindowsUnattendedBuilder",
     "NoOpBuilder",
-    # Storage backends
+    # Storage backends — generic composer.  Backend-flavoured pre-
+    # composed pairings (LocalStorageBackend / SSHStorageBackend
+    # for libvirt) live in their backend module.
+    "StorageBackend",
     "AbstractStorageBackend",
-    "LocalStorageBackend",
-    "SSHStorageBackend",
     # Networks
     "VirtualNetwork",
     "AbstractVirtualNetwork",

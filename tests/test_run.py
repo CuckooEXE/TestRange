@@ -9,7 +9,8 @@ import pytest
 
 from testrange._run import RunDir
 from testrange.exceptions import CacheError
-from testrange.storage import LocalFileTransport, LocalStorageBackend
+from testrange.backends.libvirt.storage import LocalStorageBackend
+from testrange.storage import LocalFileTransport
 
 
 def _make_run(cache_root: Path) -> RunDir:
