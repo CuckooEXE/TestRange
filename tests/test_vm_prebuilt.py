@@ -15,7 +15,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from testrange import VM, Credential, NoOpBuilder
+from testrange import Credential, NoOpBuilder
+from testrange import LibvirtVM as VM
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.cache import CacheManager
 from testrange.communication.ssh import SSHCommunicator

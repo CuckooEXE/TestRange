@@ -143,8 +143,8 @@ class TestGuestAgentFactoryIsBackendOverridable:
 
         from testrange import Credential
         from testrange.backends.libvirt import (
-            VM,
             GuestAgentCommunicator,
+            LibvirtVM as VM,
         )
 
         vm = VM(

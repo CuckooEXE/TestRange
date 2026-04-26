@@ -56,7 +56,6 @@ implementation of the same abstract surface.
 
 from testrange._version import __version__
 from testrange.backends.libvirt import (
-    VM,
     Hypervisor,
     LibvirtOrchestrator,
     LibvirtVM,
@@ -89,6 +88,13 @@ from testrange.storage import (
 from testrange.test import Test, TestResult, run_tests
 from testrange.vms.base import AbstractVM
 from testrange.vms.generic import GenericVM
+
+# ``VM`` at the top level is the generic, backend-agnostic spec
+# (:class:`GenericVM`).  The orchestrator promotes it to its native
+# concrete type at provisioning time.  Users who want to pin a VM
+# to a specific backend reach for that backend's class explicitly
+# (``LibvirtVM``, future ``ProxmoxVM``, …).
+VM = GenericVM
 from testrange.vms.builders import (
     Builder,
     CloudInitBuilder,

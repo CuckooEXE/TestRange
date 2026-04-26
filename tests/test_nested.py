@@ -18,12 +18,12 @@ from unittest.mock import MagicMock
 import pytest
 
 from testrange import (
-    VM,
     AbstractHypervisor,
     Credential,
     HardDrive,
     Hypervisor,
     LibvirtOrchestrator,
+    LibvirtVM as VM,
     Memory,
     Orchestrator,
     OrchestratorError,
