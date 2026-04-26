@@ -22,20 +22,27 @@ network and the builder synthesises a ``from-answer`` static config
 that survives the install-to-run network swap.  Example:
 ``examples/nested_proxmox_public_private.py``.
 
-The path lives on top of seven distinct PVE-specific behaviours
-that all needed handling: activation via ``/cdrom/auto-installer-mode.toml``
-at the ISO root (PVE 9.x; earlier releases looked inside the
-initrd), kebab-case ``answer.toml`` field names that don't match
-the underscored mode-file fields, ``reboot-mode = "power-off"`` to
-turn the installer's reboot into the SHUTOFF the cache pipeline
-expects, OVMF-only firmware to sidestep a SeaBIOS + q35 + SATA-CD
-GRUB triple-fault, NVRAM sidecar caching to preserve the
-installer's UEFI ``BootOrder`` past
-``VIR_DOMAIN_UNDEFINE_NVRAM``, ``from-dhcp``-vs-``from-answer``
-distinction (the former freezes the install-phase lease as
-static), and interface-name-based NIC filtering (the install-phase
-MAC differs from the run-phase MAC, but interface name is stable
-across the swap).  Each is regression-tested.
+The path lives on top of six PVE-specific behaviours, all
+regression-tested.  Five are just correct handling of how PVE 9.x
+ships rather than workarounds: activation via
+``/cdrom/auto-installer-mode.toml`` at the ISO root (PVE 9.x;
+earlier releases looked inside the initrd); kebab-case
+``answer.toml`` field names that don't match the underscored
+mode-file fields; ``reboot-mode = "power-off"`` to turn the
+installer's reboot into the SHUTOFF the cache pipeline expects;
+the ``from-dhcp``-vs-``from-answer`` distinction (the former
+freezes the install-phase lease as static, the latter takes the
+answer's static config verbatim); and interface-name-based NIC
+filtering (the install-phase MAC differs from the run-phase MAC,
+but interface name is stable across the swap).  The one true
+workaround is OVMF-only firmware to sidestep a SeaBIOS + q35 +
+SATA-CD GRUB triple-fault during PVE's first boot.
+
+PVE installs also exercise the per-VM UEFI NVRAM sidecar described
+under *Cache layout* below, but that is a libvirt-backend mechanism
+needed by any UEFI install (Windows was the first guest to surface
+it); it lives in :mod:`testrange.backends.libvirt.vm` and the cache
+layer, not in the ProxMox builder.
 
 Cache layout
 ~~~~~~~~~~~~
