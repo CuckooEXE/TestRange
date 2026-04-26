@@ -84,6 +84,7 @@ from testrange.orchestrator_base import AbstractOrchestrator
 if TYPE_CHECKING:
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
+    from testrange.vms.generic import GenericVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
 _log = get_logger(__name__)
@@ -99,6 +100,30 @@ characters of headroom for users who want to override the default
 with a deployment-specific zone name (``"trtest"``, ``"trprod"``,
 …).  The default name itself is namespaced enough; it never conflicts
 with PVE's built-in zones (which all start with ``localnetwork``)."""
+
+
+def _promote_to_proxmox(vm: ProxmoxVM | "GenericVM") -> ProxmoxVM:
+    """Convert a backend-agnostic :class:`GenericVM` to the
+    proxmox backend's concrete :class:`ProxmoxVM`.
+
+    Field-for-field translation since GenericVM exists exactly to
+    be pluggable into any backend.  An already-ProxmoxVM input
+    passes through unchanged.  Symmetric with
+    :func:`testrange.backends.libvirt.orchestrator._promote_to_libvirt`.
+    """
+    from testrange.vms.generic import GenericVM as _GenericVM
+    if isinstance(vm, _GenericVM):
+        return ProxmoxVM(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,
+            builder=vm.builder,
+            communicator=vm.communicator,
+        )
+    return vm
 
 
 class ProxmoxOrchestrator(AbstractOrchestrator):
@@ -192,7 +217,11 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             "list[ProxmoxVirtualNetwork]",
             list(networks) if networks else [],
         )
-        self._vm_list = list(vms) if vms else []
+        # Promote any backend-agnostic GenericVM specs to ProxmoxVM
+        # up front so the rest of the orchestrator (and external
+        # readers of ``self._vm_list``) see only the backend-native
+        # type — same pattern as ``LibvirtOrchestrator._promote_to_libvirt``.
+        self._vm_list = [_promote_to_proxmox(v) for v in (vms or [])]
         self._cache_root = cache_root
         self._cache_url = cache
         self._cache_verify = cache_verify
