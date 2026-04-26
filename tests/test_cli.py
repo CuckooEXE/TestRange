@@ -442,13 +442,14 @@ class TestBackendUrlDispatch:
             "qemu+ssh://vm/system", self._fake_original(),
         ) is None
 
-    def test_proxmox_user_password(self) -> None:
+    def test_proxmox_user_password(self, tmp_path: Path) -> None:
         from testrange.backends.proxmox import (
             ProxmoxOrchestrator,
             cli_build_orchestrator,
         )
         orch = cli_build_orchestrator(
-            "proxmox://root:hunter2@pve.example.com", self._fake_original(),
+            "proxmox://root:hunter2@pve.example.com",
+            self._fake_original(tmp_path),
         )
         assert isinstance(orch, ProxmoxOrchestrator)
         assert orch._host == "pve.example.com"
@@ -456,11 +457,11 @@ class TestBackendUrlDispatch:
             "token": None, "user": "root", "password": "hunter2",
         }
 
-    def test_proxmox_token_in_userinfo(self) -> None:
+    def test_proxmox_token_in_userinfo(self, tmp_path: Path) -> None:
         from testrange.backends.proxmox import cli_build_orchestrator
         orch = cli_build_orchestrator(
             "proxmox://abcdefghij@pve.example.com/pve01",
-            self._fake_original(),
+            self._fake_original(tmp_path),
         )
         assert orch is not None
         assert orch._token == {
@@ -468,13 +469,13 @@ class TestBackendUrlDispatch:
         }
         assert orch._node == "pve01"
 
-    def test_proxmox_token_query_param(self) -> None:
+    def test_proxmox_token_query_param(self, tmp_path: Path) -> None:
         """?token= takes precedence over userinfo (lets callers pass
         the full ``user@realm!name=secret`` blob without URL-encoding)."""
         from testrange.backends.proxmox import cli_build_orchestrator
         orch = cli_build_orchestrator(
             "proxmox://pve.example.com?token=root!auto&storage=local-lvm",
-            self._fake_original(),
+            self._fake_original(tmp_path),
         )
         assert orch is not None
         # ``_token`` is typed as ``object`` on the ProxmoxOrchestrator;
