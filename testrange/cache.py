@@ -483,14 +483,18 @@ class CacheManager:
         # LOCAL FAST PATH: when the backend is the same filesystem as
         # ``local_path`` and the file already lives under the backend
         # cache root, skip the copy — it's already where the
-        # hypervisor expects it.
+        # hypervisor expects it.  Gated on ``_transport_is_local``
+        # because a remote transport's ``cache_root`` is only a string
+        # that happens to share a prefix with the outer host's path
+        # — the bytes still aren't on the remote filesystem.
         transport = backend.transport
-        backend_root = transport.cache_root
-        try:
-            local_path.relative_to(Path(backend_root))
-            return str(local_path)
-        except ValueError:
-            pass
+        if _transport_is_local(transport):
+            backend_root = transport.cache_root
+            try:
+                local_path.relative_to(Path(backend_root))
+                return str(local_path)
+            except ValueError:
+                pass
 
         ext = local_path.suffix
         digest = _sha256_file(local_path)[:24]
