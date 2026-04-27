@@ -7,6 +7,35 @@ independently.  The concrete realisation depends on the hypervisor
 backend — see :doc:`/api/backends` for the per-backend mapping
 (host-managed bridges with bridge-local DHCP/DNS, SDN vnets, …).
 
+Two layers
+----------
+
+The networking surface has two layers, mirroring the standard
+L2-virtualisation model used in ESXi (vSwitch + Port Group),
+Proxmox SDN (Zone + VNet), and similar:
+
+* :class:`~testrange.Switch` — an L2 switch (or its backend
+  equivalent).  Hosts one or more virtual networks; can carry
+  physical-NIC uplinks; has a backend-specific *type* knob for
+  backends that ship multiple switch flavours (e.g. PVE SDN's
+  ``simple`` / ``vlan`` / ``vxlan`` / ``evpn`` zones).
+* :class:`~testrange.VirtualNetwork` — the named thing VMs attach
+  to (your "port group").  Optionally bound to a switch via
+  ``switch=`` on the constructor.
+
+For most tests the switch layer is invisible — every backend
+provides a sensible default (libvirt: each network is its own
+self-contained bridge; Proxmox: a shared ``simple`` SDN zone) and
+``VirtualNetwork(name, subnet, ...)`` works exactly as before.
+Reach for an explicit :class:`Switch` only when you need to:
+
+* run multiple networks under one zone with shared uplinks
+  (Proxmox VLAN zones, ESXi vSwitches with several port groups);
+* bind a network to a specific physical NIC for upstream egress;
+* select a non-default zone type (VXLAN, VLAN trunking, EVPN BGP).
+
+See :ref:`switch-explicit-example` below for the explicit form.
+
 Topology flags
 --------------
 
@@ -106,3 +135,79 @@ test starts.  The fix is host-level — the exact configuration
 depends on which DNS server you run and which backend you use;
 each backend's docstring under :mod:`testrange.backends` lists
 the bridge-interface name patterns to except.
+
+.. _switch-explicit-example:
+
+Multiple networks per switch (explicit ``Switch``)
+--------------------------------------------------
+
+When you want several networks to share one switch — typically
+because they need to share uplinks or live in a non-default zone
+type — declare the switch explicitly and pass it to both the
+orchestrator (``switches=``) and each network (``switch=``):
+
+.. code-block:: python
+
+    from testrange import (
+        Switch, VirtualNetwork, Orchestrator, Test, VM,
+        Credential, Memory, vCPU, vNIC, run_tests,
+    )
+    from testrange.backends.proxmox import ProxmoxOrchestrator
+
+    corp = Switch(
+        "Corp",
+        switch_type="vlan",   # PVE SDN zone type
+        uplinks=["eno1"],     # bind to this physical NIC
+    )
+
+    mgmt = VirtualNetwork(
+        "Mgmt", "10.0.10.0/24",
+        internet=True, dhcp=True,
+        switch=corp,          # ← lives in the Corp zone
+    )
+    prod = VirtualNetwork(
+        "Prod", "10.0.20.0/24",
+        internet=True, dhcp=True,
+        switch=corp,          # ← same zone, different vnet
+    )
+
+    tests = [
+        Test(
+            ProxmoxOrchestrator(
+                host="pve.example.com",
+                user="root@pam",
+                password="...",
+                switches=[corp],
+                networks=[mgmt, prod],
+                vms=[
+                    VM(
+                        name="web", iso="...",
+                        users=[Credential("root", "pw")],
+                        devices=[vCPU(2), Memory(2), vNIC("Mgmt")],
+                    ),
+                ],
+            ),
+            lambda orch: None,
+            name="vlan-trunk-smoke",
+        ),
+    ]
+
+What each backend does with the switch:
+
+* **Proxmox** — creates a PVE SDN zone of the requested type
+  (``simple`` / ``vlan`` / ``qinq`` / ``vxlan`` / ``evpn``).
+  ``uplinks=`` flows into the zone's ``bridge=`` for VLAN/QinQ
+  zones; ``zone_extra={...}`` is a free-form ``dict`` for VXLAN
+  / EVPN knobs TestRange doesn't model first-class
+  (``peers``, ``vrf-vxlan``, ``controller``).
+* **Libvirt** — accepts the field for portability but ignores
+  it; libvirt's network model puts every network on its own
+  bridge with no separate switch layer.
+
+Backwards compatibility: every ``VirtualNetwork(...)`` without
+a ``switch=`` keeps working exactly as before — Proxmox lands
+it in the orchestrator's default ``"tr"`` simple zone; libvirt
+treats it as a self-contained NAT/isolated bridge.
+
+See ``examples/proxmox_explicit_zones.py`` for a runnable
+end-to-end version with multiple zone types.

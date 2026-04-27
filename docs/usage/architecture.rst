@@ -256,6 +256,14 @@ talks to abstract bases**.  Concrete behaviour lives in
 - A ``VM`` subclass of :class:`~testrange.vms.base.AbstractVM`
 - A ``VirtualNetwork`` subclass of
   :class:`~testrange.networks.base.AbstractVirtualNetwork`
+- Optionally a ``Switch`` subclass of
+  :class:`~testrange.networks.base.AbstractSwitch` for backends
+  that model the switch + port-group layering as a distinct
+  layer (Proxmox SDN zones, future VMware vSwitches).  Backends
+  whose networks are self-contained bridges (vanilla libvirt)
+  can leave this unimplemented; the abstract ``switch=`` field on
+  ``VirtualNetwork`` defaults to ``None`` so portable test code
+  works either way.
 - Optionally: backend-specific device classes (siblings of
   :class:`~testrange.HardDrive` etc. under the matching abstract
   base), pre-composed storage backends, communicators, builders.

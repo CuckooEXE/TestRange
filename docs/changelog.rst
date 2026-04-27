@@ -8,6 +8,55 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Switch / VirtualNetwork two-layer model
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The networking surface gained an explicit switch layer mirroring
+the standard L2-virtualisation model (ESXi vSwitch + Port Group;
+Proxmox SDN Zone + VNet).  For backends that model switches as a
+separate layer, this lets one switch host many networks and binds
+physical NICs at the switch level instead of per-network.
+
+**Added: :class:`testrange.AbstractSwitch` ABC** in
+``testrange/networks/base.py``.  Carries ``name``, optional
+``switch_type`` (backend-specific flavour), and optional
+``uplinks`` (physical-NIC bindings).  Defines ``start`` /
+``stop`` / ``backend_name`` lifecycle, parallel to
+:class:`AbstractVirtualNetwork`.
+
+**Added: :class:`testrange.Switch`** — backend-agnostic spec
+(parallel to :class:`~testrange.GenericVM`).  Promoted to the
+orchestrator's native ``<Backend>Switch`` at ``__init__``.
+
+**Added: :class:`testrange.AbstractVirtualNetwork`'s ``switch=``
+parameter.**  Optional reference to a switch instance (or its
+name as a string).  ``None`` (default) means "backend's default
+switch" — every existing
+``VirtualNetwork(name, subnet, ...)`` call works unchanged.
+
+**Added:
+:class:`testrange.backends.proxmox.ProxmoxSwitch`** — maps an
+:class:`AbstractSwitch` to a PVE SDN zone.  Accepts
+``switch_type`` in ``{"simple", "vlan", "qinq", "vxlan",
+"evpn"}``, ``uplinks`` (forwarded as PVE's ``bridge=`` for
+VLAN/QinQ zones), ``mtu``, and free-form ``zone_extra={...}``
+for VXLAN/EVPN knobs not modelled first-class.  Lifecycle is
+idempotent: a zone that's already present at ``start`` is
+reused as-is and left alone on ``stop``.
+
+**Changed:
+:class:`testrange.backends.proxmox.ProxmoxOrchestrator` gained a
+``switches=`` kwarg.**  Each declared switch is promoted, brought
+up before the user's vnets in ``__enter__``, and torn down after
+them in ``__exit__``.  Backwards compatible: omitting the kwarg
+keeps the pre-Switch behaviour where every vnet lives in the
+orchestrator's default ``"tr"`` simple zone.
+
+**Added: ``examples/proxmox_explicit_zones.py``** — runnable
+end-to-end example showing two switches (a simple zone for
+isolated test traffic, a VLAN zone bound to a physical uplink)
+each hosting multiple vnets.
+
 ProxMox VE: nested orchestration + guest-agent + multi-NIC + install vnet
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
