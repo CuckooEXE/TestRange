@@ -331,6 +331,70 @@ class TestStartRunPhase2Seed:
         assert vm._phase2_seed_filename is not None
         assert "abcd1234" in vm._phase2_seed_filename
 
+    def test_multi_nic_vm_attaches_every_declared_nic(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: a VM with two declared vNICs (e.g. dual-homed
+        client between PublicNet + PrivateNet) must get BOTH NICs
+        attached to the cloned VMID at run-phase reconfigure.
+
+        Previously start_run only set ``net0``, leaving
+        ``net1+`` unattached.  cloud-init's network-config listed
+        both MACs but the VM only had one NIC, so cloud-init
+        failed with ``Not all expected physical devices present``
+        and refused to bring up *any* interface — the dual-homed
+        VM ended up with eth0 DOWN and no IPs."""
+        vm = _vm()
+        client = MagicMock()
+        client.nodes.return_value.qemu.return_value.status.current.get.return_value = {
+            "status": "stopped",
+        }
+        client.nodes.return_value.qemu.return_value.status.start.post.return_value = (
+            "UPID:start"
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_task", lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_upload_iso_bytes", lambda *a, **kw: None,
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_ssh", staticmethod(lambda *a, **kw: None),
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_make_communicator", lambda self, mac_ip_pairs: MagicMock(),
+        )
+
+        run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
+        run.storage = LocalStorageBackend(Path("/tmp"))
+        ctx = MagicMock(_client=client, _node="pve01", _storage="local-lvm")
+
+        # Two NICs: PublicNet + PrivateNet, mirrors the dual-homed
+        # ``client`` VM in examples/nested_proxmox_public_private.
+        vm.start_run(
+            context=ctx,
+            run=run,
+            installed_disk="999",
+            network_entries=[
+                ("PublicNet",  "52:54:00:aa:bb:cc"),
+                ("PrivateNet", "52:54:00:dd:ee:ff"),
+            ],
+            mac_ip_pairs=[
+                ("52:54:00:aa:bb:cc", "10.42.0.6/24", "10.42.0.1", "1.1.1.1"),
+                ("52:54:00:dd:ee:ff", "10.43.0.6/24", "",          ""),
+            ],
+        )
+
+        put_call = (
+            client.nodes.return_value.qemu.return_value.config.put.call_args
+        )
+        assert put_call is not None
+        # Both NICs land on net0 + net1 with the matching MACs +
+        # bridges — cloud-init's network-config lists both MACs
+        # and finds both NICs at boot.
+        assert put_call.kwargs["net0"] == "virtio=52:54:00:aa:bb:cc,bridge=PublicNet"
+        assert put_call.kwargs["net1"] == "virtio=52:54:00:dd:ee:ff,bridge=PrivateNet"
+
 
 # =====================================================================
 # shutdown() — clones go, templates stay

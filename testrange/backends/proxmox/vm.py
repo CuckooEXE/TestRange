@@ -548,17 +548,25 @@ class ProxmoxVM(AbstractVM):
         # 2. Reconfigure the cloned VMID for the run phase:
         #    - swap CD-ROM at ide2 from the install seed to the
         #      phase-2 seed
-        #    - replace net0 with the run-phase NIC (new MAC, run
-        #      bridge).  ``network_entries[0]`` is the primary;
-        #      ``ProxmoxVM`` only handles single-NIC VMs in v1, but
-        #      future multi-NIC support extends here.
+        #    - replace net0 (and add net1, net2, ... if needed)
+        #      with the user's declared run-phase NICs
+        #
+        # Multi-NIC handling matters for cloud-init's network-config:
+        # if the seed lists N MACs but the VM only has 1 NIC
+        # attached, cloud-init logs ``Not all expected physical
+        # devices present`` and refuses to configure ANY interface
+        # (eth0 stays DOWN, no network).  The clone inherits exactly
+        # one NIC (net0, the install vnet) from the template, so we
+        # have to add ``net1`` … ``netN`` for every additional
+        # declared NIC.  Same MAC convention as ``mac_ip_pairs`` so
+        # the seed's per-NIC config lines up with the qemu-side
+        # config.
         try:
             config_updates: dict[str, Any] = {
                 "ide2": f"local:iso/{phase2_filename},media=cdrom",
             }
-            if network_entries:
-                net_name, net_mac = network_entries[0]
-                config_updates["net0"] = (
+            for idx, (net_name, net_mac) in enumerate(network_entries):
+                config_updates[f"net{idx}"] = (
                     f"virtio={net_mac},bridge={net_name}"
                 )
             client.nodes(node).qemu(vmid).config.put(**config_updates)
