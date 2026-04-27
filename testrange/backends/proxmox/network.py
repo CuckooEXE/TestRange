@@ -31,11 +31,12 @@ can get away with.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from testrange._logging import get_logger
 from testrange.exceptions import NetworkError
-from testrange.networks.base import AbstractVirtualNetwork
+from testrange.networks.base import AbstractSwitch, AbstractVirtualNetwork
 
 if TYPE_CHECKING:
     from testrange.orchestrator_base import AbstractOrchestrator
@@ -44,6 +45,16 @@ _log = get_logger(__name__)
 
 _MAX_VNET_NAME_LEN = 8
 """PVE caps SDN vnet names at 8 characters."""
+
+_MAX_ZONE_NAME_LEN = 8
+"""PVE caps SDN zone IDs at 8 characters of lowercase ASCII alphanum."""
+
+_VALID_ZONE_TYPES = frozenset({"simple", "vlan", "qinq", "vxlan", "evpn"})
+"""SDN zone types PVE accepts in its ``POST /cluster/sdn/zones`` endpoint.
+
+We accept the strings PVE does verbatim; backend-specific extras
+(VXLAN VRF / EVPN AS / ...) flow through ``zone_extra`` on
+:class:`ProxmoxSwitch`."""
 
 
 def _proxmox_client(context: AbstractOrchestrator) -> Any:
@@ -72,6 +83,184 @@ def _mac_for_vm_network(vm_name: str, net_name: str) -> str:
     b[0], b[1], b[2] = 0x52, 0x54, 0x00
     b[3], b[4], b[5] = digest[0], digest[1], digest[2]
     return ":".join(f"{x:02x}" for x in b)
+
+
+def _zone_id(name: str) -> str:
+    """Sanitise *name* into a PVE-legal SDN zone ID.
+
+    PVE rejects ``-`` / ``_`` and is case-sensitive; cap at
+    :data:`_MAX_ZONE_NAME_LEN` characters of lowercase ASCII
+    alphanumerics.  Empty input falls back to ``"sw"`` so the
+    rendered ID always has a stable shape.
+    """
+    cleaned = re.sub(r"[^a-z0-9]", "", name.lower())
+    return (cleaned or "sw")[:_MAX_ZONE_NAME_LEN]
+
+
+class ProxmoxSwitch(AbstractSwitch):
+    """Proxmox VE SDN-zone-backed switch.
+
+    Maps an :class:`AbstractSwitch` onto an SDN zone created via
+    ``POST /cluster/sdn/zones``.  Each :class:`ProxmoxVirtualNetwork`
+    that names this switch (or that picks it up as the
+    orchestrator's default) lives as a vnet inside the zone.
+
+    :param name: Logical switch name.  PVE-mangled to
+        :data:`_MAX_ZONE_NAME_LEN` chars of lowercase ASCII
+        alphanumerics for the SDN zone ID — see :meth:`backend_name`.
+    :param switch_type: PVE SDN zone type.  One of
+        :data:`_VALID_ZONE_TYPES` (``"simple"`` / ``"vlan"`` /
+        ``"qinq"`` / ``"vxlan"`` / ``"evpn"``).  Defaults to
+        ``"simple"`` — the type TestRange uses for its own
+        infrastructure zone.  Most users want this default; pick
+        ``"vlan"`` / ``"vxlan"`` only if you need real L2 isolation
+        on a physical fabric.
+    :param uplinks: Physical NIC name(s) on the PVE node to use as
+        the zone's uplink.  Required for ``"vlan"`` / ``"qinq"`` /
+        ``"vxlan"`` zones; ignored for ``"simple"``.  PVE's REST
+        API takes a single ``bridge=`` parameter for VLAN-shaped
+        zones — we send the first uplink and warn if more were
+        declared (PVE doesn't model uplink teaming inside a zone;
+        team it at the host network layer instead).
+    :param zone_extra: Free-form ``dict`` merged into the
+        ``POST /cluster/sdn/zones`` body.  Use it for VXLAN/EVPN
+        knobs (``peers``, ``vrf-vxlan``, ``controller``, …) that
+        TestRange doesn't model first-class.
+    :param mtu: Optional MTU for the zone.  Forwarded as PVE's
+        ``mtu`` field; ``None`` means "leave PVE's default".
+    """
+
+    _client: Any
+    _zone_id: str | None
+    _zone_created: bool
+    """``True`` once :meth:`start` has successfully created the zone.
+    Drives :meth:`stop` so we only delete what *this* call created —
+    important when the zone already existed from a prior run, in
+    which case we don't want to tear out an in-use shared zone on
+    teardown."""
+
+    def __init__(
+        self,
+        name: str,
+        switch_type: str | None = None,
+        uplinks: Sequence[str] | None = None,
+        *,
+        zone_extra: dict[str, Any] | None = None,
+        mtu: int | None = None,
+    ) -> None:
+        # Default zone type is "simple" — matches the existing
+        # TestRange install zone behaviour and works without
+        # uplinks.
+        resolved_type = switch_type or "simple"
+        if resolved_type not in _VALID_ZONE_TYPES:
+            raise NetworkError(
+                f"ProxmoxSwitch {name!r}: switch_type "
+                f"{resolved_type!r} is not one of "
+                f"{sorted(_VALID_ZONE_TYPES)}"
+            )
+        super().__init__(
+            name=name, switch_type=resolved_type, uplinks=uplinks,
+        )
+        self.zone_extra = dict(zone_extra) if zone_extra else {}
+        self.mtu = mtu
+        self._client = None
+        self._zone_id = None
+        self._zone_created = False
+
+    def backend_name(self) -> str:
+        """Return the PVE SDN zone ID for this switch."""
+        return _zone_id(self.name)
+
+    def start(self, context: AbstractOrchestrator) -> None:
+        """Create the SDN zone (idempotent) and apply pending SDN config.
+
+        :raises NetworkError: If the create call fails.
+        """
+        client = _proxmox_client(context)
+        zone_id = self.backend_name()
+        self._client = client
+        self._zone_id = zone_id
+
+        # Idempotent: a zone we already brought up (or one a prior
+        # run left behind that names the same logical switch) gets
+        # reused as-is.  Don't set ``_zone_created`` in that case
+        # so teardown leaves it alone.
+        try:
+            existing = client.cluster.sdn.zones.get()
+        except Exception as exc:
+            raise NetworkError(
+                f"ProxmoxSwitch {self.name!r}: cannot list SDN zones: "
+                f"{exc}"
+            ) from exc
+        if any(z.get("zone") == zone_id for z in (existing or [])):
+            _log.debug(
+                "switch %r: SDN zone %s already present — reusing",
+                self.name, zone_id,
+            )
+            return
+
+        params: dict[str, Any] = {
+            "type": self.switch_type,
+            "zone": zone_id,
+        }
+        if self.uplinks:
+            # PVE's VLAN/QinQ zones take ``bridge=`` (a single host
+            # bridge name) as the underlying L2.  VXLAN takes
+            # ``peers=`` and a different shape — pass the uplink
+            # through ``zone_extra`` for those cases.  Warn loudly
+            # if multiple uplinks were declared since PVE only
+            # consumes one here.
+            if self.switch_type in ("vlan", "qinq"):
+                params["bridge"] = self.uplinks[0]
+                if len(self.uplinks) > 1:
+                    _log.warning(
+                        "switch %r: %d uplinks declared but PVE %s "
+                        "zones only accept one bridge — using %r; "
+                        "team additional NICs at the host network "
+                        "layer instead.",
+                        self.name, len(self.uplinks),
+                        self.switch_type, self.uplinks[0],
+                    )
+        if self.mtu is not None:
+            params["mtu"] = self.mtu
+        params.update(self.zone_extra)
+
+        _log.info(
+            "creating SDN %s-zone %s (uplinks=%s)",
+            self.switch_type, zone_id, self.uplinks or "—",
+        )
+        try:
+            client.cluster.sdn.zones.post(**params)
+            client.cluster.sdn.put()
+        except Exception as exc:
+            raise NetworkError(
+                f"ProxmoxSwitch {self.name!r}: failed to create zone "
+                f"{zone_id!r}: {exc}"
+            ) from exc
+        self._zone_created = True
+
+    def stop(self, context: AbstractOrchestrator) -> None:
+        """Delete the SDN zone if *we* created it.
+
+        Best-effort: per-resource errors are logged and swallowed so
+        teardown never raises.  No-op if the zone was already
+        present at :meth:`start` time (we don't tear out a zone we
+        didn't bring up).
+        """
+        del context  # client is stashed at start()
+        if not self._zone_created or self._client is None or self._zone_id is None:
+            return
+        try:
+            self._client.cluster.sdn.zones(self._zone_id).delete()
+            self._client.cluster.sdn.put()
+        except Exception as exc:
+            _log.warning(
+                "switch %r: failed to delete SDN zone %s: %s — "
+                "may need ``pvesh delete /cluster/sdn/zones/%s`` by "
+                "hand",
+                self.name, self._zone_id, exc, self._zone_id,
+            )
+        self._zone_created = False
 
 
 class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
@@ -121,8 +310,11 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
         dhcp: bool = True,
         internet: bool = False,
         dns: bool = True,
+        switch: AbstractSwitch | str | None = None,
     ) -> None:
-        super().__init__(name, subnet, dhcp, internet, dns)
+        super().__init__(
+            name, subnet, dhcp, internet, dns, switch=switch,
+        )
         self._run_id = None
         self._vm_entries = []
         self._vnet_name = None
@@ -166,6 +358,50 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
         """Register a VM with an externally-computed MAC address."""
         self._vm_entries.append((vm_name, mac, ip))
 
+    def _resolve_zone(self, context: AbstractOrchestrator) -> str:
+        """Return the SDN zone ID this vnet should live in.
+
+        Four cases:
+
+        * :attr:`switch` is a :class:`ProxmoxSwitch` instance →
+          use that switch's :meth:`backend_name` directly.
+        * :attr:`switch` is any other :class:`AbstractSwitch`
+          instance → look up its name on the orchestrator's
+          promoted ``_switches`` list.  This is the common path
+          when the user passed a generic :class:`Switch` to both
+          the orchestrator's ``switches=`` and the network's
+          ``switch=``: the orchestrator promoted the switch
+          instance to a fresh :class:`ProxmoxSwitch`, but the
+          network still holds the original reference.
+        * :attr:`switch` is a string (logical switch name) → look
+          up the matching :class:`ProxmoxSwitch` on the
+          orchestrator's ``_switches`` and use its zone.
+        * :attr:`switch` is ``None`` → fall back to the
+          orchestrator's default zone (the pre-Switch behaviour
+          where every vnet lived under one shared zone).
+        """
+        if isinstance(self.switch, ProxmoxSwitch):
+            return self.switch.backend_name()
+        if isinstance(self.switch, (AbstractSwitch, str)):
+            wanted_name = (
+                self.switch
+                if isinstance(self.switch, str)
+                else self.switch.name
+            )
+            switches: list[ProxmoxSwitch] = list(
+                getattr(context, "_switches", []) or []
+            )
+            for sw in switches:
+                if sw.name == wanted_name:
+                    return sw.backend_name()
+            raise NetworkError(
+                f"VirtualNetwork {self.name!r}: switch "
+                f"{wanted_name!r} not found in orchestrator's "
+                f"switches list (available: "
+                f"{[s.name for s in switches]})"
+            )
+        return _proxmox_zone(context)
+
     def backend_name(self) -> str:
         """Return the PVE-legal SDN vnet name (≤ 8 characters).
 
@@ -191,13 +427,19 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     def start(self, context: AbstractOrchestrator) -> None:
         """Create the SDN vnet + subnet and reload SDN.
 
+        Zone selection: if :attr:`switch` is bound to a
+        :class:`ProxmoxSwitch`, the vnet lands in *that* switch's
+        zone.  Otherwise the orchestrator's default zone (set on
+        ``__enter__``) is used — matches the pre-Switch behaviour
+        where every vnet lived under one shared zone.
+
         :param context: The :class:`ProxmoxOrchestrator` driving this
-            run.  Its proxmoxer client and zone name are pulled off
-            it.
+            run.  Its proxmoxer client and (default) zone name are
+            pulled off it.
         :raises NetworkError: If the create / reload calls fail.
         """
         client = _proxmox_client(context)
-        zone = _proxmox_zone(context)
+        zone = self._resolve_zone(context)
         vnet = self.backend_name()
 
         # Track creation state explicitly so the rollback path only

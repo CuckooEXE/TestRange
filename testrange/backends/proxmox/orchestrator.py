@@ -84,6 +84,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from testrange._logging import get_logger, log_duration
 from testrange.backends.proxmox.network import (
+    ProxmoxSwitch,
     ProxmoxVirtualNetwork,
     _mac_for_vm_network,
 )
@@ -93,7 +94,7 @@ from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
 
 if TYPE_CHECKING:
-    from testrange.networks.base import AbstractVirtualNetwork
+    from testrange.networks.base import AbstractSwitch, AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
     from testrange.vms.generic import GenericVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
@@ -158,9 +159,9 @@ def _promote_to_proxmox_network(
     backend's concrete :class:`ProxmoxVirtualNetwork`.
 
     Same shape-preserving translation as :func:`_promote_to_proxmox`
-    but for networks: copy the five user-facing fields (name, subnet,
-    dhcp, internet, dns) into a fresh ProxmoxVirtualNetwork.  An
-    already-ProxmoxVirtualNetwork input passes through unchanged.
+    but for networks: copy the user-facing fields (name, subnet,
+    dhcp, internet, dns, switch) into a fresh ProxmoxVirtualNetwork.
+    An already-ProxmoxVirtualNetwork input passes through unchanged.
 
     The translation is necessary because ``testrange.VirtualNetwork``
     re-exports the libvirt backend's class for top-level ergonomics —
@@ -177,6 +178,28 @@ def _promote_to_proxmox_network(
         dhcp=net.dhcp,
         internet=net.internet,
         dns=net.dns,
+        switch=net.switch,
+    )
+
+
+def _promote_to_proxmox_switch(sw: "AbstractSwitch") -> ProxmoxSwitch:
+    """Convert any :class:`AbstractSwitch` (typically the generic
+    :class:`testrange.networks.Switch` spec) to the proxmox backend's
+    concrete :class:`ProxmoxSwitch`.
+
+    Field-for-field translation; an already-ProxmoxSwitch input
+    passes through unchanged.  Mirrors :func:`_promote_to_proxmox`
+    for VMs and :func:`_promote_to_proxmox_network` for networks —
+    every backend-agnostic spec class becomes its native peer at
+    ``__init__`` time so the rest of the orchestrator only sees
+    backend-native instances.
+    """
+    if isinstance(sw, ProxmoxSwitch):
+        return sw
+    return ProxmoxSwitch(
+        name=sw.name,
+        switch_type=sw.switch_type,
+        uplinks=sw.uplinks,
     )
 
 
@@ -232,6 +255,20 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     # (mixing backend types in one orchestrator is a user error
     # caught at construction).
     _networks: list[ProxmoxVirtualNetwork]  # type: ignore[assignment] # pyright: ignore[reportIncompatibleVariableOverride]
+    _switches: list[ProxmoxSwitch]
+    """User-declared :class:`ProxmoxSwitch` instances (one per SDN
+    zone the orchestrator owns).  Promoted from any
+    :class:`AbstractSwitch` (typically the generic
+    :class:`testrange.Switch` spec) at __init__.  Started in
+    :meth:`__enter__`, stopped in :meth:`__exit__`.  An empty list
+    means "no user-declared switches" — the orchestrator's default
+    zone (``self._zone``) handles every vnet, matching the
+    pre-Switch behaviour."""
+    _started_switches: list[ProxmoxSwitch]
+    """Subset of :attr:`_switches` that :meth:`__enter__` actually
+    brought up; tracked separately so the rollback path only tears
+    down what we created (a partial-failure switch shouldn't be
+    deleted)."""
     _started_networks: list[ProxmoxVirtualNetwork]
     _provisioned_vms: list[ProxmoxVM]
 
@@ -239,6 +276,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self,
         host: str = "localhost",
         networks: Sequence[AbstractVirtualNetwork] | None = None,
+        switches: Sequence[AbstractSwitch] | None = None,
         vms: Sequence[AbstractVM] | None = None,
         cache_root: Path | None = None,
         cache: str | None = None,
@@ -283,6 +321,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._networks = [  # pyright: ignore[reportIncompatibleVariableOverride]
             _promote_to_proxmox_network(n) for n in (networks or [])
         ]
+        # Promote user-declared switches the same way.  Each becomes
+        # a PVE SDN zone that this orchestrator owns end-to-end:
+        # created on __enter__, torn down on __exit__.  None or empty
+        # is the common case — the orchestrator's default zone
+        # (``self._zone``) covers it.
+        self._switches = [
+            _promote_to_proxmox_switch(s) for s in (switches or [])
+        ]
         # Promote any backend-agnostic GenericVM specs to ProxmoxVM
         # up front so the rest of the orchestrator (and external
         # readers of ``self._vm_list``) see only the backend-native
@@ -318,6 +364,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._run = None
         self._run_id: str | None = None
         self._started_networks = []
+        self._started_switches = []
         self._install_network: ProxmoxVirtualNetwork | None = None
         """Ephemeral SDN vnet used by every VM during the install
         phase.  Has ``internet=True`` so cloud-init can reach apt /
@@ -431,6 +478,10 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         _log.info("run id: %s", self._run_id[:8])
 
         try:
+            # Switches first — vnets reference their switch's zone,
+            # so the zone has to exist before any vnet's start()
+            # tries to land in it.
+            self._start_switches()
             self._setup_vm_networks()
             self._start_networks()
             # Bring up the install-phase vnet AFTER the user-declared
@@ -467,6 +518,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             self._teardown_vms()
             self._teardown_install_network()
             self._teardown_networks()
+            self._teardown_switches()
             if self._run is not None:
                 try:
                     self._run.cleanup()
@@ -520,6 +572,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 self._teardown_vms()
                 self._teardown_install_network()
                 self._teardown_networks()
+                self._teardown_switches()
                 if self._run is not None:
                     try:
                         self._run.cleanup()
@@ -886,6 +939,30 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         while self._started_networks:
             net = self._started_networks.pop()
             net.stop(self)
+
+    def _start_switches(self) -> None:
+        """Bring up every user-declared :class:`ProxmoxSwitch`.
+
+        Each switch becomes a PVE SDN zone.  Per-switch failures
+        re-raise; the rollback in :meth:`__enter__` undoes any
+        already-started switches via :meth:`_teardown_switches`.
+
+        :raises NetworkError: If any switch's ``start`` raises.
+        """
+        for sw in self._switches:
+            with log_duration(_log, f"start switch {sw.name!r}"):
+                sw.start(self)
+            self._started_switches.append(sw)
+
+    def _teardown_switches(self) -> None:
+        """Drop every user-declared switch we brought up, in
+        reverse start order.  Best-effort — :meth:`ProxmoxSwitch.stop`
+        already swallows per-resource errors so this loop never
+        raises.
+        """
+        while self._started_switches:
+            sw = self._started_switches.pop()
+            sw.stop(self)
 
     def _create_install_network(self) -> ProxmoxVirtualNetwork:
         """Build the ephemeral install-phase SDN vnet.

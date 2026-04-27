@@ -31,7 +31,10 @@ from typing import TYPE_CHECKING
 from testrange.backends.proxmox.guest_agent import (
     ProxmoxGuestAgentCommunicator,
 )
-from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
+from testrange.backends.proxmox.network import (
+    ProxmoxSwitch,
+    ProxmoxVirtualNetwork,
+)
 from testrange.backends.proxmox.orchestrator import ProxmoxOrchestrator
 from testrange.backends.proxmox.vm import ProxmoxVM
 
@@ -102,9 +105,10 @@ def cli_build_orchestrator(
 
 
 __all__ = [
-    "ProxmoxOrchestrator",
-    "ProxmoxVM",
-    "ProxmoxVirtualNetwork",
     "ProxmoxGuestAgentCommunicator",
+    "ProxmoxOrchestrator",
+    "ProxmoxSwitch",
+    "ProxmoxVirtualNetwork",
+    "ProxmoxVM",
     "cli_build_orchestrator",
 ]
