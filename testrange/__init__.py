@@ -77,7 +77,8 @@ from testrange.exceptions import (
     VMNotRunningError,
     VMTimeoutError,
 )
-from testrange.networks.base import AbstractVirtualNetwork
+from testrange.networks.base import AbstractSwitch, AbstractVirtualNetwork
+from testrange.networks.generic import Switch
 from testrange.orchestrator_base import AbstractOrchestrator
 from testrange.packages import Apt, Dnf, Homebrew, Pip, Winget
 from testrange.storage import AbstractStorageBackend, StorageBackend
@@ -128,6 +129,8 @@ __all__ = [
     # Networks
     "VirtualNetwork",
     "AbstractVirtualNetwork",
+    "Switch",
+    "AbstractSwitch",
     # Devices
     "vCPU",
     "Memory",

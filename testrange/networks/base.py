@@ -1,7 +1,26 @@
-"""Abstract base class for virtual network definitions.
+"""Abstract base classes for virtual network definitions.
+
+Two layers, mirroring the standard L2-virtualisation model:
+
+* :class:`AbstractSwitch` — an L2 switch (or its backend equivalent).
+  Carries optional uplink physical NIC bindings and a backend-specific
+  *type* knob for backends that ship multiple switch flavours
+  (e.g. PVE SDN's ``simple`` / ``vlan`` / ``vxlan`` / ``evpn`` zones).
+  Networks attach to a switch; one switch can host many networks.
+  Concrete impls live in each backend's module.
+
+* :class:`AbstractVirtualNetwork` — a network VMs attach to.  In
+  ESXi-shaped backends this is the **port group**; in libvirt and
+  pre-SDN Proxmox setups it's just "the bridge".  Either way it's
+  the named thing :class:`~testrange.devices.vNIC` references.
+
+Networks may declare a :attr:`switch` they live on.  Backends that
+don't model switches (libvirt's vanilla bridges) ignore the field;
+backends that do (Proxmox SDN, future VMware) use it to place the
+network in the right zone / vSwitch.
 
 Concrete implementations handle the backend-specific work of creating,
-configuring, and tearing down an isolated network segment for a test run.
+configuring, and tearing down both layers for a test run.
 """
 
 from __future__ import annotations
@@ -11,7 +30,91 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from testrange.orchestrator_base import AbstractOrchestrator
+
+
+class AbstractSwitch(ABC):
+    """Base class for L2 switches (or their backend equivalent).
+
+    A switch hosts one or more :class:`AbstractVirtualNetwork`
+    instances.  Backends that don't model switches as a separate
+    layer (libvirt's vanilla bridges, where every "network" *is* a
+    bridge) can leave this unused — :class:`AbstractVirtualNetwork`
+    accepts ``switch=None`` and lets each backend pick its own
+    default behaviour.
+
+    Backends that *do* model switches (Proxmox SDN zones, future
+    VMware vSwitches) subclass this and implement :meth:`start` /
+    :meth:`stop` to create + destroy the underlying construct.
+
+    :param name: Human-readable switch name.  Used as the basis for
+        the backend's switch identifier (subject to length / charset
+        constraints — see :meth:`backend_name`).
+    :param switch_type: Optional backend-specific switch flavour.
+        Examples: ``"simple"`` / ``"vlan"`` / ``"vxlan"`` / ``"evpn"``
+        for Proxmox SDN zones; ``"standard"`` / ``"distributed"`` for
+        a hypothetical VMware backend.  ``None`` means "backend's
+        default" — that's what existing simple-zone tests get without
+        opting into anything.
+    :param uplinks: Optional list of physical NIC names on the
+        hypervisor host that this switch should bind as uplinks.
+        Backends that route external traffic through a specific
+        physical interface (Proxmox VLAN/VXLAN zones, VMware
+        vSwitches) honour this; backends that route through the
+        host's default route (libvirt NAT, Proxmox simple zones)
+        ignore it.
+    """
+
+    name: str
+    """Human-readable switch name."""
+
+    switch_type: str | None
+    """Optional backend-specific switch flavour selector."""
+
+    uplinks: list[str]
+    """Optional physical-NIC uplinks (empty list when none declared)."""
+
+    def __init__(
+        self,
+        name: str,
+        switch_type: str | None = None,
+        uplinks: Sequence[str] | None = None,
+    ) -> None:
+        self.name = name
+        self.switch_type = switch_type
+        self.uplinks = list(uplinks) if uplinks else []
+
+    @abstractmethod
+    def start(self, context: AbstractOrchestrator) -> None:
+        """Create the switch on the hypervisor.
+
+        Idempotent: if a switch with the same identifier already
+        exists, accept it as ours rather than failing.
+
+        :param context: The orchestrator driving this run.
+        :raises NetworkError: If the switch cannot be created.
+        """
+
+    @abstractmethod
+    def stop(self, context: AbstractOrchestrator) -> None:
+        """Remove the switch from the hypervisor.
+
+        Best-effort.  Implementations should swallow per-resource
+        errors so teardown never raises.
+
+        :param context: The orchestrator driving this run.
+        """
+
+    @abstractmethod
+    def backend_name(self) -> str:
+        """Return the switch identifier as registered with the backend.
+
+        May differ from :attr:`name` if backend-specific length /
+        charset constraints required mangling (e.g. PVE SDN zone IDs
+        cap at 8 characters of lowercase ASCII alphanumerics).
+        """
 
 
 class AbstractVirtualNetwork(ABC):
@@ -28,6 +131,13 @@ class AbstractVirtualNetwork(ABC):
         internet is enabled.  If ``False``, the network is fully isolated.
     :param dns: If ``True``, hostname-based DNS resolution is enabled within
         this network (e.g. ``MyVM.NetA``).
+    :param switch: Optional :class:`AbstractSwitch` (or its name) this
+        network lives on.  Backends that model switches as a distinct
+        layer (Proxmox SDN, future VMware) honour the binding;
+        backends without a separate switch concept (libvirt) treat
+        the field as decoration.  ``None`` means "backend's default
+        switch" — backwards-compatible with every existing
+        ``VirtualNetwork(name, subnet, ...)`` call.
     """
 
     name: str
@@ -45,6 +155,9 @@ class AbstractVirtualNetwork(ABC):
     dns: bool
     """If ``True``, hostname-based DNS resolution is enabled within this network."""
 
+    switch: AbstractSwitch | str | None
+    """Switch this network lives on; see constructor docstring."""
+
     _network: ipaddress.IPv4Network
     """Parsed :class:`ipaddress.IPv4Network` object derived from :attr:`subnet`."""
 
@@ -55,12 +168,14 @@ class AbstractVirtualNetwork(ABC):
         dhcp: bool = True,
         internet: bool = False,
         dns: bool = True,
+        switch: AbstractSwitch | str | None = None,
     ) -> None:
         self.name = name
         self.subnet = subnet
         self.dhcp = dhcp
         self.internet = internet
         self.dns = dns
+        self.switch = switch
         self._network = ipaddress.IPv4Network(subnet, strict=False)
 
     @property

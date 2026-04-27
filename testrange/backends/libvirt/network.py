@@ -10,7 +10,7 @@ import libvirt
 
 from testrange._logging import get_logger
 from testrange.exceptions import NetworkError
-from testrange.networks.base import AbstractVirtualNetwork
+from testrange.networks.base import AbstractSwitch, AbstractVirtualNetwork
 
 if TYPE_CHECKING:
     from testrange.orchestrator_base import AbstractOrchestrator
@@ -90,8 +90,16 @@ class VirtualNetwork(AbstractVirtualNetwork):
         dhcp: bool = True,
         internet: bool = False,
         dns: bool = True,
+        switch: AbstractSwitch | str | None = None,
     ) -> None:
-        super().__init__(name, subnet, dhcp, internet, dns)
+        # ``switch=`` is accepted for portable test code but the
+        # libvirt backend has no separate switch layer — every
+        # network IS its own bridge.  The field is preserved on the
+        # instance for inspection but never consumed by the
+        # provisioning path.
+        super().__init__(
+            name, subnet, dhcp, internet, dns, switch=switch,
+        )
         self._run_id: str | None = None
         self._lv_network: libvirt.virNetwork | None = None
         # vm_name -> (mac, ip) mappings; populated by Orchestrator before start()
