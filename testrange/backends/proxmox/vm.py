@@ -776,14 +776,19 @@ class ProxmoxVM(AbstractVM):
         install_network_name: str,
         install_network_mac: str,
     ) -> list[tuple[str, str, str, str]]:
-        """Reconstruct ``(mac, ip_with_cidr, gateway, dns)`` per NIC
-        for the install-phase seed's network-config.
+        """Reconstruct ``(mac, ip_with_cidr, gateway, dns)`` for the
+        install-phase seed's network-config.
 
-        The orchestrator passes us the *first* NIC's network + MAC as
-        ``install_network_*``; we walk this VM's
-        :class:`vNIC` list and look the corresponding
-        :class:`ProxmoxVirtualNetwork` up on the orchestrator to
-        derive the rest.
+        Returns a **single** entry describing the install vnet —
+        not the user's declared NICs.  This is critical: the install
+        VM is attached only to the install vnet (a single
+        ``virtio=<install_mac>,bridge=<install_vnet>`` NIC), so the
+        cloud-init network-config has to match THAT NIC's MAC + IP.
+        Walking the user NICs here would generate a config for a
+        MAC that doesn't exist on the install VM, cloud-init would
+        fail to find the device, the network would never come up,
+        and ``apt install`` would hang forever waiting on a default
+        route.
 
         DNS notes
         ---------
@@ -791,34 +796,52 @@ class ProxmoxVM(AbstractVM):
         Unlike the libvirt backend (where each NAT network's gateway
         runs dnsmasq), PVE SDN subnets *don't* ship a DNS resolver
         unless the user explicitly configures DHCP+DNS at the SDN
-        layer.  We fall back to a public resolver
-        (:data:`_PUBLIC_DNS`) for ``internet=True`` networks so apt
-        / dnf can resolve package mirrors during the install phase.
-        For isolated networks we send no DNS — the install will fail
-        if any apt repository can't be reached, which is the right
-        behaviour (user opted out of internet).
-        """
-        from testrange.backends.proxmox.network import (
-            ProxmoxVirtualNetwork,
-            _mac_for_vm_network,
-        )
-        from testrange.devices import vNIC
+        layer.  We send :data:`_PUBLIC_DNS` for the install vnet so
+        apt / dnf can resolve package mirrors during install.
 
-        pairs: list[tuple[str, str, str, str]] = []
-        nets: list[ProxmoxVirtualNetwork] = getattr(context, "_networks", [])
-        net_by_logical_name = {n.name: n for n in nets}
-        for ref in self._network_refs():
-            if not isinstance(ref, vNIC):
-                continue
-            net = net_by_logical_name.get(ref.ref)
-            if net is None:
-                continue
-            mac = _mac_for_vm_network(self.name, ref.ref)
-            cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
-            gateway = net.gateway_ip if net.internet else ""
-            dns = _PUBLIC_DNS if net.internet else ""
-            pairs.append((mac, cidr, gateway, dns))
-        return pairs
+        :param install_network_name: SDN vnet name the install VM is
+            attached to (matches ``context._install_network.backend_name()``).
+        :param install_network_mac: MAC address of the install NIC
+            (the same one ``_install_qemu_params`` writes into
+            ``net0=virtio=<mac>,bridge=<vnet>``).
+        """
+        # Find the install vnet on the orchestrator so we can read
+        # the per-VM IP it pre-registered in
+        # ``ProxmoxOrchestrator._create_install_network``.
+        install_vnet = getattr(context, "_install_network", None)
+        if install_vnet is None or install_vnet.backend_name() != install_network_name:
+            # Defensive — should not happen because the orchestrator
+            # passes us its own install vnet's name.  Returning an
+            # empty list here would silently produce a no-NIC seed
+            # and the same install hang we're trying to avoid; raise
+            # loud instead.
+            raise VMBuildError(
+                f"VM {self.name!r}: install network {install_network_name!r} "
+                f"does not match orchestrator's install vnet "
+                f"({getattr(install_vnet, 'backend_name', lambda: None)() if install_vnet else None!r}); "
+                "cannot build install-phase network-config."
+            )
+        # Look up the IP the orchestrator assigned this VM on the
+        # install vnet.  ``_vm_entries`` is the (vm_name, mac, ip)
+        # ledger ``register_vm_with_mac`` writes into.
+        ip = next(
+            (entry_ip for vm_name, _, entry_ip in install_vnet._vm_entries
+             if vm_name == self.name),
+            None,
+        )
+        if not ip:
+            raise VMBuildError(
+                f"VM {self.name!r}: orchestrator did not register an "
+                f"IP on install vnet {install_network_name!r}; "
+                "_create_install_network's loop must have skipped "
+                "this VM."
+            )
+        cidr = f"{ip}/{install_vnet.prefix_len}"
+        gateway = install_vnet.gateway_ip
+        # Install vnet is always ``internet=True`` (see
+        # ``_create_install_network``), so DNS goes through the
+        # public resolver fallback.
+        return [(install_network_mac, cidr, gateway, _PUBLIC_DNS)]
 
     def _vcpu_count(self) -> int:
         from testrange.devices import vCPU

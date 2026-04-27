@@ -311,3 +311,105 @@ class TestProvisionUsesInstallVnet:
 
         with pytest.raises(NetworkError, match="no network refs"):
             orch._provision_vms()
+
+
+# =====================================================================
+# Install seed network-config matches the install vnet
+# =====================================================================
+
+
+class TestInstallSeedMatchesInstallVnet:
+    """Regression for the apt-hangs-forever bug: the install-phase
+    cloud-init seed's network-config has to describe the SAME NIC
+    (MAC + IP + subnet) the install VM is actually attached to.
+
+    Before the fix, ``_build_install_mac_ip_pairs`` walked the VM's
+    user-declared NICs and produced a config for a MAC the install
+    VM didn't have — cloud-init couldn't bring up the network,
+    apt had no route to upstream, and the install hung."""
+
+    def test_returns_single_entry_matching_install_vnet(self) -> None:
+        from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
+
+        # Build the orchestrator with one VM and run the install-vnet
+        # creation path so the IP gets registered the same way
+        # __enter__ would.
+        web = _vm("web", network_name="UserNet")
+        orch = _orch_with_vms([web])
+        orch._run_id = "abcd1234-1111-2222-3333-4444"
+        install_vnet = orch._create_install_network()
+        # ``backend_name`` is what the orchestrator passes to
+        # ``vm.build()`` as ``install_network_name``.
+        install_name = install_vnet.backend_name()
+        # MAC for the install NIC, same convention the orchestrator
+        # uses in ``_provision_vms``.
+        from testrange.backends.proxmox.network import _mac_for_vm_network
+        install_mac = _mac_for_vm_network("web", "__install__")
+        # Stash the vnet on the orchestrator the way __enter__ does
+        # so ProxmoxVM can find it via ``context._install_network``.
+        orch._install_network = install_vnet
+
+        pairs = web._build_install_mac_ip_pairs(
+            context=orch,
+            install_network_name=install_name,
+            install_network_mac=install_mac,
+        )
+
+        # Exactly ONE entry — the install VM has only one NIC.
+        assert len(pairs) == 1
+        mac, cidr, gateway, dns = pairs[0]
+
+        # MAC matches what the orchestrator wrote into qemu's
+        # ``net0=virtio=<mac>`` config.
+        assert mac == install_mac
+        # IP is on the install vnet's subnet (192.168.230.0/24),
+        # NOT the user-declared UserNet's.
+        assert cidr.startswith("192.168.230.")
+        assert cidr.endswith("/24")
+        # Gateway points at the install vnet's .1 — without this
+        # the VM has no default route and apt hangs.
+        assert gateway == "192.168.230.1"
+        # DNS uses the public fallback (PVE SDN doesn't ship its
+        # own resolver) so apt can resolve mirrors.
+        assert dns  # non-empty
+
+    def test_mac_mismatch_raises_loudly(self) -> None:
+        """If the orchestrator passes the wrong install_network_name,
+        the function refuses rather than silently producing a no-NIC
+        config that would re-trigger the original install-hang."""
+        from testrange.exceptions import VMBuildError
+
+        web = _vm("web")
+        orch = _orch_with_vms([web])
+        orch._run_id = "abcd1234-1111-2222-3333-4444"
+        install_vnet = orch._create_install_network()
+        orch._install_network = install_vnet
+
+        with pytest.raises(VMBuildError, match="does not match"):
+            web._build_install_mac_ip_pairs(
+                context=orch,
+                install_network_name="some-other-vnet",
+                install_network_mac="52:54:00:de:ad:be",
+            )
+
+    def test_unregistered_vm_raises(self) -> None:
+        """If a VM ended up in build() without being registered on
+        the install vnet, surface that as a clear error rather than
+        producing an empty network-config."""
+        from testrange.exceptions import VMBuildError
+
+        web = _vm("web")
+        orch = _orch_with_vms([web])
+        orch._run_id = "abcd1234-1111-2222-3333-4444"
+        install_vnet = orch._create_install_network()
+        # Empty out the IP registration (simulate a buggy
+        # _create_install_network that skipped this VM).
+        install_vnet._vm_entries = []
+        orch._install_network = install_vnet
+
+        with pytest.raises(VMBuildError, match="did not register"):
+            web._build_install_mac_ip_pairs(
+                context=orch,
+                install_network_name=install_vnet.backend_name(),
+                install_network_mac="52:54:00:01:02:03",
+            )
