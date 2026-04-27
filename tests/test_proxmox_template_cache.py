@@ -234,9 +234,23 @@ class TestBuildCacheMiss:
 
         run = MagicMock(run_id="abcd1234-1111-2222-3333-4444")
         run.storage = LocalStorageBackend(Path("/tmp"))
+        # ProxmoxVM._build_install_mac_ip_pairs reads the install
+        # vnet off ``context._install_network`` to seed cloud-init's
+        # network-config; provide a stub the build path can look
+        # the per-VM install IP up on.
+        install_net = MagicMock()
+        install_net.backend_name.return_value = "install-net"
+        install_net.gateway_ip = "192.168.230.1"
+        install_net.prefix_len = 24
+        install_net._vm_entries = [
+            ("web", "52:54:00:01:02:03", "192.168.230.2"),
+        ]
         ref = vm.build(
             context=MagicMock(
-                _client=client, _node="pve01", _storage="local-lvm",
+                _client=client,
+                _node="pve01",
+                _storage="local-lvm",
+                _install_network=install_net,
             ),
             cache=MagicMock(),
             run=run,

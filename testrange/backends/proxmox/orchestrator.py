@@ -67,6 +67,7 @@ Non-goals (for v1 of the Proxmox backend)
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -89,6 +90,20 @@ if TYPE_CHECKING:
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
 _log = get_logger(__name__)
+
+_PROXMOX_INSTALL_SUBNET = "192.168.230.0/24"
+"""Fixed subnet for the install-phase SDN vnet.
+
+Sits below libvirt's install pool (``192.168.240.0/24`` –
+``192.168.254.0/24``) so concurrent libvirt + proxmox runs on the
+same host don't confuse each other.  PVE-side, vnets are isolated
+inside the orchestrator's :data:`DEFAULT_ZONE`, so the choice only
+matters for collisions with operator-managed routes on the PVE node.
+Two test processes targeting the same PVE node would race on this
+subnet — addressing that needs a per-PVE-zone subnet pool with a
+PVE-side lock, which is a future slice; the single-orchestrator
+case is what this constant covers."""
+
 
 DEFAULT_ZONE = "tr"
 """Name of the SDN simple-zone TestRange creates and stashes its
@@ -286,6 +301,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._run = None
         self._run_id: str | None = None
         self._started_networks = []
+        self._install_network: ProxmoxVirtualNetwork | None = None
+        """Ephemeral SDN vnet used by every VM during the install
+        phase.  Has ``internet=True`` so cloud-init can reach apt /
+        dnf mirrors regardless of which user-declared NIC the VM
+        ends up on at run time.  Created in :meth:`__enter__` (after
+        ``_start_networks``), torn down in :meth:`__exit__`.
+        Symmetric with the libvirt backend's ``_install_network``."""
         self._provisioned_vms = []
         # Nested-orchestrator state.  ``_nested_stack`` owns the
         # unwind for every entered inner orchestrator; closing it in
@@ -395,6 +417,22 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         try:
             self._setup_vm_networks()
             self._start_networks()
+            # Bring up the install-phase vnet AFTER the user-declared
+            # ones — every VM build attaches its install NIC here so
+            # cloud-init has internet access regardless of where the
+            # VM eventually lives at run time (a user network with
+            # ``internet=False`` would otherwise hang ``apt install``
+            # forever; see :meth:`_create_install_network`).  Skip
+            # entirely if no VM in this run actually has an install
+            # phase (NoOpBuilder VMs).
+            if any(vm.builder.needs_install_phase() for vm in self._vm_list):
+                self._install_network = self._create_install_network()
+                with log_duration(
+                    _log,
+                    f"start install network "
+                    f"{self._install_network.backend_name()!r}",
+                ):
+                    self._install_network.start(self)
             self._warn_if_unroutable()
             self._provision_vms()
             # Enter inner orchestrators for any Hypervisor VMs.
@@ -411,6 +449,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 self._nested_stack = None
                 self._inner_orchestrators = []
             self._teardown_vms()
+            self._teardown_install_network()
             self._teardown_networks()
             if self._run is not None:
                 try:
@@ -463,6 +502,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                     _log.info("  %s", line)
             else:
                 self._teardown_vms()
+                self._teardown_install_network()
                 self._teardown_networks()
                 if self._run is not None:
                     try:
@@ -831,6 +871,74 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             net = self._started_networks.pop()
             net.stop(self)
 
+    def _create_install_network(self) -> ProxmoxVirtualNetwork:
+        """Build the ephemeral install-phase SDN vnet.
+
+        Internet must be on so cloud-init / dnf / apt can reach
+        upstream package mirrors during the install pass.  DNS too
+        — without name resolution apt times out on
+        ``deb.debian.org``.  The subnet is fixed and lives in
+        ``192.168.230.0/24``, picked to sit clearly outside libvirt's
+        install-pool range (``192.168.240.0/24`` – ``192.168.254.0/24``)
+        so two backends running concurrently on the same host don't
+        confuse each other.
+
+        :returns: A :class:`ProxmoxVirtualNetwork` already bound to
+            this run and pre-registered with each install-phase VM's
+            ``__install__`` MAC, ready for :meth:`start`.
+
+        .. note::
+
+           Two test processes pointed at the **same PVE node + zone**
+           would race on the install-vnet SDN ID and the subnet.
+           Per-process concurrency on a shared PVE cluster is a
+           future slice — for the single-orchestrator case this is
+           sufficient.
+        """
+        assert self._run_id is not None, (
+            "_create_install_network requires a bound run_id"
+        )
+        net = ProxmoxVirtualNetwork(
+            name="install",
+            subnet=_PROXMOX_INSTALL_SUBNET,
+            dhcp=True,
+            internet=True,
+            dns=True,
+        )
+        net.bind_run(self._run_id)
+        # Register every install-phase VM under the deterministic
+        # ``__install__`` MAC so the install-phase cloud-init seed's
+        # network-config matches the NIC the orchestrator actually
+        # attaches.  Same convention as the libvirt backend.
+        net_obj = ipaddress.IPv4Network(_PROXMOX_INSTALL_SUBNET, strict=False)
+        hosts = list(net_obj.hosts())
+        install_phase_vms = [
+            vm for vm in self._vm_list
+            if vm.builder.needs_install_phase()
+        ]
+        for idx, vm in enumerate(install_phase_vms):
+            ip = str(hosts[idx + 1])  # skip gateway (.1)
+            mac = _mac_for_vm_network(vm.name, "__install__")
+            net.register_vm_with_mac(vm.name, mac, ip)
+        return net
+
+    def _teardown_install_network(self) -> None:
+        """Stop the install-phase vnet if one was created.
+
+        Best-effort; matches :meth:`_teardown_networks` shape.
+        Idempotent — safe to call from both the success and the
+        exception paths in :meth:`__exit__`.
+        """
+        if self._install_network is None:
+            return
+        try:
+            self._install_network.stop(self)
+        except Exception as exc:  # pragma: no cover — defensive
+            _log.warning(
+                "unexpected error stopping install vnet: %s", exc,
+            )
+        self._install_network = None
+
     # ------------------------------------------------------------------
     # VM lifecycle
     # ------------------------------------------------------------------
@@ -904,28 +1012,50 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     def _provision_vms(self) -> None:
         """Build + start every configured VM.
 
-        Each VM gets its first NIC's network as the install-phase
-        attachment — the Proxmox backend doesn't have a separate
-        install network the way the libvirt backend does, since
-        cloud-init can run against the same vnet the test phase
-        will use.  Tracks successfully-started VMs in
-        ``_provisioned_vms`` so a partial failure rolls back only
-        what got created.
+        Build phase attaches each VM to the dedicated install vnet
+        (``self._install_network``, ``internet=True``) so cloud-init
+        can reach package mirrors regardless of whether any of the
+        VM's user-declared NICs has internet.  After build, the
+        per-run clone's NIC is swapped to the user's first declared
+        network in :meth:`ProxmoxVM.start_run`.
+
+        Tracks successfully-started VMs in ``_provisioned_vms`` so
+        a partial failure rolls back only what got created.
         """
-        # __enter__ sets _cache before _provision_vms runs; the assert
-        # narrows the Optional for pyright.
+        # __enter__ sets _cache + _install_network before
+        # _provision_vms runs; the asserts narrow the Optionals for
+        # pyright.
         assert self._cache is not None, "cache must be initialised"
         cache = self._cache
         installed_disks: dict[str, str] = {}
         for vm in self._vm_list:
             assert isinstance(vm, ProxmoxVM)
-            network_entries, _ = self._vm_network_refs(vm)
-            if not network_entries:
+            # Validate the user's spec early — every VM must declare
+            # at least one vNIC, otherwise there's nowhere to attach
+            # the run-phase NIC after install.  (Run-phase
+            # ``start_run`` would also catch this; we surface it here
+            # to fail before the install runs.)
+            user_network_entries, _ = self._vm_network_refs(vm)
+            if not user_network_entries:
                 raise NetworkError(
                     f"VM {vm.name!r}: no network refs — Proxmox VMs "
                     "need at least one vNIC."
                 )
-            install_net_name, install_mac = network_entries[0]
+
+            # Build phase always uses the install vnet, never the
+            # user's first NIC.  An ``internet=False`` user network
+            # would otherwise hang ``apt install`` forever.
+            if vm.builder.needs_install_phase():
+                assert self._install_network is not None, (
+                    "install network must be up before build phase"
+                )
+                install_net_name = self._install_network.backend_name()
+                install_mac = _mac_for_vm_network(vm.name, "__install__")
+            else:
+                # NoOpBuilder VMs skip install entirely; pass empty
+                # strings to keep ``build()``'s signature stable.
+                install_net_name = ""
+                install_mac = ""
 
             vm.set_client(self._client)
             with log_duration(_log, f"build VM {vm.name!r}"):
