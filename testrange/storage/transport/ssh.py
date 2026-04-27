@@ -25,16 +25,46 @@ _DEFAULT_REMOTE_CACHE = "/var/tmp/testrange/{user}"
 """Default remote cache root.  ``{user}`` substituted with the SSH login."""
 
 
+def _ssh_config_user(host: str) -> str | None:
+    """Return the ``User`` directive ``~/.ssh/config`` resolves for *host*.
+
+    paramiko's :meth:`SSHClient.connect` does not read ``ssh_config`` on
+    its own — when the caller doesn't pass an explicit username we
+    consult the file ourselves so the transport authenticates as the
+    same user ``ssh <host>`` would.
+
+    Best-effort: returns ``None`` when the file is missing or
+    unparseable so callers fall through to their existing default.
+    """
+    cfg_path = Path.home() / ".ssh" / "config"
+    if not cfg_path.is_file():
+        return None
+    try:
+        cfg = paramiko.SSHConfig.from_path(str(cfg_path))
+    except Exception:  # noqa: BLE001 — malformed config shouldn't break SSH
+        return None
+    return cfg.lookup(host).get("user")
+
+
 class SSHFileTransport(AbstractFileTransport):
     """File + exec primitives over an SSH connection.
 
     :param host: Remote hostname or IP.
-    :param username: SSH username.  Defaults to ``$USER``.
+    :param username: SSH username (the wire identity used for
+        authentication).  Defaults to the ``User`` directive from
+        ``~/.ssh/config`` for *host*, falling back to ``$USER``.
     :param port: SSH port.  Defaults to 22.
     :param key_filename: Explicit private-key path.  When ``None``,
         paramiko walks standard locations and tries ssh-agent.
-    :param cache_root: Remote cache root.  Defaults to
-        ``/var/tmp/testrange/<ssh_user>``.
+    :param cache_root: Remote cache root.  When ``None``, defaults to
+        ``/var/tmp/testrange/<remote-whoami>`` — resolved lazily on the
+        first :attr:`cache_root` read by running ``whoami`` over the
+        SSH session.  This handles cases where the wire username
+        differs from the effective post-auth user (NSS mapping,
+        cloud-provider account-by-key auth, ``ForceCommand``-driven
+        impersonation, …): cache files always land under the user
+        that actually owns the shell, not whoever we authenticated
+        as.
     :param connect_timeout: Seconds to wait for the TCP handshake.
     """
 
@@ -45,7 +75,8 @@ class SSHFileTransport(AbstractFileTransport):
     _port: int
     _key_filename: str | None
     _connect_timeout: float
-    _cache_root: str
+    _cache_root_override: str | None
+    _cache_root_resolved: str | None
 
     def __init__(
         self,
@@ -57,13 +88,17 @@ class SSHFileTransport(AbstractFileTransport):
         connect_timeout: float = 30.0,
     ) -> None:
         self._host = host
-        self._user = username or os.environ.get("USER") or "root"
+        self._user = (
+            username
+            or _ssh_config_user(host)
+            or os.environ.get("USER")
+            or "root"
+        )
         self._port = port
         self._key_filename = key_filename
         self._connect_timeout = connect_timeout
-        self._cache_root = cache_root or _DEFAULT_REMOTE_CACHE.format(
-            user=self._user
-        )
+        self._cache_root_override = cache_root
+        self._cache_root_resolved = None
         self._client = None
         self._sftp = None
 
@@ -151,7 +186,21 @@ class SSHFileTransport(AbstractFileTransport):
 
     @property
     def cache_root(self) -> str:
-        return self._cache_root
+        if self._cache_root_override is not None:
+            return self._cache_root_override
+        if self._cache_root_resolved is None:
+            # Ask the remote who we actually are.  The wire username
+            # (``self._user``) and the post-auth effective user can
+            # diverge — e.g. publickey auth lands in a different shell
+            # via NSS or PAM mapping — and the cache root must name a
+            # directory the actual session owns.  ``whoami`` over the
+            # established SSH session is the only authoritative answer.
+            stdout = self._exec_check(["whoami"]).strip()
+            remote_user = stdout or self._user
+            self._cache_root_resolved = _DEFAULT_REMOTE_CACHE.format(
+                user=remote_user
+            )
+        return self._cache_root_resolved
 
     def make_run_dir(self, run_id: str) -> str:
         run_path = self.run_dir(run_id)

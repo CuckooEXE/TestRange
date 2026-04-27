@@ -294,23 +294,92 @@ class TestStorageBackendComposition:
 
 
 class TestSSHFileTransportConstruction:
-    def test_defaults_cache_root_to_user_subdir(self) -> None:
+    @staticmethod
+    def _stub_whoami(monkeypatch: pytest.MonkeyPatch, user: str) -> None:
+        """Patch :meth:`SSHFileTransport._exec_check` to return *user*
+        for ``whoami``.  The lazy ``cache_root`` resolution invokes
+        ``whoami`` over SSH, which we don't want to actually do in
+        unit tests."""
+        def _fake_exec_check(self: SSHFileTransport, argv: list[str]) -> str:
+            if argv == ["whoami"]:
+                return f"{user}\n"
+            raise AssertionError(f"unexpected exec_check: {argv}")
+
+        monkeypatch.setattr(SSHFileTransport, "_exec_check", _fake_exec_check)
+
+    @staticmethod
+    def _stub_no_ssh_config(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pretend ``~/.ssh/config`` does not exist so user resolution
+        falls through to ``$USER`` deterministically — a developer
+        running tests with a wildcard ``Host * / User foo`` block in
+        their real config shouldn't pollute the suite."""
+        monkeypatch.setattr(
+            "testrange.storage.transport.ssh._ssh_config_user",
+            lambda host: None,
+        )
+
+    def test_defaults_cache_root_from_remote_whoami(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # cache_root resolves lazily from the remote ``whoami`` — not
+        # the wire username — because the post-auth effective user can
+        # diverge from the user we authenticated as.
+        self._stub_whoami(monkeypatch, "remote_alice")
         t = SSHFileTransport(host="kvm.example.com", username="alice")
-        assert t.cache_root == "/var/tmp/testrange/alice"
+        assert t.cache_root == "/var/tmp/testrange/remote_alice"
 
     def test_explicit_cache_root_wins(self) -> None:
+        # No whoami stub: an explicit override must short-circuit
+        # before any remote call.
         t = SSHFileTransport(host="x", username="y", cache_root="/opt/tr")
         assert t.cache_root == "/opt/tr"
 
     def test_username_defaults_to_env_user(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        self._stub_no_ssh_config(monkeypatch)
         monkeypatch.setenv("USER", "cfg")
         assert SSHFileTransport(host="x")._user == "cfg"
 
-    def test_cache_root_interpolates_user_token(self) -> None:
-        t = SSHFileTransport(host="x", username="impersonated")
-        assert t.cache_root == "/var/tmp/testrange/impersonated"
+    def test_username_picks_up_ssh_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ``~/.ssh/config`` ``User`` directive wins over local ``$USER``,
+        # matching the user ``ssh <host>`` would authenticate as —
+        # paramiko doesn't read ssh_config on its own.
+        monkeypatch.setattr(
+            "testrange.storage.transport.ssh._ssh_config_user",
+            lambda host: "configured" if host == "matched-host" else None,
+        )
+        monkeypatch.setenv("USER", "fallback")
+        assert SSHFileTransport(host="matched-host")._user == "configured"
+        assert SSHFileTransport(host="other-host")._user == "fallback"
+
+    def test_cache_root_uses_remote_whoami_not_wire_user(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Wire username is one thing, post-auth effective user is
+        # another.  cache_root must reflect the effective user.
+        self._stub_whoami(monkeypatch, "effective_user")
+        t = SSHFileTransport(host="x", username="wire_user")
+        assert t.cache_root == "/var/tmp/testrange/effective_user"
+
+    def test_cache_root_resolution_is_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Resolution is cached after the first call so we don't
+        # whoami-over-SSH on every path computation.
+        calls = {"n": 0}
+
+        def _fake_exec_check(self: SSHFileTransport, argv: list[str]) -> str:
+            calls["n"] += 1
+            return "alice\n"
+
+        monkeypatch.setattr(SSHFileTransport, "_exec_check", _fake_exec_check)
+        t = SSHFileTransport(host="x", username="y")
+        assert t.cache_root == "/var/tmp/testrange/alice"
+        assert t.cache_root == "/var/tmp/testrange/alice"
+        assert calls["n"] == 1
 
 
 class TestSSHFileTransportConnectFailure:
