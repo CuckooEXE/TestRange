@@ -275,6 +275,52 @@ def _verify_outer_layer(orch: Orchestrator) -> None:
     )
 
 
+def _log_inner_state(orch) -> None:
+    """Dump per-inner-VM diagnostics so a failing reachability
+    assertion prints actionable context instead of just "curl: (7)".
+
+    Specifically: each VM's network state (``ip -br addr`` /
+    ``ip route``), nginx status on the two server VMs, and the
+    set of listening sockets.  Output goes through ``_log`` at
+    INFO so it shows up alongside the orchestrator's own lifecycle
+    lines without needing ``--log-level debug``.
+    """
+    import logging
+    log = logging.getLogger("examples.nested_proxmox")
+    log.setLevel(logging.INFO)
+
+    inner_orchestrators = getattr(orch, "_inner_orchestrators", [])
+    if not inner_orchestrators:
+        log.warning("no inner orchestrator entered — skipping diagnostics")
+        return
+    inner = inner_orchestrators[0]
+
+    def _run(vm_name: str, argv: list[str]) -> str:
+        try:
+            r = inner.vms[vm_name].exec(argv, timeout=10)
+            return (
+                f"  exit={r.exit_code} "
+                f"stdout={r.stdout_text.strip()!r} "
+                f"stderr={r.stderr_text.strip()!r}"
+            )
+        except Exception as exc:
+            return f"  exec({argv}) raised: {exc}"
+
+    for vm_name in ("webpublic", "dbprivate", "client"):
+        log.info("=== inner VM %r ===", vm_name)
+        log.info(" hostname:")
+        log.info(_run(vm_name, ["hostname"]))
+        log.info(" ip -br addr:")
+        log.info(_run(vm_name, ["ip", "-br", "addr"]))
+        log.info(" ip route:")
+        log.info(_run(vm_name, ["ip", "route"]))
+        if vm_name in ("webpublic", "dbprivate"):
+            log.info(" systemctl is-active nginx:")
+            log.info(_run(vm_name, ["systemctl", "is-active", "nginx"]))
+            log.info(" ss -tlnp (listening sockets):")
+            log.info(_run(vm_name, ["ss", "-tlnp"]))
+
+
 def _verify_inner_reachability(orch: Orchestrator) -> None:
     """Inner-layer reachability: L2 → L2 + L2 → L1.
 
@@ -297,7 +343,17 @@ def _verify_inner_reachability(orch: Orchestrator) -> None:
        proves cross-network reachability *within* the inner layer
        and that the ``PrivateNet`` (``internet=False``) doesn't
        isolate inner peers from each other.
+
+    On failure, dumps every inner VM's network + service state
+    (see :func:`_log_inner_state`) before re-raising so the
+    teardown log carries enough context to localise the problem.
     """
+    # Always dump the diagnostics first.  They're cheap (single
+    # guest-agent exec per command) and make the logs useful even
+    # when everything succeeds — easy way to confirm IPs landed
+    # on the right NICs and nginx is up.
+    _log_inner_state(orch)
+
     inner_orchestrators = getattr(orch, "_inner_orchestrators", [])
     assert inner_orchestrators, (
         "no inner orchestrator entered — outer libvirt orchestrator "
