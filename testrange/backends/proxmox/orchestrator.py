@@ -1,10 +1,19 @@
 """Proxmox VE orchestrator.
 
 Authenticates against the PVE REST API (via the ``proxmoxer``
-package), resolves a target node + image-capable storage pool, and
-ensures TestRange's SDN simple-zone exists.  VM and network lifecycle
-are still in progress — the orchestrator currently exits without
-provisioning any VMs.
+package), resolves a target node + image-capable storage pool,
+ensures TestRange's SDN simple-zone exists, brings up an
+ephemeral install-phase vnet + the user-declared run-phase vnets,
+provisions VMs from cached PVE templates, and tears everything
+down on exit.  Supports nested orchestration —
+:meth:`root_on_vm` produces a ``ProxmoxOrchestrator`` rooted on a
+just-booted PVE Hypervisor VM, and ``__enter__`` enters any
+inner ``Hypervisor``-typed VMs the same way the libvirt backend
+does (see :meth:`_enter_nested_orchestrators`).
+
+Known limits documented in the project's TODO.md (single fixed
+install-vnet subnet, hardcoded public DNS for install-phase
+cloud-init, …) — open follow-ups, not undocumented surprises.
 
 The CLI URL form for this backend is
 ``proxmox://USER:PASS@HOST[:PORT]/NODE?storage=NAME`` — see
@@ -178,9 +187,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     :param host: PVE node hostname or IP.  A single node is fine; for
         a cluster, point at any node and pass ``node=`` to pick the
         target.
-    :param networks: Virtual networks to create as SDN vnets.
-    :param vms: VMs to provision (lifecycle still in progress — see
-        the module docstring for the implementation roadmap).
+    :param networks: Virtual networks to create as SDN vnets.  Any
+        non-:class:`ProxmoxVirtualNetwork` (e.g. the libvirt-flavoured
+        :class:`testrange.VirtualNetwork`) is promoted at __init__.
+    :param vms: VMs to provision.  ``GenericVM`` and ``LibvirtVM``
+        specs are promoted to :class:`ProxmoxVM` field-for-field at
+        __init__ so the rest of the orchestrator only sees the
+        backend-native type.
     :param cache_root: Override the default cache directory.
     :param node: Target node name.  Defaults to the only node in
         single-node setups; required for clusters.
@@ -247,10 +260,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             cache=cache, cache_verify=cache_verify,
             storage_backend=storage_backend,  # type: ignore[arg-type]
         )
-        # Proxmox doesn't yet honour storage_backend (the orchestrator
-        # is a stub).  Stash it for forward-compatibility so the
-        # contract test passes today and the wiring follows when the
-        # PVE REST integration lands.
+        # ``storage_backend`` is a generic abstraction the libvirt
+        # backend uses to switch transports (local FS / SSH SFTP);
+        # the proxmox backend bypasses it entirely because every
+        # disk-image operation goes through the PVE REST API instead
+        # of a transport-shaped tool wrapper.  Stash it so the
+        # cross-backend contract test in
+        # ``tests/test_backend_contract.py`` still passes — never
+        # consumed by any proxmox-side code.
         self._storage_backend_override = storage_backend
         self._host = host
         self._port = port
@@ -325,11 +342,10 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._cache: CacheManager | None = None
 
         # CacheManager construction mirrors LibvirtOrchestrator's
-        # wiring so the cross-backend cache.backend_name invariant
-        # holds even though the rest of this orchestrator is still a
-        # stub.  Without it, the contract test in
+        # wiring so the cross-backend ``cache.backend_name`` invariant
+        # holds.  The contract test in
         # tests/test_backend_contract.py::TestScenarioConstructionContract
-        # catches the missing setup.
+        # catches missing setup if this drifts.
         from testrange.cache import CacheManager
         remote = None
         if cache is not None:

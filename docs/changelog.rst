@@ -8,6 +8,85 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+ProxMox VE: nested orchestration + guest-agent + multi-NIC + install vnet
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ProxMox backend gained the surface area needed to drive the
+end-to-end :mod:`examples.nested_proxmox_public_private` example
+(an outer libvirt orchestrator boots a PVE Hypervisor; a nested
+``ProxmoxOrchestrator`` provisions inner VMs + SDN networks
+inside it).  The same fixes apply to a stand-alone remote
+``ProxmoxOrchestrator`` — none of them are nesting-specific.
+
+**Added: ``ProxmoxOrchestrator.root_on_vm()`` + nested-stack
+unwind.**  Mirrors the libvirt backend's pattern: given a booted
+PVE Hypervisor VM, build a configured-but-not-entered inner
+``ProxmoxOrchestrator`` pointing at the PVE REST endpoint on the
+hypervisor's static IP.  Auth via the hypervisor's root
+credential, ``verify_ssl=False`` (PVE ships a self-signed cert).
+Waits for ``pveproxy.service`` to reach ``active`` before
+returning so the outer orchestrator's ``ExitStack`` doesn't race
+the API daemon's startup.  ``__exit__`` unwinds inner
+orchestrators first (LIFO) so each inner ``__exit__`` runs while
+its hosting PVE VM is still alive.
+
+**Added: real
+:class:`~testrange.backends.proxmox.guest_agent.ProxmoxGuestAgentCommunicator`
+over PVE REST.** Replaces the stub.  Drives ``qemu-guest-agent``
+inside the guest via PVE's ``/api2/json/nodes/{node}/qemu/{vmid}/agent/*``
+endpoints.  No inner-VM IP routability needed — agent traffic
+hops through PVE's host-mediated virtio-serial channel, so
+nested topologies whose inner SDN subnets aren't routed back to
+the test runner host work without ``ip route add`` choreography.
+Wired through ``ProxmoxVM._make_guest_agent_communicator``;
+``communicator='guest-agent'`` on a ``ProxmoxVM`` is now end-to-end.
+
+**Added: dedicated install-phase SDN vnet.**
+``ProxmoxOrchestrator`` brings up a separate
+:class:`~testrange.backends.proxmox.network.ProxmoxVirtualNetwork`
+on ``192.168.230.0/24`` (``internet=True``) for every install
+pass.  Without it, a VM whose only declared NIC was on a
+``internet=False`` user network would hang indefinitely on
+``apt install`` during cloud-init.  Symmetric with the libvirt
+backend's ``tr-instal-*`` network.
+
+**Added: install-phase cloud-init seed describes the install NIC.**
+``ProxmoxVM._build_install_mac_ip_pairs`` now returns a single
+entry whose MAC + IP + subnet match the install vnet's actual
+NIC, not the user's declared NICs.  cloud-init ``Not all expected
+physical devices present`` errors gone.
+
+**Added: multi-NIC support in ``ProxmoxVM.start_run``.**  Every
+declared :class:`~testrange.devices.vNIC` gets attached at run
+phase as ``net0`` … ``netN``, not just ``net0``.  Dual-homed
+inner VMs no longer trip cloud-init's "expected MAC missing"
+guard.
+
+**Added: PVE storage-upload UPID waiter.**  ``ProxmoxVM`` now
+captures the UPID returned from ``upload.create()`` and polls
+``/tasks/{upid}/status`` until ``stopped`` before returning.
+Closes a class of races where the next REST call referenced a
+file the async write hadn't flushed yet (manifested as
+intermittent ``500 Internal Server Error: volume … does not exist``
+on ``config.put`` immediately after a phase-2 seed upload).
+
+**Added: ``GenericVM`` / ``LibvirtVM`` → ``ProxmoxVM`` and
+non-Proxmox network → ``ProxmoxVirtualNetwork`` promotion at
+``__init__``.**  Top-level ``testrange.VirtualNetwork`` resolves
+to the libvirt-flavoured class for ergonomics, so a user
+constructing
+``Hypervisor(orchestrator=ProxmoxOrchestrator, networks=[VirtualNetwork(...)])``
+no longer hands the inner orchestrator a libvirt-shaped object
+that explodes on ``.start()``.  ``RunDir`` now constructed
+unconditionally in ``__enter__`` (was a latent ``None``-deref in
+``ProxmoxVM.build``'s clone-name code).
+
+**Open follow-ups** — see ``TODO.md`` at the repo root.  Headline
+items: hardcoded install-vnet subnet (no concurrent-runs-against-
+the-same-PVE-zone support), hardcoded public DNS in the install
+seed (PVE SDN doesn't ship a per-bridge resolver), and the
+``RunDir``-as-id-carrier pattern.
+
 ProxMox VE template cache
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 

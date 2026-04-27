@@ -130,11 +130,20 @@ Per-backend semantics:
   ``tr-instal-<runid[:4]>``, plus the per-run scratch dir.
 * **Proxmox.**  Destroys per-run clone VMIDs named
   ``tr-<vm[:10]>-<runid[:8]>`` plus the SDN vnets named
-  ``<net[:4]><runid[:4]>`` for the run.  PVE templates
+  ``<net[:4]><runid[:4]>`` for the run, plus the per-run install
+  vnet named ``inst<runid[:4]>``.  PVE templates
   (``tr-template-<config_hash[:12]>``) are the install-once-clone-
   many cache and are *never* touched by per-run cleanup — use
   ``testrange proxmox-prune-templates`` to evict them
-  (see :ref:`proxmox-template-cache`).
+  (see :ref:`proxmox-template-cache`).  When a Proxmox-flavoured
+  Hypervisor is involved (libvirt outer + inner
+  ``ProxmoxOrchestrator``), the inner orchestrator's PVE-side
+  state lives on the Hypervisor VM — destroying the outer VM
+  removes everything; ``testrange cleanup`` against the outer
+  factory currently doesn't walk into the inner orchestrator's
+  PVE node, so a half-killed nested run may leave inner VMIDs +
+  vnets behind on PVE that need ``qm destroy`` / ``pvesh delete
+  /cluster/sdn/vnets/...`` by hand.
 * **Other backends** (Hyper-V) raise
   :class:`NotImplementedError` until they wire their own
   :meth:`~testrange.orchestrator_base.AbstractOrchestrator.cleanup`.
