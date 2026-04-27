@@ -1,4 +1,4 @@
-"""Talk to a VM over SSH instead of the QEMU guest agent.
+"""Talk to a VM over SSH instead of the host-mediated guest agent.
 
 TestRange's default :class:`~testrange.communication.guest_agent.GuestAgentCommunicator`
 speaks to the VM over a virtio-serial channel — no network involved.
@@ -32,8 +32,8 @@ every run does not invalidate the cached post-install snapshot.
 
 Networking
 ----------
-The VM is pinned to a static IP on a libvirt bridge with
-``internet=True`` — the libvirt host sits at ``.1`` of the bridge
+The VM is pinned to a static IP on the backend's bridge with
+``internet=True`` — the backend host sits at ``.1`` of the bridge
 subnet so the test process can reach ``10.30.0.10:22`` directly
 without any port-forward.
 

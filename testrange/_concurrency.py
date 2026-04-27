@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from filelock import FileLock
+from filelock import BaseFileLock, FileLock
 
 _LOCK_ROOT = Path("/var/tmp/testrange-locks")
 
@@ -42,7 +42,7 @@ def _ensure_lock_root() -> Path:
     return _LOCK_ROOT
 
 
-def install_subnet_lock(timeout: float = 300.0) -> FileLock:
+def install_subnet_lock(timeout: float = 300.0) -> BaseFileLock:
     """Return a :class:`~filelock.FileLock` protecting the install subnet pool.
 
     Acquire around the pick-a-subnet / define-network / start-network
@@ -58,13 +58,13 @@ def install_subnet_lock(timeout: float = 300.0) -> FileLock:
     )
 
 
-def vm_build_lock(config_hash: str, timeout: float = 3600.0) -> FileLock:
+def vm_build_lock(config_hash: str, timeout: float = 3600.0) -> BaseFileLock:
     """Serialise install-phase builds that share a config hash.
 
     Two concurrent tests whose VMs have identical iso/users/packages/
     post-install-commands/disk-size produce the same
     :func:`~testrange.cache.vm_config_hash` and therefore target the
-    same cached qcow2 file.  Without coordination they'd both run the
+    same cached image.  Without coordination they'd both run the
     full install phase in parallel and then race on the write side of
     the snapshot-compress step.
 

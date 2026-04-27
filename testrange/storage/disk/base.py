@@ -1,10 +1,9 @@
 """Abstract disk-format operations.
 
 Parameterised over an :class:`~testrange.storage.transport.AbstractFileTransport`.
-Subclasses implement a specific image format (qcow2, VHDX, VMDK, a
-Proxmox storage-pool volume type, …) by running the appropriate
-tool through the transport — the format knows *what* command to run;
-the transport knows *where* to run it.
+Subclasses implement a specific image format by running the
+appropriate tool through the transport — the format knows *what*
+command to run; the transport knows *where* to run it.
 
 This split exists so adding a new transport (remote host, nested VM,
 REST API) doesn't duplicate the tool-argv logic for every format, and
@@ -45,19 +44,18 @@ class AbstractDiskFormat(ABC):
     Generic code (cache layer) constructs disk paths by joining a
     containing directory with this filename, so each format owns its
     own extension/naming convention without the rest of the codebase
-    needing to know what's inside.  Subclasses override (e.g.
-    ``"disk.qcow2"`` for qcow2, ``"disk.vhdx"`` for VHDX,
-    ``"disk.vmdk"`` for VMDK).
+    needing to know what's inside.  Subclasses override with their
+    canonical ``disk.<ext>`` filename for the format they implement.
     """
 
     @property
     def disk_extension(self) -> str:
         """Filename extension for disks in this format, with leading dot.
 
-        Derived from :attr:`primary_disk_filename` by default
-        (``"disk.qcow2"`` → ``".qcow2"``).  Used by per-run scratch
-        helpers that name overlays after the VM rather than after the
-        format (e.g. ``<vm_name>.qcow2``).
+        Derived from :attr:`primary_disk_filename` by default (a
+        ``disk.<ext>`` value yields ``".<ext>"``).  Used by per-run
+        scratch helpers that name overlays after the VM rather than
+        after the format.
         """
         if "." in self.primary_disk_filename:
             return "." + self.primary_disk_filename.split(".", 1)[1]
@@ -72,8 +70,8 @@ class AbstractDiskFormat(ABC):
         Used by :class:`~testrange.vms.builders.NoOpBuilder` to fail
         loudly when the user hands a prebuilt image whose format the
         backend can't actually use.  Default implementation accepts
-        anything; format-specific subclasses override (qcow2 runs
-        ``qemu-img info`` and checks the format field, etc.).
+        anything; format-specific subclasses override to inspect the
+        image with the format's native introspection tool.
 
         :raises testrange.exceptions.VMBuildError: When *path* is not
             in the expected format.

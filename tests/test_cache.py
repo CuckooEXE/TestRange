@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -275,7 +276,7 @@ class TestStoreVm:
         src = tmp_cache_root / "work.qcow2"
         src.write_bytes(b"x")
 
-        from testrange.storage.disk import qcow2 as _qcow2_mod
+        from testrange.backends.libvirt import _qcow2 as _qcow2_mod
 
         def _boom(self: object, src_ref: str, dest_ref: str) -> None:
             # Simulate a compress that writes a partial file and then
@@ -431,3 +432,176 @@ class TestGetVirtioWinIso:
         monkeypatch.setattr(c, "_download", _explode)
         with pytest.raises(ImageNotFoundError):
             c.get_virtio_win_iso()
+
+
+# ----------------------------------------------------------------------
+# UEFI NVRAM sidecar — the install-phase NVRAM file holds boot
+# entries that PVE (and any other distro that doesn't write
+# ``/EFI/BOOT/BOOTX64.EFI``) needs preserved across the install/run
+# domain rebuild.  Without these tests a future cache refactor could
+# silently break ProxMox installs.
+# ----------------------------------------------------------------------
+
+
+class TestVmNvramRef:
+    def test_path_format(self, tmp_cache_root: Path) -> None:
+        c = CacheManager(root=tmp_cache_root)
+        backend = _local_backend(tmp_cache_root)
+        ref = c.vm_nvram_ref("abc123def", backend)
+        assert ref.endswith("/vms/abc123def.nvram.fd")
+
+
+class TestStoreVmNvram:
+    def test_round_trip(self, tmp_cache_root: Path) -> None:
+        """``store_vm_nvram`` must round-trip the install-phase NVRAM
+        bytes verbatim — the file is opaque OVMF state, any byte
+        change risks corrupting the boot variables."""
+        c = CacheManager(root=tmp_cache_root)
+        backend = _local_backend(tmp_cache_root)
+
+        # Install-phase NVRAM somewhere outside the cache (this is
+        # what a RunDir's nvram_path looks like in production).
+        src = tmp_cache_root / "fake-run" / "proxmox_VARS.fd"
+        src.parent.mkdir()
+        body = bytes(range(256)) * 2  # 512 distinct-ish bytes
+        src.write_bytes(body)
+
+        dest_ref = c.store_vm_nvram("h1234567890", str(src), backend)
+        assert Path(dest_ref).read_bytes() == body
+        assert Path(dest_ref).name == "h1234567890.nvram.fd"
+
+    def test_atomic_partial_rename(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Mid-write crashes must not leave a half-written .nvram.fd
+        the next run mistakes for a valid sidecar — same atomic
+        ``.partial`` discipline as ``store_vm``.
+        """
+        c = CacheManager(root=tmp_cache_root)
+        backend = _local_backend(tmp_cache_root)
+
+        src = tmp_cache_root / "src.fd"
+        src.write_bytes(b"x" * 100)
+
+        # Simulate a write_bytes that raises after writing the
+        # partial; the helper's except branch must remove the partial.
+        original_write = backend.transport.write_bytes
+        partial_seen: list[Path] = []
+
+        def _explode(ref: str, data: bytes, mode: int = 0o644) -> None:
+            original_write(ref, data, mode)
+            if ref.endswith(".partial"):
+                partial_seen.append(Path(ref))
+                raise RuntimeError("simulated crash")
+
+        monkeypatch.setattr(backend.transport, "write_bytes", _explode)
+
+        with pytest.raises(RuntimeError, match="simulated"):
+            c.store_vm_nvram("hh", str(src), backend)
+
+        assert partial_seen, "partial path must have been written before crash"
+        assert not partial_seen[0].exists(), (
+            "partial must be removed after the crash so the next "
+            "store_vm_nvram doesn't inherit it"
+        )
+        # Final dest must NOT exist either — half-write isn't a cache hit.
+        assert not (tmp_cache_root / "vms" / "hh.nvram.fd").exists()
+
+
+class TestGetVmNvram:
+    def test_miss_returns_none(self, tmp_cache_root: Path) -> None:
+        c = CacheManager(root=tmp_cache_root)
+        backend = _local_backend(tmp_cache_root)
+        assert c.get_vm_nvram("never-stored", backend) is None
+
+    def test_hit_returns_ref(self, tmp_cache_root: Path) -> None:
+        c = CacheManager(root=tmp_cache_root)
+        backend = _local_backend(tmp_cache_root)
+        src = tmp_cache_root / "src.fd"
+        src.write_bytes(b"contents")
+        c.store_vm_nvram("h", str(src), backend)
+        ref = c.get_vm_nvram("h", backend)
+        assert ref is not None
+        assert Path(ref).read_bytes() == b"contents"
+
+
+# ----------------------------------------------------------------------
+# Proxmox prepared-ISO cache — the expensive 1-time prep result that
+# subsequent VMs reuse.
+# ----------------------------------------------------------------------
+
+
+class TestGetProxmoxPreparedIso:
+    def test_first_call_invokes_prep(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = CacheManager(root=tmp_cache_root)
+        vanilla = tmp_cache_root / "vanilla.iso"
+        vanilla.write_bytes(b"vanilla iso contents")
+
+        prep_calls: list[tuple[Path, Path]] = []
+
+        def _fake_prep(src, dst, *, partition_label="PROXMOX-AIS"):
+            prep_calls.append((Path(src), Path(dst)))
+            Path(dst).write_bytes(b"prepared iso contents")
+
+        # Patch the symbol the cache method imports lazily.
+        import testrange.vms.builders._proxmox_prepare as pp
+        monkeypatch.setattr(pp, "prepare_iso_bytes", _fake_prep)
+
+        prepared = c.get_proxmox_prepared_iso(vanilla)
+        assert prepared.exists()
+        assert prepared.read_bytes() == b"prepared iso contents"
+        assert len(prep_calls) == 1
+        # Cache filename embeds a sha256 prefix of the vanilla bytes.
+        assert prepared.name.startswith("proxmox-prepared-")
+        assert prepared.name.endswith(".iso")
+
+    def test_cache_hit_skips_prep(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        c = CacheManager(root=tmp_cache_root)
+        vanilla = tmp_cache_root / "vanilla.iso"
+        vanilla.write_bytes(b"v")
+
+        import testrange.vms.builders._proxmox_prepare as pp
+
+        first_calls: list[Any] = []
+        monkeypatch.setattr(
+            pp, "prepare_iso_bytes",
+            lambda s, d, **_: (first_calls.append((s, d)),
+                              Path(d).write_bytes(b"prepared"))[1],
+        )
+        first = c.get_proxmox_prepared_iso(vanilla)
+
+        def _explode(*_a, **_k):
+            raise AssertionError("must not reprep on cache hit")
+        monkeypatch.setattr(pp, "prepare_iso_bytes", _explode)
+
+        second = c.get_proxmox_prepared_iso(vanilla)
+        assert second == first
+
+    def test_partial_cleaned_on_prep_failure(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """If ``prepare_iso_bytes`` raises mid-write, the
+        ``.iso.part`` stub must be removed — otherwise concurrent
+        callers could race the partial and confuse cache reads."""
+        c = CacheManager(root=tmp_cache_root)
+        vanilla = tmp_cache_root / "vanilla.iso"
+        vanilla.write_bytes(b"v")
+
+        import testrange.vms.builders._proxmox_prepare as pp
+
+        def _explode(_src, dst, **_kw):
+            Path(dst).write_bytes(b"half-written")
+            raise RuntimeError("prep crash")
+        monkeypatch.setattr(pp, "prepare_iso_bytes", _explode)
+
+        with pytest.raises(RuntimeError, match="prep crash"):
+            c.get_proxmox_prepared_iso(vanilla)
+
+        leftover = list((tmp_cache_root / "images").glob("proxmox-prepared-*.iso.part"))
+        assert leftover == [], (
+            f"expected no .part files after crash; found {leftover!r}"
+        )

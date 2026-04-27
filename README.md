@@ -4,9 +4,10 @@ A pip-installable Python package for orchestrating hypervisor-backed
 virtual-machine environments for integration testing, version-
 compatibility testing, and anything else that needs a real OS.
 
-The default backend drives KVM/QEMU through libvirt; alternative
-backends are peer implementations of the same abstract surface (see
-`testrange.backends`).
+Each shipped hypervisor backend is a peer implementation of the same
+abstract surface — pick one and the rest of your test code stays
+hypervisor-neutral.  See `testrange.backends` for the full list and
+each backend's prerequisites.
 
 ```python
 from testrange import (
@@ -40,13 +41,10 @@ if __name__ == "__main__":
 
 ## Install
 
-System prerequisites for the default libvirt backend (skip if you
-only want to run unit tests):
-
-```bash
-sudo apt install libvirt-daemon-system qemu-system-x86 ovmf
-sudo usermod -aG libvirt,kvm $USER   # then re-login
-```
+Each backend has its own host-side prerequisites — see the matching
+backend module's docstring under `testrange.backends` for the
+package list, daemon-enable commands, and group memberships your
+host needs.  Skip these if you only want to run the unit tests.
 
 Then the package itself:
 

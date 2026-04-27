@@ -5,8 +5,7 @@ A VM's hardware shape is described by a flat list of device objects
 on its ``devices=`` keyword.  Each object is a plain Python class
 with a few fields; the backend inspects the list with ``isinstance``
 checks at build time to render the hypervisor-native domain spec
-(libvirt domain XML, Proxmox REST payload, …) and the builder
-network-config for the guest.
+and the builder network-config for the guest.
 
 Generic vs backend-specific
 ---------------------------
@@ -18,13 +17,12 @@ Each device kind ships in two flavours:
   accepts.  Carries only the universal fields; backends pick
   sensible defaults for everything else.  Reach for these unless
   you need a backend-specific knob.
-* **Backend-specific** subclasses (e.g.
-  :class:`testrange.backends.libvirt.LibvirtHardDrive` with bus
-  selection and the NVMe shortcut) that expose extra options
-  meaningful only to that backend.  These are **siblings** of the
-  generic class, not children — that's the type-system contract
-  that makes pyright reject a libvirt-specific drive being passed
-  to a Proxmox VM.
+* **Backend-specific** subclasses (each backend's
+  ``<Backend>HardDrive`` etc. under ``testrange.backends.<backend>``)
+  that expose extra options meaningful only to that backend.  These
+  are **siblings** of the generic class, not children — that's the
+  type-system contract that makes pyright reject one backend's
+  device being passed to another backend's VM.
 
 Each backend's ``VM`` class declares a typed union of accepted
 device classes; passing a foreign-backend device is caught by the
@@ -33,7 +31,8 @@ type checker at edit time and again at runtime in ``__init__``.
 .. code-block:: python
 
     from testrange import VM, HardDrive, vCPU, Memory, vNIC
-    from testrange.backends.libvirt import LibvirtHardDrive
+    # Backend-specific drive comes from your chosen backend's module:
+    from testrange.backends.<backend> import <Backend>HardDrive
 
     VM(
         name="db",
@@ -42,8 +41,8 @@ type checker at edit time and again at runtime in ``__init__``.
         devices=[
             vCPU(4),
             Memory(8),
-            LibvirtHardDrive(200, nvme=True),  # libvirt-specific knobs
-            HardDrive(500),                    # generic — backend picks bus
+            <Backend>HardDrive(200, ...),     # backend-specific knobs
+            HardDrive(500),                   # generic — backend picks bus
             vNIC("Internal"),
             vNIC("Public", ip="10.0.0.5"),
         ],
@@ -56,8 +55,8 @@ Omitting a device type yields a sensible default:
 
 - **vCPU**: 2 cores.
 - **Memory**: 2 GiB.
-- **HardDrive**: 20 GB primary disk (backend-default bus —
-  virtio-blk on libvirt for Linux guests, SATA for Windows).
+- **HardDrive**: 20 GB primary disk (backend picks the default bus
+  — typically virtio-blk for Linux guests, SATA for Windows).
 - **Network refs**: none (a VM with no NICs still boots; useful for
   compute-only scenarios).
 
@@ -129,12 +128,8 @@ device being passed to a different backend's VM.
    :members:
    :show-inheritance:
 
-Backend-specific
-~~~~~~~~~~~~~~~~
-
-.. autoclass:: testrange.backends.libvirt.LibvirtHardDrive
-   :members:
-   :show-inheritance:
+Backend-specific concrete device classes are documented in their
+own backend module — see :doc:`backends`.
 
 .. autofunction:: testrange.devices.parse_size
 

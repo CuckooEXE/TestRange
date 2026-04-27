@@ -45,6 +45,11 @@ ssh = [
 winrm = [
     "pywinrm>=0.5",
 ]
+proxmox = [
+    "proxmoxer>=2.0",
+    "requests>=2.31",
+    "requests_toolbelt>=1.0",
+]
 repl = [
     "ipython>=8.0",
 ]
@@ -56,6 +61,7 @@ dev = [
     "ruff>=0.3",
     "paramiko>=3.0",
     "pywinrm>=0.5",
+    "proxmoxer>=2.0",
 ]
 
 [project.scripts]
@@ -104,6 +110,8 @@ addopts = [
 markers = [
     "regression: guards against previously-fixed bugs",
     "integration: requires a real libvirt daemon",
+    "proxmox_live: requires a reachable PVE host (TESTRANGE_PROXMOX_HOST)",
+    "slow: takes minutes to run (full-install integration tests)",
 ]
 filterwarnings = [
     "ignore::pytest.PytestCollectionWarning",

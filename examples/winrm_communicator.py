@@ -10,10 +10,9 @@ Prerequisites (once per host):
 
 - A Windows 10/11 install ISO on disk.  TestRange stages it into
   ``<cache_root>/images/iso-<sha>.iso`` on first use.
-- ``libvirt`` + ``qemu`` with OVMF (UEFI firmware).  The orchestrator
-  points at ``/usr/share/OVMF/OVMF_CODE_4M.fd`` and
-  ``/usr/share/OVMF/OVMF_VARS_4M.fd``; on Debian/Ubuntu these come from
-  the ``ovmf`` package.
+- A working backend with UEFI firmware available — see the backend's
+  module docstring under :mod:`testrange.backends` for the per-host
+  install steps.
 - Network egress on first run so ``virtio-win.iso`` can be downloaded
   from ``fedorapeople.org`` (about 800 MiB).  Cached forever after that.
 - ``pywinrm`` installed: ``pip install testrange[winrm]``.
@@ -71,7 +70,7 @@ before spinning anything up."""
 def windows_smoke(orch: Orchestrator) -> None:
     vm = orch.vms["winbox"]
 
-    # Hostname round-trips through the QEMU guest agent MSI installed
+    # Hostname round-trips through the guest-agent MSI installed
     # during the autounattend FirstLogonCommands.  The sanity check
     # that Windows actually finished setup and the tools are wired up.
     hn = vm.hostname()

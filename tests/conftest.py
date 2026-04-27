@@ -178,7 +178,7 @@ def fake_qemu_img(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
             dest.write_bytes(b"fake qcow2")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    from testrange.storage.disk import _qemu_img
+    from testrange.backends.libvirt import _qemu_img
     monkeypatch.setattr(_qemu_img.subprocess, "run", _fake_run)
     return calls
 

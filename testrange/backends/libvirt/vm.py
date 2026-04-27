@@ -40,13 +40,10 @@ from testrange.devices import (
     vCPU,
 )
 from testrange.exceptions import VMBuildError
-from testrange.vms.base import AbstractVM
+from testrange.vms.base import _COMMUNICATOR_KINDS, AbstractVM
 from testrange.vms.builders import Builder, auto_select_builder
 
 _log = get_logger(__name__)
-
-_COMMUNICATOR_KINDS = ("guest-agent", "ssh", "winrm")
-"""Legal values for the ``communicator=`` kwarg on :class:`VM`."""
 
 if TYPE_CHECKING:
     from testrange._run import RunDir
@@ -54,6 +51,7 @@ if TYPE_CHECKING:
     from testrange.devices import AbstractDevice
     from testrange.orchestrator_base import AbstractOrchestrator
     from testrange.packages import AbstractPackage
+    from testrange.storage.transport.base import AbstractFileTransport
 
 
 # Pyright-checked union of devices this backend's VM accepts.  Generic
@@ -92,6 +90,16 @@ _BUILD_TIMEOUT = 1800
 _GA_READY_TIMEOUT = 300
 """Maximum seconds to wait for the QEMU guest agent to become ready after test boot."""
 
+_OVMF_CODE_PATH = "/usr/share/OVMF/OVMF_CODE_4M.fd"
+"""Host path to the OVMF firmware code (read-only) used for UEFI domains."""
+
+_OVMF_VARS_TEMPLATE = "/usr/share/OVMF/OVMF_VARS_4M.fd"
+"""Host path to the OVMF variables template.  Per-domain NVRAM files
+are seeded from this when the caller doesn't provide one — either by
+libvirt via the ``<nvram template="...">`` attribute or by us
+pre-creating the file (see :func:`_preseed_nvram`).
+"""
+
 _BOOT_KEYPRESS_WINDOW_S = 30
 """How long to spam spacebars at the start of an install-phase boot.
 
@@ -114,6 +122,29 @@ hiccup during a heavy install."""
 _LINUX_KEY_SPACE = 57
 """Linux keycode for SPACE — consumes the 'Press any key' prompt without
 risking a menu selection the way ENTER or arrow keys might."""
+
+
+def _preseed_nvram(nvram_ref: str, transport: AbstractFileTransport) -> None:
+    """Pre-create the per-domain NVRAM file from the OVMF_VARS template.
+
+    When libvirt creates the NVRAM file itself (by copying the
+    ``<nvram template="...">`` path on first domain start), the DAC
+    security driver records no ``remember_owner`` xattr — so on
+    domain stop the file stays owned by ``libvirt-qemu`` at mode
+    ``0600``, and our Python (running as the invoking user) can't
+    read it.  Pre-seeding the file ourselves makes *us* the original
+    owner; the DAC driver stores that in an xattr when it chowns
+    to ``libvirt-qemu`` on start, and restores it when the domain
+    stops.  After shutdown the file is readable again and we can
+    snapshot it into the cache.
+
+    The seeded bytes match exactly what libvirt would have copied
+    (it's the same template), so runtime behaviour is identical.
+    """
+    from pathlib import Path as _Path
+    transport.write_bytes(
+        nvram_ref, _Path(_OVMF_VARS_TEMPLATE).read_bytes(), mode=0o644,
+    )
 
 
 def _destroy_and_undefine(domain: libvirt.virDomain) -> None:
@@ -347,9 +378,9 @@ class LibvirtVM(AbstractVM):
 
         # Runtime state — set by Orchestrator
         self._communicator = None
-        self._domain = None
-        self._install_domain = None
-        self._run_id = None
+        self._domain: libvirt.virDomain | None = None
+        self._install_domain: libvirt.virDomain | None = None
+        self._run_id: str | None = None
 
     @property
     def name(self) -> str:
@@ -463,8 +494,8 @@ class LibvirtVM(AbstractVM):
                 readonly="yes", type="pflash",
                 secure="no",
             )
-            loader.text = "/usr/share/OVMF/OVMF_CODE_4M.fd"
-            nvram = ET.SubElement(os_el, "nvram", template="/usr/share/OVMF/OVMF_VARS_4M.fd")
+            loader.text = _OVMF_CODE_PATH
+            nvram = ET.SubElement(os_el, "nvram", template=_OVMF_VARS_TEMPLATE)
             nvram.text = nvram_path
         # NOTE: no <cmdline> — qemu rejects -append without -kernel for disk
         # boots. NoCloud is auto-detected from the "cidata" volume label on
@@ -699,6 +730,15 @@ class LibvirtVM(AbstractVM):
         nvram_ref = (
             _nvram_run_path(run, self._name) if domain_spec.uefi else None
         )
+        if nvram_ref is not None:
+            # Seed the per-run NVRAM ourselves so DAC's remember_owner
+            # xattr records us as the original owner — otherwise the
+            # file ends up ``libvirt-qemu:0600`` after shutdown and
+            # :meth:`store_vm_nvram` below can't read it.  Safe to
+            # skip if the file already exists (e.g., re-using a run
+            # dir), but within ``_run_install_phase`` the run dir is
+            # always fresh, so we unconditionally seed.
+            _preseed_nvram(nvram_ref, run.storage.transport)
 
         domain_name = f"tr-build-{self._name[:10]}-{run.run_id[:8]}"
         xml = self._base_domain_xml(
@@ -798,9 +838,20 @@ class LibvirtVM(AbstractVM):
                     )
 
             manifest = self.builder.install_manifest(self, h)
-            return cache.store_vm(
+            snapshot_ref = cache.store_vm(
                 h, domain_spec.work_disk, manifest, run.storage,
             )
+            # Preserve UEFI boot entries the installer just wrote.
+            # Libvirt's ``VIR_DOMAIN_UNDEFINE_NVRAM`` (passed by
+            # :func:`_destroy_and_undefine` in the ``finally`` below)
+            # deletes the per-run NVRAM at teardown; without this
+            # snapshot the run phase would spin up with an empty
+            # OVMF ``BootOrder`` and UEFI would sit at a shell on
+            # any distro (ProxMox VE included) that doesn't write
+            # the ``/EFI/BOOT/BOOTX64.EFI`` removable fallback.
+            if domain_spec.uefi and nvram_ref is not None:
+                cache.store_vm_nvram(h, nvram_ref, run.storage)
+            return snapshot_ref
         finally:
             # Stop the keypress thread before destroying the domain —
             # sendKey on a destroyed domain raises (swallowed) but
@@ -868,6 +919,27 @@ class LibvirtVM(AbstractVM):
         # firmware / device models the run domain needs.
         run_spec = self.builder.prepare_run_domain(self, run, mac_ip_pairs)
         nvram_ref = _nvram_run_path(run, self._name) if run_spec.uefi else None
+
+        # Seed the per-run NVRAM from the install-phase snapshot when
+        # we have one.  Libvirt uses the file as-is if it exists; it
+        # only copies from the ``template=`` attribute when the file
+        # is absent.  Derived from ``installed_disk`` rather than
+        # asking ``cache`` directly so we don't have to thread a
+        # CacheManager through :meth:`AbstractVM.start_run`.  Relies
+        # on the cache layout convention
+        # ``<vms_dir>/<hash>.qcow2`` ↔ ``<vms_dir>/<hash>.nvram.fd``
+        # (see :meth:`~testrange.cache.CacheManager.vm_nvram_ref`).
+        if nvram_ref is not None and installed_disk.endswith(".qcow2"):
+            transport = run.storage.transport
+            cached_nvram = installed_disk.removesuffix(".qcow2") + ".nvram.fd"
+            if transport.exists(cached_nvram):
+                _log.debug(
+                    "seeding run-phase NVRAM from cached %s",
+                    cached_nvram,
+                )
+                transport.write_bytes(
+                    nvram_ref, transport.read_bytes(cached_nvram),
+                )
 
         domain_name = f"tr-{self._name[:10]}-{run.run_id[:8]}"
         xml = self._base_domain_xml(

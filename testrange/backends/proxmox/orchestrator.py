@@ -1,68 +1,69 @@
-"""Proxmox VE orchestrator (SCAFFOLDING).
+"""Proxmox VE orchestrator.
 
-.. warning::
+Authenticates against the PVE REST API (via the ``proxmoxer``
+package), resolves a target node + image-capable storage pool,
+ensures TestRange's SDN simple-zone exists, brings up an
+ephemeral install-phase vnet + the user-declared run-phase vnets,
+provisions VMs from cached PVE templates, and tears everything
+down on exit.  Supports nested orchestration —
+:meth:`root_on_vm` produces a ``ProxmoxOrchestrator`` rooted on a
+just-booted PVE Hypervisor VM, and ``__enter__`` enters any
+inner ``Hypervisor``-typed VMs the same way the libvirt backend
+does (see :meth:`_enter_nested_orchestrators`).
 
-   This module is *not yet implemented*.  The class is here so that
-   TestRange's backend architecture is exercised by something other
-   than libvirt, and so the abstract method signatures have a real
-   second subscriber.  Instantiating and entering the orchestrator
-   raises :class:`NotImplementedError`.
+Known limits documented in the project's TODO.md (single fixed
+install-vnet subnet, hardcoded public DNS for install-phase
+cloud-init, …) — open follow-ups, not undocumented surprises.
 
-Target architecture
--------------------
+The CLI URL form for this backend is
+``proxmox://USER:PASS@HOST[:PORT]/NODE?storage=NAME`` — see
+:func:`testrange.backends.proxmox.cli_build_orchestrator`.
 
-The Proxmox backend will drive a Proxmox VE cluster via:
+Architecture
+------------
 
-- the REST API (`proxmoxer <https://pypi.org/project/proxmoxer/>`_
-  wraps auth + retries nicely) for the majority of the lifecycle —
-  define VM, start, stop, clone, snapshot, SDN vnet create, storage
-  uploads;
+The Proxmox backend drives a PVE node via:
+
+- the REST API (``proxmoxer`` wraps auth + retries) for the majority
+  of the lifecycle — authenticate, list nodes / storage, manage SDN
+  zones / vnets / subnets / IPAM, create + start + stop + delete VMIDs,
+  upload installer ISOs, snapshot post-install disks;
 - fallback shell-outs to ``qm`` / ``pct`` over SSH for the handful of
-  storage-pool operations the REST API does not cleanly expose (e.g.
+  storage-pool operations the REST API doesn't cleanly expose (e.g.
   importing a qcow2 into an LVM-thin pool).
 
 The builder layer (:class:`~testrange.vms.builders.CloudInitBuilder`,
 :class:`~testrange.vms.builders.WindowsUnattendedBuilder`,
-:class:`~testrange.vms.builders.NoOpBuilder`) is shared with libvirt
-— their :class:`~testrange.vms.builders.base.InstallDomain` /
+:class:`~testrange.vms.builders.NoOpBuilder`,
+:class:`~testrange.vms.builders.ProxmoxAnswerBuilder`) is shared with
+libvirt — their :class:`~testrange.vms.builders.base.InstallDomain` /
 :class:`~testrange.vms.builders.base.RunDomain` outputs are
-hypervisor-neutral.  Only the *rendering* into backend-native calls is
-different: where libvirt emits domain XML,
-:class:`~testrange.backends.proxmox.vm.ProxmoxVM` will translate the
-same dataclasses into ``qm create`` / ``POST /api2/json/nodes/{node}/qemu``
-parameters.
+hypervisor-neutral.  Only the *rendering* into backend-native calls
+differs: where libvirt emits domain XML,
+:class:`~testrange.backends.proxmox.vm.ProxmoxVM` translates the same
+dataclasses into ``qm create`` / REST parameters.
 
-TODO list for implementation
-----------------------------
+Roadmap
+-------
 
-Roughly in dependency order:
+In dependency order:
 
-1. Lazy-import ``proxmoxer`` inside :meth:`__enter__`; raise
-   :class:`~testrange.exceptions.OrchestratorError` with the pip
-   install hint when missing.
-2. Authenticate against ``/api2/json/access/ticket`` using the
-   ``host`` + API-token / password supplied at construction.
-3. Pick a target node and storage pool.  For single-node setups this
-   is trivial; for clusters, add ``node=`` / ``storage=`` kwargs.
-4. Create SDN vnets via ``/cluster/sdn/vnets`` for each
-   :class:`~testrange.networks.base.AbstractVirtualNetwork`; reload
-   SDN; reserve IPs via the IPAM endpoint for static-IP
-   :class:`~testrange.devices.vNIC` entries.
-5. For each VM, delegate to
-   :meth:`~testrange.backends.proxmox.vm.ProxmoxVM.build` which
-   consumes the builder's :class:`InstallDomain` and:
-
-   a. uploads / clones the required disk images into the storage pool;
-   b. creates an ephemeral VMID via ``POST /nodes/{node}/qemu`` with
-      the right ``bios``, ``ostype``, ``ide0``, ``net0``, etc.;
-   c. starts the domain and polls
-      ``/nodes/{node}/qemu/{vmid}/status/current`` until it reports
-      ``stopped`` (the autounattend / cloud-init power_state dance
-      still works — Proxmox just observes it differently);
-   d. snapshots the post-install disk into the TestRange cache.
-
-6. On exit: stop each VM, destroy the ephemeral VMIDs, delete the
-   SDN vnets, reload SDN.
+1. **Authentication + zone bootstrap** (this slice).  ``__enter__``
+   logs in, picks a node, picks an image-capable storage pool, and
+   ensures TestRange's SDN simple-zone exists.
+2. **SDN vnet + IPAM** (next slice).
+   :meth:`~testrange.backends.proxmox.network.ProxmoxVirtualNetwork.start`
+   creates a vnet + subnet under the zone, registers static-IP
+   entries via IPAM, reloads SDN.
+3. **VM build / start_run** — translate
+   :class:`~testrange.vms.builders.base.InstallDomain` into
+   ``POST /nodes/{node}/qemu`` parameters; poll ``status/current``
+   until the install domain stops; snapshot the disk; create an
+   overlay clone for the run phase; start it; attach a communicator.
+4. **Guest-agent communicator** —
+   :class:`~testrange.backends.proxmox.guest_agent.ProxmoxGuestAgentCommunicator`
+   talks to ``/nodes/{node}/qemu/{vmid}/agent``.
+5. **Teardown** — stop, delete VMIDs, delete vnets, reload SDN.
 
 Non-goals (for v1 of the Proxmox backend)
 -----------------------------------------
@@ -70,47 +71,169 @@ Non-goals (for v1 of the Proxmox backend)
 - LXC containers — TestRange is VM-focused and LXC has different
   semantics for most features.
 - HA failover / live migration — single-node use is the v1 target.
-- Alternative communicators — the shipped communicators (SSH, WinRM)
-  work against Proxmox guests unchanged.  A
-  ``ProxmoxGuestAgentCommunicator`` (going through
-  ``/nodes/{node}/qemu/{vmid}/agent``) is a follow-up.
 """
 
 from __future__ import annotations
 
+import contextlib
+import ipaddress
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
+from testrange._logging import get_logger, log_duration
+from testrange.backends.proxmox.network import (
+    ProxmoxVirtualNetwork,
+    _mac_for_vm_network,
+)
+from testrange.backends.proxmox.vm import ProxmoxVM
+from testrange.cache import CacheManager
+from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator
 
 if TYPE_CHECKING:
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
+    from testrange.vms.generic import GenericVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
+
+_log = get_logger(__name__)
+
+_PROXMOX_INSTALL_SUBNET = "192.168.230.0/24"
+"""Fixed subnet for the install-phase SDN vnet.
+
+Sits below libvirt's install pool (``192.168.240.0/24`` –
+``192.168.254.0/24``) so concurrent libvirt + proxmox runs on the
+same host don't confuse each other.  PVE-side, vnets are isolated
+inside the orchestrator's :data:`DEFAULT_ZONE`, so the choice only
+matters for collisions with operator-managed routes on the PVE node.
+Two test processes targeting the same PVE node would race on this
+subnet — addressing that needs a per-PVE-zone subnet pool with a
+PVE-side lock, which is a future slice; the single-orchestrator
+case is what this constant covers."""
+
+
+DEFAULT_ZONE = "tr"
+"""Name of the SDN simple-zone TestRange creates and stashes its
+vnets under.  One zone, shared across all runs against the same PVE
+host — vnets are namespaced under the zone so concurrent runs don't
+collide as long as their vnet names differ.
+
+PVE caps SDN zone IDs at 8 characters.  We use ``"tr"`` to leave six
+characters of headroom for users who want to override the default
+with a deployment-specific zone name (``"trtest"``, ``"trprod"``,
+…).  The default name itself is namespaced enough; it never conflicts
+with PVE's built-in zones (which all start with ``localnetwork``)."""
+
+
+def _promote_to_proxmox(vm: ProxmoxVM | "GenericVM") -> ProxmoxVM:
+    """Convert a backend-agnostic :class:`GenericVM` to the
+    proxmox backend's concrete :class:`ProxmoxVM`.
+
+    Field-for-field translation since GenericVM exists exactly to
+    be pluggable into any backend.  An already-ProxmoxVM input
+    passes through unchanged.  Symmetric with
+    :func:`testrange.backends.libvirt.orchestrator._promote_to_libvirt`.
+    """
+    from testrange.vms.generic import GenericVM as _GenericVM
+    if isinstance(vm, _GenericVM):
+        return ProxmoxVM(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,
+            builder=vm.builder,
+            communicator=vm.communicator,
+        )
+    return vm
+
+
+def _promote_to_proxmox_network(
+    net: "AbstractVirtualNetwork",
+) -> ProxmoxVirtualNetwork:
+    """Convert any :class:`AbstractVirtualNetwork` to the proxmox
+    backend's concrete :class:`ProxmoxVirtualNetwork`.
+
+    Same shape-preserving translation as :func:`_promote_to_proxmox`
+    but for networks: copy the five user-facing fields (name, subnet,
+    dhcp, internet, dns) into a fresh ProxmoxVirtualNetwork.  An
+    already-ProxmoxVirtualNetwork input passes through unchanged.
+
+    The translation is necessary because ``testrange.VirtualNetwork``
+    re-exports the libvirt backend's class for top-level ergonomics —
+    a user constructing ``Hypervisor(orchestrator=ProxmoxOrchestrator,
+    networks=[VirtualNetwork(...)])`` would otherwise hand the inner
+    ProxmoxOrchestrator a libvirt-flavoured network whose
+    :meth:`start` reaches for ``context._conn`` and fails.
+    """
+    if isinstance(net, ProxmoxVirtualNetwork):
+        return net
+    return ProxmoxVirtualNetwork(
+        name=net.name,
+        subnet=net.subnet,
+        dhcp=net.dhcp,
+        internet=net.internet,
+        dns=net.dns,
+    )
 
 
 class ProxmoxOrchestrator(AbstractOrchestrator):
     """Proxmox VE implementation of
     :class:`~testrange.orchestrator_base.AbstractOrchestrator`.
 
-    **NOT YET IMPLEMENTED.**  Constructing an instance succeeds so
-    that callers can stash one for future use without crashing, but
-    entering the context manager raises
-    :class:`NotImplementedError`.
-
-    :param host: Proxmox cluster entry point — a hostname or IP of any
-        node in the cluster.
-    :param networks: Virtual networks to create as SDN vnets.
-    :param vms: VMs to provision.
+    :param host: PVE node hostname or IP.  A single node is fine; for
+        a cluster, point at any node and pass ``node=`` to pick the
+        target.
+    :param networks: Virtual networks to create as SDN vnets.  Any
+        non-:class:`ProxmoxVirtualNetwork` (e.g. the libvirt-flavoured
+        :class:`testrange.VirtualNetwork`) is promoted at __init__.
+    :param vms: VMs to provision.  ``GenericVM`` and ``LibvirtVM``
+        specs are promoted to :class:`ProxmoxVM` field-for-field at
+        __init__ so the rest of the orchestrator only sees the
+        backend-native type.
     :param cache_root: Override the default cache directory.
-    :param node: Optional target node name.  Defaults to the node
-        reached by *host* if the cluster has more than one.
-    :param storage: Optional storage-pool name for disk images.
-        Common values: ``"local-lvm"``, ``"local-zfs"``, ``"ceph"``.
-    :param token: Proxmox API token ID + secret, or a ``(user, pw)``
-        tuple.  Exact shape to be decided during implementation.
+    :param node: Target node name.  Defaults to the only node in
+        single-node setups; required for clusters.
+    :param storage: Storage-pool name for VM disk images
+        (``"local-lvm"``, ``"local-zfs"``, ``"ceph"``…).  Defaults
+        to the first pool on the target node that lists ``images``
+        in its content set.
+    :param port: PVE REST API port.  Defaults to 8006.
+    :param user: PVE user, e.g. ``"root@pam"``.  Required with
+        ``password`` or ``token_value``.
+    :param password: PVE user password.  Mutually exclusive with the
+        ``token_*`` kwargs.
+    :param token_name: PVE API-token name (the part after the ``!``
+        in ``user@pam!tokenname``).
+    :param token_value: PVE API-token secret.  Use with
+        ``token_name`` and ``user`` for token-based auth (preferred
+        over password for service accounts).
+    :param verify_ssl: Verify the PVE TLS certificate.  Defaults to
+        ``False`` because PVE ships a self-signed cert by default;
+        flip to ``True`` once you've replaced the cert.
+    :param zone: SDN simple-zone name TestRange uses for its vnets.
+        Defaults to ``"testrange"``.  Created on ``__enter__`` if
+        missing.
+    :param token: **Legacy.**  Dict-shaped credential carrier used by
+        :func:`testrange.backends.proxmox.cli_build_orchestrator` —
+        ``{"user": ..., "password": ..., "token": ...}``.  Prefer
+        the explicit kwargs above.
     """
+
+    # Narrow the abstract ``list[AbstractVirtualNetwork]`` to our
+    # concrete subclass so calls to ``bind_run`` / ``register_vm`` /
+    # ``backend_name`` type-check without a per-call cast.  The
+    # ``pyright: ignore`` matches the libvirt backend's convention —
+    # ``list`` is invariant, so the narrow is technically a violation
+    # of the LSP variance rule, but it's intentional and safe
+    # (mixing backend types in one orchestrator is a user error
+    # caught at construction).
+    _networks: list[ProxmoxVirtualNetwork]  # type: ignore[assignment] # pyright: ignore[reportIncompatibleVariableOverride]
+    _started_networks: list[ProxmoxVirtualNetwork]
+    _provisioned_vms: list[ProxmoxVM]
 
     def __init__(
         self,
@@ -123,6 +246,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         storage_backend: object | None = None,
         node: str | None = None,
         storage: str | None = None,
+        port: int = 8006,
+        user: str | None = None,
+        password: str | None = None,
+        token_name: str | None = None,
+        token_value: str | None = None,
+        verify_ssl: bool = False,
+        zone: str = DEFAULT_ZONE,
         token: object | None = None,
     ) -> None:
         super().__init__(
@@ -130,28 +260,92 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             cache=cache, cache_verify=cache_verify,
             storage_backend=storage_backend,  # type: ignore[arg-type]
         )
-        # Proxmox doesn't yet honour storage_backend (the orchestrator
-        # is a stub).  Stash it for forward-compatibility so the
-        # contract test passes today and the wiring follows when the
-        # PVE REST integration lands.
+        # ``storage_backend`` is a generic abstraction the libvirt
+        # backend uses to switch transports (local FS / SSH SFTP);
+        # the proxmox backend bypasses it entirely because every
+        # disk-image operation goes through the PVE REST API instead
+        # of a transport-shaped tool wrapper.  Stash it so the
+        # cross-backend contract test in
+        # ``tests/test_backend_contract.py`` still passes — never
+        # consumed by any proxmox-side code.
         self._storage_backend_override = storage_backend
         self._host = host
-        self._networks = list(networks) if networks else []
-        self._vm_list = list(vms) if vms else []
+        self._port = port
+        # Promote any non-Proxmox networks to ProxmoxVirtualNetwork
+        # up front so the rest of the orchestrator only ever sees
+        # backend-native instances.  The top-level
+        # ``testrange.VirtualNetwork`` re-export resolves to libvirt's
+        # class, so a user constructing
+        # ``Hypervisor(orchestrator=ProxmoxOrchestrator,
+        # networks=[VirtualNetwork(...)])`` would otherwise hand us
+        # libvirt-flavoured networks whose start() reaches for
+        # ``context._conn`` and explodes.
+        self._networks = [  # pyright: ignore[reportIncompatibleVariableOverride]
+            _promote_to_proxmox_network(n) for n in (networks or [])
+        ]
+        # Promote any backend-agnostic GenericVM specs to ProxmoxVM
+        # up front so the rest of the orchestrator (and external
+        # readers of ``self._vm_list``) see only the backend-native
+        # type — same pattern as ``LibvirtOrchestrator._promote_to_libvirt``.
+        self._vm_list = [_promote_to_proxmox(v) for v in (vms or [])]
         self._cache_root = cache_root
         self._cache_url = cache
         self._cache_verify = cache_verify
         self._node = node
         self._storage = storage
-        self._token = token
+        self._zone = zone
+        self._user = user
+        self._password = password
+        self._token_name = token_name
+        self._token_value = token_value
+        self._verify_ssl = verify_ssl
+
+        # Translate legacy dict-shaped ``token=`` glue from the URL
+        # handler.  The dict carries one of three credential shapes
+        # depending on what the URL spelled — see
+        # :func:`testrange.backends.proxmox.cli_build_orchestrator`.
+        if isinstance(token, dict):
+            if not self._user and token.get("user"):
+                self._user = token["user"]
+            if not self._password and token.get("password"):
+                self._password = token["password"]
+            self._legacy_token = token.get("token")
+        else:
+            self._legacy_token = None
+
+        self._client: Any = None
         self.vms = {}
+        self._run = None
+        self._run_id: str | None = None
+        self._started_networks = []
+        self._install_network: ProxmoxVirtualNetwork | None = None
+        """Ephemeral SDN vnet used by every VM during the install
+        phase.  Has ``internet=True`` so cloud-init can reach apt /
+        dnf mirrors regardless of which user-declared NIC the VM
+        ends up on at run time.  Created in :meth:`__enter__` (after
+        ``_start_networks``), torn down in :meth:`__exit__`.
+        Symmetric with the libvirt backend's ``_install_network``."""
+        self._provisioned_vms = []
+        # Nested-orchestrator state.  ``_nested_stack`` owns the
+        # unwind for every entered inner orchestrator; closing it in
+        # ``__exit__`` unwinds them in LIFO order before this
+        # orchestrator's own teardown runs.  Mirrors libvirt's
+        # convention so a Hypervisor VM hosted on PVE behaves the
+        # same way as one hosted on libvirt.
+        self._nested_stack: contextlib.ExitStack | None = None
+        self._inner_orchestrators: list[AbstractOrchestrator] = []
+        # CacheManager creation involves filesystem mutation
+        # (mkdir/chmod on the cache root); defer it to __enter__ so
+        # cheap construction patterns — CLI URL dispatch, tests
+        # constructing instances for spec inspection — don't trip
+        # on filesystem permissions.
+        self._cache: CacheManager | None = None
 
         # CacheManager construction mirrors LibvirtOrchestrator's
-        # wiring so the cross-backend cache.backend_name invariant
-        # holds even though the rest of this orchestrator is still a
-        # stub.  Without it, the contract test in
+        # wiring so the cross-backend ``cache.backend_name`` invariant
+        # holds.  The contract test in
         # tests/test_backend_contract.py::TestScenarioConstructionContract
-        # catches the missing setup.
+        # catches missing setup if this drifts.
         from testrange.cache import CacheManager
         remote = None
         if cache is not None:
@@ -169,61 +363,1041 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         """Return ``"proxmox"``."""
         return "proxmox"
 
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     def __enter__(self) -> AbstractOrchestrator:
-        # TODO: lazy import proxmoxer here; raise OrchestratorError
-        # with a clear "pip install testrange[proxmox]" message if
-        # the client library is unavailable.
-        # TODO: authenticate via POST /api2/json/access/ticket using
-        # self._token (or user+password fallback).
-        # TODO: resolve self._node / self._storage defaults.
-        # TODO: create SDN vnets for every AbstractVirtualNetwork in
-        # self._networks, via POST /cluster/sdn/vnets + reload SDN.
-        # TODO: for each VM, call vm.build(self, cache, run, ...) and
-        # then vm.start_run(self, ...); populate self.vms.
-        raise NotImplementedError(
-            "ProxmoxOrchestrator is not yet implemented.  "
-            "Contribute the REST calls + SDN work at "
-            "testrange.backends.proxmox, or use the libvirt "
-            "Orchestrator in the meantime."
+        """Authenticate, resolve node + storage, ensure SDN zone exists.
+
+        :raises OrchestratorError: If ``proxmoxer`` is not installed,
+            credentials are missing or wrong, the host is unreachable,
+            or no image-capable storage pool can be found.
+        """
+        try:
+            # ``proxmoxer`` is an optional dep — pip-install
+            # ``testrange[proxmox]`` to pull it in.  It ships no type
+            # stubs, hence the pyright ignore.
+            from proxmoxer import ProxmoxAPI  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:
+            raise OrchestratorError(
+                "ProxmoxOrchestrator needs the ``proxmoxer`` Python "
+                "package — install with "
+                "``pip install testrange[proxmox]``."
+            ) from exc
+
+        if self._cache is None:
+            self._cache = (
+                CacheManager(root=self._cache_root)
+                if self._cache_root else CacheManager()
+            )
+
+        client_kwargs = self._resolve_client_kwargs()
+        _log.info(
+            "connecting to PVE %s:%d as %s",
+            self._host, self._port, client_kwargs.get("user"),
+        )
+        try:
+            self._client = ProxmoxAPI(**client_kwargs)
+            nodes = self._client.nodes.get()
+        except Exception as exc:
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: cannot reach "
+                f"{self._host}:{self._port}: {exc}"
+            ) from exc
+
+        self._resolve_node(nodes)
+        self._resolve_storage()
+        self._ensure_sdn_zone()
+        _log.info(
+            "PVE ready: node=%s storage=%s zone=%s",
+            self._node, self._storage, self._zone,
         )
 
+        # Run setup — every entry gets a fresh RunDir so concurrent
+        # runs against the same PVE namespace partition cleanly.
+        # Even though ProxmoxVM uploads disks via REST and never
+        # touches the local scratch path, ``run.run_id`` flows into
+        # the deterministic clone / phase-2-seed names downstream.
+        # The local scratch dir lands under the cache root and is
+        # cleaned up in __exit__; nothing inside it is load-bearing
+        # for the proxmox path today, but having it means any
+        # future builder that wants a backend-local scratch file
+        # gets the same ergonomics as the libvirt path.
+        from testrange._run import RunDir
+        from testrange.backends.libvirt.storage import LocalStorageBackend
+        self._run = RunDir(LocalStorageBackend(cache_root=self._cache.root))
+        self._run_id = self._run.run_id
+        _log.info("run id: %s", self._run_id[:8])
+
+        try:
+            self._setup_vm_networks()
+            self._start_networks()
+            # Bring up the install-phase vnet AFTER the user-declared
+            # ones — every VM build attaches its install NIC here so
+            # cloud-init has internet access regardless of where the
+            # VM eventually lives at run time (a user network with
+            # ``internet=False`` would otherwise hang ``apt install``
+            # forever; see :meth:`_create_install_network`).  Skip
+            # entirely if no VM in this run actually has an install
+            # phase (NoOpBuilder VMs).
+            if any(vm.builder.needs_install_phase() for vm in self._vm_list):
+                self._install_network = self._create_install_network()
+                with log_duration(
+                    _log,
+                    f"start install network "
+                    f"{self._install_network.backend_name()!r}",
+                ):
+                    self._install_network.start(self)
+            self._warn_if_unroutable()
+            self._provision_vms()
+            # Enter inner orchestrators for any Hypervisor VMs.
+            # Same contract as the libvirt backend: ExitStack owns
+            # the unwind so a partial failure here exits every
+            # already-entered inner orchestrator before we propagate
+            # to the outer teardown path.
+            self._enter_nested_orchestrators()
+        except Exception:
+            # Roll back in reverse provisioning order so we don't
+            # leak any SDN / VMID state into the user's exception.
+            if self._nested_stack is not None:
+                self._nested_stack.close()
+                self._nested_stack = None
+                self._inner_orchestrators = []
+            self._teardown_vms()
+            self._teardown_install_network()
+            self._teardown_networks()
+            if self._run is not None:
+                try:
+                    self._run.cleanup()
+                except Exception:  # pragma: no cover — defensive
+                    pass
+                self._run = None
+            self._client = None
+            self._run_id = None
+            raise
+
+        return self
+
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
-        # TODO: stop VMs via POST /nodes/{node}/qemu/{vmid}/status/stop.
-        # TODO: delete VMIDs via DELETE /nodes/{node}/qemu/{vmid}.
-        # TODO: delete SDN vnets; reload SDN.
-        # TODO: close the proxmoxer client.
-        raise NotImplementedError(
-            "ProxmoxOrchestrator teardown is not yet implemented."
+        """Tear down SDN vnets and close the PVE client.
+
+        Honours :meth:`leak` by skipping resource teardown (just
+        releases the client handle) — the same contract the libvirt
+        backend follows.  Per the
+        :class:`~testrange.orchestrator_base.AbstractOrchestrator`
+        contract, never raises: per-network teardown errors are
+        already swallowed by :meth:`ProxmoxVirtualNetwork.stop`, and
+        any other unexpected error here is logged.
+        """
+        try:
+            # Unwind nested inner orchestrators first (LIFO) so each
+            # inner orchestrator's __exit__ runs while its hosting
+            # PVE VM is still alive.  Tear down our own VMs / vnets
+            # only after the inner stack is closed.
+            if self._nested_stack is not None:
+                try:
+                    self._nested_stack.close()
+                except Exception as exc:  # pragma: no cover — defensive
+                    _log.warning(
+                        "unexpected error while unwinding nested "
+                        "orchestrators: %s", exc,
+                    )
+                self._nested_stack = None
+                self._inner_orchestrators = []
+
+            if self._leaked:
+                hints = self.keep_alive_hints()
+                _log.info(
+                    "leak() set — leaving %d VM(s) and %d network(s) "
+                    "in place; manual cleanup hints follow",
+                    len(self._provisioned_vms),
+                    len(self._started_networks),
+                )
+                for line in hints:
+                    _log.info("  %s", line)
+            else:
+                self._teardown_vms()
+                self._teardown_install_network()
+                self._teardown_networks()
+                if self._run is not None:
+                    try:
+                        self._run.cleanup()
+                    except Exception as exc:  # pragma: no cover — defensive
+                        _log.warning(
+                            "unexpected error cleaning run dir: %s", exc,
+                        )
+        except Exception as exc:  # pragma: no cover — defensive
+            _log.warning("unexpected error during PVE teardown: %s", exc)
+        finally:
+            self._client = None
+            self._run_id = None
+            self._run = None
+
+    def cleanup(self, run_id: str) -> None:
+        """Reconstruct + tear down per-run PVE resources for *run_id*.
+
+        Symmetric with :meth:`testrange.backends.libvirt.Orchestrator.cleanup`:
+        reconstructs the deterministic backend names this orchestrator's
+        ``__enter__`` would have created and destroys them.
+
+        **Templates are preserved.**  ``tr-template-<config_hash[:12]>``
+        VMIDs are persistent cache state — a second run with the same
+        spec hits them and skips install.  ``cleanup`` only removes the
+        per-run clones (named ``tr-<vm_name[:10]>-<run_id[:8]>``) plus
+        any per-run phase-2 seed ISOs.
+
+        SDN vnets named ``<net[:4]><run_id[:4]>`` get destroyed.  The
+        SDN zone (a global resource shared across runs) is left intact.
+
+        Opens its own proxmoxer client; does NOT call ``__enter__``
+        (no provisioning to redo).
+        """
+        from testrange.backends.proxmox.network import (
+            ProxmoxVirtualNetwork,
         )
+        from testrange.backends.proxmox.vm import _TEMPLATE_NAME_PREFIX
+
+        client, node = self._open_admin_connection()
+
+        # 1. Per-VM clones.  Reconstruct the clone name from
+        #    (vm.name, run_id) — same formula ProxmoxVM.build uses
+        #    for the clone's display name.
+        for vm in self._vm_list:
+            clone_name = f"tr-{vm.name[:10]}-{run_id[:8]}"
+            clone_vmid = self._find_vm_by_name(client, node, clone_name)
+            if clone_vmid is None:
+                continue
+            # Refuse to touch a template even if the name pattern
+            # somehow matches.  Templates are persistent cache state.
+            if self._is_template(client, node, clone_vmid):
+                _log.warning(
+                    "cleanup: skipping VMID %d (matches clone name %r "
+                    "but is flagged as template)",
+                    clone_vmid, clone_name,
+                )
+                continue
+            _log.info(
+                "cleanup: stopping + deleting clone VMID %d (%s)",
+                clone_vmid, clone_name,
+            )
+            try:
+                client.nodes(node).qemu(clone_vmid).status.stop.post()
+            except Exception:
+                pass
+            try:
+                client.nodes(node).qemu(clone_vmid).delete()
+            except Exception as exc:
+                _log.warning(
+                    "cleanup: delete VMID %d failed: %s",
+                    clone_vmid, exc,
+                )
+
+        # 2. Per-run phase-2 seed ISOs.  Filename pattern is
+        #    ``tr-<vm[:10]>-<run_id[:8]>-seed.iso`` (see
+        #    ProxmoxVM.start_run).
+        for vm in self._vm_list:
+            seed_name = f"tr-{vm.name[:10]}-{run_id[:8]}-seed.iso"
+            try:
+                client.nodes(node).storage("local").content(
+                    f"local:iso/{seed_name}",
+                ).delete()
+            except Exception as exc:
+                _log.debug(
+                    "cleanup: phase-2 seed %r not deleted (probably "
+                    "already gone): %s",
+                    seed_name, exc,
+                )
+
+        # 3. Per-run SDN vnets.  ProxmoxVirtualNetwork.backend_name
+        #    is a pure function of (network.name, run_id), so we
+        #    can reconstruct each name without state.
+        for net_spec in self._networks:
+            if not isinstance(net_spec, ProxmoxVirtualNetwork):
+                continue
+            net_spec.bind_run(run_id)
+            vnet_name = net_spec.backend_name()
+            try:
+                client.cluster.sdn.vnets(vnet_name).delete()
+                _log.info("cleanup: deleted SDN vnet %r", vnet_name)
+            except Exception as exc:
+                _log.debug(
+                    "cleanup: SDN vnet %r not deleted (probably "
+                    "already gone): %s",
+                    vnet_name, exc,
+                )
+        # Reload SDN config so the vnet deletes take effect.
+        try:
+            client.cluster.sdn.put()
+        except Exception:
+            pass
+
+        _log.info(
+            "cleanup: done for run %s; templates (%s*) preserved",
+            run_id[:8], _TEMPLATE_NAME_PREFIX,
+        )
+
+    @staticmethod
+    def _find_vm_by_name(
+        client: Any, node: str, name: str,
+    ) -> int | None:
+        """Return the VMID of the VM on *node* with display name
+        *name*, or ``None``."""
+        try:
+            vms = client.nodes(node).qemu.get()
+        except Exception:
+            return None
+        for vm in vms or []:
+            if vm.get("name") == name:
+                return int(vm["vmid"])
+        return None
+
+    @staticmethod
+    def _is_template(client: Any, node: str, vmid: int) -> bool:
+        """Return True if VMID is a PVE template."""
+        try:
+            cfg = client.nodes(node).qemu(vmid).config.get()
+        except Exception:
+            return False
+        return bool(cfg.get("template"))
+
+    def list_templates(self) -> list[dict[str, Any]]:
+        """Return TestRange-managed PVE templates on the configured node.
+
+        Each entry is a ``{"vmid": int, "name": str}`` dict.  Names
+        always start with the
+        :data:`~testrange.backends.proxmox.vm._TEMPLATE_NAME_PREFIX`
+        prefix so accidental matches against operator-managed templates
+        are filtered out.
+
+        Used by ``testrange proxmox-list-templates`` to surface the
+        cache contents and by
+        :meth:`prune_templates` to enumerate eviction candidates.
+        Opens its own connection — does NOT call :meth:`__enter__`.
+        """
+        from testrange.backends.proxmox.vm import _TEMPLATE_NAME_PREFIX
+
+        client, node = self._open_admin_connection()
+        try:
+            vms = client.nodes(node).qemu.get()
+        except Exception as exc:
+            raise OrchestratorError(
+                f"list_templates: cannot list VMs on node {node!r}: {exc}"
+            ) from exc
+
+        return [
+            {"vmid": int(vm["vmid"]), "name": vm["name"]}
+            for vm in vms or []
+            if vm.get("template")
+            and vm.get("name", "").startswith(_TEMPLATE_NAME_PREFIX)
+        ]
+
+    def prune_templates(self, *, names: list[str] | None = None) -> int:
+        """Delete TestRange-managed PVE templates from the configured node.
+
+        :param names: Restrict the prune to templates with these
+            display names.  ``None`` (default) deletes every
+            ``tr-template-*`` VMID — careful with shared PVE hosts.
+        :returns: Number of templates actually deleted.
+        """
+        client, node = self._open_admin_connection()
+        candidates = self.list_templates()
+        if names is not None:
+            wanted = set(names)
+            candidates = [t for t in candidates if t["name"] in wanted]
+
+        deleted = 0
+        for tpl in candidates:
+            vmid = tpl["vmid"]
+            try:
+                client.nodes(node).qemu(vmid).delete()
+                _log.info(
+                    "prune: deleted template VMID %d (%r)",
+                    vmid, tpl["name"],
+                )
+                deleted += 1
+            except Exception as exc:
+                _log.warning(
+                    "prune: delete template VMID %d (%r) failed: %s",
+                    vmid, tpl["name"], exc,
+                )
+        return deleted
+
+    def _open_admin_connection(self) -> tuple[Any, str]:
+        """Open a proxmoxer connection + resolve the target node.
+
+        Shared between :meth:`cleanup`, :meth:`list_templates`, and
+        :meth:`prune_templates` — none of which need ``__enter__``'s
+        provisioning side effects but all need the same auth +
+        node-resolution dance.
+        """
+        try:
+            from proxmoxer import ProxmoxAPI  # pyright: ignore[reportMissingImports]
+        except ImportError as exc:
+            raise OrchestratorError(
+                "ProxmoxOrchestrator: proxmoxer is required.  Install "
+                "with ``pip install testrange[proxmox]``."
+            ) from exc
+        client_kwargs = self._resolve_client_kwargs()
+        try:
+            client = ProxmoxAPI(self._host, **client_kwargs)
+        except Exception as exc:
+            raise OrchestratorError(
+                f"cannot connect to PVE at {self._host!r}: {exc}"
+            ) from exc
+        try:
+            nodes = list(client.nodes.get())
+        except Exception as exc:
+            raise OrchestratorError(
+                f"cannot list PVE nodes: {exc}"
+            ) from exc
+        self._resolve_node(nodes)
+        node = self._node
+        assert node is not None
+        return client, node
+
+    def keep_alive_hints(self) -> list[str]:
+        """Return cleanup commands for resources left behind by
+        :meth:`leak`.
+
+        Each line is a self-contained ``pvesh`` invocation a human
+        would run on the PVE node to release one resource — useful
+        when ``leak()`` was set, the user is done poking, and they
+        want to tidy up by hand without booting another orchestrator.
+        """
+        lines: list[str] = []
+        for vm in self._provisioned_vms:
+            if vm._vmid is None:
+                continue
+            lines.append(
+                f"pvesh create /nodes/{self._node}/qemu/{vm._vmid}/status/stop"
+            )
+            lines.append(
+                f"pvesh delete /nodes/{self._node}/qemu/{vm._vmid}"
+            )
+        for net in self._started_networks:
+            try:
+                vnet = net.backend_name()
+            except RuntimeError:
+                continue
+            lines.append(f"pvesh delete /cluster/sdn/vnets/{vnet}")
+        if any("/cluster/sdn/vnets/" in line for line in lines):
+            lines.append("pvesh set /cluster/sdn  # apply pending deletes")
+        return lines
+
+    # ------------------------------------------------------------------
+    # Network lifecycle
+    # ------------------------------------------------------------------
+
+    def _start_networks(self) -> None:
+        """Bind + start every configured network under our run ID.
+
+        Tracks successfully-started networks on
+        :attr:`_started_networks` so :meth:`_teardown_networks`
+        only stops what we actually brought up — important on the
+        rollback path when a later network's :meth:`start` fails.
+        """
+        assert self._run_id is not None, "run id must be set first"
+        for net in self._networks:
+            net.bind_run(self._run_id)
+            net.start(self)
+            self._started_networks.append(net)
+            _log.debug(
+                "started network %r (backend=%s)",
+                net.name, net.backend_name(),
+            )
+
+    def _check_network_reachable(
+        self, net: ProxmoxVirtualNetwork,
+    ) -> bool:
+        """Check whether the test runner has a route into *net*'s subnet.
+
+        SDN vnets live on a bridge inside the PVE host.  The test
+        runner needs an IP route through the PVE node to reach VM
+        IPs on that subnet — without it, the SSH-readiness wait in
+        :meth:`ProxmoxVM.start_run` will time out at 300s with no
+        useful diagnostic.
+
+        We can't TCP-probe a VM that doesn't exist yet, and the
+        gateway IP isn't a host (just the PVE-side bridge).  But the
+        kernel knows whether *anything* on the subnet is routable:
+        ``ip route get`` returns a "via … dev …" line for a routable
+        target and exits non-zero otherwise.  We pick a host inside
+        the subnet (any will do — the kernel doesn't ARP) and ask.
+        """
+        import subprocess
+
+        # Pick the gateway address — guaranteed to be in-subnet and
+        # not equal to the test runner's own address.
+        target = net.gateway_ip
+        try:
+            result = subprocess.run(
+                ["ip", "-4", "route", "get", target],
+                capture_output=True, text=True, timeout=2,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Either ``ip`` isn't on PATH or the kernel hung — give
+            # the user the benefit of the doubt and skip the warning.
+            return True
+        if result.returncode != 0:
+            return False
+        # ``ip route get`` returns 0 even when the route is via the
+        # default gateway, which would not actually reach the SDN
+        # subnet (the default GW has no route for it).  Look for a
+        # ``via <pve-host>`` clause to confirm we'd egress through
+        # the PVE node.
+        return f"via {self._host}" in result.stdout
+
+    def _warn_if_unroutable(self) -> None:
+        """Log a clear ``ip route add ...`` hint for any SDN subnet
+        that isn't reachable from the test runner.
+
+        Called after networks come up but before VMs build, so the
+        warning lands in the user's logs *before* a 300-second SSH
+        timeout would.  Doesn't raise — the hint is advisory; some
+        topologies may route correctly via mechanisms we can't
+        detect here.
+        """
+        for net in self._started_networks:
+            if self._check_network_reachable(net):
+                continue
+            _log.warning(
+                "SDN subnet %s (gateway %s) is not reachable from "
+                "this host — VM SSH attach will likely time out.",
+                net.subnet, net.gateway_ip,
+            )
+            _log.warning(
+                "Add a route through the PVE node, e.g.: "
+                "sudo ip route add %s via %s",
+                net.subnet, self._host,
+            )
+
+    def _teardown_networks(self) -> None:
+        """Stop each network we brought up, in reverse start order.
+
+        :meth:`ProxmoxVirtualNetwork.stop` is itself best-effort and
+        never raises, so this loop just walks the list.  Reverse order
+        mirrors the libvirt backend's teardown discipline — symmetric
+        with :meth:`_start_networks` and reduces the chance of
+        cross-resource dependencies tripping cleanup (not relevant
+        for current SDN vnets, but a useful default if future
+        backends add inter-network dependencies).
+        """
+        while self._started_networks:
+            net = self._started_networks.pop()
+            net.stop(self)
+
+    def _create_install_network(self) -> ProxmoxVirtualNetwork:
+        """Build the ephemeral install-phase SDN vnet.
+
+        Internet must be on so cloud-init / dnf / apt can reach
+        upstream package mirrors during the install pass.  DNS too
+        — without name resolution apt times out on
+        ``deb.debian.org``.  The subnet is fixed and lives in
+        ``192.168.230.0/24``, picked to sit clearly outside libvirt's
+        install-pool range (``192.168.240.0/24`` – ``192.168.254.0/24``)
+        so two backends running concurrently on the same host don't
+        confuse each other.
+
+        :returns: A :class:`ProxmoxVirtualNetwork` already bound to
+            this run and pre-registered with each install-phase VM's
+            ``__install__`` MAC, ready for :meth:`start`.
+
+        .. note::
+
+           Two test processes pointed at the **same PVE node + zone**
+           would race on the install-vnet SDN ID and the subnet.
+           Per-process concurrency on a shared PVE cluster is a
+           future slice — for the single-orchestrator case this is
+           sufficient.
+        """
+        assert self._run_id is not None, (
+            "_create_install_network requires a bound run_id"
+        )
+        net = ProxmoxVirtualNetwork(
+            name="install",
+            subnet=_PROXMOX_INSTALL_SUBNET,
+            dhcp=True,
+            internet=True,
+            dns=True,
+        )
+        net.bind_run(self._run_id)
+        # Register every install-phase VM under the deterministic
+        # ``__install__`` MAC so the install-phase cloud-init seed's
+        # network-config matches the NIC the orchestrator actually
+        # attaches.  Same convention as the libvirt backend.
+        net_obj = ipaddress.IPv4Network(_PROXMOX_INSTALL_SUBNET, strict=False)
+        hosts = list(net_obj.hosts())
+        install_phase_vms = [
+            vm for vm in self._vm_list
+            if vm.builder.needs_install_phase()
+        ]
+        for idx, vm in enumerate(install_phase_vms):
+            ip = str(hosts[idx + 1])  # skip gateway (.1)
+            mac = _mac_for_vm_network(vm.name, "__install__")
+            net.register_vm_with_mac(vm.name, mac, ip)
+        return net
+
+    def _teardown_install_network(self) -> None:
+        """Stop the install-phase vnet if one was created.
+
+        Best-effort; matches :meth:`_teardown_networks` shape.
+        Idempotent — safe to call from both the success and the
+        exception paths in :meth:`__exit__`.
+        """
+        if self._install_network is None:
+            return
+        try:
+            self._install_network.stop(self)
+        except Exception as exc:  # pragma: no cover — defensive
+            _log.warning(
+                "unexpected error stopping install vnet: %s", exc,
+            )
+        self._install_network = None
+
+    # ------------------------------------------------------------------
+    # VM lifecycle
+    # ------------------------------------------------------------------
+
+    def _setup_vm_networks(self) -> None:
+        """Register each VM's static IPs against its networks.
+
+        v1 PVE backend requires every :class:`vNIC` to
+        carry a static ``ip=`` — DHCP discovery is a future slice.
+        We fail loud here rather than later in
+        :meth:`AbstractVM._make_communicator` so users see the cause
+        immediately.
+        """
+        for vm in self._vm_list:
+            if not isinstance(vm, ProxmoxVM):
+                raise OrchestratorError(
+                    f"VM {vm.name!r} is not a ProxmoxVM; cannot mix "
+                    "backends in one orchestrator."
+                )
+            for ref in vm._network_refs():
+                net = self._find_network(ref.ref)
+                if net is None:
+                    raise NetworkError(
+                        f"VM {vm.name!r} references unknown network "
+                        f"{ref.ref!r}; available: "
+                        f"{[n.name for n in self._networks]!r}"
+                    )
+                if not ref.ip:
+                    raise NetworkError(
+                        f"VM {vm.name!r}: vNIC "
+                        f"{ref.ref!r} has no static ``ip=`` — "
+                        "the Proxmox backend doesn't support DHCP "
+                        "discovery yet."
+                    )
+                net.register_vm(vm.name, ref.ip)
+
+    def _find_network(
+        self, name: str,
+    ) -> ProxmoxVirtualNetwork | None:
+        for net in self._networks:
+            if net.name == name:
+                return net
+        return None
+
+    def _vm_network_refs(
+        self,
+        vm: ProxmoxVM,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str, str, str]]]:
+        """Build ``(network_entries, mac_ip_pairs)`` for a VM.
+
+        Mirrors the libvirt backend's ``_build_nic_entries``:
+        ``network_entries`` carries ``(backend_net_name, mac)`` (used
+        to attach NICs to PVE bridges), and ``mac_ip_pairs`` carries
+        ``(mac, ip_with_cidr, gateway, dns)`` (used by cloud-init's
+        network-config and SSH host resolution).
+        """
+        network_entries: list[tuple[str, str]] = []
+        mac_ip_pairs: list[tuple[str, str, str, str]] = []
+        for ref in vm._network_refs():
+            net = self._find_network(ref.ref)
+            if net is None:
+                continue
+            mac = _mac_for_vm_network(vm.name, ref.ref)
+            network_entries.append((net.backend_name(), mac))
+            gateway = net.gateway_ip if net.internet else ""
+            nameserver = net.gateway_ip if net.dns else ""
+            cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
+            mac_ip_pairs.append((mac, cidr, gateway, nameserver))
+        return network_entries, mac_ip_pairs
+
+    def _provision_vms(self) -> None:
+        """Build + start every configured VM.
+
+        Build phase attaches each VM to the dedicated install vnet
+        (``self._install_network``, ``internet=True``) so cloud-init
+        can reach package mirrors regardless of whether any of the
+        VM's user-declared NICs has internet.  After build, the
+        per-run clone's NIC is swapped to the user's first declared
+        network in :meth:`ProxmoxVM.start_run`.
+
+        Tracks successfully-started VMs in ``_provisioned_vms`` so
+        a partial failure rolls back only what got created.
+        """
+        # __enter__ sets _cache + _install_network before
+        # _provision_vms runs; the asserts narrow the Optionals for
+        # pyright.
+        assert self._cache is not None, "cache must be initialised"
+        cache = self._cache
+        installed_disks: dict[str, str] = {}
+        for vm in self._vm_list:
+            assert isinstance(vm, ProxmoxVM)
+            # Validate the user's spec early — every VM must declare
+            # at least one vNIC, otherwise there's nowhere to attach
+            # the run-phase NIC after install.  (Run-phase
+            # ``start_run`` would also catch this; we surface it here
+            # to fail before the install runs.)
+            user_network_entries, _ = self._vm_network_refs(vm)
+            if not user_network_entries:
+                raise NetworkError(
+                    f"VM {vm.name!r}: no network refs — Proxmox VMs "
+                    "need at least one vNIC."
+                )
+
+            # Build phase always uses the install vnet, never the
+            # user's first NIC.  An ``internet=False`` user network
+            # would otherwise hang ``apt install`` forever.
+            if vm.builder.needs_install_phase():
+                assert self._install_network is not None, (
+                    "install network must be up before build phase"
+                )
+                install_net_name = self._install_network.backend_name()
+                install_mac = _mac_for_vm_network(vm.name, "__install__")
+            else:
+                # NoOpBuilder VMs skip install entirely; pass empty
+                # strings to keep ``build()``'s signature stable.
+                install_net_name = ""
+                install_mac = ""
+
+            vm.set_client(self._client)
+            with log_duration(_log, f"build VM {vm.name!r}"):
+                installed_disks[vm.name] = vm.build(
+                    context=self,
+                    cache=cache,
+                    run=self._run,
+                    install_network_name=install_net_name,
+                    install_network_mac=install_mac,
+                )
+            self._provisioned_vms.append(vm)
+
+        for vm in self._vm_list:
+            assert isinstance(vm, ProxmoxVM)
+            network_entries, mac_ip_pairs = self._vm_network_refs(vm)
+            with log_duration(_log, f"start VM {vm.name!r}"):
+                vm.start_run(
+                    context=self,
+                    run=self._run,
+                    installed_disk=installed_disks[vm.name],
+                    network_entries=network_entries,
+                    mac_ip_pairs=mac_ip_pairs,
+                )
+            self.vms[vm.name] = vm
+
+    def _enter_nested_orchestrators(self) -> None:
+        """Enter an inner orchestrator for each
+        :class:`AbstractHypervisor` VM in the run.
+
+        Symmetric with the libvirt backend — called last in the
+        provisioning sequence so every outer VM is already running
+        and its communicator is ready.  Each hypervisor's declared
+        ``orchestrator`` class is responsible for whatever inner
+        bring-up it needs (auth, control-plane probe, etc.) inside
+        its own :meth:`root_on_vm`.
+        """
+        from testrange.vms.hypervisor_base import AbstractHypervisor
+
+        hypervisors = [
+            vm for vm in self._vm_list
+            if isinstance(vm, AbstractHypervisor)
+        ]
+        if not hypervisors:
+            return
+
+        stack = contextlib.ExitStack()
+        entered: list[AbstractOrchestrator] = []
+        try:
+            for hv in hypervisors:
+                with log_duration(
+                    _log, f"enter inner orchestrator on {hv.name!r}",
+                ):
+                    inner = hv.orchestrator.root_on_vm(hv, self)
+                    stack.enter_context(inner)
+                    entered.append(inner)
+        except BaseException:
+            # ExitStack closes in LIFO order — whatever succeeded
+            # gets unwound before the original exception propagates.
+            stack.close()
+            raise
+
+        self._nested_stack = stack
+        self._inner_orchestrators = entered
+
+    def _teardown_vms(self) -> None:
+        """Stop and DELETE each provisioned VMID, in reverse order.
+
+        :meth:`ProxmoxVM.shutdown` swallows its own errors, so this
+        loop just walks the list — symmetric with
+        :meth:`_provision_vms`.
+        """
+        while self._provisioned_vms:
+            vm = self._provisioned_vms.pop()
+            vm.shutdown()
+        self.vms.clear()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_client_kwargs(self) -> dict[str, Any]:
+        """Pick a credential combination and return ``ProxmoxAPI`` kwargs.
+
+        Resolution order:
+
+        1. ``user`` + ``token_name`` + ``token_value`` → API token.
+        2. ``user`` + ``password`` → ticket auth.
+        3. ``password`` alone → ticket auth as ``root@pam``.
+
+        :raises OrchestratorError: If no credential combination works.
+        """
+        host = f"{self._host}:{self._port}"
+        common: dict[str, Any] = {"host": host, "verify_ssl": self._verify_ssl}
+
+        if self._user and self._token_name and self._token_value:
+            return {
+                **common,
+                "user": self._user,
+                "token_name": self._token_name,
+                "token_value": self._token_value,
+            }
+        if self._user and self._password:
+            return {**common, "user": self._user, "password": self._password}
+        if self._password and not self._user:
+            return {**common, "user": "root@pam", "password": self._password}
+
+        raise OrchestratorError(
+            "ProxmoxOrchestrator: no credentials.  Pass ``user=`` and "
+            "``password=`` (ticket auth) or ``user=``, ``token_name=`` "
+            "and ``token_value=`` (API-token auth)."
+        )
+
+    def _resolve_node(self, nodes: list[dict[str, Any]]) -> None:
+        """Resolve :attr:`_node` against the cluster's node list.
+
+        :raises OrchestratorError: If the cluster reports zero nodes,
+            ``self._node`` is set but unknown to the cluster, or the
+            cluster has multiple nodes and ``self._node`` was not
+            given.
+        """
+        if not nodes:
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: PVE at {self._host!r} reports "
+                "no nodes (cluster broken or auth scoped wrong)."
+            )
+        node_names = [n["node"] for n in nodes]
+        if self._node is None:
+            if len(node_names) > 1:
+                raise OrchestratorError(
+                    f"ProxmoxOrchestrator: cluster has {len(node_names)} "
+                    f"nodes ({node_names!r}); pass ``node=`` to pick one."
+                )
+            self._node = node_names[0]
+        elif self._node not in node_names:
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: node {self._node!r} not in "
+                f"cluster (known: {node_names!r})."
+            )
+
+    def _resolve_storage(self) -> None:
+        """Resolve :attr:`_storage` to the first image-capable pool.
+
+        Caller-supplied storage is validated against the node's pool
+        list; a missing default is filled in by picking the first pool
+        whose ``content`` field includes ``images``.
+
+        :raises OrchestratorError: If the node has no image-capable
+            storage pool, or ``self._storage`` is set but unknown.
+        """
+        stores = self._client.nodes(self._node).storage.get()
+        names = [s["storage"] for s in stores]
+        if self._storage is None:
+            image_stores = [
+                s["storage"] for s in stores
+                if "images" in s.get("content", "")
+                and s.get("active", 1)
+            ]
+            if not image_stores:
+                raise OrchestratorError(
+                    f"ProxmoxOrchestrator: node {self._node!r} has no "
+                    "active storage pool that accepts ``images`` "
+                    f"content (saw: {names!r}).  Pass ``storage=`` "
+                    "explicitly."
+                )
+            self._storage = image_stores[0]
+        elif self._storage not in names:
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: storage {self._storage!r} is "
+                f"not configured on node {self._node!r} "
+                f"(known: {names!r})."
+            )
+
+    def _ensure_sdn_zone(self) -> None:
+        """Create our SDN simple-zone if it doesn't already exist.
+
+        TestRange parks every vnet under one zone so concurrent runs
+        only have to namespace by vnet name.  Idempotent: a no-op if
+        the zone already exists.
+        """
+        zones = self._client.cluster.sdn.zones.get()
+        if any(z.get("zone") == self._zone for z in zones):
+            return
+        _log.info("creating SDN simple-zone %s", self._zone)
+        self._client.cluster.sdn.zones.post(type="simple", zone=self._zone)
+        # ``cluster/sdn`` accepts an empty PUT to apply pending config.
+        # Without it, the zone exists in the "pending" state and isn't
+        # usable for vnets yet.
+        self._client.cluster.sdn.put()
 
     @classmethod
     def root_on_vm(
         cls,
         hypervisor: AbstractHypervisor,
         outer: AbstractOrchestrator,
-    ) -> AbstractOrchestrator:
-        """Not yet implemented.
+    ) -> ProxmoxOrchestrator:
+        """Build a nested :class:`ProxmoxOrchestrator` rooted on
+        *hypervisor*.
 
-        Nested Proxmox-in-libvirt will:
+        The outer orchestrator (typically libvirt) has just booted a
+        VM that's been provisioned with PVE via
+        :class:`~testrange.vms.builders.proxmox_answer.ProxmoxAnswerBuilder`.
+        That gives us a reachable IP, a ``root@pam`` account whose
+        password matches the outer credential we seeded into
+        ``answer.toml``, and ``pveproxy`` listening on 8006.  This
+        method packages those into a fresh ``ProxmoxOrchestrator``
+        that the outer orchestrator's ExitStack will enter, at which
+        point the inner orchestrator authenticates against the PVE
+        REST API and goes through its own normal provisioning of
+        ``hypervisor.networks`` and ``hypervisor.vms``.
 
-        1. Obtain an API token for the inner cluster by POSTing to
-           ``/api2/json/access/ticket`` with credentials injected by
-           the Proxmox ISO unattended installer.
-        2. Construct a fresh :class:`ProxmoxOrchestrator` pointing at
-           ``https://<hypervisor-ip>:8006`` with the new token.
-        3. Return it so the outer orchestrator can enter it via
-           :class:`ExitStack`.
+        Auth flow: prefers an explicit token if one is set on a
+        :class:`~testrange.credentials.Credential` (via the
+        ``ssh_key`` slot used as a generic secret carrier — kept
+        lightweight to avoid a credential schema change just for
+        nested PVE), otherwise falls back to the root credential's
+        plaintext password.  ``verify_ssl=False`` because PVE ships a
+        self-signed cert by default — flipping to ``True`` is the
+        operator's call once they've replaced the cert.
 
-        Step (1) needs an unattended Proxmox installer (a dedicated
-        :class:`~testrange.vms.builders.base.Builder` subclass) that
-        pre-seeds the cluster's root password and enables HTTPS.
-        That's scheduled as its own track.
+        The resulting orchestrator is **not yet entered** — the outer
+        orchestrator manages that lifecycle via :class:`ExitStack`.
+
+        :param hypervisor: The just-booted PVE hypervisor VM.  Must
+            have a static IP (see :class:`vNIC`) and a
+            ``root@pam``-shaped credential whose password matches
+            the one the unattended installer set.
+        :param outer: The outer orchestrator that booted
+            ``hypervisor``; used to source the shared cache root.
+        :returns: A configured (not yet entered) inner orchestrator.
+        :raises OrchestratorError: If the hypervisor's communicator
+            has no resolvable host, or no usable root credential is
+            present.
         """
-        del hypervisor, outer
-        raise NotImplementedError(
-            "ProxmoxOrchestrator.root_on_vm is not yet implemented. "
-            "Nested Proxmox-in-libvirt needs an unattended Proxmox "
-            "installer (tracked separately).  Use "
-            "LibvirtOrchestrator for nested libvirt-in-libvirt in the "
-            "meantime."
+        if not hypervisor.users:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r} has no users — "
+                "ProxmoxOrchestrator.root_on_vm needs at least one "
+                "Credential to authenticate against PVE."
+            )
+        # PVE's unattended installer creates ``root@pam`` with the
+        # ``root-password`` value from answer.toml.  Pick the
+        # credential whose username starts with ``"root"`` (handles
+        # both ``"root"`` and ``"root@pam"``) so we hit the right
+        # account regardless of how the user spelled it.
+        root_cred = next(
+            (c for c in hypervisor.users if c.username.startswith("root")),
+            hypervisor.users[0],
+        )
+        if not root_cred.password:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r}: root credential "
+                "has no password.  PVE's REST ticket auth needs the "
+                "plaintext password the unattended installer set "
+                "into ``answer.toml``."
+            )
+
+        # The hypervisor VM's live communicator stores its reachable
+        # host.  Both SSHCommunicator and (eventually) any future
+        # transport expose ``_host``; we only support the SSH /
+        # static-IP case here because the nested PVE REST endpoint
+        # is on the same IP.
+        comm = hypervisor._require_communicator()
+        host = getattr(comm, "_host", None)
+        if not host:
+            raise OrchestratorError(
+                f"Hypervisor VM {hypervisor.name!r}: communicator "
+                "has no resolvable host.  Nested Proxmox requires "
+                "communicator='ssh' + a static IP "
+                "(vNIC('Net', ip='10.x.x.x'))."
+            )
+
+        # Reuse the outer cache root so artefacts stay in one place
+        # — same convention as the libvirt backend's root_on_vm.
+        outer_cache_root: Path | None = None
+        outer_cache = getattr(outer, "_cache", None)
+        if outer_cache is not None:
+            outer_cache_root = outer_cache.root
+
+        # PVE's pveproxy.service depends on pve-cluster + pvedaemon
+        # and reaches active state noticeably later than sshd on a
+        # freshly-installed VM (see ``examples/nested_proxmox_*``'s
+        # ``_wait_for_pveproxy`` helper).  Without this wait, the
+        # inner orchestrator's ``__enter__`` races pveproxy startup
+        # and intermittently fails with "Connection refused".  Doing
+        # the wait here keeps ``__enter__`` simple — by the time
+        # the ExitStack enters the returned orchestrator, the API
+        # is ready.
+        cls._wait_for_pveproxy(hypervisor)
+
+        return cls(
+            host=host,
+            user="root@pam",
+            password=root_cred.password,
+            verify_ssl=False,
+            networks=hypervisor.networks,  # pyright: ignore[reportArgumentType]
+            vms=hypervisor.vms,  # pyright: ignore[reportArgumentType]
+            cache_root=outer_cache_root,
+        )
+
+    @staticmethod
+    def _wait_for_pveproxy(
+        hypervisor: AbstractHypervisor,
+        timeout_s: float = 120.0,
+    ) -> None:
+        """Poll ``systemctl is-active pveproxy`` on the hypervisor
+        until active or *timeout_s* elapses.
+
+        Used by :meth:`root_on_vm` to bridge the gap between sshd
+        readiness (which the outer orchestrator's communicator wait
+        already keys on) and PVE REST API readiness.
+
+        :raises OrchestratorError: If pveproxy doesn't reach active
+            within the timeout.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout_s
+        last_stderr = b""
+        while time.monotonic() < deadline:
+            r = hypervisor.exec(["systemctl", "is-active", "pveproxy"])
+            if r.exit_code == 0 and b"active" in r.stdout:
+                return
+            last_stderr = r.stderr
+            time.sleep(2)
+        raise OrchestratorError(
+            f"pveproxy on hypervisor {hypervisor.name!r} did not "
+            f"reach active within {timeout_s:.0f}s; last stderr: "
+            f"{last_stderr!r}"
         )

@@ -315,6 +315,37 @@ class TestBuilderRegistry:
         b = auto_select_builder("/srv/iso/Win10_21H1_English_x64.iso")
         assert isinstance(b, WindowsUnattendedBuilder)
 
+    @pytest.mark.parametrize("iso", [
+        "https://enterprise.proxmox.com/iso/proxmox-ve_9.1-1.iso",
+        "/srv/iso/proxmox-ve_8.2-1.iso",
+        "proxmox-ve-7.4-1.iso",                      # hyphenated form
+        "/cache/PROXMOX-VE_9.0-1.ISO",               # uppercase
+    ])
+    def test_default_picks_proxmox_for_pve_iso(self, iso: str) -> None:
+        from testrange.vms.builders import (
+            ProxmoxAnswerBuilder,
+            auto_select_builder,
+        )
+        b = auto_select_builder(iso)
+        assert isinstance(b, ProxmoxAnswerBuilder)
+
+    @pytest.mark.parametrize("iso", [
+        "https://example.com/debian.qcow2",
+        "https://example.com/proxmox-mailgateway-9.iso",  # different product
+        "proxmox-backup-server.iso",                       # different product
+        "Win10_21H1_English_x64.iso",
+    ])
+    def test_proxmox_predicate_does_not_match_non_pve(self, iso: str) -> None:
+        """Predicate must be tight enough to only catch PVE installer
+        ISOs — Proxmox ships several other products (PMG, PBS) that
+        share the upstream brand prefix but use different installers."""
+        from testrange.vms.builders import (
+            ProxmoxAnswerBuilder,
+            auto_select_builder,
+        )
+        b = auto_select_builder(iso)
+        assert not isinstance(b, ProxmoxAnswerBuilder)
+
     def test_custom_predicate_takes_precedence(self) -> None:
         from testrange.vms.builders import (
             NoOpBuilder,

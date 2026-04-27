@@ -2,10 +2,11 @@
 
 Each device kind has a sealed abstract base class plus a generic
 concrete subclass that every backend accepts.  Backend-specific
-device variants (e.g. :class:`testrange.backends.libvirt.LibvirtHardDrive`)
-extend the abstract base directly as **siblings** of the generic
-class — that's how the type system catches a backend's device being
-passed to a different backend's VM.
+device variants (e.g. ``<Backend>HardDrive`` under
+``testrange.backends.<backend>``) extend the abstract base directly
+as **siblings** of the generic class — that's how the type system
+catches a backend's device being passed to a different backend's
+VM.
 
 * :class:`AbstractHardDrive` ← :class:`HardDrive`
 * :class:`AbstractVCPU` ← :class:`vCPU`

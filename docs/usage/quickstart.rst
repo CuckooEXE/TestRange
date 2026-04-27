@@ -21,7 +21,8 @@ networks, one with internet access and one isolated.
         online_vm = orchestrator.vms["OnlineVM"]
         offline_vm = orchestrator.vms["OfflineVM"]
 
-        # hostname() runs `hostname` inside the VM via the QEMU guest agent
+        # hostname() runs `hostname` inside the VM via the configured
+        # communicator (defaults to the host-mediated guest agent)
         assert online_vm.hostname() == "OnlineVM"
         assert offline_vm.hostname() == "OfflineVM"
 
@@ -148,15 +149,16 @@ Run from the command line::
     testrange run my_tests.py:tests -j 4
 
 
-While a run is in flight you'll see a timeline like this on stderr::
+While a run is in flight you'll see a timeline like this on stderr
+(logger names reflect whichever backend is in play)::
 
-    INFO  testrange.backends.libvirt.orchestrator: provisioning run a9c6d044: 3 VM(s), 2 network(s)
-    INFO  testrange.backends.libvirt.orchestrator: install phase for 3 VM(s) ...
-    INFO  testrange.backends.libvirt.vm: VM 'webpublic' install cache hit (8a14e6a8cb0b) — skipping install phase
-    INFO  testrange.backends.libvirt.orchestrator: start test network 'Internet' done in 0.1s
-    INFO  testrange.backends.libvirt.orchestrator: start VM 'webpublic' ...
-    INFO  testrange.backends.libvirt.vm: wait for guest agent on 'webpublic' done in 9.0s
-    INFO  testrange.backends.libvirt.orchestrator: all VMs ready; handing off to test function
+    INFO  testrange.backends.<backend>.orchestrator: provisioning run a9c6d044: 3 VM(s), 2 network(s)
+    INFO  testrange.backends.<backend>.orchestrator: install phase for 3 VM(s) ...
+    INFO  testrange.backends.<backend>.vm: VM 'webpublic' install cache hit (8a14e6a8cb0b) — skipping install phase
+    INFO  testrange.backends.<backend>.orchestrator: start test network 'Internet' done in 0.1s
+    INFO  testrange.backends.<backend>.orchestrator: start VM 'webpublic' ...
+    INFO  testrange.backends.<backend>.vm: wait for guest agent on 'webpublic' done in 9.0s
+    INFO  testrange.backends.<backend>.orchestrator: all VMs ready; handing off to test function
 
 Every long-running step is bracketed with its elapsed time so
 you can tell whether a slow run is blocked on downloads, cloud-init,
@@ -170,23 +172,26 @@ How It Works
    with cloud-init to install packages and create users, then powers it off and
    caches the resulting disk image under ``/var/tmp/testrange/<user>/vms/``.
 
-2. **Subsequent runs** — TestRange creates a thin qcow2 overlay over the cached
-   image.  The VM boots in seconds directly into the post-install state.
+2. **Subsequent runs** — TestRange creates a thin copy-on-write overlay
+   over the cached image (or a clone, depending on the backend's native
+   storage layer).  The VM boots in seconds directly into the
+   post-install state.
 
 3. **Communication** — All VM interaction (``exec``, ``get_file``, ``put_file``,
-   ``hostname``) goes through the QEMU Guest Agent over a ``virtio-serial``
-   channel.  No network port is exposed to the host.
+   ``hostname``) goes through the configured communicator — most backends
+   default to a host-mediated guest-agent channel over ``virtio-serial`` so
+   no network port is exposed to the host.
 
-4. **Network isolation** — VMs on networks with ``internet=False`` are on a
-   libvirt "isolated" network with no forwarding rules.  They have no path to
-   the host or internet during test execution.
+4. **Network isolation** — VMs on networks with ``internet=False`` are on
+   an "isolated" backend network with no forwarding rules.  They have no
+   path to the host or internet during test execution.
 
 
 Images
 ------
 
-Pass ``iso=`` an absolute local path to a ``.qcow2`` / ``.img`` file,
-or an ``https://`` URL pointing at an upstream cloud image (Debian,
+Pass ``iso=`` an absolute local path to a disk-image file, or an
+``https://`` URL pointing at an upstream cloud image (Debian,
 Ubuntu, Fedora, Rocky, AlmaLinux, CentOS Stream, Alpine, Arch — any
 distro that ships a cloud-init-ready image will work).
 

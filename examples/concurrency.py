@@ -12,7 +12,7 @@ Safety constraints (see ``run_tests`` docstring for full detail):
   never collide.
 - **User-declared ``VirtualNetwork`` subnets are NOT auto-rewritten.**
   Each parallel test must declare its own non-overlapping subnets, or
-  the second libvirt network define will fail.
+  the second backend network-create call will fail.
 - **Results come back in input order**, regardless of which test
   finished first.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from testrange.communication.base import AbstractCommunicator, ExecResult
 from testrange.exceptions import VMBuildError
@@ -19,27 +19,41 @@ if TYPE_CHECKING:
     from testrange.vms.builders.base import Builder
 
 
+_COMMUNICATOR_KINDS: tuple[str, ...] = ("guest-agent", "ssh", "winrm")
+"""Legal values for the ``communicator=`` kwarg.  Shared across every
+backend — the transport kind is part of the hypervisor-neutral spec,
+not any backend-specific runtime."""
+
+
 class AbstractVM(ABC):
     """Abstract interface for a virtual machine instance.
 
-    Concrete subclasses must implement the runtime communication methods.
-    Before any of these methods can be called, the VM must be started
-    and its communicator initialised (done automatically by an
+    The constructor populates the hypervisor-neutral spec
+    (:attr:`name`, :attr:`iso`, :attr:`users`, :attr:`pkgs`,
+    :attr:`post_install_cmds`, :attr:`devices`, :attr:`builder`,
+    :attr:`communicator`) so concrete backends only need to add
+    backend-specific runtime fields and the lifecycle methods.
+
+    Concrete subclasses must implement :meth:`build`, :meth:`start_run`,
+    and :meth:`shutdown`.  Before any of the runtime-call helpers can be
+    invoked, the VM must be started and its communicator initialised
+    (done automatically by an
     :class:`~testrange.orchestrator_base.AbstractOrchestrator` context
     manager).
 
-    Subclass this to support alternative hypervisors or provisioning mechanisms.
+    Subclass this to support alternative hypervisors or provisioning
+    mechanisms.
     """
 
     _communicator: AbstractCommunicator | None = None
     """Active communicator instance; ``None`` until the VM is started."""
 
     # ------------------------------------------------------------------
-    # Spec attributes subclasses populate in their __init__.  Declared
-    # here so shared helpers and builders (which type ``vm`` as
-    # :class:`AbstractVM`) can read them without Pyright complaining
-    # about attribute-access issues.  Concrete backends override with
-    # compatible types.
+    # Spec attributes populated by :meth:`__init__`.  Declared at class
+    # scope as well so shared helpers and builders (which type ``vm``
+    # as :class:`AbstractVM`) can read them without Pyright complaining
+    # about attribute-access issues.  Concrete backends may override
+    # with compatible types.
     # ------------------------------------------------------------------
     users: list[Credential]
     """Credentials to configure on / pass through to the guest."""
@@ -69,13 +83,59 @@ class AbstractVM(ABC):
     """Provisioning strategy.  Reads this VM's spec and produces the
     install- and run-phase domain descriptions the backend consumes."""
 
+    def __init__(
+        self,
+        name: str,
+        iso: str,
+        users: list[Credential],
+        pkgs: list[AbstractPackage] | None = None,
+        post_install_cmds: list[str] | None = None,
+        devices: list[AbstractDevice] | None = None,
+        builder: Builder | None = None,
+        communicator: str | None = None,
+    ) -> None:
+        """Populate the hypervisor-neutral spec.
+
+        Concrete backends override only to add their own runtime state;
+        the spec construction (auto-selecting a builder from ``iso=``,
+        defaulting the communicator from the builder, validating it
+        against :data:`_COMMUNICATOR_KINDS`) is identical across
+        backends and lives here.
+
+        :raises VMBuildError: If ``communicator`` is not one of
+            :data:`_COMMUNICATOR_KINDS`.
+        """
+        # Lazy import: ``vms.builders`` re-exports concrete builders
+        # whose own modules pull in pycdlib / passlib at import time;
+        # importing them at the top of the abstract base would force
+        # those deps on anyone who merely imports :class:`AbstractVM`.
+        from testrange.vms.builders import auto_select_builder
+
+        self._name = name
+        self.iso = iso
+        self.users = users
+        self.pkgs = pkgs or []
+        self.post_install_cmds = post_install_cmds or []
+        self.devices = devices or []
+
+        self.builder = builder if builder is not None else auto_select_builder(iso)
+
+        if communicator is None:
+            communicator = self.builder.default_communicator()
+        if communicator not in _COMMUNICATOR_KINDS:
+            raise VMBuildError(
+                f"VM {name!r}: communicator={communicator!r} is not one "
+                f"of {_COMMUNICATOR_KINDS}"
+            )
+        self.communicator = communicator
+
     @property
-    @abstractmethod
     def name(self) -> str:
         """The VM's human-readable name as specified at construction.
 
         :returns: VM name string.
         """
+        return self._name
 
     def _primary_disk_size(self) -> str:
         """Return the primary (OS) disk's size as a backend-friendly
@@ -89,6 +149,17 @@ class AbstractVM(ABC):
         from testrange.devices import HardDrive
         drives = [d for d in self.devices if isinstance(d, HardDrive)]
         return drives[0].size_string if drives else "20G"
+
+    def _network_refs(self) -> list[Any]:
+        """Return every :class:`~testrange.devices.vNIC`
+        on :attr:`devices` in declaration order.
+
+        Pure spec lookup with no backend dependencies — used by
+        orchestrators to walk a VM's NICs when assigning IPs and
+        building network configs.
+        """
+        from testrange.devices import vNIC
+        return [d for d in self.devices if isinstance(d, vNIC)]
 
     def _require_communicator(self) -> AbstractCommunicator:
         """Return the active communicator or raise an error.

@@ -27,15 +27,10 @@ from testrange.test import Test, run_tests
 
 _ORCHESTRATOR_HELP = (
     "Hypervisor backend URL.  Overrides the backend the test factory "
-    "constructed.  Examples:\n\n"
-    "\b\n"
-    "  --orchestrator qemu:///system\n"
-    "  --orchestrator qemu+ssh://alice@vmhost/system\n"
-    "  --orchestrator proxmox://TOKENID:SECRET@pve.example.com/pve01?storage=local-lvm\n"
-    "  --orchestrator proxmox://root:hunter2@pve.example.com\n"
-    "\n"
-    "Omit to keep the test's own orchestrator.  Each backend in "
-    ":mod:`testrange.backends` self-describes the URL shapes it accepts."
+    "constructed.  Each backend in :mod:`testrange.backends` "
+    "self-describes the URL shapes it accepts — see its module "
+    "docstring for the exact form.  Omit to keep the test's own "
+    "orchestrator."
 )
 
 
@@ -420,20 +415,12 @@ def _print_single_vm(
     :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`,
     appends an ``Inner networks`` + ``Inner VMs`` section.
     """
-    from testrange.backends.libvirt.devices import LibvirtHardDrive
     from testrange.devices import (
         AbstractHardDrive,
         AbstractVNIC,
         Memory,
         vCPU,
     )
-
-    def _drive_tag(d: AbstractHardDrive) -> str:
-        # NVMe is libvirt-specific; only the LibvirtHardDrive subclass
-        # carries the flag.  Generic HardDrive renders untagged.
-        if isinstance(d, LibvirtHardDrive) and d.nvme:
-            return " NVMe"
-        return ""
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
     vm_head = "└──" if is_last else "├──"
@@ -461,7 +448,7 @@ def _print_single_vm(
     ]
 
     disk_desc = (
-        ", ".join(f"{d.size}{_drive_tag(d)}" for d in drives)
+        ", ".join(f"{d.size}{d.display_tag()}" for d in drives)
         if drives else "20GB (default)"
     )
     pkg_desc = (
@@ -585,10 +572,9 @@ def repl_cmd(
         testrange repl examples/hello_world.py --test smoke
         testrange repl examples/two_networks_three_vms.py --keep
 
-    Use ``--orchestrator`` to point at a remote backend::
-
-        testrange repl tests \\
-            --orchestrator qemu+ssh://alice@vmhost/system
+    Use ``--orchestrator`` to point at a remote backend; the URL
+    format is documented in each backend module under
+    :mod:`testrange.backends`.
 
     The REPL prefers IPython if installed, otherwise falls back to the
     standard library's ``code.InteractiveConsole`` (works everywhere).
@@ -714,3 +700,119 @@ def cache_clear(cache_dir: Path | None, yes: bool) -> None:
     shutil.rmtree(cache.vms_dir, ignore_errors=True)
     cache.vms_dir.mkdir(parents=True, exist_ok=True)
     click.echo("VM image cache cleared.")
+
+
+_PROXMOX_URL_HELP = (
+    "PVE connection URL.  Same shape ``--orchestrator`` uses elsewhere:\n"
+    "\n"
+    "\b\n"
+    "  proxmox://USER:PASS@HOST[:PORT]/NODE[?storage=NAME]\n"
+    "  proxmox://TOKENID:SECRET@HOST/NODE\n"
+)
+
+
+def _build_proxmox_orchestrator(url: str):
+    """Construct a :class:`ProxmoxOrchestrator` from *url*.
+
+    Helper for the ``proxmox-list-templates`` / ``-prune-templates``
+    commands.  Raises ``click.BadParameter`` on a non-proxmox URL so
+    the error surfaces as a clean usage message rather than a stack
+    trace."""
+    from testrange.backends.proxmox import ProxmoxOrchestrator
+    from testrange.backends.proxmox import cli_build_orchestrator as _build
+
+    # cli_build_orchestrator wants an existing orchestrator to copy
+    # vms/networks from; for these admin commands neither is needed,
+    # so pass a bare ProxmoxOrchestrator(host="placeholder").
+    placeholder = ProxmoxOrchestrator(host="placeholder")
+    orch = _build(url, placeholder)
+    if orch is None:
+        raise click.BadParameter(
+            f"not a proxmox URL: {url!r}.  Expected "
+            f"``proxmox://...``."
+        )
+    return orch
+
+
+@main.command("proxmox-list-templates")
+@click.option("--orchestrator", "url", required=True, help=_PROXMOX_URL_HELP)
+@click.option(
+    "--log-level",
+    type=click.Choice(
+        ["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False
+    ),
+    default="WARNING",
+    help="Minimum level for TestRange stderr logs.",
+)
+def proxmox_list_templates(url: str, log_level: str) -> None:
+    """List TestRange-managed PVE templates on a Proxmox node.
+
+    Each template is the cached install for one VM spec
+    (``tr-template-<config_hash[:12]>``); a hit on a future
+    ``testrange run`` skips the install entirely and clones from
+    the matching template.
+
+    Use ``proxmox-prune-templates`` to evict.
+    """
+    configure_root_logger(getattr(logging, log_level.upper()))
+    orch = _build_proxmox_orchestrator(url)
+    templates = orch.list_templates()
+    if not templates:
+        click.echo("No TestRange templates on this PVE node.")
+        return
+    click.echo(f"{len(templates)} TestRange template(s):")
+    for t in templates:
+        click.echo(f"  VMID {t['vmid']}  {t['name']}")
+
+
+@main.command("proxmox-prune-templates")
+@click.option("--orchestrator", "url", required=True, help=_PROXMOX_URL_HELP)
+@click.option(
+    "--name",
+    "names",
+    multiple=True,
+    help=(
+        "Restrict prune to templates with these display names.  "
+        "Repeatable.  Omit to prune all ``tr-template-*`` VMIDs."
+    ),
+)
+@click.option("--yes", is_flag=True, help="Skip confirmation prompt.")
+@click.option(
+    "--log-level",
+    type=click.Choice(
+        ["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False
+    ),
+    default="INFO",
+    help="Minimum level for TestRange stderr logs.",
+)
+def proxmox_prune_templates(
+    url: str, names: tuple[str, ...], yes: bool, log_level: str,
+) -> None:
+    """Delete TestRange-managed PVE templates from a Proxmox node.
+
+    Without ``--name``, deletes EVERY ``tr-template-*`` VMID — the
+    full proxmox-side cache wipe.  Use ``--name=...`` (repeatable)
+    to evict specific templates only.
+
+    Per-VM run clones are not touched; this command only manages
+    the persistent template cache.
+    """
+    configure_root_logger(getattr(logging, log_level.upper()))
+    orch = _build_proxmox_orchestrator(url)
+    targets = orch.list_templates()
+    if names:
+        wanted = set(names)
+        targets = [t for t in targets if t["name"] in wanted]
+
+    if not targets:
+        click.echo("Nothing to prune.")
+        return
+
+    if not yes:
+        click.echo(f"Will delete {len(targets)} template(s):")
+        for t in targets:
+            click.echo(f"  VMID {t['vmid']}  {t['name']}")
+        click.confirm("Proceed?", abort=True)
+
+    deleted = orch.prune_templates(names=list(names) if names else None)
+    click.echo(f"Pruned {deleted} template(s).")

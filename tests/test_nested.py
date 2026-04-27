@@ -4,7 +4,10 @@ Covers:
 
 - :class:`AbstractHypervisor` — ABC shape + isinstance partitioning
 - :meth:`LibvirtOrchestrator.root_on_vm` URI construction + error paths
-- :meth:`ProxmoxOrchestrator.root_on_vm` NotImplementedError stub
+- :meth:`ProxmoxOrchestrator.root_on_vm` returns a configured
+  inner orchestrator (regression: previously raised
+  NotImplementedError; live behaviour now lives in
+  ``tests/test_proxmox_root_on_vm.py``)
 - :class:`Hypervisor` concrete class — default libvirt packages +
   post-install commands
 - Outer :meth:`LibvirtOrchestrator._enter_nested_orchestrators` walk —
@@ -216,16 +219,33 @@ class TestRootOnVmLibvirt:
 
 
 class TestRootOnVmProxmox:
-    def test_raises_not_implemented(self) -> None:
+    def test_returns_configured_inner_orchestrator(self) -> None:
+        """Smoke test: ``ProxmoxOrchestrator.root_on_vm`` returns a
+        configured-but-not-entered inner orchestrator pointing at
+        the hypervisor's reachable IP.  Detailed coverage lives in
+        ``tests/test_proxmox_root_on_vm.py``."""
         from testrange.backends.proxmox import ProxmoxOrchestrator
 
         hv = _hypervisor()
+        # Stand-in for what _require_communicator would normally
+        # return after the outer orchestrator booted the VM.
         comm = MagicMock()
         comm._host = "10.0.0.10"
         hv._communicator = comm
+        # Short-circuit pveproxy readiness — the live VM is mocked.
+        ready = MagicMock()
+        ready.exit_code = 0
+        ready.stdout = b"active\n"
+        hv._communicator.exec.return_value = ready
+        # AbstractVM.exec → self._communicator.exec; mock that too.
+        hv.exec = lambda *a, **kw: ready  # type: ignore[method-assign]
+
         outer = LibvirtOrchestrator(host="localhost")
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            ProxmoxOrchestrator.root_on_vm(hv, outer)
+        inner = ProxmoxOrchestrator.root_on_vm(hv, outer)
+
+        assert isinstance(inner, ProxmoxOrchestrator)
+        assert inner._host == "10.0.0.10"
+        assert inner._client is None  # not yet entered
 
 
 class TestNestedEnterExit:

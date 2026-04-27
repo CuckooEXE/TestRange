@@ -8,7 +8,7 @@ Compared to :class:`~testrange.communication.guest_agent.GuestAgentCommunicator`
 the SSH backend:
 
 - Exercises the real network stack (useful for integration testing)
-- Does not require ``qemu-guest-agent`` inside the VM
+- Does not require any guest-agent package inside the VM
 - Relies on the VM being network-reachable from the host
 
 Requires ``paramiko``.  Install via the ``ssh`` extra::

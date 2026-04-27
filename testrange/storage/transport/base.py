@@ -1,9 +1,9 @@
 """Abstract file + exec transport.
 
 This is the "where does the filesystem live" half of a storage
-backend.  It knows nothing about disk formats (qcow2 / VHDX / VMDK) —
-it only knows how to put bytes at refs, read them back, and run a
-subprocess against wherever its refs point.
+backend.  It knows nothing about disk formats — it only knows how
+to put bytes at refs, read them back, and run a subprocess against
+wherever its refs point.
 
 Pair with an :class:`~testrange.storage.disk.AbstractDiskFormat` to
 form a full :class:`~testrange.storage.StorageBackend`.
@@ -14,12 +14,12 @@ Contract
 All ``ref`` arguments and return values are **transport-local strings**
 — for :class:`LocalFileTransport` that's an absolute POSIX path on
 the outer host; for :class:`SSHFileTransport` it's a path on the
-remote.  A Proxmox transport would return volume IDs that don't parse
-as paths at all.  Callers treat refs as opaque.
+remote.  A REST-style transport would return volume IDs that don't
+parse as paths at all.  Callers treat refs as opaque.
 
 The transport owns three subtrees under :attr:`cache_root`:
 
-- ``images/`` — source qcow2/img/iso files staged from the outer host.
+- ``images/`` — source disk-image / ISO files staged from the outer host.
 - ``vms/``    — post-install snapshots + manifests.
 - ``runs/<run_id>/`` — per-run scratch (overlays, seed ISOs, NVRAM).
 """
@@ -35,7 +35,7 @@ class AbstractFileTransport(ABC):
 
     Every method takes and returns **transport-local** strings — refs
     valid on the host this transport reaches.  Nothing in here knows
-    about qcow2, VHDX, or any other disk format; that lives on
+    about any specific disk format; that lives on
     :class:`~testrange.storage.disk.AbstractDiskFormat`.
     """
 
@@ -130,10 +130,10 @@ class AbstractFileTransport(ABC):
 
         Returns ``(exit_code, stdout, stderr)``.  Used by
         :class:`~testrange.storage.disk.AbstractDiskFormat`
-        implementations to run disk-manipulation tools (qemu-img,
-        PowerShell New-VHD, Proxmox CLI, …) wherever the filesystem
-        lives.  The transport itself never interprets the argv — it's
-        just a pipe to a subprocess on the right host.
+        implementations to run disk-manipulation tools wherever the
+        filesystem lives.  The transport itself never interprets
+        the argv — it's just a pipe to a subprocess on the right
+        host.
 
         :raises testrange.exceptions.CacheError: On exec-infrastructure
             failure (SSH disconnect, etc.).  Non-zero exit codes are

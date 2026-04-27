@@ -1,11 +1,11 @@
 """Assert that an isolated network really is isolated.
 
-Creates a VM on a ``VirtualNetwork`` with ``internet=False`` — libvirt
-installs no NAT forwarding rules for this bridge — and verifies that
-outbound traffic has nowhere to go.  This is the positive proof that
-``internet=False`` works; other tests can rely on it for security
-assertions (e.g. "our service should fail closed when the internet is
-gone").
+Creates a VM on a ``VirtualNetwork`` with ``internet=False`` — the
+backend installs no NAT forwarding rules for this bridge — and
+verifies that outbound traffic has nowhere to go.  This is the
+positive proof that ``internet=False`` works; other tests can rely
+on it for security assertions (e.g. "our service should fail closed
+when the internet is gone").
 
 The guest agent still works because it's a virtio-serial channel,
 not a TCP one — there's no network port involved in talking to the
@@ -36,8 +36,8 @@ from testrange import (
 def assert_airgapped(orch: Orchestrator) -> None:
     vm = orch.vms["jail"]
 
-    # DNS should still resolve against libvirt's dnsmasq on the bridge
-    # (dns=True) even though the bridge has no upstream path.
+    # DNS should still resolve against the backend's bridge-local
+    # DNS service (dns=True) even though the bridge has no upstream path.
     resolved = vm.exec(["getent", "hosts", "jail.Airgap"])
     resolved.check()
 

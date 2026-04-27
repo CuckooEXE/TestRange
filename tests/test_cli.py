@@ -336,9 +336,10 @@ class TestOrchestratorOption:
         r = runner.invoke(main, ["run", "--help"])
         assert r.exit_code == 0
         assert "--orchestrator" in r.output
-        # URL examples appear inline in the help text.
-        assert "qemu:///system" in r.output
-        assert "proxmox://" in r.output
+        # The CLI help is backend-neutral and points at each
+        # backend module for the exact URL shape it accepts —
+        # we should NOT name specific backends here.
+        assert "testrange.backends" in r.output
 
     def test_unknown_scheme_rejected(
         self, runner: CliRunner, tmp_path: Path
@@ -453,9 +454,10 @@ class TestBackendUrlDispatch:
         )
         assert isinstance(orch, ProxmoxOrchestrator)
         assert orch._host == "pve.example.com"
-        assert orch._token == {
-            "token": None, "user": "root", "password": "hunter2",
-        }
+        # CLI lifts ``user:password`` out of the URL into the
+        # orchestrator's explicit auth kwargs.
+        assert orch._user == "root"
+        assert orch._password == "hunter2"
 
     def test_proxmox_token_in_userinfo(self, tmp_path: Path) -> None:
         from testrange.backends.proxmox import cli_build_orchestrator
@@ -464,27 +466,27 @@ class TestBackendUrlDispatch:
             self._fake_original(tmp_path),
         )
         assert orch is not None
-        assert orch._token == {
-            "token": "abcdefghij", "user": None, "password": None,
-        }
+        # Userinfo without a colon is treated as a token.  The
+        # orchestrator stashes it on ``_legacy_token`` until the URL
+        # handler grows explicit ``token_name``/``token_value``
+        # parsing for the ``user@realm!name=secret`` form.
+        assert orch._legacy_token == "abcdefghij"
         assert orch._node == "pve01"
 
     def test_proxmox_token_query_param(self, tmp_path: Path) -> None:
-        """?token= takes precedence over userinfo (lets callers pass
-        the full ``user@realm!name=secret`` blob without URL-encoding)."""
-        from testrange.backends.proxmox import cli_build_orchestrator
+        """``?token=`` takes precedence over userinfo (lets callers
+        pass the full ``user@realm!name=secret`` blob without
+        URL-encoding)."""
+        from testrange.backends.proxmox import (
+            ProxmoxOrchestrator,
+            cli_build_orchestrator,
+        )
         orch = cli_build_orchestrator(
             "proxmox://pve.example.com?token=root!auto&storage=local-lvm",
             self._fake_original(tmp_path),
         )
-        assert orch is not None
-        # ``_token`` is typed as ``object`` on the ProxmoxOrchestrator;
-        # pyright can't tell it's a dict without narrowing.  assert it
-        # here and then index.
-        from testrange.backends.proxmox import ProxmoxOrchestrator
         assert isinstance(orch, ProxmoxOrchestrator)
-        assert isinstance(orch._token, dict)
-        assert orch._token["token"] == "root!auto"
+        assert orch._legacy_token == "root!auto"
         assert orch._storage == "local-lvm"
 
     def test_central_dispatcher_iterates_backends(

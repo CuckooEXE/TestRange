@@ -8,6 +8,230 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+ProxMox VE: nested orchestration + guest-agent + multi-NIC + install vnet
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ProxMox backend gained the surface area needed to drive the
+end-to-end :mod:`examples.nested_proxmox_public_private` example
+(an outer libvirt orchestrator boots a PVE Hypervisor; a nested
+``ProxmoxOrchestrator`` provisions inner VMs + SDN networks
+inside it).  The same fixes apply to a stand-alone remote
+``ProxmoxOrchestrator`` — none of them are nesting-specific.
+
+**Added: ``ProxmoxOrchestrator.root_on_vm()`` + nested-stack
+unwind.**  Mirrors the libvirt backend's pattern: given a booted
+PVE Hypervisor VM, build a configured-but-not-entered inner
+``ProxmoxOrchestrator`` pointing at the PVE REST endpoint on the
+hypervisor's static IP.  Auth via the hypervisor's root
+credential, ``verify_ssl=False`` (PVE ships a self-signed cert).
+Waits for ``pveproxy.service`` to reach ``active`` before
+returning so the outer orchestrator's ``ExitStack`` doesn't race
+the API daemon's startup.  ``__exit__`` unwinds inner
+orchestrators first (LIFO) so each inner ``__exit__`` runs while
+its hosting PVE VM is still alive.
+
+**Added: real
+:class:`~testrange.backends.proxmox.guest_agent.ProxmoxGuestAgentCommunicator`
+over PVE REST.** Replaces the stub.  Drives ``qemu-guest-agent``
+inside the guest via PVE's ``/api2/json/nodes/{node}/qemu/{vmid}/agent/*``
+endpoints.  No inner-VM IP routability needed — agent traffic
+hops through PVE's host-mediated virtio-serial channel, so
+nested topologies whose inner SDN subnets aren't routed back to
+the test runner host work without ``ip route add`` choreography.
+Wired through ``ProxmoxVM._make_guest_agent_communicator``;
+``communicator='guest-agent'`` on a ``ProxmoxVM`` is now end-to-end.
+
+**Added: dedicated install-phase SDN vnet.**
+``ProxmoxOrchestrator`` brings up a separate
+:class:`~testrange.backends.proxmox.network.ProxmoxVirtualNetwork`
+on ``192.168.230.0/24`` (``internet=True``) for every install
+pass.  Without it, a VM whose only declared NIC was on a
+``internet=False`` user network would hang indefinitely on
+``apt install`` during cloud-init.  Symmetric with the libvirt
+backend's ``tr-instal-*`` network.
+
+**Added: install-phase cloud-init seed describes the install NIC.**
+``ProxmoxVM._build_install_mac_ip_pairs`` now returns a single
+entry whose MAC + IP + subnet match the install vnet's actual
+NIC, not the user's declared NICs.  cloud-init ``Not all expected
+physical devices present`` errors gone.
+
+**Added: multi-NIC support in ``ProxmoxVM.start_run``.**  Every
+declared :class:`~testrange.devices.vNIC` gets attached at run
+phase as ``net0`` … ``netN``, not just ``net0``.  Dual-homed
+inner VMs no longer trip cloud-init's "expected MAC missing"
+guard.
+
+**Added: PVE storage-upload UPID waiter.**  ``ProxmoxVM`` now
+captures the UPID returned from ``upload.create()`` and polls
+``/tasks/{upid}/status`` until ``stopped`` before returning.
+Closes a class of races where the next REST call referenced a
+file the async write hadn't flushed yet (manifested as
+intermittent ``500 Internal Server Error: volume … does not exist``
+on ``config.put`` immediately after a phase-2 seed upload).
+
+**Added: ``GenericVM`` / ``LibvirtVM`` → ``ProxmoxVM`` and
+non-Proxmox network → ``ProxmoxVirtualNetwork`` promotion at
+``__init__``.**  Top-level ``testrange.VirtualNetwork`` resolves
+to the libvirt-flavoured class for ergonomics, so a user
+constructing
+``Hypervisor(orchestrator=ProxmoxOrchestrator, networks=[VirtualNetwork(...)])``
+no longer hands the inner orchestrator a libvirt-shaped object
+that explodes on ``.start()``.  ``RunDir`` now constructed
+unconditionally in ``__enter__`` (was a latent ``None``-deref in
+``ProxmoxVM.build``'s clone-name code).
+
+**Open follow-ups** — see ``TODO.md`` at the repo root.  Headline
+items: hardcoded install-vnet subnet (no concurrent-runs-against-
+the-same-PVE-zone support), hardcoded public DNS in the install
+seed (PVE SDN doesn't ship a per-bridge resolver), and the
+``RunDir``-as-id-carrier pattern.
+
+ProxMox VE template cache
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Added: PVE-template-as-cache for ``ProxmoxVM``.** ``build()``
+now looks up an existing PVE template named
+``tr-template-<config_hash[:12]>`` before doing anything; on a hit
+the install path is skipped entirely and the template is cloned
+into a fresh run VMID.  On a miss, the install runs, then
+``POST /qemu/{vmid}/template`` promotes the install VMID to a
+template that subsequent runs hit.  Cache key is the same hash the
+libvirt qcow2 cache uses — same spec, same hit, two physical
+caches.
+
+Phase-2 cloud-init seed: the cloned VMID inherits the install seed
++ install NIC from the template, both of which need replacing
+before the run-phase boot.  ``start_run()`` writes a phase-2 seed
+ISO with a rotated instance-id and the run-phase
+``mac_ip_pairs``, uploads it, and ``PUT``\ s the cloned VMID's
+config to swap ``ide2`` (install seed → phase-2 seed) and ``net0``
+(install NIC → run-phase NIC with fresh MAC + run bridge).
+Without the rotation cloud-init treats the clone as the same
+instance and skips applying the new network-config — VM keeps the
+install-network DHCP and SSH attach times out.
+
+Concurrency: a per-config-hash file lock around the find-template
++ install + promote sequence so two test processes building the
+same spec at the same time don't race to create duplicate
+templates.  Same lock primitive
+(:func:`~testrange._concurrency.vm_build_lock`) the libvirt
+backend uses.
+
+Cleanup symmetry: ``ProxmoxOrchestrator.cleanup(run_id)``
+reconstructs per-run clone names
+(``tr-<vm[:10]>-<run_id[:8]>``) + per-run phase-2 seed filenames
++ per-run SDN vnet names and deletes them.  Templates
+(``tr-template-*``) are explicitly preserved even if a name
+pattern match points at one — they're persistent cache state, the
+same way the libvirt qcow2 snapshot cache is.
+
+**Added: template-cache CLI.** ``testrange proxmox-list-templates``
+shows every TestRange-managed PVE template on a node;
+``testrange proxmox-prune-templates`` deletes them, optionally
+filtered by ``--name``.  Both commands open their own connection
+and don't require ``__enter__``, so they're safe to invoke from a
+shell with the same ``--orchestrator`` URL the run uses.
+
+**Added: crash-recovery for half-promoted templates.** If an
+install dies between ``qm create`` and ``qm template`` it leaves a
+VMID with the target template's display name but no ``template``
+flag.  The next install attempt for the same spec now sweeps such
+orphans automatically (logged at WARNING) before re-running
+``qm create`` so the install doesn't abort with a duplicate-name
+error.
+
+**Added: linked-then-full clone fallback.** Run-phase clones now
+attempt ``full=0`` first (snapshot-backed, seconds) and fall back
+to ``full=1`` automatically if the storage pool refuses linked
+clones (raw LVM, NFS, Ceph without snapshot support).  Same code
+path, no user-visible config knob — the user just gets a working
+clone either way.
+
+**Added: ``GenericVM`` → ``ProxmoxVM`` promotion.** Backend-agnostic
+``GenericVM`` specs are promoted to ``ProxmoxVM`` at orchestrator
+construction, mirroring the libvirt backend.  The same test fixture
+now runs across both backends without per-backend wrapping.
+
+ProxMox VE install path
+~~~~~~~~~~~~~~~~~~~~~~~
+
+**Added: ``ProxmoxAnswerBuilder``** for unattended ProxMox VE
+installs.  Auto-selected for ``iso=`` strings matching
+``proxmox-ve[-_]*.iso``; emits an ``answer.toml`` to a
+``PROXMOX-AIS``-labeled seed ISO and prepares the main installer ISO
+in pure Python (no ``proxmox-auto-install-assistant`` host
+dependency, no ``xorriso``).  Working PVE 9.x out of the box;
+declare ``VirtualNetworkRef(..., ip="...")`` for the run-phase
+network and the builder synthesises a ``from-answer`` static config
+that survives the install-to-run network swap.  Example:
+``examples/nested_proxmox_public_private.py``.
+
+The path lives on top of six PVE-specific behaviours, all
+regression-tested.  Five are just correct handling of how PVE 9.x
+ships rather than workarounds: activation via
+``/cdrom/auto-installer-mode.toml`` at the ISO root (PVE 9.x;
+earlier releases looked inside the initrd); kebab-case
+``answer.toml`` field names that don't match the underscored
+mode-file fields; ``reboot-mode = "power-off"`` to turn the
+installer's reboot into the SHUTOFF the cache pipeline expects;
+the ``from-dhcp``-vs-``from-answer`` distinction (the former
+freezes the install-phase lease as static, the latter takes the
+answer's static config verbatim); and interface-name-based NIC
+filtering (the install-phase MAC differs from the run-phase MAC,
+but interface name is stable across the swap).  The one true
+workaround is OVMF-only firmware to sidestep a SeaBIOS + q35 +
+SATA-CD GRUB triple-fault during PVE's first boot.
+
+PVE installs also exercise the per-VM UEFI NVRAM sidecar described
+under *Cache layout* below, but that is a libvirt-backend mechanism
+needed by any UEFI install (Windows was the first guest to surface
+it); it lives in :mod:`testrange.backends.libvirt.vm` and the cache
+layer, not in the ProxMox builder.
+
+Cache layout
+~~~~~~~~~~~~
+
+**Added: per-VM UEFI NVRAM sidecar at ``<vms_dir>/<hash>.nvram.fd``.**
+Install-phase NVRAM (where the installer writes EFI ``BootOrder``
+entries) is now snapshotted into the cache alongside the qcow2,
+because libvirt's ``VIR_DOMAIN_UNDEFINE_NVRAM`` deletes the per-run
+NVRAM at teardown.  Run-phase domains seed their NVRAM from the
+cached sidecar rather than the empty global ``OVMF_VARS`` template,
+so any UEFI install whose distro doesn't write the
+``/EFI/BOOT/BOOTX64.EFI`` removable-path fallback (PVE included)
+still boots cleanly.  New helpers:
+:meth:`~testrange.cache.CacheManager.vm_nvram_ref`,
+:meth:`~testrange.cache.CacheManager.store_vm_nvram`,
+:meth:`~testrange.cache.CacheManager.get_vm_nvram`.  Backwards-
+compatible: existing entries without sidecars stay valid for BIOS
+installs (cloud-init), and a missing sidecar on a UEFI install
+falls through to the template just as before.
+
+**Added: prepared-ISO cache for ProxMox installer media** at
+``<images_dir>/proxmox-prepared-<sha>.iso``, populated by
+:meth:`~testrange.cache.CacheManager.get_proxmox_prepared_iso` on
+first use.  Keyed by the SHA-256 of the vanilla ISO so the
+expensive (~1 s) prep step happens once per upstream version,
+amortised across every VM that builds against it.
+
+DAC ownership of UEFI NVRAM
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Fixed: NVRAM file ``Permission denied`` after install completes.**
+When libvirt creates the per-domain NVRAM by copying the
+``<nvram template="...">`` source on first ``domain.create()``,
+the DAC security driver records no original-owner xattr — the
+file stays ``libvirt-qemu:0600`` after the domain stops, and the
+NVRAM-snapshot read fails with EACCES on any non-libvirt-qemu user.
+:func:`~testrange.backends.libvirt.vm._preseed_nvram` pre-creates
+the NVRAM as the invoking user with mode ``0644`` *before*
+``defineXML``; DAC's ``remember_owner`` xattr then has an original
+owner to restore on shutdown, and the snapshot reader can open
+the file.  Behaviour is identical at install time (the seeded
+bytes are the OVMF_VARS template, exactly what libvirt would have
+copied).
+
 Windows install path
 ~~~~~~~~~~~~~~~~~~~~
 

@@ -1,13 +1,15 @@
 Builders
 ========
 
-Every :class:`~testrange.backends.libvirt.VM` owns a
+Every :class:`~testrange.AbstractVM` owns a
 :class:`~testrange.vms.builders.base.Builder` that encodes the
 provisioning strategy — how the VM gets from ``iso=`` to a runnable
-disk image.  :class:`VM` delegates everything install-pipeline related
-to the builder: disk preparation, seed ISO generation, domain-XML
-hints (UEFI, Windows device models, extra CD-ROMs), and cache key
-derivation.
+disk image.  The VM delegates everything install-pipeline related to
+the builder: disk preparation, seed ISO generation, domain hints
+(UEFI, Windows device models, extra CD-ROMs), and cache key
+derivation.  The hints are *backend-neutral* — each backend renders
+them into its own native representation (domain XML, REST payload,
+PowerShell calls, …).
 
 Why a strategy object?
 ----------------------
@@ -29,7 +31,7 @@ The contract
 
 Builders are **stateless**: one instance can serve any number of VMs.
 All per-VM state comes in through the
-:class:`~testrange.backends.libvirt.VM` argument of each method.  The ABC
+:class:`~testrange.AbstractVM` argument of each method.  The ABC
 defines eight methods:
 
 - :meth:`~testrange.vms.builders.base.Builder.default_communicator` —
@@ -68,9 +70,16 @@ Concrete builders
   install ISOs.  Generates an autounattend answer file, attaches the
   Windows ISO plus ``virtio-win.iso`` as CD-ROMs, runs Setup under
   OVMF/UEFI.  See :doc:`/usage/windows`.
-- :class:`~testrange.vms.builders.NoOpBuilder` — prebuilt qcow2
+- :class:`~testrange.vms.builders.NoOpBuilder` — prebuilt image
   (BYOI).  No install phase; the image is content-hash staged into
   the cache and booted from an overlay.  See :ref:`BYOI <byoi>`.
+- :class:`~testrange.vms.builders.ProxmoxAnswerBuilder` — ProxMox VE
+  installer ISOs.  Patches the vanilla PVE ISO in pure Python (no
+  ``proxmox-auto-install-assistant`` host dep), emits an
+  ``answer.toml`` on a ``PROXMOX-AIS``-labeled seed ISO, and runs
+  unattended under OVMF with an NVRAM-snapshot sidecar so the
+  install-phase ``BootOrder`` survives into run phase.  Default for
+  ``proxmox-ve_*.iso`` URLs.
 
 Reference
 ---------
@@ -97,6 +106,14 @@ Reference
    :members:
    :show-inheritance:
 
+.. autoclass:: testrange.vms.builders.ProxmoxAnswerBuilder
+   :members:
+   :show-inheritance:
+
 .. autofunction:: testrange.vms.builders.cloud_init.build_seed_iso_bytes
 
 .. autofunction:: testrange.vms.builders.unattend.build_autounattend_iso_bytes
+
+.. autofunction:: testrange.vms.builders.build_proxmox_seed_iso_bytes
+
+.. autofunction:: testrange.vms.builders.is_proxmox_installer_iso

@@ -28,7 +28,7 @@ Starting out
    * - ``hello_world.py``
      - The smallest possible spec — one Debian VM, one ``uname -r``
        assertion, one NAT network.  Run this first to confirm your
-       libvirt / OVMF setup works.
+       backend's host setup works.
    * - ``exec_features.py``
      - A tour of every surface on :meth:`VM.exec`: exit codes,
        captured stdout / stderr, ``env=``, ``timeout=``, and the
@@ -58,7 +58,7 @@ Provisioning variations
        rather than mutating the source file.
    * - ``bring_your_own_image.py``
      - Skip the install phase entirely with
-       ``builder=NoOpBuilder()``.  The user-supplied qcow2 is
+       ``builder=NoOpBuilder()``.  The user-supplied disk image is
        content-hash staged into the cache, ``pkgs=`` and
        ``post_install_cmds=`` are silently ignored, and ``users=`` is
        *informational* — the accounts must already exist in the
@@ -84,6 +84,16 @@ Provisioning variations
        into cache), override the service config at test time via
        ``upload`` / ``write_text``.  Config changes don't bust the
        cache hash because they happen after provisioning.
+   * - ``nested_proxmox_public_private.py``
+     - ProxMox VE as an L1 guest with a sibling Debian sidecar.
+       Auto-selected :class:`~testrange.vms.builders.ProxmoxAnswerBuilder`
+       does the unattended PVE install through the upstream
+       ``answer.toml`` mechanism (UEFI, kebab-case schema,
+       ``reboot-mode = "power-off"``); sidecar smoke-tests the
+       ProxMox API at ``https://10.0.0.10:8006/api2/json/version``.
+       Inner-orchestrator plumbing is staged behind
+       ``TODO(proxmox-nest):`` markers, ready to enable once the
+       ProxMox backend's ``root_on_vm()`` lands.
 
 Networking
 ----------
@@ -96,10 +106,10 @@ Networking
      - What it shows
    * - ``isolated_network.py``
      - Positive proof that ``internet=False`` actually cuts off
-       outbound traffic — libvirt installs no NAT forwarding rules.
-       The guest agent still works because it's virtio-serial, not
-       TCP.  Other tests can rely on this invariant for
-       fail-closed assertions.
+       outbound traffic — the backend installs no NAT forwarding
+       rules for an isolated network.  The guest agent still works
+       because it's virtio-serial, not TCP.  Other tests can rely
+       on this invariant for fail-closed assertions.
    * - ``cross_network_dns.py``
      - Network name used as TLD for DNS: one jump host dual-homed on
        ``Engineering`` + ``Ops`` resolves ``auth.Engineering`` and
@@ -107,10 +117,10 @@ Networking
        bare names — every cross-VM lookup is explicit about which
        network it belongs to.
    * - ``static_ip_lab.py``
-     - ``VirtualNetwork(dhcp=False, ...)`` disables libvirt's DHCP
-       server.  Every NIC on that network must come with an explicit
-       ``ip=`` on its ``vNIC`` — the orchestrator
-       enforces this at provisioning time.
+     - ``VirtualNetwork(dhcp=False, ...)`` disables the backend's
+       bridge-local DHCP server.  Every NIC on that network must
+       come with an explicit ``ip=`` on its ``vNIC`` — the
+       orchestrator enforces this at provisioning time.
    * - ``two_networks_three_vms.py``
      - The flagship networking example.  Two networks (NAT +
        isolated), three VMs (one public-facing nginx, one dual-homed
@@ -128,11 +138,11 @@ Communication backends
    * - File
      - What it shows
    * - ``ssh_communicator.py``
-     - Swap the default QEMU guest-agent communicator for an SSH
-       one.  Exercises both auth paths (ephemeral ed25519 key, and
-       the credential's plaintext password) and asserts both return
-       the same hostname as the guest-agent channel.  See
-       :doc:`communication`.
+     - Swap the default host-mediated guest-agent communicator for
+       an SSH one.  Exercises both auth paths (ephemeral ed25519
+       key, and the credential's plaintext password) and asserts
+       both return the same hostname as the guest-agent channel.
+       See :doc:`communication`.
    * - ``winrm_communicator.py``
      - End-to-end Windows flow: ``TESTRANGE_WIN_ISO`` points at a
        Win10/11 install ISO, TestRange runs Setup under OVMF with an
@@ -154,10 +164,10 @@ Concurrency
      - Passing ``-j N`` to ``testrange run`` dispatches up to ``N``
        tests to a thread pool.  Install-phase subnets are
        auto-serialised under a cross-process file lock, so concurrent
-       install phases never collide; user-declared
-       :class:`~testrange.backends.libvirt.VirtualNetwork` subnets are
-       *not* auto-rewritten and must be non-overlapping.  Results
-       come back in input order regardless of completion order.
+       install phases never collide; user-declared ``VirtualNetwork``
+       subnets are *not* auto-rewritten and must be non-overlapping.
+       Results come back in input order regardless of completion
+       order.
 
 Running the whole set
 ---------------------

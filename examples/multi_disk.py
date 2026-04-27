@@ -3,9 +3,9 @@
 The first ``HardDrive`` in a VM's ``devices=[...]`` list is **always
 the OS disk** — cloud-init installs onto it and the post-install
 snapshot is what lands in the cache.  Any additional ``HardDrive``
-entries become empty data volumes (``<vm>-data<n>.qcow2`` in the
-per-run scratch dir) and are ephemeral — each run starts with a
-blank volume.
+entries become empty data volumes (``<vm>-data<n>.<ext>`` in the
+per-run scratch dir, where ``<ext>`` is the backend's native disk
+format) and are ephemeral — each run starts with a blank volume.
 
 This example also demonstrates the ergonomic numeric form
 (``HardDrive(20)`` → 20 GiB) alongside the string form

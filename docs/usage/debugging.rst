@@ -10,7 +10,7 @@ statements and re-run.
 would, then drops you into a Python REPL with the same names a test
 function receives:
 
-* ``orch`` — the started :class:`~testrange.backends.libvirt.Orchestrator`.
+* ``orch`` — the started :class:`~testrange.Orchestrator`.
 * ``vms`` — ``list[VM]``, in the order they were declared.
 * One binding per VM, named after the VM (e.g. ``web``, ``db``), so you
   can type ``web.exec([...])`` instead of ``orch.vms["web"].exec([...])``.
@@ -72,9 +72,12 @@ Keeping VMs alive after the REPL exits
 --------------------------------------
 
 By default the orchestrator's normal teardown runs when you ``exit()``
-or hit Ctrl-D. Pass ``--keep`` to skip teardown and print the libvirt
-domain/network names plus the run scratch dir, so you can keep poking
-with ``virsh``, ``ssh``, etc.:
+or hit Ctrl-D. Pass ``--keep`` to skip teardown and print the
+backend-resource names plus the run scratch dir, so you can keep
+poking with the backend's CLI, ``ssh``, etc.  The exact suggested
+cleanup commands are produced by the backend (each backend's
+:meth:`~testrange.orchestrator_base.AbstractOrchestrator.keep_alive_hints`
+returns the right verbs for its own toolchain) — example output:
 
 .. code-block:: console
 
@@ -83,15 +86,14 @@ with ``virsh``, ``ssh``, etc.:
    >>> exit()
 
    Run kept alive. To clean up manually:
-     Domains:  tr-web-abcdef12
+     VMs:      tr-web-abcdef12
      Networks: tr-net-abcd
      Run dir:  /tmp/testrange-run-abcdef12
    Suggested:
-     sudo virsh destroy tr-web-abcdef12 && sudo virsh undefine tr-web-abcdef12
-     sudo virsh net-destroy tr-net-abcd && sudo virsh net-undefine tr-net-abcd
+     <backend-specific cleanup commands>
      rm -rf /tmp/testrange-run-abcdef12
 
-Use ``--keep`` carefully — it leaks libvirt state if you forget to
+Use ``--keep`` carefully — it leaks backend state if you forget to
 clean up.
 
 Cleaning up after a SIGKILL'd run
@@ -126,13 +128,80 @@ Per-backend semantics:
   ``tr-build-<vm[:10]>-<runid[:8]>``, ``tr-<net[:6]>-<runid[:4]>``
   for each spec'd VM/network, plus the ephemeral install network
   ``tr-instal-<runid[:4]>``, plus the per-run scratch dir.
-* **Other backends** (Proxmox, Hyper-V) raise
+* **Proxmox.**  Destroys per-run clone VMIDs named
+  ``tr-<vm[:10]>-<runid[:8]>`` plus the SDN vnets named
+  ``<net[:4]><runid[:4]>`` for the run, plus the per-run install
+  vnet named ``inst<runid[:4]>``.  PVE templates
+  (``tr-template-<config_hash[:12]>``) are the install-once-clone-
+  many cache and are *never* touched by per-run cleanup — use
+  ``testrange proxmox-prune-templates`` to evict them
+  (see :ref:`proxmox-template-cache`).  When a Proxmox-flavoured
+  Hypervisor is involved (libvirt outer + inner
+  ``ProxmoxOrchestrator``), the inner orchestrator's PVE-side
+  state lives on the Hypervisor VM — destroying the outer VM
+  removes everything; ``testrange cleanup`` against the outer
+  factory currently doesn't walk into the inner orchestrator's
+  PVE node, so a half-killed nested run may leave inner VMIDs +
+  vnets behind on PVE that need ``qm destroy`` / ``pvesh delete
+  /cluster/sdn/vnets/...`` by hand.
+* **Other backends** (Hyper-V) raise
   :class:`NotImplementedError` until they wire their own
   :meth:`~testrange.orchestrator_base.AbstractOrchestrator.cleanup`.
 
 When in doubt, ``testrange cleanup`` is always the right first
 step before falling back to manual ``virsh destroy`` / ``qm
 destroy`` / equivalent.
+
+.. _proxmox-template-cache:
+
+Proxmox template cache
+~~~~~~~~~~~~~~~~~~~~~~
+
+The Proxmox backend caches the result of each VM install as a PVE
+template (``qm template``).  Subsequent runs for the same spec
+(same ``cache_key``) skip the install entirely and ``qm clone`` the
+template instead.  Templates persist across runs and across
+``testrange cleanup`` invocations on purpose — they're the
+expensive thing the cache exists to keep.
+
+To inspect and evict the template cache:
+
+.. code-block:: bash
+
+    # Show every TestRange-managed template on the node.
+    testrange proxmox-list-templates \
+        --orchestrator proxmox://root:pw@pve.example.com/pve01
+
+    # Delete every TestRange-managed template (full cache wipe).
+    # The next run for any spec will re-install from scratch.
+    testrange proxmox-prune-templates \
+        --orchestrator proxmox://root:pw@pve.example.com/pve01 \
+        --yes
+
+    # Or evict a specific template by display name.  --name is
+    # repeatable.
+    testrange proxmox-prune-templates \
+        --orchestrator proxmox://root:pw@pve.example.com/pve01 \
+        --name tr-template-deadbeefcafe \
+        --yes
+
+Both commands open their own PVE connection and do **not** require
+``__enter__`` — they're safe to run while a separate testrange run
+is in progress (the prune command refuses to touch active per-run
+clones since those don't carry the ``template`` flag).
+
+Crash-recovery sweep
+~~~~~~~~~~~~~~~~~~~~
+
+If a previous testrange process was killed mid-install — after
+``qm create`` but before ``qm template`` — the half-promoted VM
+gets left behind with the target template's display name but no
+``template`` flag.  On the next install attempt for the same spec
+the orchestrator detects this case via
+:func:`~testrange.backends.proxmox.vm._delete_orphan_templates` and
+sweeps the orphan automatically before retrying ``qm create``.  No
+operator action required, but the sweep is logged at WARNING so
+you can spot post-incident.
 
 Watching an install-phase VM
 ----------------------------
@@ -141,17 +210,22 @@ Most of the time the orchestrator's install phase is a black box —
 the logs say "waiting for builder to finish and power off (timeout
 1800s)" and 15–30 minutes later the cached disk shows up.  When a
 Windows install misbehaves (answer file rejected, Setup stuck at a
-prompt) you need to *see the screen*.  Two complementary tools:
+prompt) you need to *see the screen*.  Two complementary tools.
 
-**Opt-in VNC** (``TESTRANGE_VNC=1``).  The default libvirt domain XML
-is headless (``<graphics>`` omitted, QEMU runs ``-display none``).
-Setting ``TESTRANGE_VNC=1`` in the environment of the ``testrange``
-process tells
-:func:`~testrange.backends.libvirt.VM._base_domain_xml` to attach a
-``<graphics type='vnc' listen='127.0.0.1' autoport='yes'/>`` plus a
-QXL video device.  The listener is pinned to ``127.0.0.1`` so nothing
-is exposed beyond the host.  Find the port with
-``virsh -c qemu:///system domdisplay <domain>``.
+.. note::
+
+   The shell snippets below use the CLI tools that ship with one
+   particular backend.  Other backends provide equivalent verbs
+   through their own CLI; check that backend's docs for the matching
+   commands.
+
+**Opt-in VNC** (``TESTRANGE_VNC=1``).  By default the backend
+defines a headless install-phase domain (no graphics device, no
+display).  Setting ``TESTRANGE_VNC=1`` in the environment of the
+``testrange`` process tells the backend to attach a VNC graphics
+device pinned to ``127.0.0.1`` plus a QXL video device, so nothing
+is exposed beyond the host.  Find the port via the backend's
+domain-display command.
 
 From a remote machine, tunnel the port over your existing SSH
 connection:
@@ -166,27 +240,64 @@ connection:
    ssh -L 5900:127.0.0.1:5900 user@host
    open vnc://127.0.0.1:5900                   # macOS, any VNC client otherwise
 
-**Terminal-only screenshots.**  If you're SSH-only and would rather
-not set up a VNC client, libvirt can dump the framebuffer to a PPM
-file directly — no ``TESTRANGE_VNC`` needed — and
-``caca-utils``' ``img2txt`` renders it as colour ASCII:
+**Terminal-only screenshots (sixel).**  If you're SSH-only and your
+local terminal supports sixel (WezTerm, iTerm2, Kitty, Windows
+Terminal 1.22+, ghostty, foot, mlterm, xterm launched with
+``-ti vt340``), a ``while`` loop + ``virsh screenshot`` +
+``img2sixel`` gives you a live low-res view of the framebuffer with
+no VNC client, SSH tunnel, or ``TESTRANGE_VNC`` needed.  The
+domain *does* need a video device — ``TESTRANGE_VNC=1`` adds a QXL
+one; otherwise the install-phase domain is headless and
+``screenshot`` errors with "no graphics device".
+
+Requires ``TESTRANGE_VNC=1`` on the ``testrange`` run so the
+install/run domains get the QXL device, plus ``libsixel-bin`` on
+the host for ``img2sixel``:
+
+.. code-block:: bash
+
+   sudo apt-get install -y libsixel-bin
+
+   # Find the running proxmox (or any) domain.  The builder-name
+   # prefix is ``tr-build-<vm>-<id>`` during install and
+   # ``tr-<vm>-<id>`` once the run phase has started — update the
+   # pattern if you're watching a different VM.
+   DOM=$(sudo virsh list --name | grep '^tr-proxmox-' | head -1)
+
+   while sleep 3; do
+       virsh -c qemu:///system screenshot "$DOM" /tmp/vm.ppm >/dev/null 2>&1 \
+           && clear && img2sixel /tmp/vm.ppm
+   done
+
+.. note::
+
+   Use ``virsh screenshot`` (which pulls the framebuffer via
+   libvirt's privileged stream API) rather than
+   ``virsh qemu-monitor-command --hmp '$DOM' 'screendump /tmp/s.ppm'``.
+   The monitor command tells QEMU to open the file itself, and
+   AppArmor's libvirt profile blocks QEMU from writing to arbitrary
+   paths — you'll get a ``failed to open file ... Permission denied``
+   that can't be fixed by chowning the file or pointing it at
+   ``/var/lib/libvirt/qemu/``.  ``virsh screenshot`` sidesteps the
+   profile entirely because libvirt writes the file.
+
+**Terminal-only screenshots (ASCII fallback).**  If your terminal
+doesn't do sixel, ``caca-utils``' ``img2txt`` renders colour ASCII
+instead — good enough to tell "partitioning" from "copying files"
+from "OOBE":
 
 .. code-block:: bash
 
    sudo apt-get install -y caca-utils
-   DOM=tr-build-winbox-<id>
+   DOM=$(sudo virsh list --name | grep '^tr-build-' | head -1)
    while sleep 3; do
        virsh -c qemu:///system screenshot "$DOM" /tmp/vm.ppm >/dev/null 2>&1 \
            && clear && img2txt -W "$(tput cols)" /tmp/vm.ppm
    done
 
-Good enough to distinguish "partitioning" from "copying files" from
-"OOBE".  Terminals with sixel support (kitty, WezTerm, xterm-sixel)
-can use ``img2sixel`` from ``libsixel-bin`` for a much sharper
-render.
-
 When the install reboots into the run phase the domain name changes
-from ``tr-build-<vm>-<id>`` to ``tr-<vm>-<id>``; update ``DOM``.
+from ``tr-build-<vm>-<id>`` to ``tr-<vm>-<id>``; update the ``grep``
+pattern.
 
 Tips
 ----

@@ -205,7 +205,7 @@ def test_store_vm_publishes_to_remote(
     def _fake_compress(self, src_ref: str, dst_ref: str) -> None:  # type: ignore[no-untyped-def]
         Path(dst_ref).write_bytes(Path(src_ref).read_bytes())
 
-    from testrange.storage.disk import qcow2 as _qcow2_mod
+    from testrange.backends.libvirt import _qcow2 as _qcow2_mod
     monkeypatch.setattr(_qcow2_mod.Qcow2DiskFormat, "compress", _fake_compress)
 
     config_hash = "hash" + "0" * 20
@@ -252,7 +252,7 @@ def test_store_vm_skips_remote_publish_when_remote_is_none(
     def _fake_compress(self, src_ref: str, dst_ref: str) -> None:  # type: ignore[no-untyped-def]
         Path(dst_ref).write_bytes(Path(src_ref).read_bytes())
 
-    from testrange.storage.disk import qcow2 as _qcow2_mod
+    from testrange.backends.libvirt import _qcow2 as _qcow2_mod
     monkeypatch.setattr(_qcow2_mod.Qcow2DiskFormat, "compress", _fake_compress)
 
     cm.store_vm("h" + "0" * 23, str(src), {"name": "vm"}, backend)

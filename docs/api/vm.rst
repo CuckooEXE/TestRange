@@ -16,31 +16,32 @@ Two flavours, same architecture as the device split:
 * :class:`~testrange.GenericVM` — backend-agnostic spec.  Use this
   when the test doesn't need anything backend-specific.  The
   orchestrator translates each ``GenericVM`` into its own concrete
-  VM type (e.g. :class:`~testrange.LibvirtVM`) at ``__enter__``
-  time, so backend code never sees a ``GenericVM``.
-* :class:`~testrange.LibvirtVM` — the libvirt backend's concrete
-  implementation.  Re-exported as the top-level
-  :class:`~testrange.VM` for convenience (libvirt is the default
-  backend).  Future :class:`ProxmoxVM` / :class:`HyperVVM` are
-  siblings under :class:`~testrange.vms.base.AbstractVM`, not
-  children of ``LibvirtVM``.
+  ``<Backend>VM`` at ``__enter__`` time, so backend code never sees
+  a ``GenericVM``.
+* ``<Backend>VM`` — each backend module under
+  :mod:`testrange.backends` ships its own concrete implementation.
+  The default-backend's class is re-exported as the top-level
+  :class:`~testrange.VM` for convenience.  Backend-specific VM
+  classes are siblings under
+  :class:`~testrange.vms.base.AbstractVM`, not children of one
+  another.
 
-The two share their entire constructor surface (since promotion is a
-field-for-field copy), so swapping ``LibvirtVM(...)`` for
-``GenericVM(...)`` in a test is mechanical.
+The generic and backend-specific VMs share their entire constructor
+surface (since promotion is a field-for-field copy), so swapping
+one for the other in a test is mechanical.
 
 Building the spec
 -----------------
 
-:class:`~testrange.GenericVM`,
-:class:`~testrange.backends.libvirt.LibvirtVM`, and the top-level
-alias :class:`~testrange.VM` all take the same keyword arguments:
+:class:`~testrange.GenericVM`, every shipped ``<Backend>VM``, and
+the top-level alias :class:`~testrange.VM` all take the same keyword
+arguments:
 
-- ``name`` — unique per test run; shows up as hostname, in DNS, and in
-  libvirt domain names.
-- ``iso`` — an absolute path to a local qcow2/img, or an ``https://``
-  URL pointing at an upstream cloud image.  See :doc:`/usage/vms` for
-  common upstream URLs.
+- ``name`` — unique per test run; shows up as hostname, in DNS, and
+  as the backend's VM identifier.
+- ``iso`` — an absolute path to a local disk image, or an
+  ``https://`` URL pointing at an upstream cloud image.  See
+  :doc:`/usage/vms` for common upstream URLs.
 - ``users`` — at least one :class:`~testrange.credentials.Credential`
   must be ``username='root'``.  Additional users can be non-sudo or
   passwordless-sudo.
@@ -65,8 +66,8 @@ alias :class:`~testrange.VM` all take the same keyword arguments:
   :class:`~testrange.vms.builders.WindowsUnattendedBuilder`,
   everything else →
   :class:`~testrange.vms.builders.CloudInitBuilder`.  Pass
-  :class:`~testrange.vms.builders.NoOpBuilder` explicitly for prebuilt
-  qcow2 images (see :ref:`BYOI <byoi>`).
+  :class:`~testrange.vms.builders.NoOpBuilder` explicitly for
+  prebuilt images (see :ref:`BYOI <byoi>`).
 - ``communicator`` — which backend the orchestrator wires up once the
   domain is running: ``"guest-agent"``, ``"ssh"``, or ``"winrm"``.
   When ``None`` (the default) the builder's
@@ -76,32 +77,35 @@ alias :class:`~testrange.VM` all take the same keyword arguments:
 Which install path runs depends on the builder:
 
 - :class:`~testrange.vms.builders.CloudInitBuilder` (default for
-  ``.qcow2`` / ``.img`` / ``https://``) → cloud-init install phase,
-  outputs a cached post-install qcow2.
+  cloud disk images and ``https://`` URLs) → cloud-init install
+  phase, outputs a cached post-install image.
 - :class:`~testrange.vms.builders.WindowsUnattendedBuilder` (default
   for Windows install ISOs detected by
   :func:`~testrange.vms.images.is_windows_image`) → Windows Setup
   driven by autounattend, OVMF firmware, SATA primary disk, e1000e
   NIC, ``virtio-win.iso`` for drivers, outputs a cached installed
-  qcow2.  See :doc:`/usage/windows` for the walkthrough.
+  disk image.  See :doc:`/usage/windows` for the walkthrough.
 - :class:`~testrange.vms.builders.NoOpBuilder` — no install phase;
-  the user-supplied qcow2 is staged into the cache by content hash.
+  the user-supplied disk image is staged into the cache by content
+  hash.
 
 The spec is deterministic: two VMs with identical user/package/cmd
 lists map to the same cache hash and share a single compressed disk
 image in the cache.  See
 :meth:`~testrange.vms.builders.base.Builder.cache_key` and
 :func:`~testrange.cache.vm_config_hash`.  ``NoOpBuilder``-backed VMs
-skip the config hash entirely and key their cache on the content hash
-of the user-supplied qcow2.
+skip the config hash entirely and key their cache on the content
+hash of the user-supplied image.
 
 Talking to a running VM
 -----------------------
 
 All runtime calls go through a
-:class:`~testrange.communication.base.AbstractCommunicator`.  For
-Linux guests this is the QEMU guest agent (virtio-serial, no TCP);
-Windows guests default to WinRM.  See :doc:`communication`.
+:class:`~testrange.communication.base.AbstractCommunicator`.  Linux
+guests default to a hypervisor-native side-channel (a host-mediated
+guest-agent socket — each backend wires its own concrete
+implementation); Windows guests default to WinRM.  See
+:doc:`communication`.
 
 The high-level methods on :class:`~testrange.vms.base.AbstractVM` are
 thin wrappers that:
@@ -147,13 +151,13 @@ orchestrator.  It carries three extra fields on top of the plain
 - ``networks`` — :class:`~testrange.VirtualNetwork` specs for the
   inner layer.
 
-The libvirt :class:`Hypervisor` concrete class additionally pre-loads
-``libvirt-daemon-system``, ``qemu-kvm``, and ``qemu-utils`` via apt,
-and adds ``systemctl enable --now libvirtd`` plus ``usermod -aG
-libvirt,kvm`` for each declared user to ``post_install_cmds`` —
-enough for the nested ``qemu+ssh://`` URI to connect and drive the
-inner layer.  Caller-supplied ``pkgs`` / ``post_install_cmds`` are
-appended, so the library's steps run first.
+Each backend's concrete ``Hypervisor`` subclass additionally
+pre-loads its own host-daemon packages and adds the matching
+``systemctl enable --now`` + group-membership commands to
+``post_install_cmds`` — enough for the nested control-plane URI
+to connect and drive the inner layer.  Caller-supplied ``pkgs``
+/ ``post_install_cmds`` are appended, so the library's steps run
+first.
 
 Prerequisites and cross-layer behaviour are documented in
 :doc:`/usage/installation`.
@@ -165,21 +169,16 @@ Reference
    :members:
    :show-inheritance:
 
-.. autoclass:: testrange.backends.libvirt.LibvirtVM
-   :members:
-   :show-inheritance:
-
 .. autoclass:: testrange.vms.base.AbstractVM
-   :members:
-   :show-inheritance:
-
-.. autoclass:: testrange.backends.libvirt.Hypervisor
    :members:
    :show-inheritance:
 
 .. autoclass:: testrange.vms.hypervisor_base.AbstractHypervisor
    :members:
    :show-inheritance:
+
+Concrete backend-specific VM and Hypervisor classes are documented
+under :doc:`backends`.
 
 .. autoclass:: testrange.credentials.Credential
    :members:

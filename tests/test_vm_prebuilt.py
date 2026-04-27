@@ -97,7 +97,7 @@ class TestReadyImage:
         cache = CacheManager(root=tmp_cache_root)
 
         monkeypatch.setattr(
-            "testrange.storage.disk.qcow2._qemu_img_info",
+            "testrange.backends.libvirt._qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -132,7 +132,7 @@ class TestReadyImage:
         )
         cache = CacheManager(root=tmp_cache_root)
         monkeypatch.setattr(
-            "testrange.storage.disk.qcow2._qemu_img_info",
+            "testrange.backends.libvirt._qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -161,7 +161,7 @@ class TestReadyImage:
             builder=NoOpBuilder(),
         )
         monkeypatch.setattr(
-            "testrange.storage.disk.qcow2._qemu_img_info",
+            "testrange.backends.libvirt._qcow2._qemu_img_info",
             lambda _: {"format": "qcow2"},
         )
         run = _local_run(tmp_cache_root)
@@ -197,7 +197,7 @@ class TestReadyImage:
         )
         cache = CacheManager(root=tmp_cache_root)
         monkeypatch.setattr(
-            "testrange.storage.disk.qcow2._qemu_img_info",
+            "testrange.backends.libvirt._qcow2._qemu_img_info",
             lambda _: {"format": "raw"},
         )
         run = _local_run(tmp_cache_root)

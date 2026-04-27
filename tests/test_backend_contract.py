@@ -185,24 +185,32 @@ class TestGuestAgentFactoryIsBackendOverridable:
         comm = vm._make_guest_agent_communicator()
         assert isinstance(comm, GuestAgentCommunicator)
 
-    def test_proxmox_vm_raises_not_implemented_clearly(self) -> None:
-        """Proxmox hasn't implemented guest-agent yet.  Until the real
-        :class:`ProxmoxGuestAgentCommunicator` is wired into
-        :meth:`ProxmoxVM._make_guest_agent_communicator`, the default
-        :meth:`AbstractVM` fallback surfaces a clear error instead of
-        the pre-refactor ``AttributeError: 'ProxmoxVM' has no attribute
-        '_domain'``."""
+    def test_proxmox_vm_produces_proxmox_guest_agent(self) -> None:
+        """End-to-end: ProxmoxVM + ``communicator="guest-agent"``
+        must produce the PVE-REST-flavoured communicator (regression:
+        previously this method raised because the override was a
+        stub).  The VM must already have the orchestrator-side state
+        ``_make_guest_agent_communicator`` reaches for —
+        ``_client`` / ``_node`` / ``_vmid`` — populated, otherwise
+        construction asserts."""
+        from unittest.mock import MagicMock
+
         from testrange import Credential
-        from testrange.backends.proxmox import ProxmoxVM
-        from testrange.exceptions import VMBuildError
+        from testrange.backends.proxmox import (
+            ProxmoxGuestAgentCommunicator,
+            ProxmoxVM,
+        )
 
         vm = ProxmoxVM(
             name="x",
             iso="https://example.com/debian.qcow2",
             users=[Credential("root", "pw")],
         )
-        with pytest.raises(VMBuildError, match="guest-agent"):
-            vm._make_guest_agent_communicator()
+        vm._client = MagicMock()
+        vm._node = "pve01"
+        vm._vmid = 100
+        comm = vm._make_guest_agent_communicator()
+        assert isinstance(comm, ProxmoxGuestAgentCommunicator)
 
 
 # =====================================================================
@@ -261,22 +269,12 @@ class TestScenarioConstructionContract:
 
     @pytest.mark.parametrize("orch_cls,vm_cls,net_cls", BACKEND_TRIPLES)
     def test_promotes_generic_vm_to_native(
-        self, orch_cls, vm_cls, net_cls, request,
+        self, orch_cls, vm_cls, net_cls,
     ) -> None:
         """GenericVM is the backend-agnostic spec; every orchestrator
         must convert it to its own native VM type at __init__ so the
-        rest of provisioning operates on backend-specific instances.
-
-        Proxmox is xfail until its orchestrator wires _promote_to_proxmox;
-        the test will turn green automatically when that happens, which
-        is the point — divergence detection."""
+        rest of provisioning operates on backend-specific instances."""
         del net_cls
-        if orch_cls is ProxmoxOrchestrator:
-            request.node.add_marker(pytest.mark.xfail(
-                reason="ProxmoxOrchestrator scaffolding doesn't promote "
-                       "GenericVM yet; xfail flips to pass when it does",
-                strict=True,
-            ))
 
         from testrange import GenericVM
         spec = _spec("web")
@@ -369,17 +367,26 @@ class TestScenarioLifecycleContract:
     ) -> None:
         """Cleanup is the SIGKILL-recovery hook (``testrange cleanup
         MODULE RUN_ID``).  Backends either implement it cleanly
-        (idempotent best-effort) or raise NotImplementedError with a
-        clear message naming the backend.  Anything else (silent
-        AttributeError, generic exception) breaks the recovery CLI."""
+        (idempotent best-effort) or raise a documented exception
+        kind: ``NotImplementedError`` (backend hasn't wired it yet)
+        or :class:`~testrange.exceptions.OrchestratorError` (couldn't
+        connect, missing credentials, …).  Anything else — silent
+        AttributeError, raw KeyError, or a generic ``Exception`` —
+        breaks the recovery CLI."""
+        from testrange.exceptions import OrchestratorError
+
         del vm_cls, net_cls
         orch = orch_cls()
         run_id = "00000000-0000-0000-0000-000000000000"
         try:
             orch.cleanup(run_id)
         except NotImplementedError as exc:
-            # Default fallback shape: clear message naming the backend.
             assert orch_cls.__name__ in str(exc) or "cleanup" in str(exc).lower()
+        except OrchestratorError:
+            # Connection / credential failures are an acceptable
+            # documented shape — same exception surface ``__enter__``
+            # uses for the same kind of problem.
+            pass
 
 
 class TestScenarioDeterministicNaming:

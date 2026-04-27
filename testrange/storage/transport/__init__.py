@@ -11,10 +11,10 @@ Implementations:
   subprocess.  Identity wrapper; preserves today's behaviour for
   ``Orchestrator(host="localhost")``.
 - :class:`SSHFileTransport` — paramiko SFTP + SSH exec to a remote
-  host.  Lets ``Orchestrator(host="qemu+ssh://...")`` put bytes on
-  the remote and execute tools there.
+  host.  Lets an SSH-style orchestrator URL put bytes on the
+  remote and execute tools there.
 
-Third-party transports (Proxmox REST, Hyper-V PSSession, nested-VM
+Third-party transports (REST, WinRM/PSSession, nested-VM
 communicator, …) land alongside these by subclassing
 :class:`AbstractFileTransport`.
 """

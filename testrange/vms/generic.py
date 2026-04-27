@@ -1,9 +1,9 @@
 """Backend-agnostic VM spec.
 
-:class:`GenericVM` is a sibling of every backend-specific VM (e.g.
-:class:`testrange.backends.libvirt.LibvirtVM`) under
+:class:`GenericVM` is a sibling of every backend-specific VM
+(``<Backend>VM`` under :mod:`testrange.backends.<backend>`) on
 :class:`~testrange.vms.base.AbstractVM` — same architecture as the
-device split (``HardDrive`` vs ``LibvirtHardDrive``).  Use it for
+device split (``HardDrive`` vs ``<Backend>HardDrive``).  Use it for
 tests that don't need any backend-specific knob; the orchestrator
 converts each ``GenericVM`` into its own native VM type at
 ``__enter__`` time.
@@ -43,9 +43,9 @@ class GenericVM(AbstractVM):
     orchestrator translates field-for-field at provision time).
     Pass it as ``vms=[GenericVM(...)]`` when the test doesn't care
     which backend runs it; the orchestrator's :meth:`__enter__` will
-    swap each ``GenericVM`` for its native concrete VM class
-    (e.g. :class:`testrange.backends.libvirt.LibvirtVM`) before any
-    backend code touches it.
+    swap each ``GenericVM`` for its native concrete VM class (the
+    matching ``<Backend>VM`` under :mod:`testrange.backends`) before
+    any backend code touches it.
 
     :param name: Unique name for this VM within a test run.
     :param iso: OS image reference (URL or absolute local path).
@@ -118,8 +118,7 @@ class GenericVM(AbstractVM):
             "spec-only GenericVM.  This means the orchestrator failed "
             "to convert it to its backend-specific VM type at "
             "__enter__; either call the orchestrator inside a "
-            "``with`` block or pass a backend-specific VM "
-            "(e.g. LibvirtVM) directly."
+            "``with`` block or pass a backend-specific VM directly."
         )
 
     def build(

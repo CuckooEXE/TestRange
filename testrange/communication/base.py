@@ -51,13 +51,11 @@ class ExecResult(NamedTuple):
 class AbstractCommunicator(ABC):
     """Abstract interface for communicating with a running VM.
 
-    Concrete implementations must handle the transport details (e.g. QEMU
-    guest agent over virtio-serial).  All methods that contact the VM raise
+    Concrete implementations must handle the transport details (a guest-
+    agent socket on a virtio-serial channel, an SSH session, a WinRM
+    session, …).  All methods that contact the VM raise
     :class:`~testrange.exceptions.VMNotRunningError` if the VM has not been
     started.
-
-    Subclass this to support additional communication channels (e.g. SSH,
-    WinRM).
     """
 
     @abstractmethod

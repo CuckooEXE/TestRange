@@ -21,13 +21,14 @@ Call sites use either explicitly::
     run.storage.disk.resize(ref, "64G")
 
 The split matters because the two axes are genuinely independent.
-Local KVM, remote KVM-over-SSH, and nested KVM-via-communicator all
-share the same disk format (qcow2) but differ entirely in transport;
-a future Hyper-V backend would share the transport story (SSH /
-PSSession / whatever) with one of those but swap the format for
-VHDX.  Keeping them separate means adding a new transport doesn't
-duplicate the per-format tool-argv logic, and adding a new format
-doesn't require knowing whether its target filesystem is local.
+A local hypervisor, a remote hypervisor over SSH, and a nested
+hypervisor reached via the inner-VM communicator all share the same
+disk format but differ entirely in transport; a future hypervisor
+on a different image format would share the transport story with
+one of those but swap the format.  Keeping them separate means
+adding a new transport doesn't duplicate the per-format tool-argv
+logic, and adding a new format doesn't require knowing whether its
+target filesystem is local.
 """
 
 from __future__ import annotations
@@ -74,12 +75,12 @@ class StorageBackend:
                 pass
 
 
-# Pre-composed convenience subclasses (e.g. ``LocalFileTransport +
-# Qcow2DiskFormat``) that pin a specific disk format are
-# **backend-flavoured** — the format binding is the libvirt-leaning
-# bit.  Each backend that wants its own pairings publishes them in
-# its backend module (see :mod:`testrange.backends.libvirt.storage`).
-# The generic storage layer here intentionally stays format-agnostic.
+# Pre-composed convenience subclasses that pin a specific disk
+# format are **backend-flavoured** — the format binding is what
+# locks a pairing to one hypervisor family.  Each backend that
+# wants its own pairings publishes them in its backend module
+# under :mod:`testrange.backends`.  The generic storage layer here
+# intentionally stays format-agnostic.
 
 
 # ---------------------------------------------------------------------------
