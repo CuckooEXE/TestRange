@@ -941,8 +941,9 @@ class ProxmoxVM(AbstractVM):
                     f"{storage}:iso: {exc}"
                 ) from exc
 
-    @staticmethod
+    @classmethod
     def _upload_with_target_name(
+        cls,
         client: Any,
         node: str,
         storage: str,
@@ -951,7 +952,8 @@ class ProxmoxVM(AbstractVM):
         target_filename: str,
         content: str,
     ) -> None:
-        """Upload *source_path* under *target_filename* on PVE storage.
+        """Upload *source_path* under *target_filename* on PVE storage,
+        then wait for the upload task to finish.
 
         proxmoxer's auto-multipart only triggers on bare file handles
         (``isinstance(v, io.IOBase)``); the remote filename comes
@@ -964,15 +966,24 @@ class ProxmoxVM(AbstractVM):
         already has the right name — symlink into a tempdir if the
         real file has a different name (e.g. content-hashed cache
         files), then pass the symlink as a bare file handle.
+
+        PVE's ``POST /storage/{storage}/upload`` returns a UPID and
+        does the actual write asynchronously.  Without waiting on
+        the UPID, a follow-up step that references the file (config
+        ``ide2=local:iso/<file>,media=cdrom`` say) races the
+        background write and trips a 500 ``volume … does not exist``
+        every couple of runs.  Wait for the UPID to reach ``stopped``
+        before returning so callers can attach the file immediately.
         """
         if source_path.name == target_filename:
             with open(source_path, "rb") as fh, log_duration(
                 _log, f"upload {target_filename} ({content})"
             ):
-                client.nodes(node).storage(storage).upload.create(
+                upid = client.nodes(node).storage(storage).upload.create(
                     content=content,
                     filename=fh,
                 )
+                cls._await_upload_upid(client, node, upid, target_filename)
             return
 
         with tempfile.TemporaryDirectory(prefix="tr-pve-upload-") as tmpdir:
@@ -981,10 +992,40 @@ class ProxmoxVM(AbstractVM):
             with open(staged, "rb") as fh, log_duration(
                 _log, f"upload {target_filename} ({content})"
             ):
-                client.nodes(node).storage(storage).upload.create(
+                upid = client.nodes(node).storage(storage).upload.create(
                     content=content,
                     filename=fh,
                 )
+                cls._await_upload_upid(client, node, upid, target_filename)
+
+    @classmethod
+    def _await_upload_upid(
+        cls,
+        client: Any,
+        node: str,
+        upid: object,
+        target_filename: str,
+    ) -> None:
+        """Block until a PVE storage-upload task UPID finishes.
+
+        PVE returns a UPID for every ``upload.create()``.  Some
+        proxmoxer versions surface it as a bare string; others (and
+        smaller-payload synchronous PVE responses) return a dict or
+        ``None`` outright.  Treat anything that doesn't look like a
+        UPID as "already done" — the synchronous-write case where
+        nothing to wait for is correct behaviour.
+        """
+        if isinstance(upid, str) and upid.startswith("UPID:"):
+            cls._wait_for_task(client, node, upid, timeout=300.0)
+            return
+        # Not a UPID — synchronous response, nothing to wait for.
+        # Log only at debug; the upload's own log_duration line
+        # already conveys the call happened.
+        _log.debug(
+            "upload %r returned non-UPID response %r — assuming "
+            "synchronous, no task to wait on",
+            target_filename, upid,
+        )
 
     @staticmethod
     def _wait_for_status(
