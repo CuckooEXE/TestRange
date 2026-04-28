@@ -8,6 +8,52 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE first-boot: chmod 0755 + script body in qcow2 cache key
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Two related fixes for the cache-vs-install gap that left the
+first-boot mechanism silently broken even after the previous
+"prepared ISO not seed ISO" fix.
+
+**Fixed: first-boot script is now chmod 0755 on the prepared
+ISO.**  ``tempfile.NamedTemporaryFile`` creates files mode 0600
+and xorriso's ``-map`` preserves source POSIX bits via Rock
+Ridge, so the embedded ``/proxmox-first-boot`` was landing
+unexecutable.  Verified empirically by extracting that file from
+a reference ISO produced by ``proxmox-auto-install-assistant
+prepare-iso --on-first-boot SCRIPT`` (the upstream tool produces
+0755) and from our own cached prepared ISO (we were producing
+0600).  ``prepare_iso_bytes`` now ``chmod 0755``'s the script
+temp file before xorriso reads it, matching upstream.
+
+**Fixed: ``ProxmoxAnswerBuilder.cache_key`` now folds in the
+rendered first-boot script body.**  This is what made the chmod
+fix not appear to work on its own: the prepared-ISO cache key
+already incorporated the script body's hash (so a script change
+correctly produced a fresh prepared ISO), but the **qcow2 cache
+key didn't** (it hashed only ``vm.pkgs`` / ``vm.post_install_cmds``
+/ ``[network]``, not the rendered script).  Result: a script-side
+fix produced a new prepared ISO, but the qcow2 cache hit the old
+broken install and the new prepared ISO was never used — the VM
+booted from a disk where first-boot had already failed silently.
+Folding ``_first_boot_script(vm)`` into ``cache_key`` guarantees
+that any rendering change (chmod, embed mechanism, the script's
+own commands) invalidates the qcow2 cache too.  No-script case
+hashes an empty string so VMs with no ``vm.pkgs`` /
+``vm.post_install_cmds`` keep the same cache key as before.
+
+**Test surface:** new
+``tests/test_proxmox_answer.py::TestProxmoxAnswerBuilderCacheKey::test_changes_with_first_boot_script_body``
+pins the contract: monkeypatching ``_first_boot_script`` to a
+different return value MUST change ``cache_key``.  Suite is now
+1033 passed / 14 skipped / 0 failed.
+
+**Operator note:** existing cached qcow2 images for PVE Hypervisor
+VMs will be invalidated by this change (their cache key now
+includes a hash of the first-boot script body, which they
+previously ignored).  The next run rebuilds with the chmod fix
+applied; subsequent runs cache-hit normally.
+
 PVE first-boot script lands on the prepared ISO, not the seed ISO
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

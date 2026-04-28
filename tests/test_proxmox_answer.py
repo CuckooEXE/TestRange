@@ -138,6 +138,42 @@ class TestProxmoxAnswerBuilderCacheKey:
         # locality is worth a deliberate decision.
         assert b.cache_key(a) == b.cache_key(c)
 
+    def test_changes_with_first_boot_script_body(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first-boot script body MUST be folded into the cache
+        key.  Without this, a fix to the first-boot mechanism (chmod
+        on the embedded script, a different render output, anything
+        that changes what the install actually does) regenerates the
+        prepared ISO but the qcow2 cache hits the old install — and
+        the new prepared ISO is never used.  Regression case: a
+        previous slice fixed a chmod bug on /proxmox-first-boot but
+        the user's run continued to fail because the qcow2 cache had
+        baked in the broken-permission install.
+        """
+        from testrange.packages import Apt
+        b = ProxmoxAnswerBuilder()
+        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
+
+        # Snapshot the cache key with the current rendered script.
+        key_before = b.cache_key(vm)
+
+        # Now simulate a code change to ``_first_boot_script``: same
+        # vm.pkgs, but the rendered body is different (e.g. logging
+        # added, chmod fix changing the embed path, etc.).
+        import testrange.vms.builders.proxmox_answer as pa
+        monkeypatch.setattr(
+            pa, "_first_boot_script",
+            lambda _vm: "#!/bin/bash\nexec > /var/log/foo 2>&1\n"
+                        "apt-get install -y dnsmasq\n",
+        )
+        key_after = b.cache_key(vm)
+
+        assert key_before != key_after, (
+            "Changing the first-boot script body must invalidate the "
+            "qcow2 cache; otherwise stale installs shadow new builds."
+        )
+
 
 # ----------------------------------------------------------------------
 # build_answer_toml — the TOML emitter is the most important surface;

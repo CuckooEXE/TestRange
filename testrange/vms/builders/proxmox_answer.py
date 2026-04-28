@@ -197,12 +197,22 @@ class ProxmoxAnswerBuilder(Builder):
 
         Includes the same fields other install-phase builders use
         (iso, users, packages, post-install, disk size) plus the
-        ``[network]`` block of ``answer.toml``.  The network block
-        ends up baked into the installed system's
+        ``[network]`` block of ``answer.toml`` AND the rendered
+        ``[first-boot]`` script body.  The network block ends up
+        baked into the installed system's
         ``/etc/network/interfaces``, so two VMs with different
         static IPs produce different installed systems and MUST NOT
-        share a cache entry.  SSH keys are intentionally excluded
-        so key rotation does not invalidate cached builds.
+        share a cache entry.  The first-boot script is what
+        actually installs ``vm.pkgs`` on a PVE host — folding it in
+        means any change to the script (different packages, the
+        rendering function being patched, the embed mechanism on
+        the prepared ISO being fixed) invalidates the qcow2 cache
+        too, so a stale install can't shadow a new build.  Without
+        this fold the prepared-ISO cache key changes when the script
+        changes (good) but the qcow2 cache hits the old install
+        (bad) and the new prepared ISO is never used.  SSH keys
+        are intentionally excluded so key rotation does not
+        invalidate cached builds.
         """
         return vm_config_hash(
             iso=vm.iso,
@@ -210,7 +220,15 @@ class ProxmoxAnswerBuilder(Builder):
                 (c.username, c.password, c.sudo) for c in vm.users
             ],
             package_reprs=[repr(p) for p in vm.pkgs],
-            post_install_cmds=[*vm.post_install_cmds, *self._network_block(vm)],
+            post_install_cmds=[
+                *vm.post_install_cmds,
+                *self._network_block(vm),
+                # Empty string (instead of None) when no script —
+                # keeps the hash stable for the no-pkgs / no-cmds
+                # case while still catching any change to the
+                # rendered script body.
+                _first_boot_script(vm) or "",
+            ],
             disk_size=vm._primary_disk_size(),
         )
 

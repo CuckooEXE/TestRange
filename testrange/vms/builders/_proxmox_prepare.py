@@ -156,6 +156,17 @@ def prepare_iso_bytes(
             tmp.write(first_boot_script.encode("utf-8"))
             script_tmp_path = Path(tmp.name)
             tmp_paths.append(script_tmp_path)
+        # xorriso's ``-map`` preserves the source POSIX mode bits via
+        # Rock Ridge; ``tempfile.NamedTemporaryFile`` defaults to mode
+        # 0600 (no exec bit), so without this chmod the file lands on
+        # the prepared ISO unexecutable, PVE's first-boot service hits
+        # EACCES, and the install completes with no clue why ``dnsmasq``
+        # never showed up.  Verified by extracting
+        # ``/proxmox-first-boot`` from a reference ISO produced by
+        # ``proxmox-auto-install-assistant prepare-iso --on-first-boot
+        # SCRIPT``: the upstream tool produces 0755, ours was producing
+        # 0600.  Match upstream.
+        script_tmp_path.chmod(0o755)
 
     try:
         cmd = [
