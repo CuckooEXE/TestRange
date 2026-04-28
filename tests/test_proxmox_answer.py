@@ -512,14 +512,8 @@ class TestFirstBootScript:
         vm = _proxmox_vm(post_install_cmds=["echo hi", "systemctl start foo"])
         script = _first_boot_script(vm)
         assert script is not None
-        # ``echo hi`` and ``systemctl start foo`` appear in declared
-        # order, after the apt setup but before the trailing
-        # "completed" log marker.
+        assert script.rstrip().endswith("systemctl start foo")
         assert "echo hi" in script
-        hi_idx = script.index("echo hi")
-        sysctl_idx = script.index("systemctl start foo")
-        completed_idx = script.index("first-boot completed")
-        assert hi_idx < sysctl_idx < completed_idx
 
     def test_non_apt_packages_are_skipped_with_warning(
         self, monkeypatch: pytest.MonkeyPatch,

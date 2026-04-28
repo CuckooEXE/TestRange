@@ -8,57 +8,6 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
-PVE first-boot: executable bit, retry-aware preflight, log file
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Three follow-ups after the first-boot script landed on the
-prepared ISO at the right path: the script wasn't getting run
-(silent EACCES), the preflight raced its async completion, and
-when the script *did* fail there was nothing to look at.
-
-**Fixed: first-boot script is now executable on the prepared ISO.**
-``tempfile.NamedTemporaryFile`` creates files mode 0600, and
-xorriso's ``-map`` preserves source POSIX bits via Rock Ridge —
-so the embedded ``/proxmox-first-boot`` landed on the ISO without
-the exec bit, PVE's first-boot service got EACCES at exec time,
-the install completed silently, and downstream
-``_preflight_dnsmasq_installed`` saw "no dnsmasq" with no log to
-explain why.  ``prepare_iso_bytes`` now ``chmod 0755``'s the
-script temp file before xorriso reads it, preserving 0755 on
-the ISO entry.
-
-**Added: 180s polling window in ``_preflight_dnsmasq_installed``.**
-The first-boot hook runs async with sshd coming up — the inner
-``ProxmoxOrchestrator``'s ``__enter__`` happens as soon as sshd
-is reachable, but ``apt-get install -y dnsmasq`` may still be
-fetching the package index.  The previous one-shot probe raced
-that latency and reported "not installed" 30-60s before the apt
-actually finished.  New constants
-``_DNSMASQ_PREFLIGHT_TIMEOUT_S`` (180s) and
-``_DNSMASQ_PREFLIGHT_POLL_S`` (5s) drive a polling loop;
-pre-existing PVE clusters where the package is already installed
-exit on the first probe (zero added latency for the non-nested
-path).  Failure-mode error message now mentions
-``/var/log/testrange-first-boot.log`` for post-mortem.
-
-**Added: first-boot script tees to
-``/var/log/testrange-first-boot.log``.**  Both stdout and stderr
-of every line in the rendered first-boot script (apt update, apt
-install, post_install_cmds) land in the same log file with start
-+ end timestamp markers.  ``apt-get update`` also picks up a
-3-attempt retry loop (5s sleep between) for the case where the
-network is still settling when first-boot fires — a one-off
-``Failed to fetch`` shouldn't tank the whole run.
-
-**Test surface:** ``TestDnsmasqPreflight`` gains an autouse
-fixture that pins the timeout to 0 for the failure-path tests
-(otherwise they'd block the suite for 3 minutes each), plus a new
-``test_retries_until_package_appears`` that simulates the apt
-install completing on the third probe.  Existing
-``test_post_install_cmds_appended_verbatim`` gets ordering
-assertions to match the new log-marker tail.  Suite is now 1033
-passed / 14 skipped / 0 failed across 3 back-to-back runs.
-
 PVE first-boot script lands on the prepared ISO, not the seed ISO
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

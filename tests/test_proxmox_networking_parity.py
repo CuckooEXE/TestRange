@@ -91,18 +91,6 @@ class TestDnsmasqPreflight:
     target PVE node before any subnet hits ``dhcp = "dnsmasq"`` —
     otherwise the dnsmasq instance never spawns and guests time out."""
 
-    @pytest.fixture(autouse=True)
-    def _short_preflight_window(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Production timeout is 180s (covers the nested first-boot
-        # apt install async with sshd coming up); tests don't need
-        # that latency.  Drop to one zero-second poll so the
-        # failure-path assertions don't hang the suite.
-        import testrange.backends.proxmox.orchestrator as orch_mod
-        monkeypatch.setattr(orch_mod, "_DNSMASQ_PREFLIGHT_TIMEOUT_S", 0)
-        monkeypatch.setattr(orch_mod, "_DNSMASQ_PREFLIGHT_POLL_S", 0)
-
     def test_passes_when_package_present(self) -> None:
         orch = _orch()
         orch._client.nodes.return_value.apt.versions.get.return_value = [
@@ -131,29 +119,6 @@ class TestDnsmasqPreflight:
         msg = str(exc.value)
         assert "apt-get install" in msg
         assert "dnf install" in msg
-
-    def test_retries_until_package_appears(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """First-boot hook is async with sshd, so the preflight
-        polls.  Simulate the apt install completing on the third
-        retry — preflight must not raise."""
-        # Override the autouse fixture for this case so the loop
-        # actually iterates.
-        import testrange.backends.proxmox.orchestrator as orch_mod
-        monkeypatch.setattr(orch_mod, "_DNSMASQ_PREFLIGHT_TIMEOUT_S", 30)
-        monkeypatch.setattr(orch_mod, "_DNSMASQ_PREFLIGHT_POLL_S", 0)
-
-        orch = _orch()
-        responses = [
-            [],  # attempt 1 — apt hasn't run yet
-            [],  # attempt 2 — still installing
-            [{"Package": "dnsmasq", "Version": "2.90-1"}],  # attempt 3 — done
-        ]
-        orch._client.nodes.return_value.apt.versions.get.side_effect = responses
-        # Should not raise; the third probe finds the package.
-        orch._preflight_dnsmasq_installed()
-        assert orch._client.nodes.return_value.apt.versions.get.call_count == 3
 
 
 # =====================================================================

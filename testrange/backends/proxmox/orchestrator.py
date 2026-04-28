@@ -78,7 +78,6 @@ from __future__ import annotations
 
 import contextlib
 import ipaddress
-import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
@@ -128,23 +127,6 @@ _PROXMOX_INSTALL_SUBNET = _INSTALL_SUBNET_POOL[0]
 """Backwards-compat alias for the first pool entry — the constant
 some tests still import directly.  Prefer
 :data:`_INSTALL_SUBNET_POOL` for new code."""
-
-
-_DNSMASQ_PREFLIGHT_TIMEOUT_S = 180
-"""Maximum wait for the ``dnsmasq`` package to appear on the target
-PVE node before declaring the preflight failed.
-
-Sized for the nested-Hypervisor case where the PVE installer's
-``[first-boot]`` hook runs ``apt-get install -y dnsmasq`` async with
-sshd coming up — the inner orchestrator's ``__enter__`` happens as
-soon as sshd is reachable, but apt may still be fetching the package
-index.  3 minutes covers a slow first-boot apt with the install
-network in NAT mode and a cold mirror.  Pre-existing PVE clusters
-(where the package is already installed) exit on the first probe."""
-
-_DNSMASQ_PREFLIGHT_POLL_S = 5
-"""Sleep between ``apt/versions`` retries while waiting for the
-first-boot hook to finish installing ``dnsmasq``."""
 
 
 DEFAULT_ZONE = "tr"
@@ -1539,80 +1521,42 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         installed-package list; we substring-match for ``dnsmasq`` in
         the package names.  When TestRange itself built the PVE node
         as the outer VM of a :class:`Hypervisor` (see
-        :meth:`prepare_outer_vm`), ``dnsmasq`` is added to the
-        install-time package list and the answer-builder's
-        ``[first-boot]`` script runs ``apt-get install -y dnsmasq``
-        on first boot — but ``[first-boot]`` is async with sshd
-        coming up, so the inner ``ProxmoxOrchestrator``'s
-        ``__enter__`` can race the apt install.  Poll up to
-        :data:`_DNSMASQ_PREFLIGHT_TIMEOUT_S` to absorb that latency
-        before declaring the package missing; against pre-existing
-        PVE clusters the package is always present, so the loop
-        exits on the first probe.
+        :meth:`prepare_outer_vm`), ``dnsmasq`` is in the install-time
+        package list so this check passes by construction; the
+        explicit probe matters only against pre-existing PVE clusters
+        the user pointed us at.
 
-        :raises OrchestratorError: When the package is still absent
-            after the polling window.
+        :raises OrchestratorError: When the package isn't present.
         """
         assert self._client is not None
-        deadline = time.monotonic() + _DNSMASQ_PREFLIGHT_TIMEOUT_S
-        attempt = 0
-        last_exc: Exception | None = None
-        while True:
-            attempt += 1
-            try:
-                packages = (
-                    self._client.nodes(self._node).apt.versions.get() or []
-                )
-            except Exception as exc:
-                last_exc = exc
-                packages = []
-            # Each entry is a dict with ``Package`` (or ``Title`` on
-            # older PVE) keying the apt name; substr-match keeps us
-            # tolerant of both shapes and of extras like
-            # ``dnsmasq-base`` shipping without ``dnsmasq`` itself.
-            names = [
-                str(entry.get("Package") or entry.get("Title") or "")
-                for entry in packages
-            ]
-            if any("dnsmasq" in name and "base" not in name for name in names):
-                _log.debug(
-                    "dnsmasq present on node %r (attempt %d)",
-                    self._node, attempt,
-                )
-                return
-            if time.monotonic() >= deadline:
-                break
-            _log.debug(
-                "dnsmasq not yet present on node %r (attempt %d) — "
-                "first-boot may still be running, retrying in %ds",
-                self._node, attempt, _DNSMASQ_PREFLIGHT_POLL_S,
+        try:
+            packages = self._client.nodes(self._node).apt.versions.get() or []
+        except Exception as exc:
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: cannot query installed packages "
+                f"on node {self._node!r} via /apt/versions: {exc}"
+            ) from exc
+        # Each entry is a dict with ``Package`` (or ``Title`` on older
+        # PVE) keying the apt name; substr-match keeps us tolerant of
+        # both shapes and of extras like ``dnsmasq-base`` shipping
+        # without ``dnsmasq`` itself.
+        names = [
+            str(entry.get("Package") or entry.get("Title") or "")
+            for entry in packages
+        ]
+        if not any("dnsmasq" in name and "base" not in name for name in names):
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: ``dnsmasq`` is not installed on "
+                f"PVE node {self._node!r}.  TestRange relies on PVE's "
+                "SDN dnsmasq integration for per-vnet DHCP + DNS.  "
+                "Install on the node:\n"
+                "  Debian/Ubuntu:  sudo apt-get install -y dnsmasq\n"
+                "  RHEL/Rocky:     sudo dnf install -y dnsmasq\n"
+                "Then re-run.  (When TestRange builds the PVE host "
+                "itself via testrange.Hypervisor, dnsmasq is added to "
+                "the install package list automatically.)"
             )
-            time.sleep(_DNSMASQ_PREFLIGHT_POLL_S)
-
-        # Polling window exhausted; surface a clear error with hints
-        # for both manual install (pre-existing cluster) and post-
-        # mortem debugging (nested PVE Hypervisor build, where the
-        # install was supposed to happen via the first-boot hook).
-        connect_note = (
-            f"  Last REST error while polling: {last_exc}\n"
-            if last_exc is not None else ""
-        )
-        raise OrchestratorError(
-            f"ProxmoxOrchestrator: ``dnsmasq`` is not installed on "
-            f"PVE node {self._node!r} after polling for "
-            f"{_DNSMASQ_PREFLIGHT_TIMEOUT_S}s.  TestRange relies on "
-            "PVE's SDN dnsmasq integration for per-vnet DHCP + DNS.\n"
-            f"{connect_note}"
-            "Install on the node:\n"
-            "  Debian/Ubuntu:  sudo apt-get install -y dnsmasq\n"
-            "  RHEL/Rocky:     sudo dnf install -y dnsmasq\n"
-            "Then re-run.  When TestRange builds the PVE host itself "
-            "via testrange.Hypervisor, dnsmasq is added to the install "
-            "package list and installed via the answer.toml "
-            "[first-boot] hook — if the hook ran but failed, look at "
-            "``/var/log/testrange-first-boot.log`` on the PVE node "
-            "for the apt error."
-        )
+        _log.debug("dnsmasq present on node %r", self._node)
 
     def _ensure_sdn_zone(self) -> None:
         """Create our SDN simple-zone if it doesn't already exist.

@@ -156,14 +156,6 @@ def prepare_iso_bytes(
             tmp.write(first_boot_script.encode("utf-8"))
             script_tmp_path = Path(tmp.name)
             tmp_paths.append(script_tmp_path)
-        # xorriso's ``-map`` preserves the source file's POSIX mode
-        # bits via Rock Ridge.  ``tempfile.NamedTemporaryFile``
-        # creates files mode 0600 (no exec bit), so without this
-        # chmod the script lands on the ISO unexecutable and PVE
-        # gets EACCES when it tries to run it (the install
-        # completes silently without the script ever firing, and
-        # downstream code wonders why dnsmasq isn't installed).
-        script_tmp_path.chmod(0o755)
 
     try:
         cmd = [
