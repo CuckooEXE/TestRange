@@ -1091,10 +1091,20 @@ class Orchestrator(AbstractOrchestrator):
                     # Static IP — register with the explicit address
                     net.register_vm(vm.name, nic.ip)
                 else:
-                    # Auto-assign from the subnet
+                    # Auto-assign from the subnet, then stamp the
+                    # picked IP back onto the vNIC so downstream
+                    # readers (ProxmoxAnswerBuilder._network_block in
+                    # particular — it inspects ``vNIC.ip`` directly
+                    # and falls back to a broken ``from-dhcp`` mode
+                    # when None) see a unified static-IP view.  The
+                    # libvirt cloud-init builder also benefits: it
+                    # gets to emit a static network-config block
+                    # instead of ``dhcp4: true``, skipping a DHCP
+                    # round-trip at boot for the same end address.
                     idx = net_counters[nic.ref]
                     ip = net.static_ip_for_index(idx)
                     net_counters[nic.ref] = idx + 1
+                    nic.ip = ip
                     net.register_vm(vm.name, ip)
 
     def _find_network(self, name: str) -> VirtualNetwork | None:

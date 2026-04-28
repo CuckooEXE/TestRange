@@ -192,6 +192,22 @@ class TestDhcpDiscovery:
         # is ``10.42.0.2``.
         assert registered == [("web", "10.42.0.2")]
 
+    def test_picked_ip_is_stamped_back_onto_vnic(self) -> None:
+        # Downstream consumers (ProxmoxAnswerBuilder._network_block,
+        # cloud-init network-config readers) inspect ``vNIC.ip``
+        # directly.  The orchestrator stamps the picked IP back onto
+        # the vNIC after allocation so they see a unified static-IP
+        # view — without this, the answer builder falls back to
+        # ``from-dhcp`` mode and the PVE installer freezes the wrong
+        # (install-phase) lease into /etc/network/interfaces.
+        net = self._net()
+        vm = _vm("web", network="Net", ip=None)
+        nic = vm.devices[2]  # vCPU, Memory, vNIC
+        assert nic.ip is None
+        orch = _orch(vms=[vm], networks=[net])
+        orch._setup_vm_networks()
+        assert nic.ip == "10.42.0.2"
+
     def test_multiple_dhcp_vms_get_sequential_addresses(self) -> None:
         # Determinism in declaration order — same VMs in the same
         # order should land on the same IPs across runs, which is

@@ -1188,6 +1188,17 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                         f"{[n.name for n in self._networks]!r}"
                     )
                 ip = ref.ip or self._allocate_dhcp_ip(net, vm.name)
+                # Stamp the picked IP back onto the vNIC so any
+                # downstream reader (cloud-init network-config,
+                # ProxmoxAnswerBuilder._network_block, …) sees a
+                # unified static-IP view.  Without this stamp the
+                # answer builder reads ``ref.ip is None`` and falls
+                # back to ``source = "from-dhcp"``, which freezes the
+                # install-phase DHCP lease (from the throwaway
+                # 192.168.23x install vnet) as the run-phase config —
+                # leaving the VM unreachable.  Static ``ip=`` values
+                # are unchanged because ``or`` short-circuits.
+                ref.ip = ip
                 net.register_vm(vm.name, ip)
 
     def _allocate_dhcp_ip(
