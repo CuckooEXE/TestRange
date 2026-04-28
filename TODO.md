@@ -252,7 +252,47 @@ an ignored teardown error.
 - Skip-if-not-bound in the network teardown loop so unstarted
   run-phase networks don't pollute the log with teardown errors.
 
-### 11. Migrate ``_proxmox_prepare`` off the ``xorriso`` binary
+### 11. WinRM communicator missing on Proxmox
+
+**Where:** ``testrange/backends/proxmox/`` — no parallel to
+``testrange.backends.libvirt.guest_agent.GuestAgentCommunicator`` /
+the WinRM communicator wired up for libvirt VMs.  The proxmox
+backend currently routes Windows VMs through QEMU guest-agent
+only.
+
+**Why it bothers us:** when a Windows VM doesn't have the QEMU
+guest-agent installed (cold install ISO, snapshot from before
+guest-agent was rolled out, third-party Windows image without the
+``virtio-win`` tools) there's no fallback remote-exec path on
+Proxmox.  libvirt tests can use ``communicator='winrm'``; the
+same test against ``ProxmoxOrchestrator`` fails because no
+communicator class accepts that kwarg.  Blocks every Windows-VM
+use case on PVE except the narrow "guest-agent already running"
+case.
+
+**Sketch:**
+
+- New ``testrange/backends/proxmox/winrm.py`` mirroring the
+  guest-agent module's shape: an ``AbstractCommunicator``
+  subclass, but instead of routing exec calls through PVE's
+  ``/agent/`` REST endpoints, it talks WinRM directly to the
+  guest's ``5985`` / ``5986`` over the routable network the VM
+  was provisioned on.
+- ProxmoxOrchestrator must ensure WinRM gets enabled at install
+  time — same ``Enable-PSRemoting -Force`` autounattend snippet
+  the libvirt path injects, plus a Windows-firewall rule for
+  the inbound port.  ``WindowsUnattendedBuilder`` already knows
+  how to render those steps; the proxmox-side wiring just needs
+  to set them up via ``answer.toml`` / first-boot scripts.
+- Open question: PVE's SDN simple zones don't bridge inner
+  subnets to the outer host without an explicit route (see
+  TODO #8 below), so WinRM-from-the-host-to-an-inner-VM only
+  works when the outer host can reach the inner IP.  Either
+  document the routing requirement or have the communicator
+  hop through a PVE-side proxy (proxy via guest-agent if
+  available; otherwise raise a helpful error).
+
+### 12. Migrate ``_proxmox_prepare`` off the ``xorriso`` binary
 
 **Where:** ``testrange/vms/builders/_proxmox_prepare.py`` —
 :func:`prepare_iso_bytes` shells out to the ``xorriso`` CLI via
@@ -343,7 +383,7 @@ codebase.
 isn't on ``$PATH``, so the failure mode is a clear "install this
 package" rather than a confusing prepared-ISO bug.
 
-### 12. Module of test_orchestrator.py has a flaky memory-preflight test
+### 13. Module of test_orchestrator.py has a flaky memory-preflight test
 
 **Where:**
 `tests/test_orchestrator.py::TestCleanupStaleInstallNetworks::test_runs_before_install_network_start`.
