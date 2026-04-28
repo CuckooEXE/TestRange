@@ -541,7 +541,11 @@ class TestGetProxmoxPreparedIso:
 
         prep_calls: list[tuple[Path, Path]] = []
 
-        def _fake_prep(src, dst, *, partition_label="PROXMOX-AIS"):
+        def _fake_prep(
+            src, dst, *,
+            partition_label="PROXMOX-AIS",
+            first_boot_script=None,
+        ):
             prep_calls.append((Path(src), Path(dst)))
             Path(dst).write_bytes(b"prepared iso contents")
 
@@ -580,6 +584,43 @@ class TestGetProxmoxPreparedIso:
 
         second = c.get_proxmox_prepared_iso(vanilla)
         assert second == first
+
+    def test_first_boot_script_changes_cache_key(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Different first-boot scripts must produce different cached
+        prepared-ISO files — otherwise a hypervisor that needs apt
+        package X would silently get a prepared ISO with another
+        hypervisor's script (Y).  Cache key incorporates a sha256
+        prefix of the script body."""
+        c = CacheManager(root=tmp_cache_root)
+        vanilla = tmp_cache_root / "vanilla.iso"
+        vanilla.write_bytes(b"vanilla")
+
+        import testrange.vms.builders._proxmox_prepare as pp
+        seen_scripts: list[str | None] = []
+
+        def _fake_prep(_s, dst, *, partition_label="PROXMOX-AIS",
+                       first_boot_script=None):
+            seen_scripts.append(first_boot_script)
+            Path(dst).write_bytes((first_boot_script or "").encode() or b"-")
+
+        monkeypatch.setattr(pp, "prepare_iso_bytes", _fake_prep)
+
+        no_script = c.get_proxmox_prepared_iso(vanilla)
+        with_script_a = c.get_proxmox_prepared_iso(
+            vanilla, first_boot_script="apt install dnsmasq",
+        )
+        with_script_b = c.get_proxmox_prepared_iso(
+            vanilla, first_boot_script="apt install nginx",
+        )
+        # All three are distinct files.
+        assert len({no_script, with_script_a, with_script_b}) == 3
+        # And each ran the prep exactly once (no script collapsed
+        # the two non-empty cases into one).
+        assert seen_scripts == [
+            None, "apt install dnsmasq", "apt install nginx",
+        ]
 
     def test_partial_cleaned_on_prep_failure(
         self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,

@@ -8,6 +8,48 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE first-boot script lands on the prepared ISO, not the seed ISO
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Fixed: first-boot script embedded at the wrong ISO path.**  The
+previous "Proxmox SDN" slice (just below) added the
+``[first-boot] source = "from-iso"`` mechanism so PVE Hypervisor
+builds could install ``dnsmasq`` (and any user-supplied
+``vm.pkgs``).  The script body was embedded on the *answer seed
+ISO* at ``/first-boot``; PVE's ``proxmox-fetch-answer`` reads it
+from the *prepared installer ISO* at ``/proxmox-first-boot``
+instead, so the install aborted with "Failed loading first-boot
+executable from iso (was iso prepared with --on-first-boot)".
+Path verified by grepping the local
+``/usr/bin/proxmox-auto-install-assistant`` binary.
+
+The script now lives where PVE expects it: an extended
+``prepare_iso_bytes`` (in
+``testrange/vms/builders/_proxmox_prepare.py``) takes an optional
+``first_boot_script=`` kwarg and adds a second ``-map`` to the
+xorriso invocation, embedding the script at ``/proxmox-first-boot``
+alongside the existing ``/auto-installer-mode.toml``.
+``CacheManager.get_proxmox_prepared_iso`` grew the same kwarg and
+now hashes the script body into the prepared-ISO cache key
+(``proxmox-prepared-<vanilla-sha>-fb<script-sha>.iso``) — same
+vanilla + same script gets a cache hit, different script triggers
+a fresh prep.  ``ProxmoxAnswerBuilder.prepare_install_domain``
+threads the rendered script to the prepared-ISO call instead of
+the seed-ISO call; ``build_proxmox_seed_iso_bytes`` loses its
+``first_boot_script=`` parameter (it never belonged there).
+
+**Test surface:** new
+``tests/test_cache.py::TestGetProxmoxPreparedIso::test_first_boot_script_changes_cache_key``
+pins the cache-key contract (no script vs. two different scripts
+→ three distinct cached files).  New
+``tests/test_proxmox_answer.py::TestPrepareInstallDomain::test_first_boot_script_threads_to_prepared_iso``
+asserts the answer builder calls
+``cache.get_proxmox_prepared_iso`` with the rendered script.
+``TestBuildProxmoxSeedIsoBytes`` keeps a single test asserting
+the seed ISO carries *only* ``answer.toml`` (no stray
+``/first-boot`` from a future refactor).  Suite is now 1032
+passed / 14 skipped / 0 failed.
+
 Proxmox SDN: per-vnet dnsmasq + IPAM (libvirt parity)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

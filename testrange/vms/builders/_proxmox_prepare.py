@@ -81,14 +81,16 @@ def prepare_iso_bytes(
     out_path: Path,
     *,
     partition_label: str = _PARTITION_LABEL_DEFAULT,
+    first_boot_script: str | None = None,
 ) -> None:
     """Write an auto-install-enabled copy of *vanilla_iso_path* to *out_path*.
 
     Drives ``xorriso -indev VANILLA -outdev OUT -boot_image any keep
-    -map TOML /auto-installer-mode.toml -commit``: the ``-boot_image
-    any keep`` flag preserves the original El Torito + hybrid
-    GPT/MBR/HFS+ infrastructure so PVE's UEFI GRUB can still find the
-    EFI System Partition the way it expects.
+    -map TOML /auto-installer-mode.toml [-map SCRIPT
+    /proxmox-first-boot] -commit``: the ``-boot_image any keep``
+    flag preserves the original El Torito + hybrid GPT/MBR/HFS+
+    infrastructure so PVE's UEFI GRUB can still find the EFI System
+    Partition the way it expects.
 
     :param vanilla_iso_path: Existing PVE installer ISO on disk.
     :param out_path: Where to write the prepared ISO.  Must not exist
@@ -96,6 +98,13 @@ def prepare_iso_bytes(
     :param partition_label: Volume label the prepared installer
         searches for at install time to read ``answer.toml``.
         Defaults to ``PROXMOX-AIS``.
+    :param first_boot_script: Optional bash script body to embed at
+        ``/proxmox-first-boot`` on the prepared ISO — the path PVE's
+        ``proxmox-fetch-answer`` looks at when ``answer.toml`` carries
+        ``[first-boot] source = "from-iso"``.  Mirrors the upstream
+        ``proxmox-auto-install-assistant prepare-iso --on-first-boot
+        SCRIPT`` flag.  When ``None``, the [first-boot] field on the
+        ISO is left empty (PVE skips the hook).
     :raises ProxmoxPrepareError: When ``xorriso`` is missing on
         ``$PATH``, when the vanilla ISO can't be opened, or when
         ``xorriso`` itself returns non-zero.
@@ -115,8 +124,9 @@ def prepare_iso_bytes(
         )
 
     _log.info(
-        "preparing PVE ISO %s → %s (partition_label=%s)",
+        "preparing PVE ISO %s → %s (partition_label=%s, first-boot=%s)",
         vanilla_iso_path, out_path, partition_label,
+        "yes" if first_boot_script else "no",
     )
 
     toml_body = _AUTO_INSTALLER_MODE_TOML.format(
@@ -124,15 +134,28 @@ def prepare_iso_bytes(
     )
 
     # xorriso's ``-map LOCAL ISO`` takes a real filesystem path, so
-    # stage the TOML body in a temp file for the duration of the
-    # subprocess call.
+    # stage every payload (TOML body, optional first-boot script) in
+    # temp files for the duration of the subprocess call.
+    tmp_paths: list[Path] = []
     with tempfile.NamedTemporaryFile(
         prefix="testrange-auto-installer-mode-",
         suffix=".toml",
         delete=False,
     ) as tmp:
         tmp.write(toml_body.encode("utf-8"))
-        tmp_path = Path(tmp.name)
+        toml_tmp_path = Path(tmp.name)
+        tmp_paths.append(toml_tmp_path)
+
+    script_tmp_path: Path | None = None
+    if first_boot_script is not None:
+        with tempfile.NamedTemporaryFile(
+            prefix="testrange-proxmox-first-boot-",
+            suffix=".sh",
+            delete=False,
+        ) as tmp:
+            tmp.write(first_boot_script.encode("utf-8"))
+            script_tmp_path = Path(tmp.name)
+            tmp_paths.append(script_tmp_path)
 
     try:
         cmd = [
@@ -161,9 +184,20 @@ def prepare_iso_bytes(
             # exactly — which PVE's UEFI GRUB depends on for
             # locating its own ``grub.cfg``.
             "-boot_image", "any", "keep",
-            "-map", str(tmp_path), "/auto-installer-mode.toml",
-            "-commit",
+            "-map", str(toml_tmp_path), "/auto-installer-mode.toml",
         ]
+        if script_tmp_path is not None:
+            # ``/proxmox-first-boot`` is the literal path
+            # ``proxmox-auto-install-assistant prepare-iso
+            # --on-first-boot`` writes — verified against the
+            # ``proxmox-first-boot`` string baked into the
+            # proxmox-auto-install-assistant binary at
+            # ``/usr/bin/proxmox-auto-install-assistant``.  Anything
+            # else and PVE's installer logs "Failed loading
+            # first-boot executable from iso (was iso prepared with
+            # --on-first-boot)" and aborts the install.
+            cmd += ["-map", str(script_tmp_path), "/proxmox-first-boot"]
+        cmd += ["-commit"]
         with log_duration(_log, "write prepared PVE ISO"):
             try:
                 subprocess.run(
@@ -186,10 +220,11 @@ def prepare_iso_bytes(
                     f"xorriso disappeared between which() and exec(): {exc}"
                 ) from exc
     finally:
-        try:
-            tmp_path.unlink()
-        except OSError:
-            pass
+        for path in tmp_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
 
 __all__ = [

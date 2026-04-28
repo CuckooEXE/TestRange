@@ -222,9 +222,23 @@ class ProxmoxAnswerBuilder(Builder):
     ) -> InstallDomain:
         # 1. Resolve the vanilla installer ISO (download if needed),
         #    then produce a prepared copy whose initrd drops into
-        #    auto-install / fetch-from-partition mode.
+        #    auto-install / fetch-from-partition mode.  The first-
+        #    boot script (if vm.pkgs / vm.post_install_cmds asked
+        #    for one) lands on the *prepared installer ISO* at
+        #    ``/proxmox-first-boot`` — the literal path PVE's
+        #    ``proxmox-fetch-answer`` reads.  An earlier version put
+        #    it on the answer seed ISO; PVE's installer aborts with
+        #    "Failed loading first-boot executable from iso (was iso
+        #    prepared with --on-first-boot)" because it only checks
+        #    the installer ISO for that file.  Cache key on the
+        #    prepared-ISO side incorporates the script hash so VMs
+        #    with different first-boot payloads get distinct cached
+        #    images.
         vanilla = resolve_image(vm.iso, cache)
-        prepared_local = cache.get_proxmox_prepared_iso(vanilla)
+        prepared_local = cache.get_proxmox_prepared_iso(
+            vanilla,
+            first_boot_script=_first_boot_script(vm),
+        )
         prepared_ref = cache.stage_source(prepared_local, run.storage)
 
         # 2. Blank OS disk — the PVE installer partitions it itself
@@ -233,11 +247,11 @@ class ProxmoxAnswerBuilder(Builder):
             vm.name, vm._primary_disk_size()
         )
 
-        # 3. Seed ISO carrying answer.toml (and optionally a
-        #    first-boot script if vm.pkgs / vm.post_install_cmds
-        #    asked for one), labeled so the prepared installer's
-        #    partition fetch finds it.  The filename convention is
-        #    builder-specific (the PVE installer looks for the
+        # 3. Seed ISO carrying answer.toml only — the [first-boot]
+        #    section in the TOML points the installer at the
+        #    ``/proxmox-first-boot`` file we already embedded in the
+        #    prepared installer ISO above.  The filename convention
+        #    is builder-specific (the PVE installer looks for the
         #    ``PROXMOX-AIS`` label rather than reading the filename),
         #    so compose via the generic :meth:`RunDir.path_for`
         #    helper rather than the cloud-init-specific seed helpers.
@@ -246,7 +260,6 @@ class ProxmoxAnswerBuilder(Builder):
             seed_ref,
             build_proxmox_seed_iso_bytes(
                 self.build_answer_toml(vm),
-                first_boot_script=_first_boot_script(vm),
                 volume_label=self.partition_label,
             ),
         )
@@ -542,7 +555,6 @@ def _toml_str(value: str) -> str:
 def build_proxmox_seed_iso_bytes(
     answer_toml: str,
     *,
-    first_boot_script: str | None = None,
     volume_label: str = _DEFAULT_PARTITION_LABEL,
 ) -> bytes:
     """Return the raw bytes of a ``PROXMOX-AIS``-labeled seed ISO.
@@ -554,13 +566,16 @@ def build_proxmox_seed_iso_bytes(
     attached filesystems for one with *volume_label* and reads
     ``answer.toml`` from its root.
 
+    The first-boot script (when the answer.toml asks for one via
+    ``[first-boot] source = "from-iso"``) does **not** live here —
+    PVE's ``proxmox-fetch-answer`` reads it from
+    ``/proxmox-first-boot`` on the *prepared installer ISO* instead.
+    See :func:`testrange.vms.builders._proxmox_prepare.prepare_iso_bytes`
+    and :meth:`testrange.cache.CacheManager.get_proxmox_prepared_iso`
+    for the embed + cache path.
+
     :param answer_toml: The rendered TOML content (see
         :meth:`ProxmoxAnswerBuilder.build_answer_toml`).
-    :param first_boot_script: Optional bash script body.  When set,
-        embedded at ``/first-boot`` (Joliet name) on the ISO so the
-        PVE installer's ``[first-boot] source = "from-iso"`` step
-        finds + executes it on first boot of the freshly-installed
-        system.  Caller composes via :func:`_first_boot_script`.
     :param volume_label: ISO volume label — must match the
         ``partition_label`` baked into the prepared installer ISO's
         initrd.  Defaults to the stock ``PROXMOX-AIS``.
@@ -577,16 +592,6 @@ def build_proxmox_seed_iso_bytes(
             iso_path="/ANSWER.TOM;1",
             joliet_path="/answer.toml",
         )
-        if first_boot_script is not None:
-            script_bytes = first_boot_script.encode("utf-8")
-            iso.add_fp(
-                io.BytesIO(script_bytes),
-                len(script_bytes),
-                # ISO9660 short name (8.3 + ;version); Joliet path is
-                # the one PVE actually reads.
-                iso_path="/FIRSTBT.;1",
-                joliet_path="/first-boot",
-            )
         iso.write_fp(buf)
         return buf.getvalue()
     except Exception as exc:

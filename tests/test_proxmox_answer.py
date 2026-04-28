@@ -446,47 +446,33 @@ class TestBuildProxmoxSeedIsoBytes:
         with pytest.raises(CloudInitError, match="boom"):
             build_proxmox_seed_iso_bytes("body")
 
-    def test_first_boot_script_embedded_when_provided(
+    def test_seed_iso_carries_only_answer_toml(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The first-boot mechanism is what bridges TestRange's
-        ``vm.pkgs`` / ``vm.post_install_cmds`` into the otherwise-
-        sealed PVE installer.  When the caller passes a script body,
-        the seed ISO must carry it at ``/first-boot`` (Joliet name —
-        what the PVE installer reads)."""
-        import testrange.vms.builders.proxmox_answer as pa
-
-        iso_obj = MagicMock()
-        monkeypatch.setattr(pa, "PyCdlib", lambda: iso_obj)
-
-        build_proxmox_seed_iso_bytes(
-            "mode = \"partition\"\n",
-            first_boot_script="#!/bin/bash\napt-get install -y dnsmasq\n",
-        )
-
-        # Two add_fp calls: answer.toml + first-boot script.
-        assert iso_obj.add_fp.call_count == 2
-        joliet_paths = {
-            call.kwargs["joliet_path"]
-            for call in iso_obj.add_fp.call_args_list
-        }
-        assert joliet_paths == {"/answer.toml", "/first-boot"}
-
-    def test_no_first_boot_file_when_script_omitted(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # The default callers don't pass ``first_boot_script`` and the
-        # ISO must NOT carry a stray ``/first-boot`` placeholder
-        # (PVE's installer would try to execute it and fail).
+        """The seed ISO must NOT carry a first-boot script — PVE's
+        ``proxmox-fetch-answer`` reads it from
+        ``/proxmox-first-boot`` on the *prepared installer ISO*
+        instead.  An earlier slice incorrectly embedded the script
+        on the seed ISO; PVE then aborted the install with "Failed
+        loading first-boot executable from iso (was iso prepared
+        with --on-first-boot)".  Pin the contract so the script
+        never sneaks back onto the wrong ISO."""
         import testrange.vms.builders.proxmox_answer as pa
 
         iso_obj = MagicMock()
         monkeypatch.setattr(pa, "PyCdlib", lambda: iso_obj)
 
         build_proxmox_seed_iso_bytes("body")
+
+        # Exactly one add_fp call: answer.toml.  No first-boot, no
+        # other payloads.
         assert iso_obj.add_fp.call_count == 1
+        joliet_paths = {
+            call.kwargs["joliet_path"]
+            for call in iso_obj.add_fp.call_args_list
+        }
+        assert joliet_paths == {"/answer.toml"}
 
 
 # ----------------------------------------------------------------------
@@ -645,6 +631,47 @@ class TestPrepareInstallDomain:
             _proxmox_vm(), run, cache,
         )
         assert spec.uefi is False
+        run.cleanup()
+
+    def test_first_boot_script_threads_to_prepared_iso(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When ``vm.pkgs`` carries an apt package, the rendered
+        first-boot script must be passed to
+        ``cache.get_proxmox_prepared_iso`` (so the script lands at
+        ``/proxmox-first-boot`` on the prepared installer ISO PVE
+        actually reads).  Easy regression to spot if a future
+        refactor accidentally puts the script back on the seed ISO
+        — call args on the cache.get_proxmox_prepared_iso mock
+        nail it down."""
+        from testrange._run import RunDir
+        from testrange.backends.libvirt.storage import LocalStorageBackend
+        from testrange.packages import Apt
+
+        run = RunDir(LocalStorageBackend(tmp_path))
+        cache = MagicMock()
+        cache.get_proxmox_prepared_iso.return_value = tmp_path / "p.iso"
+        cache.stage_source.side_effect = lambda p, _b: str(p)
+
+        import testrange.vms.builders.proxmox_answer as pa
+        monkeypatch.setattr(
+            pa, "build_proxmox_seed_iso_bytes",
+            lambda _toml, **_kw: b"seed",
+        )
+        monkeypatch.setattr(
+            pa, "resolve_image", lambda iso, _c: Path("/c/" + iso.split("/")[-1]),
+        )
+
+        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
+        ProxmoxAnswerBuilder().prepare_install_domain(vm, run, cache)
+
+        script = cache.get_proxmox_prepared_iso.call_args.kwargs[
+            "first_boot_script"
+        ]
+        assert script is not None
+        assert "apt-get install -y dnsmasq" in script
         run.cleanup()
 
 
