@@ -5,18 +5,39 @@ onto an SDN vnet under the orchestrator's simple-zone (created on
 ``__enter__``).  The vnet carries a single subnet whose CIDR matches
 the user-supplied :attr:`subnet`.
 
-Static IPs vs. SDN DHCP
------------------------
+DHCP + DNS via PVE SDN dnsmasq
+------------------------------
 
-PVE SDN can serve DHCP off a subnet via its ``dhcp-range`` and
-``dhcp-dns-server`` fields, which feed an IPAM database that tracks
-allocations.  We don't use that yet — TestRange VMs that need a fixed
-address get one through their own config path (cloud-init
-``network-config``, ``answer.toml`` ``[network]`` block, autounattend
-NIC settings) so we sidestep the IPAM reservation dance entirely.
-:meth:`register_vm` records the ``(name, mac, ip)`` tuple so a future
-slice can flip on IPAM-backed reservations without rewriting the
-caller surface.
+Every TestRange-created subnet ships with ``dhcp = "dnsmasq"`` set,
+which tells PVE to spin up a per-vnet ``dnsmasq`` instance bound to
+the vnet's bridge interface.  Each VM that calls :meth:`register_vm`
+also lands in the SDN IPAM (``POST /cluster/sdn/vnets/{vnet}/ips``)
+with ``(mac, ip, hostname=<vm>.<vnet>)``.  PVE turns those IPAM
+entries into ``dhcp-host=...`` directives for the dnsmasq config it
+generates, so:
+
+* DHCP requests from registered MACs receive their reserved IP
+  (deterministic for tests; same address every run).
+* dnsmasq's DNS service resolves ``<vm>.<vnet>`` to the reserved IP
+  for any querier on the vnet — libvirt-style cross-VM hostname
+  resolution.
+* The vnet's gateway is dnsmasq itself (via DHCP option 6), so VMs
+  inherit DNS without further configuration.
+
+Cloud-init / answer.toml still emit a static-IP block matching the
+IPAM-reserved address (so VMs come up immediately without a DHCP
+boot delay), but the dnsmasq lease tracking ensures the same IP is
+served for any subsequent reboot or rebuild that takes the DHCP
+path.
+
+The ``dnsmasq`` package is required on every PVE node TestRange
+talks to.  :meth:`ProxmoxOrchestrator._preflight_dnsmasq_installed`
+checks for it on every ``__enter__``; the
+:meth:`~testrange.backends.proxmox.ProxmoxOrchestrator.prepare_outer_vm`
+hook injects ``Apt("dnsmasq")`` into the package list of any
+:class:`~testrange.Hypervisor` whose inner orchestrator is
+:class:`~testrange.backends.proxmox.ProxmoxOrchestrator`, so nested
+PVE-on-libvirt setups satisfy the dependency by construction.
 
 PVE name length cap
 -------------------
@@ -30,6 +51,7 @@ can get away with.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
@@ -42,6 +64,16 @@ if TYPE_CHECKING:
     from testrange.orchestrator_base import AbstractOrchestrator
 
 _log = get_logger(__name__)
+
+_DHCP_RANGE_RESERVED_HEAD = 10
+"""Number of low-end host addresses excluded from the dynamic
+``dhcp-range`` so static MAC reservations have a stable slice to live
+in.  ``.1`` is the gateway; ``.2``–``.10`` (with the default head of
+10) carry IPAM reservations TestRange writes for each registered VM.
+``.11`` onward is the dynamic range dnsmasq hands out to anything not
+already reserved (rare in TestRange, but covers
+hand-attached debug VMs).  Subnets too small to honour this split
+(``/30`` and below) raise :class:`NetworkError` at start time."""
 
 _MAX_VNET_NAME_LEN = 8
 """PVE caps SDN vnet names at 8 characters."""
@@ -453,10 +485,22 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
             client.cluster.sdn.vnets.post(vnet=vnet, zone=zone)
             self._vnet_created = True
 
+            dhcp_start, dhcp_end = self._dhcp_range()
             subnet_params: dict[str, Any] = {
                 "type": "subnet",
                 "subnet": self.subnet,
                 "gateway": self.gateway_ip,
+                # ``dhcp = "dnsmasq"`` makes PVE spin up a per-vnet
+                # dnsmasq instance that serves DHCP from the
+                # ``dhcp-range`` we set below and DNS from the IPAM
+                # entries TestRange writes via ``register_vm``.  See
+                # the module docstring for the full DHCP/DNS shape;
+                # the orchestrator preflight has already verified
+                # ``dnsmasq`` is installed on the node.
+                "dhcp": "dnsmasq",
+                "dhcp-range": [
+                    f"start-address={dhcp_start},end-address={dhcp_end}",
+                ],
             }
             if self.internet:
                 # PVE installs an IP-masquerade rule on the host's
@@ -474,6 +518,15 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
             # PVE has changed the encoding once already across major
             # versions.
             self._subnet_id = self._lookup_subnet_id(client, vnet)
+
+            # Push every (mac, ip, hostname) tuple register_vm /
+            # register_vm_with_mac collected before start() into PVE's
+            # SDN IPAM.  PVE turns these into ``dhcp-host`` directives
+            # in the auto-generated dnsmasq config, which gives us
+            # deterministic DHCP leases AND FQDN DNS for ``<vm>.<vnet>``
+            # (libvirt parity).  Done before the final ``put()`` so a
+            # single SDN apply covers vnet + subnet + IPAM entries.
+            self._push_ipam_entries(client)
 
             # Apply pending SDN config — without this, the vnet sits
             # in a "pending" state and isn't actually attached to any
@@ -533,6 +586,67 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _push_ipam_entries(self, client: Any) -> None:
+        """POST each registered ``(mac, ip, hostname)`` to PVE's IPAM.
+
+        Endpoint: ``POST /cluster/sdn/vnets/{vnet}/ips`` with
+        ``mac`` + ``ip`` + ``hostname`` body.  PVE's pve-ipam plugin
+        records the binding and the next SDN reload regenerates the
+        per-vnet dnsmasq config with matching ``dhcp-host=...`` lines
+        — that's what gives DHCP determinism and ``<vm>.<vnet>``
+        DNS in one shot.
+
+        Hostname format: ``<vm>.<vnet>`` (libvirt parity).  We FQDN-
+        ify here rather than at :meth:`register_vm` time so callers
+        keep seeing the simple two-arg signature; the FQDN only
+        matters at the IPAM-push site.
+
+        Errors during IPAM push surface as :class:`NetworkError` —
+        if the IPAM POST fails the resulting dnsmasq config won't
+        have our static reservations, and the VM will end up with a
+        random dynamic-range lease that breaks every test that
+        asserts a specific IP.  Loud is the right failure mode here.
+        """
+        if not self._vm_entries:
+            return
+        for vm_name, mac, ip in self._vm_entries:
+            hostname = f"{vm_name}.{self.name}"
+            try:
+                client.cluster.sdn.vnets(self._vnet_name).ips.post(
+                    mac=mac, ip=ip, hostname=hostname,
+                )
+            except Exception as exc:
+                raise NetworkError(
+                    f"VirtualNetwork {self.name!r}: failed to register "
+                    f"IPAM entry mac={mac} ip={ip} hostname={hostname!r}: "
+                    f"{exc}"
+                ) from exc
+
+    def _dhcp_range(self) -> tuple[str, str]:
+        """Return ``(start, end)`` IPs for the SDN subnet's dnsmasq range.
+
+        Reserves the first :data:`_DHCP_RANGE_RESERVED_HEAD` host
+        addresses (``.1`` is the gateway, ``.2``–``.10`` carry IPAM
+        reservations TestRange writes for each :meth:`register_vm`
+        VM) so the dynamic range only fires for unregistered MACs.
+        Subnets smaller than the reserved head + at least one dynamic
+        slot raise :class:`NetworkError` rather than silently
+        producing a bogus inverted range.
+        """
+        net = ipaddress.IPv4Network(self.subnet, strict=False)
+        hosts = list(net.hosts())
+        if len(hosts) < _DHCP_RANGE_RESERVED_HEAD + 1:
+            raise NetworkError(
+                f"VirtualNetwork {self.name!r}: subnet {self.subnet} is "
+                f"too small ({len(hosts)} usable hosts) for the dnsmasq "
+                f"reservation slice ({_DHCP_RANGE_RESERVED_HEAD} reserved "
+                "for static IPAM entries + at least one dynamic).  Widen "
+                "to /28 or larger."
+            )
+        start = hosts[_DHCP_RANGE_RESERVED_HEAD]
+        end = hosts[-1]
+        return str(start), str(end)
 
     @staticmethod
     def _lookup_subnet_id(client: Any, vnet: str) -> str:

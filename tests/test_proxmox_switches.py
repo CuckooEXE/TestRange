@@ -333,6 +333,10 @@ class TestEnterStartsSwitchesFirst:
         monkeypatch.setattr(
             ProxmoxOrchestrator, "_ensure_sdn_zone", lambda self: None,
         )
+        monkeypatch.setattr(
+            ProxmoxOrchestrator, "_preflight_dnsmasq_installed",
+            lambda self: None,
+        )
 
         client = MagicMock()
         client.nodes.get.return_value = [{"node": "pve01"}]

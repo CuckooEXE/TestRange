@@ -345,7 +345,6 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         token_value: str | None = None,
         verify_ssl: bool = False,
         zone: str = DEFAULT_ZONE,
-        install_dns: str = "1.1.1.1",
         token: object | None = None,
     ) -> None:
         super().__init__(
@@ -395,15 +394,6 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._node = node
         self._storage = storage
         self._zone = zone
-        self._install_dns = install_dns
-        """DNS server cloud-init / answer.toml advertise to install-
-        and run-phase guests.  PVE SDN simple-zones don't ship a
-        per-bridge resolver (libvirt's dnsmasq pattern doesn't
-        apply), so the orchestrator pins one resolver across both
-        phases and falls back to it whenever a network has
-        ``dns=True`` (libvirt would have its gateway resolve there;
-        on PVE the gateway is just a router).  Override at construction
-        for air-gapped, sovereign-DNS, or split-horizon setups."""
         self._user = user
         self._password = password
         self._token_name = token_name
@@ -474,6 +464,30 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         """Return ``"proxmox"``."""
         return "proxmox"
 
+    @classmethod
+    def prepare_outer_vm(cls, hv: AbstractHypervisor) -> None:
+        """Inject the PVE-on-host payload onto the outer VM spec.
+
+        For an outer VM to serve as an inner
+        :class:`ProxmoxOrchestrator`'s host, the installed PVE node
+        needs ``dnsmasq`` so the SDN dnsmasq integration can spin up
+        a per-vnet DHCP+DNS service (the orchestrator's
+        :meth:`_preflight_dnsmasq_installed` enforces this on every
+        ``__enter__``).  The PVE installer ISO is otherwise self-
+        contained, so ``dnsmasq`` is the only extra package we stamp
+        on the spec — no extra ``post_install_cmds`` required.
+
+        Mirrors the libvirt orchestrator's payload pattern: prepend
+        rather than extend so the dependency is present before any
+        caller-supplied post-install commands run.
+
+        :param hv: The :class:`Hypervisor` being constructed (a
+            ``GenericVM + AbstractHypervisor``).  Mutate ``hv.pkgs``
+            in place.
+        """
+        from testrange.packages import Apt
+        hv.pkgs[:0] = [Apt("dnsmasq")]
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -519,6 +533,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
 
         self._resolve_node(nodes)
         self._resolve_storage()
+        self._preflight_dnsmasq_installed()
         self._ensure_sdn_zone()
         _log.info(
             "PVE ready: node=%s storage=%s zone=%s",
@@ -1244,15 +1259,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             network_entries.append((net.backend_name(), mac))
             gateway = net.gateway_ip if net.internet else ""
             # Run-phase DNS: ``net.dns=True`` means "this network
-            # provides name resolution to its guests."  On libvirt
-            # the gateway runs dnsmasq; on PVE SDN there's no
-            # per-bridge resolver, so fall back to the orchestrator's
-            # ``install_dns`` (which is also what install-phase
-            # cloud-init uses).  Setting it to the gateway IP here —
-            # as the v1 code did — produced a ``/etc/resolv.conf``
-            # pointing at a dead address every time, breaking any
-            # run-phase DNS lookup the test relied on.
-            nameserver = self._install_dns if net.dns else ""
+            # provides name resolution to its guests."  Each PVE SDN
+            # subnet now ships with ``dhcp = "dnsmasq"``, and dnsmasq
+            # binds to the subnet's gateway address — so the gateway
+            # IS the DNS server, mirroring the libvirt backend's
+            # bridge-local dnsmasq pattern.  IPAM entries written by
+            # ``ProxmoxVirtualNetwork._push_ipam_entries`` give it
+            # the static ``<vm>.<vnet>`` records.
+            nameserver = net.gateway_ip if net.dns else ""
             # Resolve the picked or static IP from the network's
             # ledger so DHCP-discovery vNICs (where ``ref.ip`` is
             # ``None``) still produce a valid CIDR for cloud-init.
@@ -1479,6 +1493,59 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 f"not configured on node {self._node!r} "
                 f"(known: {names!r})."
             )
+
+    def _preflight_dnsmasq_installed(self) -> None:
+        """Verify ``dnsmasq`` is installed on the target PVE node.
+
+        TestRange flips every SDN subnet to ``dhcp = "dnsmasq"`` so
+        guests get a per-vnet DHCP service plus DNS resolution for
+        ``<vm>.<vnet>`` (libvirt-style).  PVE only spins up the
+        dnsmasq instance if the binary is actually installed; without
+        it, subnet creation succeeds but no leases are served and
+        guests time out at boot.  Catching the dependency here turns
+        what would be a cryptic boot timeout into a clear
+        "install ``dnsmasq`` on this node" error.
+
+        Probe shape: ``GET /nodes/{node}/apt/versions`` returns the
+        installed-package list; we substring-match for ``dnsmasq`` in
+        the package names.  When TestRange itself built the PVE node
+        as the outer VM of a :class:`Hypervisor` (see
+        :meth:`prepare_outer_vm`), ``dnsmasq`` is in the install-time
+        package list so this check passes by construction; the
+        explicit probe matters only against pre-existing PVE clusters
+        the user pointed us at.
+
+        :raises OrchestratorError: When the package isn't present.
+        """
+        assert self._client is not None
+        try:
+            packages = self._client.nodes(self._node).apt.versions.get() or []
+        except Exception as exc:
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: cannot query installed packages "
+                f"on node {self._node!r} via /apt/versions: {exc}"
+            ) from exc
+        # Each entry is a dict with ``Package`` (or ``Title`` on older
+        # PVE) keying the apt name; substr-match keeps us tolerant of
+        # both shapes and of extras like ``dnsmasq-base`` shipping
+        # without ``dnsmasq`` itself.
+        names = [
+            str(entry.get("Package") or entry.get("Title") or "")
+            for entry in packages
+        ]
+        if not any("dnsmasq" in name and "base" not in name for name in names):
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator: ``dnsmasq`` is not installed on "
+                f"PVE node {self._node!r}.  TestRange relies on PVE's "
+                "SDN dnsmasq integration for per-vnet DHCP + DNS.  "
+                "Install on the node:\n"
+                "  Debian/Ubuntu:  sudo apt-get install -y dnsmasq\n"
+                "  RHEL/Rocky:     sudo dnf install -y dnsmasq\n"
+                "Then re-run.  (When TestRange builds the PVE host "
+                "itself via testrange.Hypervisor, dnsmasq is added to "
+                "the install package list automatically.)"
+            )
+        _log.debug("dnsmasq present on node %r", self._node)
 
     def _ensure_sdn_zone(self) -> None:
         """Create our SDN simple-zone if it doesn't already exist.

@@ -446,6 +446,131 @@ class TestBuildProxmoxSeedIsoBytes:
         with pytest.raises(CloudInitError, match="boom"):
             build_proxmox_seed_iso_bytes("body")
 
+    def test_first_boot_script_embedded_when_provided(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first-boot mechanism is what bridges TestRange's
+        ``vm.pkgs`` / ``vm.post_install_cmds`` into the otherwise-
+        sealed PVE installer.  When the caller passes a script body,
+        the seed ISO must carry it at ``/first-boot`` (Joliet name —
+        what the PVE installer reads)."""
+        import testrange.vms.builders.proxmox_answer as pa
+
+        iso_obj = MagicMock()
+        monkeypatch.setattr(pa, "PyCdlib", lambda: iso_obj)
+
+        build_proxmox_seed_iso_bytes(
+            "mode = \"partition\"\n",
+            first_boot_script="#!/bin/bash\napt-get install -y dnsmasq\n",
+        )
+
+        # Two add_fp calls: answer.toml + first-boot script.
+        assert iso_obj.add_fp.call_count == 2
+        joliet_paths = {
+            call.kwargs["joliet_path"]
+            for call in iso_obj.add_fp.call_args_list
+        }
+        assert joliet_paths == {"/answer.toml", "/first-boot"}
+
+    def test_no_first_boot_file_when_script_omitted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The default callers don't pass ``first_boot_script`` and the
+        # ISO must NOT carry a stray ``/first-boot`` placeholder
+        # (PVE's installer would try to execute it and fail).
+        import testrange.vms.builders.proxmox_answer as pa
+
+        iso_obj = MagicMock()
+        monkeypatch.setattr(pa, "PyCdlib", lambda: iso_obj)
+
+        build_proxmox_seed_iso_bytes("body")
+        assert iso_obj.add_fp.call_count == 1
+
+
+# ----------------------------------------------------------------------
+# First-boot composition — vm.pkgs / vm.post_install_cmds → bash
+# ----------------------------------------------------------------------
+
+
+class TestFirstBootScript:
+    """``_first_boot_script`` is the only seam between ``vm.pkgs`` /
+    ``vm.post_install_cmds`` and the PVE installer.  Before the
+    [first-boot] support landed both fields were silently ignored on
+    PVE Hypervisor builds; tests here pin the new behaviour."""
+
+    def test_returns_none_when_nothing_to_run(self) -> None:
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        # No pkgs, no post_install_cmds → no script.  Builder must
+        # then omit the [first-boot] section entirely (empty section
+        # is a hard error from PVE's TOML validator).
+        assert _first_boot_script(_proxmox_vm()) is None
+
+    def test_apt_packages_become_one_install_line(self) -> None:
+        from testrange.packages import Apt
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        vm = _proxmox_vm(pkgs=[Apt("dnsmasq"), Apt("tmux")])
+        script = _first_boot_script(vm)
+        assert script is not None
+        # Single apt-get invocation so the network round trip happens
+        # once.
+        assert "apt-get install -y dnsmasq tmux" in script
+        assert "apt-get update" in script
+        assert "DEBIAN_FRONTEND=noninteractive" in script
+        assert script.startswith("#!/bin/bash\n")
+        assert "set -euo pipefail" in script
+
+    def test_post_install_cmds_appended_verbatim(self) -> None:
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        vm = _proxmox_vm(post_install_cmds=["echo hi", "systemctl start foo"])
+        script = _first_boot_script(vm)
+        assert script is not None
+        assert script.rstrip().endswith("systemctl start foo")
+        assert "echo hi" in script
+
+    def test_non_apt_packages_are_skipped_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # caplog interacts badly with TestRange's per-module logger
+        # config under the full suite — patch the module logger
+        # directly so the test stays deterministic regardless of run
+        # order.
+        from testrange.packages import Apt, Pip
+        from testrange.vms.builders import proxmox_answer
+        warnings: list[str] = []
+
+        class _SpyLog:
+            def warning(self, fmt: str, *args: Any) -> None:
+                warnings.append(fmt % args if args else fmt)
+
+        monkeypatch.setattr(proxmox_answer, "_log", _SpyLog())
+
+        vm = _proxmox_vm(pkgs=[Apt("dnsmasq"), Pip("requests")])
+        script = proxmox_answer._first_boot_script(vm)
+        assert script is not None
+        assert "dnsmasq" in script
+        # Pip wouldn't make sense on a PVE node and we don't try to
+        # render it as a broken command.
+        assert "requests" not in script
+        assert any("not an Apt package" in w for w in warnings)
+
+    def test_answer_toml_emits_first_boot_section_iff_script(self) -> None:
+        # The [first-boot] section in answer.toml must only appear
+        # when there's actually a script to run; an empty section
+        # is a TOML-validator error from the PVE installer.
+        from testrange.packages import Apt
+        toml_no_pkgs = ProxmoxAnswerBuilder().build_answer_toml(
+            _proxmox_vm()
+        )
+        toml_with_pkgs = ProxmoxAnswerBuilder().build_answer_toml(
+            _proxmox_vm(pkgs=[Apt("dnsmasq")])
+        )
+        assert "[first-boot]" not in toml_no_pkgs
+        assert "[first-boot]" in toml_with_pkgs
+        assert 'source = "from-iso"' in toml_with_pkgs
+        assert 'ordering = "fully-up"' in toml_with_pkgs
+
 
 # ----------------------------------------------------------------------
 # prepare_install_domain / prepare_run_domain — the InstallDomain /

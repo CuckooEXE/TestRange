@@ -153,25 +153,6 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-_PUBLIC_DNS_FALLBACK = "1.1.1.1"
-"""Last-resort resolver if the orchestrator can't surface its own
-``install_dns``.  Production code paths always reach the
-orchestrator's value via :func:`_install_dns_for`; this constant
-exists to keep tests that construct a ``ProxmoxVM`` with a stubbed
-context (no ``_install_dns`` attribute) from blowing up on the
-attribute miss."""
-
-
-def _install_dns_for(context: AbstractOrchestrator) -> str:
-    """Fetch the orchestrator's configured install-DNS resolver.
-
-    Set at ``ProxmoxOrchestrator.__init__`` time via the
-    ``install_dns=`` kwarg (default ``1.1.1.1``).  Routed through a
-    helper rather than ``getattr`` chains so the read site stays
-    self-documenting and a rename of the underlying attribute only
-    has to happen here."""
-    return getattr(context, "_install_dns", _PUBLIC_DNS_FALLBACK)
-
 _INSTALL_TIMEOUT_S = 1800
 """Maximum wait for the install-phase domain to power itself off
 after cloud-init finishes."""
@@ -819,14 +800,16 @@ class ProxmoxVM(AbstractVM):
         DNS notes
         ---------
 
-        Unlike the libvirt backend (where each NAT network's gateway
-        runs dnsmasq), PVE SDN subnets *don't* ship a DNS resolver
-        unless the user explicitly configures DHCP+DNS at the SDN
-        layer.  We send the orchestrator's configured ``install_dns``
-        (default ``1.1.1.1``, override via the
-        :class:`ProxmoxOrchestrator` ``install_dns=`` kwarg for
-        air-gapped or sovereign-DNS setups) for the install vnet so
-        apt / dnf can resolve package mirrors during install.
+        TestRange flips every SDN subnet to PVE's ``dhcp = "dnsmasq"``
+        mode (see
+        :mod:`testrange.backends.proxmox.network`'s docstring), so
+        each vnet — including the install vnet — has dnsmasq bound to
+        its gateway address.  The install seed therefore points
+        cloud-init / answer.toml at the gateway IP for both the
+        default route AND the resolver, mirroring libvirt's bridge-
+        local-dnsmasq pattern.  Apt / dnf can resolve package mirrors
+        because dnsmasq forwards uncached queries to whatever the PVE
+        node's ``/etc/resolv.conf`` lists upstream.
 
         :param install_network_name: SDN vnet name the install VM is
             attached to (matches ``context._install_network.backend_name()``).
@@ -867,11 +850,13 @@ class ProxmoxVM(AbstractVM):
             )
         cidr = f"{ip}/{install_vnet.prefix_len}"
         gateway = install_vnet.gateway_ip
-        # Install vnet is always ``internet=True`` (see
-        # ``_create_install_network``), so DNS goes through the
-        # orchestrator's configured ``install_dns`` resolver.
+        del context  # no further use; kept in signature for the call site
+        # Install vnet ships with PVE's per-vnet dnsmasq enabled (see
+        # the network module docstring); dnsmasq binds to the gateway,
+        # so the gateway IS the DNS server.  Same shape as libvirt's
+        # bridge-local dnsmasq pattern.
         return [(
-            install_network_mac, cidr, gateway, _install_dns_for(context),
+            install_network_mac, cidr, gateway, gateway,
         )]
 
 

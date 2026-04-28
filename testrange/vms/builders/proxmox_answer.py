@@ -35,6 +35,7 @@ from testrange._logging import get_logger
 from testrange.cache import vm_config_hash
 from testrange.devices import vNIC
 from testrange.exceptions import CloudInitError
+from testrange.packages.apt import Apt
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
 from testrange.vms.images import resolve_image
 
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.cache import CacheManager
     from testrange.credentials import Credential
+    from testrange.packages import AbstractPackage
     from testrange.vms.base import AbstractVM as VM
 
 _log = get_logger(__name__)
@@ -231,18 +233,20 @@ class ProxmoxAnswerBuilder(Builder):
             vm.name, vm._primary_disk_size()
         )
 
-        # 3. Seed ISO carrying answer.toml, labeled so the prepared
-        #    installer's partition fetch finds it.  The filename
-        #    convention is builder-specific (the PVE installer
-        #    looks for the ``PROXMOX-AIS`` label rather than reading
-        #    the filename), so compose via the generic
-        #    :meth:`RunDir.path_for` helper rather than the
-        #    cloud-init-specific seed helpers.
+        # 3. Seed ISO carrying answer.toml (and optionally a
+        #    first-boot script if vm.pkgs / vm.post_install_cmds
+        #    asked for one), labeled so the prepared installer's
+        #    partition fetch finds it.  The filename convention is
+        #    builder-specific (the PVE installer looks for the
+        #    ``PROXMOX-AIS`` label rather than reading the filename),
+        #    so compose via the generic :meth:`RunDir.path_for`
+        #    helper rather than the cloud-init-specific seed helpers.
         seed_ref = run.path_for(f"{vm.name}-proxmox-answer.iso")
         run.storage.transport.write_bytes(
             seed_ref,
             build_proxmox_seed_iso_bytes(
                 self.build_answer_toml(vm),
+                first_boot_script=_first_boot_script(vm),
                 volume_label=self.partition_label,
             ),
         )
@@ -345,6 +349,18 @@ class ProxmoxAnswerBuilder(Builder):
 
         lines: list[str] = ["[global]", *global_block, "", "[network]",
                             *network_block, "", "[disk-setup]", *disk_block]
+
+        # Only emit ``[first-boot]`` when something actually wants to
+        # run there — a stray empty section trips PVE's installer
+        # validator.  When ``vm.pkgs`` (apt installs) or
+        # ``vm.post_install_cmds`` (free-form shell) are non-empty,
+        # ``_first_boot_script`` renders the bash that the embedded
+        # ``/first-boot`` script on the seed ISO will execute, and
+        # the ``[first-boot]`` block here points the installer at it.
+        if _first_boot_script(vm) is not None:
+            lines += ["", "[first-boot]",
+                      'source = "from-iso"',
+                      'ordering = "fully-up"']
         return "\n".join(lines) + "\n"
 
     def _network_block(self, vm: VM) -> list[str]:
@@ -427,6 +443,68 @@ def _primary_network_ref(vm: VM) -> vNIC | None:
     return None
 
 
+def _first_boot_script(vm: VM) -> str | None:
+    """Compose a ``/first-boot`` bash script for *vm* or return ``None``.
+
+    The PVE auto-installer's ``[first-boot] source = "from-iso"`` mode
+    runs an executable named ``first-boot`` from the answer ISO at
+    first boot of the freshly-installed system.  We use it as the
+    one-and-only seam between TestRange's per-VM ``vm.pkgs`` /
+    ``vm.post_install_cmds`` declarations and the PVE installer
+    (which otherwise has no notion of "extra packages" — its design
+    is "full PVE node, nothing else").
+
+    Two ingredients land in the script when present:
+
+    * Apt packages from ``vm.pkgs`` — collected into a single
+      ``apt-get install -y <pkg> <pkg>...`` line so the network round
+      trip happens once.  Non-Apt :class:`AbstractPackage` subclasses
+      (``Pip``, ``Dnf``, …) on a PVE host don't make sense and are
+      skipped with a warning rather than rendered as broken commands.
+
+    * Free-form shell from ``vm.post_install_cmds`` — appended verbatim
+      after the package install runs, so a hook that depends on a just-
+      installed package finds it on ``$PATH``.
+
+    Returns ``None`` when neither is set so callers can omit the
+    ``[first-boot]`` section entirely (an empty section is a hard
+    error from the installer's TOML validator).
+
+    The rendered script:
+
+    * runs under ``set -euo pipefail`` so any failed step aborts the
+      first boot — better to surface "dnsmasq install failed" than to
+      let the orchestrator's downstream preflight raise a misleading
+      "dnsmasq missing" error;
+    * sets ``DEBIAN_FRONTEND=noninteractive`` + ``apt-get update``
+      before any install so we don't need a separate package-cache
+      refresh hook in the spec.
+    """
+    apt_pkgs = [p.name for p in vm.pkgs if isinstance(p, Apt)]
+    skipped = [p for p in vm.pkgs if not isinstance(p, Apt)]
+    for pkg in skipped:
+        _log.warning(
+            "VM %r: package %r is not an Apt package and will be "
+            "skipped on the PVE first-boot hook (PVE is Debian-based "
+            "and the answer-builder only knows ``Apt``).",
+            vm.name, pkg,
+        )
+    cmds = list(vm.post_install_cmds)
+    if not apt_pkgs and not cmds:
+        return None
+
+    lines: list[str] = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        "export DEBIAN_FRONTEND=noninteractive",
+    ]
+    if apt_pkgs:
+        lines.append("apt-get update -y")
+        lines.append("apt-get install -y " + " ".join(apt_pkgs))
+    lines.extend(cmds)
+    return "\n".join(lines) + "\n"
+
+
 def _root_credential(users: list[Credential]) -> Credential:
     """Return the root :class:`Credential` or raise.
 
@@ -464,10 +542,10 @@ def _toml_str(value: str) -> str:
 def build_proxmox_seed_iso_bytes(
     answer_toml: str,
     *,
+    first_boot_script: str | None = None,
     volume_label: str = _DEFAULT_PARTITION_LABEL,
 ) -> bytes:
-    """Return the raw bytes of a ``PROXMOX-AIS``-labeled seed ISO
-    containing ``answer.toml``.
+    """Return the raw bytes of a ``PROXMOX-AIS``-labeled seed ISO.
 
     Mirrors
     :func:`testrange.vms.builders.cloud_init.build_seed_iso_bytes` in
@@ -478,6 +556,11 @@ def build_proxmox_seed_iso_bytes(
 
     :param answer_toml: The rendered TOML content (see
         :meth:`ProxmoxAnswerBuilder.build_answer_toml`).
+    :param first_boot_script: Optional bash script body.  When set,
+        embedded at ``/first-boot`` (Joliet name) on the ISO so the
+        PVE installer's ``[first-boot] source = "from-iso"`` step
+        finds + executes it on first boot of the freshly-installed
+        system.  Caller composes via :func:`_first_boot_script`.
     :param volume_label: ISO volume label — must match the
         ``partition_label`` baked into the prepared installer ISO's
         initrd.  Defaults to the stock ``PROXMOX-AIS``.
@@ -494,6 +577,16 @@ def build_proxmox_seed_iso_bytes(
             iso_path="/ANSWER.TOM;1",
             joliet_path="/answer.toml",
         )
+        if first_boot_script is not None:
+            script_bytes = first_boot_script.encode("utf-8")
+            iso.add_fp(
+                io.BytesIO(script_bytes),
+                len(script_bytes),
+                # ISO9660 short name (8.3 + ;version); Joliet path is
+                # the one PVE actually reads.
+                iso_path="/FIRSTBT.;1",
+                joliet_path="/first-boot",
+            )
         iso.write_fp(buf)
         return buf.getvalue()
     except Exception as exc:

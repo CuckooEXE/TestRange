@@ -1,16 +1,19 @@
-"""Parity tests for the three Proxmox networking gaps closed
-together: DHCP-discovery vNICs, install-vnet subnet pool, and the
-``install_dns=`` orchestrator kwarg (which doubles as the run-phase
-DNS for ``dns=True`` networks).
+"""Parity tests for the Proxmox networking surface: DHCP-discovery
+vNICs, install-vnet subnet pool, and the IPAM + dnsmasq integration
+that gives PVE guests libvirt-style DHCP + ``<vm>.<vnet>`` DNS.
 
-Pre-fix behaviour (covered by older tests still living in
-``tests/test_proxmox_install_vnet.py``):
+Pre-fix behaviour (preserved as historical context — earlier tests
+still live in ``tests/test_proxmox_install_vnet.py``):
 
 - every Proxmox vNIC required an explicit ``ip=``;
 - the install-vnet was pinned to ``192.168.230.0/24``;
 - run-phase NICs on ``dns=True`` networks set their nameserver to the
-  network's gateway IP — but PVE doesn't run a resolver there, so
-  ``/etc/resolv.conf`` ended up pointing at a dead address.
+  network's gateway IP — but PVE didn't run a resolver there, so
+  ``/etc/resolv.conf`` ended up pointing at a dead address.  The
+  earlier ``install_dns=`` kwarg worked around that by pinning a
+  public resolver across both phases; with PVE's per-vnet dnsmasq
+  now serving DNS, the gateway IS the resolver and the workaround
+  was retired.
 """
 
 from __future__ import annotations
@@ -39,7 +42,6 @@ def _orch(
     *,
     vms: list[ProxmoxVM] | None = None,
     networks: list[ProxmoxVirtualNetwork] | None = None,
-    install_dns: str = "1.1.1.1",
     claimed_subnets: list[str] | None = None,
 ) -> ProxmoxOrchestrator:
     """Build a ProxmoxOrchestrator with a stubbed client.
@@ -53,7 +55,6 @@ def _orch(
         user="root@pam",
         password="x",
         node="pve01",
-        install_dns=install_dns,
     )
     orch._vm_list = vms or []
     orch._networks = networks or []
@@ -81,46 +82,43 @@ def _vm(
 
 
 # =====================================================================
-# install_dns kwarg — defaults, override, plumbing into install MAC pairs
+# dnsmasq preflight on the PVE node
 # =====================================================================
 
 
-class TestInstallDnsKwarg:
-    def test_default_is_cloudflare(self) -> None:
-        # The historical baseline.  Tests for air-gapped scenarios
-        # below exercise the override path.
-        orch = ProxmoxOrchestrator(host="x")
-        assert orch._install_dns == "1.1.1.1"
+class TestDnsmasqPreflight:
+    """Top-level orchestrator must check dnsmasq is installed on the
+    target PVE node before any subnet hits ``dhcp = "dnsmasq"`` —
+    otherwise the dnsmasq instance never spawns and guests time out."""
 
-    def test_override_propagates_to_orchestrator_state(self) -> None:
-        orch = ProxmoxOrchestrator(host="x", install_dns="10.0.0.53")
-        assert orch._install_dns == "10.0.0.53"
+    def test_passes_when_package_present(self) -> None:
+        orch = _orch()
+        orch._client.nodes.return_value.apt.versions.get.return_value = [
+            {"Package": "dnsmasq", "Version": "2.90-1"},
+            {"Package": "qemu-server", "Version": "8.0.0"},
+        ]
+        # Should not raise.
+        orch._preflight_dnsmasq_installed()
 
-    def test_install_seed_carries_orchestrator_dns(self) -> None:
-        # The install-phase seed's ``mac_ip_pairs`` is what cloud-
-        # init / answer.toml render into ``/etc/resolv.conf``.  Pre-
-        # fix this was hardcoded ``1.1.1.1``; post-fix it follows
-        # whatever the orchestrator was constructed with.
-        orch = _orch(
-            vms=[_vm("web", network="Net", ip="10.0.0.5")],
-            install_dns="192.168.99.53",
-        )
-        orch._run_id = "abcd1234-1111-2222-3333-4444"
-        install_net = orch._create_install_network()
-        orch._install_network = install_net
+    def test_raises_when_only_dnsmasq_base_present(self) -> None:
+        # ``dnsmasq-base`` ships separately and isn't enough — the
+        # SDN integration needs the ``dnsmasq`` service.  Substring
+        # match deliberately excludes the ``-base`` fallback.
+        orch = _orch()
+        orch._client.nodes.return_value.apt.versions.get.return_value = [
+            {"Package": "dnsmasq-base", "Version": "2.90-1"},
+        ]
+        with pytest.raises(OrchestratorError, match="dnsmasq.*not installed"):
+            orch._preflight_dnsmasq_installed()
 
-        vm = orch._vm_list[0]
-        pairs = vm._build_install_mac_ip_pairs(
-            orch,
-            install_net.backend_name(),
-            next(
-                mac for vm_name, mac, _ in install_net._vm_entries
-                if vm_name == "web"
-            ),
-        )
-        assert pairs, "install-phase mac_ip_pairs unexpectedly empty"
-        _mac, _cidr, _gateway, dns = pairs[0]
-        assert dns == "192.168.99.53"
+    def test_error_includes_install_hint(self) -> None:
+        orch = _orch()
+        orch._client.nodes.return_value.apt.versions.get.return_value = []
+        with pytest.raises(OrchestratorError) as exc:
+            orch._preflight_dnsmasq_installed()
+        msg = str(exc.value)
+        assert "apt-get install" in msg
+        assert "dnf install" in msg
 
 
 # =====================================================================
@@ -245,23 +243,21 @@ class TestDhcpDiscovery:
 
 
 # =====================================================================
-# Run-phase DNS — uses install_dns, not gateway-as-DNS
+# Run-phase DNS — gateway IS the dnsmasq, libvirt-style
 # =====================================================================
 
 
 class TestRunPhaseDns:
-    """When a network has ``dns=True`` the orchestrator used to set
-    the run-phase NIC's nameserver to the gateway IP.  PVE doesn't
-    run a resolver on the gateway, so guests' ``/etc/resolv.conf``
-    pointed at a dead address.  Post-fix it points at the
-    orchestrator's ``install_dns``."""
+    """Each SDN subnet ships ``dhcp = "dnsmasq"`` so the gateway
+    address is also the DNS server.  Run-phase NICs on ``dns=True``
+    networks point at the gateway directly — no separate
+    install_dns workaround needed."""
 
-    def test_dns_true_uses_install_dns_not_gateway(self) -> None:
+    def test_dns_true_uses_gateway(self) -> None:
         net = ProxmoxVirtualNetwork(name="Net", subnet="10.42.0.0/24", dns=True)
         orch = _orch(
             vms=[_vm("web", network="Net", ip="10.42.0.5")],
             networks=[net],
-            install_dns="192.168.99.53",
         )
         orch._run_id = "abcd1234-1111-2222-3333-4444"
         for n in orch._networks:
@@ -270,8 +266,7 @@ class TestRunPhaseDns:
         _entries, mac_ip_pairs = orch._vm_network_refs(orch._vm_list[0])
         assert mac_ip_pairs, "expected one mac_ip_pair"
         _mac, cidr, _gateway, dns = mac_ip_pairs[0]
-        assert dns == "192.168.99.53"
-        # gateway field still names the gateway — only DNS changed.
+        assert dns == net.gateway_ip == "10.42.0.1"
         assert cidr == "10.42.0.5/24"
 
     def test_dns_false_leaves_nameserver_empty(self) -> None:
@@ -306,3 +301,77 @@ class TestRunPhaseDns:
         _entries, pairs = orch._vm_network_refs(orch._vm_list[0])
         _mac, cidr, _gateway, _dns = pairs[0]
         assert cidr == "10.42.0.2/24"
+
+
+# =====================================================================
+# SDN subnet creation flips to dhcp = "dnsmasq" + IPAM push
+# =====================================================================
+
+
+class TestSubnetDnsmasq:
+    """Every SDN subnet TestRange creates carries ``dhcp = "dnsmasq"``
+    + a ``dhcp-range`` covering the high half of the host range.
+    Each :meth:`register_vm` entry then flows through to PVE's IPAM
+    via ``POST /cluster/sdn/vnets/{vnet}/ips``, which is what gives
+    us deterministic DHCP leases AND ``<vm>.<vnet>`` DNS."""
+
+    def _started_net(
+        self, register: list[tuple[str, str, str]] | None = None,
+    ) -> tuple[ProxmoxVirtualNetwork, MagicMock]:
+        net = ProxmoxVirtualNetwork(name="OuterNet", subnet="10.0.0.0/24")
+        net.bind_run("abcd1234-1111-2222-3333-4444")
+        for vm_name, mac, ip in register or []:
+            net.register_vm_with_mac(vm_name, mac, ip)
+        client = MagicMock()
+        client.cluster.sdn.vnets.return_value.subnets.get.return_value = [
+            {"subnet": "tr-10.0.0.0-24"},
+        ]
+        ctx = MagicMock(_client=client, _zone="tr", _switches=[])
+        net.start(ctx)
+        return net, client
+
+    def test_subnet_post_carries_dhcp_dnsmasq(self) -> None:
+        _net, client = self._started_net()
+        subnet_call = client.cluster.sdn.vnets.return_value.subnets.post
+        kwargs = subnet_call.call_args.kwargs
+        assert kwargs["dhcp"] == "dnsmasq"
+        # Range starts past the reserved head (.1 gateway + 9 IPAM
+        # static slots) so static reservations and dynamic leases
+        # don't fight over the low end.
+        assert kwargs["dhcp-range"] == [
+            "start-address=10.0.0.11,end-address=10.0.0.254",
+        ]
+
+    def test_register_vm_pushes_ipam_entry_with_fqdn(self) -> None:
+        _net, client = self._started_net(
+            register=[
+                ("web", "52:54:00:11:22:33", "10.0.0.5"),
+                ("db",  "52:54:00:44:55:66", "10.0.0.6"),
+            ],
+        )
+        ips_post = client.cluster.sdn.vnets.return_value.ips.post
+        # Two POSTs, one per registered VM, each with the FQDN.
+        assert ips_post.call_count == 2
+        first = ips_post.call_args_list[0].kwargs
+        assert first == {
+            "mac": "52:54:00:11:22:33",
+            "ip": "10.0.0.5",
+            "hostname": "web.OuterNet",
+        }
+        second = ips_post.call_args_list[1].kwargs
+        assert second == {
+            "mac": "52:54:00:44:55:66",
+            "ip": "10.0.0.6",
+            "hostname": "db.OuterNet",
+        }
+
+    def test_subnet_too_small_for_reservation_slice_raises(self) -> None:
+        # /30 has 2 hosts.  Reserved-head is 10 → no dynamic range
+        # left, picker raises clearly rather than producing an
+        # inverted dhcp-range.
+        net = ProxmoxVirtualNetwork(name="Tiny", subnet="10.0.0.0/30")
+        net.bind_run("abcd1234-1111-2222-3333-4444")
+        client = MagicMock()
+        ctx = MagicMock(_client=client, _zone="tr", _switches=[])
+        with pytest.raises(NetworkError, match="too small"):
+            net.start(ctx)
