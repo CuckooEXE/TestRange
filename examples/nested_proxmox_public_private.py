@@ -13,18 +13,23 @@ Topology
 ::
 
     Outer (L1, libvirt):
-    └── OuterNet (10.0.0.0/24, internet=True)
-        ├── proxmox @ 10.0.0.10   (PVE Hypervisor, auto-installed
-        │   │                      via ProxmoxAnswerBuilder)
-        │   └── Inner (L2, ProxmoxOrchestrator on the PVE API):
-        │       ├── PublicNet  (10.42.0.0/24, internet=True)
-        │       │   ├── webpublic @ 10.42.0.5  (nginx)
-        │       │   └── client   @ 10.42.0.6  (dual-homed)
-        │       └── PrivateNet (10.43.0.0/24, internet=False)
-        │           ├── dbprivate @ 10.43.0.5  (nginx)
-        │           └── client    @ 10.43.0.6  (dual-homed)
-        └── sidecar @ 10.0.0.11   (Debian + curl, smoke tests the
-                                   ProxMox API over HTTPS/8006)
+    └── OuterNet (10.0.0.0/24, internet=True, dhcp=True)
+        ├── sidecar     (DHCP, .2 — Debian + curl, smoke tests the
+        │                ProxMox API over HTTPS/8006)
+        └── proxmox     (DHCP, .3 — PVE Hypervisor, auto-installed
+            │                       via ProxmoxAnswerBuilder)
+            └── Inner (L2, ProxmoxOrchestrator on the PVE API):
+                ├── PublicNet  (10.42.0.0/24, internet=True, dhcp=True)
+                │   ├── webpublic   (DHCP, nginx)
+                │   └── client      (DHCP, dual-homed; primary NIC)
+                └── PrivateNet (10.43.0.0/24, internet=False, dhcp=False)
+                    ├── dbprivate @ 10.43.0.5   (static, nginx)
+                    └── client    @ 10.43.0.6   (static, secondary NIC)
+
+DHCP-enabled networks let TestRange's deterministic-pick assign each
+NIC its address (Nth declared VM lands on Nth host address — see
+:doc:`/usage/networks` "DHCP-discovery vNICs").  ``PrivateNet`` has
+``dhcp=False`` so it requires explicit ``ip=`` on every NIC.
 
 What the example demonstrates
 =============================
@@ -248,13 +253,21 @@ def _verify_outer_layer(orch: Orchestrator) -> None:
     #    so we must explicitly wait for the API daemon.
     _wait_for_pveproxy(proxmox)
 
-    # 3. Sidecar reaches the ProxMox API.  PVE 9.x requires a valid
-    #    ticket for ``/api2/json/version`` (an older unauthenticated
-    #    endpoint is no longer public), so 401 is the normal response
-    #    for an un-authed probe.  Both 200 and 401 prove pveproxy is
-    #    alive and routing — which is the L1 smoke we care about;
-    #    authenticated access is a separate concern to prove in a
-    #    dedicated auth test.
+    # 3. Sidecar reaches the ProxMox API by FQDN.  PVE 9.x requires
+    #    a valid ticket for ``/api2/json/version`` (an older
+    #    unauthenticated endpoint is no longer public), so 401 is
+    #    the normal response for an un-authed probe.  Both 200 and
+    #    401 prove pveproxy is alive and routing — which is the L1
+    #    smoke we care about; authenticated access is a separate
+    #    concern to prove in a dedicated auth test.
+    #
+    #    ``proxmox.OuterNet`` is the FQDN libvirt's bridge-local
+    #    dnsmasq registers for the proxmox VM (deterministic-pick
+    #    gave it a stable IP via the OuterNet DHCP reservation, and
+    #    libvirt's dnsmasq exposes that as the VM's <name>.<network>
+    #    A record).  Sidecar's resolv.conf already lists OuterNet's
+    #    gateway as its DNS, so this resolves end-to-end without us
+    #    spelling out the IP.
     r = sidecar.exec(
         [
             "curl",
@@ -265,7 +278,7 @@ def _verify_outer_layer(orch: Orchestrator) -> None:
             "%{http_code}",
             "--max-time",
             "10",
-            "https://10.0.0.10:8006/api2/json/version",
+            "https://proxmox.OuterNet:8006/api2/json/version",
         ],
         timeout=20,
     ).check()
@@ -334,27 +347,33 @@ def _verify_inner_reachability(orch: Orchestrator) -> None:
        the PVE-rooted one out — there's exactly one in this
        example.
     2. From the dual-homed inner ``client``, curl
-       ``http://10.42.0.5/`` reaches the L2 public webserver.
-       Failure here means the inner ``ProxmoxOrchestrator`` either
-       didn't provision the network or didn't bring the inner
-       ``webpublic`` up.
-    3. From the same client on its private NIC, curl
-       ``http://10.43.0.5/`` reaches the L2 private DB.  This
-       proves cross-network reachability *within* the inner layer
-       and that the ``PrivateNet`` (``internet=False``) doesn't
+       ``http://webpublic.PublicNet/`` reaches the L2 public
+       webserver by FQDN.  PublicNet is the client's primary NIC,
+       so its /etc/resolv.conf lists PublicNet's dnsmasq first —
+       the FQDN resolves via the IPAM-backed ``dhcp-host`` record
+       TestRange pushed at __enter__ to the IP webpublic actually
+       boots on (no manual ``ip=`` was specified — both VMs use
+       DHCP-discovery on PublicNet).  Failure here means either
+       the inner ``ProxmoxOrchestrator`` didn't provision the
+       network, didn't bring ``webpublic`` up, or PVE's per-vnet
+       dnsmasq didn't pick up the IPAM entries.
+    3. From the same client to ``http://10.43.0.5/`` (the
+       static-IP DB on PrivateNet).  This stays IP-based: the
+       client's primary NIC is PublicNet, so its first resolv.conf
+       entry is PublicNet's dnsmasq, which doesn't know
+       ``dbprivate.PrivateNet`` and answers NXDOMAIN (glibc takes
+       NXDOMAIN as authoritative — no fallback to the second
+       nameserver).  Each per-vnet dnsmasq's IPAM is its own DNS
+       scope; cross-vnet FQDN lookups are explicitly tested below
+       in step 4 against the matching vnet's gateway.  The IP curl
+       still proves cross-network reachability *within* the inner
+       layer and that ``PrivateNet`` (``internet=False``) doesn't
        isolate inner peers from each other.
-    4. **FQDN DNS via PVE's per-vnet dnsmasq.**  Curl by name —
-       ``http://webpublic.PublicNet/`` and
-       ``http://dbprivate.PrivateNet/`` — exercises the IPAM →
-       dnsmasq DNS path TestRange now configures on every Proxmox
-       SDN vnet.  An IP-only success would mean DHCP worked but
-       DNS could be silently broken; this assertion pins the
-       libvirt-parity behaviour where ``<vm>.<vnet>`` resolves
-       cluster-side without a separate DNS plugin.  The client
-       resolves each FQDN via the gateway on the matching vnet
-       (where that vnet's dnsmasq runs); cross-vnet name lookups
-       would NXDOMAIN by design (each vnet's IPAM is its own
-       scope), so we query the matching vnet for each FQDN.
+    4. **FQDN DNS via PVE's per-vnet dnsmasq.**  ``host`` against
+       each vnet's gateway proves the IPAM→dnsmasq path directly,
+       returning the IP TestRange registered for each FQDN.  This
+       is the assertion that pins libvirt-parity DNS behaviour;
+       an IP-only verify would let DHCP-without-DNS slip through.
 
     On failure, dumps every inner VM's network + service state
     (see :func:`_log_inner_state`) before re-raising so the
@@ -375,11 +394,14 @@ def _verify_inner_reachability(orch: Orchestrator) -> None:
     client = inner.vms["client"]
 
     pub = client.exec(
-        ["curl", "-fsS", "--max-time", "10", "http://10.42.0.5/"],
+        ["curl", "-fsS", "--max-time", "10", "http://webpublic.PublicNet/"],
         timeout=20,
     ).check()
     assert b"Public webserver" in pub.stdout, pub.stdout_text
 
+    # PrivateNet stays IP-based: see docstring step 3 — cross-vnet
+    # FQDN via /etc/resolv.conf NXDOMAINs; the explicit-server
+    # version is in step 4.
     priv = client.exec(
         ["curl", "-fsS", "--max-time", "10", "http://10.43.0.5/"],
         timeout=20,
@@ -398,11 +420,16 @@ def _verify_inner_reachability(orch: Orchestrator) -> None:
     #    DNS scope).  We verify both the lookup succeeds AND
     #    returns the IP we registered, then curl by FQDN as the
     #    end-to-end check.
+    # Public lookup — webpublic auto-allocated to 10.42.0.2 by the
+    # deterministic-pick (it's the first VM declared on PublicNet,
+    # so it lands on the first non-gateway host).  The dbprivate VM
+    # stays at its declared static 10.43.0.5 because PrivateNet is
+    # ``dhcp=False``.
     pub_lookup = client.exec(
         ["host", "webpublic.PublicNet", "10.42.0.1"],
         timeout=15,
     ).check()
-    assert b"10.42.0.5" in pub_lookup.stdout, pub_lookup.stdout_text
+    assert b"10.42.0.2" in pub_lookup.stdout, pub_lookup.stdout_text
 
     priv_lookup = client.exec(
         ["host", "dbprivate.PrivateNet", "10.43.0.1"],
@@ -460,7 +487,12 @@ def gen_tests() -> list[Test]:
                             # preflight for the bigger ProxMox VM.
                             Memory(0.5),
                             HardDrive(10),
-                            vNIC("OuterNet", ip="10.0.0.11"),
+                            # No ip= — OuterNet has dhcp=True, so the
+                            # orchestrator's deterministic-pick assigns
+                            # the first non-gateway host (10.0.0.2) and
+                            # libvirt's dnsmasq registers
+                            # ``sidecar.OuterNet`` as the FQDN.
+                            vNIC("OuterNet"),
                         ],
                     ),
                     # ProxMox VE Hypervisor — auto-installed via
@@ -497,7 +529,13 @@ def gen_tests() -> list[Test]:
                             # smallest round number that doesn't
                             # trip any of PVE's sanity checks.
                             HardDrive(64),
-                            vNIC("OuterNet", ip="10.0.0.10"),
+                            # No ip= — same DHCP-discovery story as
+                            # sidecar.  Declared second on OuterNet so
+                            # it picks 10.0.0.3, and ``proxmox.OuterNet``
+                            # becomes the libvirt-dnsmasq-resolvable
+                            # FQDN that ``_verify_outer_layer`` curls
+                            # at port 8006.
+                            vNIC("OuterNet"),
                         ],
                         # ProxmoxOrchestrator.root_on_vm() will
                         # construct an inner orchestrator pointing
@@ -536,9 +574,14 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(0.5),
                                     HardDrive(10),
-                                    vNIC(
-                                        "PublicNet", ip="10.42.0.5",
-                                    ),
+                                    # PublicNet has dhcp=True; no ip=,
+                                    # deterministic-pick lands this VM
+                                    # on 10.42.0.2 (first non-gateway
+                                    # host).  PVE's per-vnet dnsmasq
+                                    # serves ``webpublic.PublicNet`` →
+                                    # 10.42.0.2 from the IPAM entry
+                                    # TestRange writes at __enter__.
+                                    vNIC("PublicNet"),
                                 ],
                             ),
                             VM(
@@ -554,9 +597,15 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(0.5),
                                     HardDrive(10),
-                                    vNIC(
-                                        "PrivateNet", ip="10.43.0.5",
-                                    ),
+                                    # PrivateNet has dhcp=False, so
+                                    # every NIC needs an explicit ip=.
+                                    # Static still flows through to
+                                    # PVE's IPAM, so
+                                    # ``dbprivate.PrivateNet`` resolves
+                                    # via PrivateNet's dnsmasq exactly
+                                    # the same way the DHCP-discovered
+                                    # peers on PublicNet do.
+                                    vNIC("PrivateNet", ip="10.43.0.5"),
                                 ],
                             ),
                             VM(
@@ -576,12 +625,18 @@ def gen_tests() -> list[Test]:
                                     vCPU(1),
                                     Memory(0.5),
                                     HardDrive(10),
-                                    vNIC(
-                                        "PublicNet", ip="10.42.0.6",
-                                    ),
-                                    vNIC(
-                                        "PrivateNet", ip="10.43.0.6",
-                                    ),
+                                    # PublicNet (dhcp=True) — no ip=,
+                                    # picks 10.42.0.3 (after webpublic
+                                    # at .2).  PrivateNet (dhcp=False)
+                                    # needs a static ip=.  Declaration
+                                    # order matters: PublicNet first so
+                                    # the client's resolv.conf lists
+                                    # PublicNet's dnsmasq first, which
+                                    # is what makes ``http://webpublic
+                                    # .PublicNet/`` resolve in step 2
+                                    # of _verify_inner_reachability.
+                                    vNIC("PublicNet"),
+                                    vNIC("PrivateNet", ip="10.43.0.6"),
                                 ],
                             ),
                         ],
