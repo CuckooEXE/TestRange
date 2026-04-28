@@ -11,9 +11,10 @@ just-booted PVE Hypervisor VM, and ``__enter__`` enters any
 inner ``Hypervisor``-typed VMs the same way the libvirt backend
 does (see :meth:`_enter_nested_orchestrators`).
 
-Known limits documented in the project's TODO.md (single fixed
-install-vnet subnet, hardcoded public DNS for install-phase
-cloud-init, …) — open follow-ups, not undocumented surprises.
+Known limits documented in the project's TODO.md (no SDN-side
+dnsmasq for run-phase ``<vm>.<net>`` name resolution, no memory
+preflight against PVE node capacity, …) — open follow-ups, not
+undocumented surprises.
 
 The CLI URL form for this backend is
 ``proxmox://USER:PASS@HOST[:PORT]/NODE?storage=NAME`` — see

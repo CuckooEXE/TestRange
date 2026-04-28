@@ -8,6 +8,118 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Proxmox networking parity
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Three Proxmox networking gaps closed together — the same code paths
+in :class:`~testrange.backends.proxmox.ProxmoxOrchestrator` and the
+same test surface, so it made sense to ship them as one slice.
+
+**Added: DHCP-discovery vNICs on Proxmox.**
+:class:`~testrange.devices.vNIC` without an explicit ``ip=`` is now
+legal on the Proxmox backend (matching the libvirt backend's existing
+behaviour).  The orchestrator picks the next free host address on the
+network's subnet — skipping the gateway and any IP another vNIC
+already registered — and threads it through cloud-init / answer.toml
+exactly as if the user had written ``ip=`` themselves.  Determinism
+in declaration order keeps test assertions stable.  Static-IP
+behaviour is unchanged; the new path only kicks in when ``ip`` is
+``None``.
+
+**Added: install-vnet subnet pool.**  Replaces the single hardcoded
+``192.168.230.0/24`` install subnet with a 10-entry pool spanning
+``192.168.230.0/24`` – ``192.168.239.0/24`` (still safely below
+libvirt's pool at ``192.168.240.0/24``+).  At ``__enter__`` time
+``ProxmoxOrchestrator._pick_install_subnet`` queries
+``cluster/sdn/subnets`` once and chooses the first pool entry not
+already claimed by another in-flight run on the cluster.  Pool-
+exhausted backpressure surfaces as a clear
+:class:`~testrange.exceptions.OrchestratorError` rather than a
+silent collision.
+
+**Added: ``install_dns=`` kwarg on
+:class:`~testrange.backends.proxmox.ProxmoxOrchestrator`.**  Defaults
+to ``"1.1.1.1"`` (preserves prior behaviour); override for air-
+gapped, sovereign-DNS, or split-horizon setups.  Replaces the
+``_PUBLIC_DNS`` constant in
+``testrange/backends/proxmox/vm.py`` so cloud-init / answer.toml
+advertise the same resolver across both install and run phases.
+
+**Fixed: run-phase NICs on ``dns=True`` networks no longer point at a
+dead address.**  Previously
+:meth:`ProxmoxOrchestrator._vm_network_refs` set ``nameserver =
+net.gateway_ip if net.dns else ""``, but PVE doesn't run a resolver
+on the SDN gateway, so a ``dns=True`` network produced
+``/etc/resolv.conf`` pointing at an unresolvable address.  Post-fix:
+``dns=True`` resolves to the orchestrator's ``install_dns``;
+``dns=False`` continues to leave the nameserver empty.  Tests that
+relied on names at run time silently failed before; they work now.
+
+ProxMox installer ISO prep moves to xorriso
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Fixed: prepared PVE ISO no longer drops to ``grub>`` shell on
+UEFI.**  ``testrange/vms/builders/_proxmox_prepare.py`` previously
+used :mod:`pycdlib` to add ``/auto-installer-mode.toml`` to a vanilla
+PVE installer ISO and write a new image.  pycdlib's ``write_fp()``
+only preserves the basic El Torito boot record — it strips the
+hybrid GPT/MBR layout, the ``--grub2-mbr`` hybrid-MBR setup, the
+HFS+ wrapper, and (critically) the ``-efi-boot-part`` reference that
+wires the EFI System Partition into the GPT.  PVE's UEFI GRUB binary
+walks the GPT to locate the ESP at boot; without it, GRUB started
+fine but couldn't find ``/boot/grub/grub.cfg`` and dropped to the
+interactive ``grub>`` shell every time.
+
+Replaced with a ``xorriso -indev VANILLA -outdev OUT -boot_image any
+keep -map TOML /auto-installer-mode.toml -commit`` invocation.  The
+``-boot_image any keep`` flag preserves every boot-related artefact
+byte-for-byte while xorriso appends the new file; ``-return_with
+FAILURE 32`` lifts past xorriso's benign post-write SORRY about the
+protective MBR's partition-size field still encoding the original
+image size.
+
+**Added: ``xorriso`` as a Proxmox-backend system dependency.**
+Documented in :doc:`/usage/installation` under "ProxMox VE installs
+(optional)".  Missing-binary path raises a clear
+:class:`~testrange.vms.builders._proxmox_prepare.ProxmoxPrepareError`
+with apt / dnf / brew install hints; never produces a broken cached
+ISO.  Migration plan to drop the binary lives in ``TODO.md`` #10.
+
+Backend-neutral Hypervisor + per-orchestrator outer-VM payload
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Changed: :class:`testrange.Hypervisor` is now a single backend-
+neutral class.**  The previous design exposed a libvirt-specific
+``Hypervisor(LibvirtVM, AbstractHypervisor)`` at the top level that
+auto-injected ``libvirt-daemon-system`` / ``qemu-system-x86`` /
+``libvirt-clients`` apt packages and a ``systemctl enable libvirtd``
+post-install hook into every Hypervisor spec — useful for libvirt-
+on-libvirt nesting, dead weight (and cache-hash pollution) on every
+other inner-orchestrator combination.
+
+The new top-level :class:`Hypervisor` is a
+:class:`~testrange.GenericVM` plus the three
+:class:`~testrange.AbstractHypervisor` data fields.  The outer
+orchestrator's existing ``_promote_to_<backend>`` pipeline now
+recognises hypervisor inputs and translates them into the backend-
+flavoured concrete Hypervisor (``Libvirt|ProxmoxVM +
+AbstractHypervisor``) so the lifecycle methods provisioning expects
+(``_memory_kib``, ``build``, ``start_run``, …) exist when called.
+
+**Added:** :meth:`AbstractOrchestrator.prepare_outer_vm` classmethod
+(default no-op).  Each orchestrator class declares its own outer-VM
+payload — ``LibvirtOrchestrator.prepare_outer_vm`` injects the
+libvirtd setup; ``ProxmoxOrchestrator`` keeps the no-op default
+because the PVE installer is the whole install phase.  All four
+cross-product cases (libvirt × {libvirt, proxmox} × proxmox × {libvirt,
+proxmox}) work uniformly.
+
+**Lifted:** ``_vcpu_count`` / ``_memory_kib`` / ``_memory_mib`` /
+``_primary_disk_size`` / ``_network_refs`` from ``LibvirtVM`` and
+``ProxmoxVM`` up to :class:`~testrange.AbstractVM`.  They were
+duplicated verbatim across both backends and the libvirt memory
+preflight needs them on a top-level Hypervisor before promotion runs.
+
 Switch / VirtualNetwork two-layer model
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -93,11 +205,11 @@ Wired through ``ProxmoxVM._make_guest_agent_communicator``;
 **Added: dedicated install-phase SDN vnet.**
 ``ProxmoxOrchestrator`` brings up a separate
 :class:`~testrange.backends.proxmox.network.ProxmoxVirtualNetwork`
-on ``192.168.230.0/24`` (``internet=True``) for every install
-pass.  Without it, a VM whose only declared NIC was on a
-``internet=False`` user network would hang indefinitely on
-``apt install`` during cloud-init.  Symmetric with the libvirt
-backend's ``tr-instal-*`` network.
+on a subnet from ``192.168.230.0/24`` – ``192.168.239.0/24``
+(``internet=True``) for every install pass.  Without it, a VM
+whose only declared NIC was on a ``internet=False`` user network
+would hang indefinitely on ``apt install`` during cloud-init.
+Symmetric with the libvirt backend's ``tr-instal-*`` network.
 
 **Added: install-phase cloud-init seed describes the install NIC.**
 ``ProxmoxVM._build_install_mac_ip_pairs`` now returns a single

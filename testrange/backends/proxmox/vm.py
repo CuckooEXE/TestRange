@@ -201,8 +201,13 @@ def _proxmox_storage(context: AbstractOrchestrator) -> str:
 class ProxmoxVM(AbstractVM):
     """Proxmox-VE implementation of :class:`AbstractVM`.
 
-    See the module docstring for the v1 scope (Debian cloud-init +
-    SSH only, no caching, static IPs).
+    See the module docstring for the supported communicator paths
+    (SSH on a routable inner-VM IP, or QEMU guest-agent over PVE's
+    REST ``/agent/`` endpoints) and the SSH-vs-guest-agent trade-off.
+    Cloud-init for Debian-style images, PVE auto-installer for PVE
+    ISOs.  Both static and DHCP-discovery vNICs are accepted —
+    ``ProxmoxOrchestrator._setup_vm_networks`` allocates a host
+    address for any vNIC without an explicit ``ip=``.
     """
 
     _vmid: int | None

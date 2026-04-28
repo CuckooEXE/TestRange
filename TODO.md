@@ -16,63 +16,7 @@ source of truth for what landed.
 
 ## Proxmox backend
 
-### 1. Hardcoded install-vnet subnet — no concurrency
-
-**Where:** `testrange/backends/proxmox/orchestrator.py` —
-`_PROXMOX_INSTALL_SUBNET = "192.168.230.0/24"`.
-
-**Why it bothers us:** two test processes pointed at the same
-PVE node + zone would both try to create an install vnet on the
-same subnet (and possibly the same SDN vnet name).  The libvirt
-backend has a 15-subnet pool + cross-process file lock for
-exactly this case; the proxmox backend is single-orchestrator-
-per-PVE-zone today.  Documented in the constant's docstring but
-it's a real concurrency limit — first to land in CI matters.
-
-**Sketch:** define a pool (`192.168.230.0/24`–`192.168.239.0/24`
-or similar) + a PVE-side lock keyed off `(host, zone)`.  Pick at
-`__enter__` time; release on teardown.  The PVE-side lock can
-piggy-back on the SDN zone (`tr-lock-<run-id>` vnet existence)
-since per-host file locks don't work for a remote PVE.
-
-### 2. Hardcoded public DNS in install-phase cloud-init seed
-
-**Where:** `testrange/backends/proxmox/vm.py` —
-`_PUBLIC_DNS = "1.1.1.1"`.
-
-**Why it bothers us:** PVE SDN simple-zones don't ship a
-per-bridge DNS resolver (libvirt's dnsmasq pattern doesn't
-apply).  The install seed has to point cloud-init at a working
-resolver or apt times out on `deb.debian.org`.  We hardcode
-`1.1.1.1`.  Three concrete consequences:
-
-1. Air-gapped or DNS-restricted environments silently fail
-   (corporate firewalls that block outbound 53, captive portals).
-2. Sovereignty / policy concerns — some shops can't legally
-   route DNS to Cloudflare.
-3. There's no user knob to override it.
-
-There's also a related latent bug: `_vm_network_refs` for run-phase
-NICs sets `nameserver = net.gateway_ip if net.dns else ""` — but
-PVE doesn't run a resolver on the gateway, so a run-phase guest's
-`/etc/resolv.conf` ends up pointing at a dead address whenever a
-test sets `dns=True` on a `ProxmoxVirtualNetwork`.  The example
-sidesteps this by using IPs in its assertions; a test that uses
-names at run time will silently fail.
-
-**Sketch:**
-- Short term: add `install_dns="1.1.1.1"` kwarg to
-  `ProxmoxOrchestrator.__init__`, plumb to `_PUBLIC_DNS`'s usage
-  site.  Solves (1)–(3) without changing the architecture.
-- Run phase: do the same fallback in `_vm_network_refs` instead
-  of pretending the gateway is a resolver.
-- Long term: actually run a dnsmasq somewhere PVE-side (host or
-  one-off LXC inside the PVE node) so cross-VM `<vm>.<net>` name
-  resolution works the same way it does on libvirt.  Restores
-  feature parity — tests written against libvirt that use names
-  would then run unchanged on PVE.
-
-### 3. `RunDir` constructed only as an `id` carrier
+### 1. `RunDir` constructed only as an `id` carrier
 
 **Where:** `testrange/backends/proxmox/orchestrator.py` —
 `__enter__` constructs `RunDir(LocalStorageBackend(...))` purely
@@ -91,7 +35,7 @@ extension that adds filesystem ops on top.  `vm.build()` /
 `vm.start_run()` take the smaller `Run` interface; libvirt's
 implementation casts to `RunDir` to use the FS bits.
 
-### 4. `_await_upload_upid` defensive non-UPID handling
+### 2. `_await_upload_upid` defensive non-UPID handling
 
 **Where:** `testrange/backends/proxmox/vm.py` —
 `_await_upload_upid` treats any response that doesn't start
@@ -109,12 +53,11 @@ response shapes (empty, dict-with-no-UPID, etc.) and raise on
 anything outside it.  Forces a real diagnosis if PVE introduces
 a new response shape rather than silently masking it.
 
-### 5. `inst<run_id[:4]>` install-vnet name is unstable across runs
+### 3. `inst<run_id[:4]>` install-vnet not swept by `testrange cleanup`
 
 **Where:** `testrange/backends/proxmox/orchestrator.py` —
-`_create_install_network` uses `name="install"` which renders
-to `inst<run_id[:4]>` via
-`ProxmoxVirtualNetwork.backend_name()`.
+`_create_install_network` produces a vnet whose backend name is
+`inst<run_id[:4]>` via `ProxmoxVirtualNetwork.backend_name()`.
 
 **Why it bothers us:** a crashed run leaves `inst<run_id[:4]>`
 behind on PVE.  `testrange cleanup MODULE RUN_ID` doesn't sweep
@@ -127,30 +70,33 @@ look for and remove `inst<run_id[:4]>`-shaped vnets in the
 zone.  Same shape as the other per-run resources it already
 sweeps.
 
+### 4. SDN-side dnsmasq for run-phase name resolution
+
+**Where:** `testrange/backends/proxmox/orchestrator.py` —
+``_vm_network_refs`` falls back to ``self._install_dns`` (the
+orchestrator's configured public resolver) for run-phase NICs on
+``dns=True`` networks.  That gives guests *a* working resolver,
+but not cross-VM ``<vm>.<net>`` name resolution the way libvirt's
+per-network dnsmasq does.
+
+**Why it bothers us:** tests written against libvirt that use VM
+hostnames in run-time assertions (``orch.vms["web"].exec(...)``
+implicitly resolves ``web.OuterNet`` from inside the guest)
+silently fail on PVE — the names don't exist anywhere.  Workaround
+is to use IPs.
+
+**Sketch:** stand up a dnsmasq somewhere PVE-side (host service or
+a one-off LXC inside the PVE node) seeded with the orchestrator's
+``register_vm`` ledger.  Each VM gets an A record for
+``<vm-name>.<network-name>``; the run-phase NICs' DNS field points
+at it.  Restores libvirt-style name resolution and makes
+cross-backend tests run unchanged.
+
 ---
 
-## Examples
+## Cross-cutting
 
-### 6. `examples/nested_proxmox_public_private.py` uses libvirt's `Hypervisor`
-
-**Where:** the example imports `Hypervisor` from
-`testrange.backends.libvirt`.
-
-**Why it bothers us:** libvirt's `Hypervisor` class auto-injects
-`libvirt-daemon-system`, `qemu-kvm`, `qemu-utils` packages into
-the spec + the `systemctl enable libvirtd` post_install_cmds.
-`ProxmoxAnswerBuilder` ignores `pkgs=` / `post_install_cmds=`
-(PVE installs from `answer.toml`), so those entries don't
-actually run — but they DO get baked into the spec's cache hash.
-The displayed hash is misleading and the spec carries dead data.
-
-**Sketch:** introduce `ProxmoxHypervisor` in
-`testrange/backends/libvirt/` (or a backend-neutral
-`Hypervisor` factory that picks the right shim based on the
-inner orchestrator type).  No package injection; the PVE
-installer is the whole install phase.
-
-### 7. Inner-orchestrator state isn't swept by `testrange cleanup`
+### 5. Inner-orchestrator state isn't swept by `testrange cleanup`
 
 **Where:** `testrange/orchestrator_base.py` — `cleanup()` is
 per-orchestrator and doesn't recurse into Hypervisor VMs'
@@ -170,11 +116,7 @@ names and delete them.  Requires the inner-orchestrator class
 to know its own naming conventions, which it already does for
 its own `cleanup()` impl.
 
----
-
-## Cross-cutting
-
-### 8. SDN routing warning is informational, not actionable
+### 6. SDN routing warning is informational, not actionable
 
 **Where:** `testrange/backends/proxmox/orchestrator.py` —
 `_warn_if_unroutable` logs ``Add a route through the PVE node,
@@ -196,7 +138,7 @@ The guest-agent communicator sidesteps the whole routing problem
   it at ``__exit__``.  Behind a flag — most CI environments
   don't have passwordless sudo.
 
-### 9. Memory preflight is libvirt-only
+### 7. Memory preflight is libvirt-only
 
 **Where:**
 `testrange/backends/libvirt/_preflight.py` — `check_memory()`
@@ -214,7 +156,7 @@ of "preflight catches it before any state changes".
 backend.  Proxmox queries `/nodes/{node}/status` for total + used
 memory and runs the same arithmetic.
 
-### 10. Ctrl+C during a remote run leaks resources on the remote
+### 8. Ctrl+C during a remote run leaks resources on the remote
 
 **Where:** `testrange/backends/libvirt/orchestrator.py` —
 `__exit__` / `_teardown` over a `qemu+ssh://` connection.
@@ -252,10 +194,10 @@ an ignored teardown error.
 - Skip-if-not-bound in the network teardown loop so unstarted
   run-phase networks don't pollute the log with teardown errors.
 
-### 11. WinRM communicator missing on Proxmox
+### 9. WinRM communicator missing on Proxmox
 
-**Where:** ``testrange/backends/proxmox/`` — no parallel to
-``testrange.backends.libvirt.guest_agent.GuestAgentCommunicator`` /
+**Where:** `testrange/backends/proxmox/` — no parallel to
+`testrange.backends.libvirt.guest_agent.GuestAgentCommunicator` /
 the WinRM communicator wired up for libvirt VMs.  The proxmox
 backend currently routes Windows VMs through QEMU guest-agent
 only.
@@ -286,13 +228,13 @@ case.
   to set them up via ``answer.toml`` / first-boot scripts.
 - Open question: PVE's SDN simple zones don't bridge inner
   subnets to the outer host without an explicit route (see
-  TODO #8 below), so WinRM-from-the-host-to-an-inner-VM only
+  TODO #6 above), so WinRM-from-the-host-to-an-inner-VM only
   works when the outer host can reach the inner IP.  Either
   document the routing requirement or have the communicator
   hop through a PVE-side proxy (proxy via guest-agent if
   available; otherwise raise a helpful error).
 
-### 12. Migrate ``_proxmox_prepare`` off the ``xorriso`` binary
+### 10. Migrate `_proxmox_prepare` off the `xorriso` binary
 
 **Where:** ``testrange/vms/builders/_proxmox_prepare.py`` —
 :func:`prepare_iso_bytes` shells out to the ``xorriso`` CLI via
@@ -383,7 +325,7 @@ codebase.
 isn't on ``$PATH``, so the failure mode is a clear "install this
 package" rather than a confusing prepared-ISO bug.
 
-### 13. Module of test_orchestrator.py has a flaky memory-preflight test
+### 11. Module of test_orchestrator.py has a flaky memory-preflight test
 
 **Where:**
 `tests/test_orchestrator.py::TestCleanupStaleInstallNetworks::test_runs_before_install_network_start`.
