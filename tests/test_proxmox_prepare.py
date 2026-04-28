@@ -4,15 +4,20 @@ The prep step (adding ``/auto-installer-mode.toml`` to a vanilla PVE
 ISO) is the one place TestRange interacts with the PVE installer's
 on-disk activation contract.  These tests pin the contract:
 
-* file is added with the right Rock Ridge / ISO9660 / Joliet names
-* the TOML body matches PVE 9.x's ``proxmox-fetch-answer`` schema
+* the toml body matches PVE 9.x's ``proxmox-fetch-answer`` schema
   (``mode = "partition"``, underscored ``partition_label``)
 * the volume label is configurable
-* ``ProxmoxPrepareError`` wraps pycdlib failures
+* ``ProxmoxPrepareError`` wraps xorriso failures + missing-binary
+* the xorriso invocation preserves boot setup via ``-boot_image any
+  keep`` (the line that fixes the prepared-ISO-drops-to-grub-shell
+  bug — earlier pycdlib path lost the hybrid GPT/MBR/HFS+
+  infrastructure and PVE's UEFI GRUB couldn't find ``grub.cfg``).
 """
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,72 +28,97 @@ from testrange.vms.builders._proxmox_prepare import (
 )
 
 
-def _stub_iso_for(monkeypatch: pytest.MonkeyPatch, **flags: bool) -> MagicMock:
-    """Patch :class:`pycdlib.PyCdlib` to a MagicMock with configurable
-    ``has_*`` flags.  Returns the mock so tests can inspect calls.
+def _stub_xorriso(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bin_path: str | None = "/usr/bin/xorriso",
+    returncode: int = 0,
+    stderr: str = "",
+) -> MagicMock:
+    """Patch ``shutil.which`` and ``subprocess.run`` for unit tests.
+
+    Returns the ``subprocess.run`` mock so call args can be asserted.
     """
     import testrange.vms.builders._proxmox_prepare as pp
 
-    iso_obj = MagicMock()
-    iso_obj.has_rock_ridge.return_value = flags.get("rock_ridge", True)
-    iso_obj.has_joliet.return_value = flags.get("joliet", False)
-    monkeypatch.setattr(pp, "PyCdlib", lambda: iso_obj)
-    return iso_obj
+    monkeypatch.setattr(pp.shutil, "which", lambda _: bin_path)
+    run_mock = MagicMock(
+        return_value=MagicMock(returncode=returncode, stderr=stderr),
+    )
+    if returncode != 0:
+        # ``check=True`` causes subprocess.run to raise on non-zero;
+        # mirror that so the production code's except path runs.
+        run_mock.side_effect = subprocess.CalledProcessError(
+            returncode=returncode,
+            cmd=["xorriso"],
+            output="",
+            stderr=stderr,
+        )
+    monkeypatch.setattr(pp.subprocess, "run", run_mock)
+    return run_mock
 
 
-class TestPrepareIsoBytesAddFp:
-    """The ``add_fp`` call is the entire point of the prep — these
-    tests pin its arguments so a future refactor can't silently
-    change the path PVE looks up."""
+class TestPrepareIsoBytesXorrisoCommand:
+    """The ``xorriso`` argv is the entire production payload — these
+    tests pin the flags so a future refactor can't silently drop the
+    boot-preservation knob (which, when missing, produces an ISO that
+    drops to ``grub>`` instead of running the installer)."""
 
-    def test_add_fp_called_with_iso_root_path(
-        self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_keeps_boot_image_setup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        iso_obj = _stub_iso_for(monkeypatch, rock_ridge=True, joliet=False)
-
-        src = tmp_path / "vanilla.iso"
-        out = tmp_path / "prepared.iso"
-        src.write_bytes(b"")  # empty — pycdlib is mocked
-        prepare_iso_bytes(src, out)
-
-        iso_obj.add_fp.assert_called_once()
-        kwargs = iso_obj.add_fp.call_args.kwargs
-        assert kwargs["iso_path"] == "/AUTOINST.TOM;1"
-        # Rock Ridge basename is what PVE 9.x's
-        # ``proxmox-fetch-answer`` reads at /cdrom/auto-installer-mode.toml.
-        assert kwargs["rr_name"] == "auto-installer-mode.toml"
-        # No Joliet on this ISO → no joliet_path kwarg.
-        assert "joliet_path" not in kwargs
-
-    def test_add_fp_includes_joliet_when_iso_has_joliet(
-        self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        iso_obj = _stub_iso_for(monkeypatch, rock_ridge=True, joliet=True)
-        src = tmp_path / "vanilla.iso"
-        out = tmp_path / "prepared.iso"
+        run_mock = _stub_xorriso(monkeypatch)
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
         src.write_bytes(b"")
+
         prepare_iso_bytes(src, out)
 
-        kwargs = iso_obj.add_fp.call_args.kwargs
-        assert kwargs.get("joliet_path") == "/auto-installer-mode.toml"
+        argv = run_mock.call_args.args[0]
+        # ``-boot_image any keep`` is the load-bearing argument.
+        # Without it xorriso re-derives the boot setup from scratch
+        # and loses the hybrid GPT/MBR/HFS+ layout that PVE's UEFI
+        # GRUB depends on to locate its grub.cfg.
+        i = argv.index("-boot_image")
+        assert argv[i + 1] == "any"
+        assert argv[i + 2] == "keep"
 
-    def test_add_fp_skips_rock_ridge_when_iso_lacks_it(
-        self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_maps_toml_to_iso_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        iso_obj = _stub_iso_for(monkeypatch, rock_ridge=False, joliet=False)
-        src = tmp_path / "vanilla.iso"
-        out = tmp_path / "prepared.iso"
+        # The prepared ISO path the PVE installer reads is hardcoded
+        # at ``/cdrom/auto-installer-mode.toml`` (i.e., ISO-root
+        # ``/auto-installer-mode.toml``).  Anywhere else and the
+        # installer drops to interactive mode.
+        run_mock = _stub_xorriso(monkeypatch)
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
         src.write_bytes(b"")
+
         prepare_iso_bytes(src, out)
 
-        kwargs = iso_obj.add_fp.call_args.kwargs
-        assert "rr_name" not in kwargs
+        argv = run_mock.call_args.args[0]
+        i = argv.index("-map")
+        # argv[i+1] is the local temp file; argv[i+2] is the ISO path.
+        assert argv[i + 2] == "/auto-installer-mode.toml"
+
+    def test_routes_through_indev_outdev(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # ``-indev`` (read source) + ``-outdev`` (write target) is the
+        # only mode that lets ``-boot_image any keep`` preserve the
+        # original boot infrastructure.  ``-dev`` (in-place) drops
+        # the El Torito record entirely.
+        run_mock = _stub_xorriso(monkeypatch)
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
+        src.write_bytes(b"")
+
+        prepare_iso_bytes(src, out)
+
+        argv = run_mock.call_args.args[0]
+        assert "-indev" in argv
+        assert "-outdev" in argv
+        assert "-dev" not in argv  # would silently break UEFI boot
+        assert argv[argv.index("-indev") + 1] == str(src.resolve())
+        assert argv[argv.index("-outdev") + 1] == str(out.resolve())
 
 
 class TestPrepareIsoBytesTomlBody:
@@ -96,83 +126,117 @@ class TestPrepareIsoBytesTomlBody:
     — ``mode = "partition"`` + ``partition_label = "<label>"``
     (note underscore, distinct from answer.toml's kebab-case)."""
 
-    def test_default_partition_label(
+    def _captured_toml(
         self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
+        run_mock: MagicMock,
+    ) -> str:
+        """Fish the temp-file payload out of the recorded argv."""
+        argv = run_mock.call_args.args[0]
+        local = argv[argv.index("-map") + 1]
+        return Path(local).read_text(encoding="utf-8")
+
+    def test_default_partition_label(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        iso_obj = _stub_iso_for(monkeypatch)
-        src = tmp_path / "v.iso"
-        out = tmp_path / "p.iso"
+        # The prep code unlinks the temp file in its ``finally``, so
+        # snapshot the bytes via a side-effect on subprocess.run.
+        captured: dict[str, str] = {}
+
+        def _capture(argv, **kw):
+            local = argv[argv.index("-map") + 1]
+            captured["body"] = Path(local).read_text(encoding="utf-8")
+            return MagicMock(returncode=0, stderr="")
+
+        import testrange.vms.builders._proxmox_prepare as pp
+        monkeypatch.setattr(pp.shutil, "which", lambda _: "/usr/bin/xorriso")
+        monkeypatch.setattr(pp.subprocess, "run", _capture)
+
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
         src.write_bytes(b"")
         prepare_iso_bytes(src, out)
 
-        # add_fp is called with (BytesIO, length, iso_path=, rr_name=, ...)
-        positional = iso_obj.add_fp.call_args.args
-        body_buf = positional[0]
-        body = body_buf.getvalue().decode("utf-8")
+        body = captured["body"]
         assert 'mode = "partition"' in body
         assert 'partition_label = "PROXMOX-AIS"' in body
-        # Underscored, not kebab-case — that's the parser quirk.
+        # Underscored, not kebab-case — that's the PVE parser quirk.
         assert "partition-label" not in body
 
     def test_custom_partition_label(
-        self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        iso_obj = _stub_iso_for(monkeypatch)
-        src = tmp_path / "v.iso"
-        out = tmp_path / "p.iso"
+        captured: dict[str, str] = {}
+
+        def _capture(argv, **kw):
+            local = argv[argv.index("-map") + 1]
+            captured["body"] = Path(local).read_text(encoding="utf-8")
+            return MagicMock(returncode=0, stderr="")
+
+        import testrange.vms.builders._proxmox_prepare as pp
+        monkeypatch.setattr(pp.shutil, "which", lambda _: "/usr/bin/xorriso")
+        monkeypatch.setattr(pp.subprocess, "run", _capture)
+
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
         src.write_bytes(b"")
         prepare_iso_bytes(src, out, partition_label="MY-LABEL")
 
-        body_buf = iso_obj.add_fp.call_args.args[0]
-        body = body_buf.getvalue().decode("utf-8")
-        assert 'partition_label = "MY-LABEL"' in body
+        assert 'partition_label = "MY-LABEL"' in captured["body"]
 
 
-class TestPrepareIsoBytesLifecycle:
-    def test_close_called_even_on_add_fp_failure(
-        self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
+class TestPrepareIsoBytesErrorHandling:
+    def test_missing_xorriso_raises_with_install_hint(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """``pycdlib.PyCdlib`` opens a file handle to the source ISO;
-        if we don't close on the error path, repeated failures leak
-        FDs and eventually fail the next prep with EMFILE."""
-        iso_obj = _stub_iso_for(monkeypatch)
-        iso_obj.add_fp.side_effect = RuntimeError("boom")
-
-        src = tmp_path / "v.iso"
-        out = tmp_path / "p.iso"
+        _stub_xorriso(monkeypatch, bin_path=None)
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
         src.write_bytes(b"")
 
-        with pytest.raises(ProxmoxPrepareError, match="boom"):
+        with pytest.raises(
+            ProxmoxPrepareError,
+            match=r"xorriso not found.*apt install xorriso",
+        ):
             prepare_iso_bytes(src, out)
 
-        iso_obj.close.assert_called_once()
-
-    def test_open_failure_wraps_in_proxmox_prepare_error(
-        self,
-        tmp_path: pytest.MonkeyPatch,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_xorriso_failure_surfaces_stderr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A vanilla ISO that pycdlib can't open (corrupt / truncated)
-        should surface as ``ProxmoxPrepareError`` with the underlying
-        message — not a raw pycdlib exception."""
+        _stub_xorriso(
+            monkeypatch,
+            returncode=32,
+            stderr="libisofs: FAILURE : malformed input",
+        )
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
+        src.write_bytes(b"")
+
+        with pytest.raises(
+            ProxmoxPrepareError,
+            match=r"exit 32.*malformed input",
+        ):
+            prepare_iso_bytes(src, out)
+
+    def test_temp_toml_is_cleaned_up_on_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Failing path must still ``unlink`` the staged TOML or
+        # repeated failures pile up in /tmp.
+        observed: list[Path] = []
+
+        def _capture(argv, **kw):
+            observed.append(Path(argv[argv.index("-map") + 1]))
+            raise subprocess.CalledProcessError(
+                returncode=1, cmd=argv, stderr="boom",
+            )
+
         import testrange.vms.builders._proxmox_prepare as pp
+        monkeypatch.setattr(pp.shutil, "which", lambda _: "/usr/bin/xorriso")
+        monkeypatch.setattr(pp.subprocess, "run", _capture)
 
-        iso_obj = MagicMock()
-        iso_obj.open.side_effect = RuntimeError("malformed iso")
-        monkeypatch.setattr(pp, "PyCdlib", lambda: iso_obj)
-
-        src = tmp_path / "v.iso"
-        out = tmp_path / "p.iso"
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
         src.write_bytes(b"")
-
-        with pytest.raises(ProxmoxPrepareError, match="malformed iso"):
+        with pytest.raises(ProxmoxPrepareError):
             prepare_iso_bytes(src, out)
+
+        assert observed, "xorriso wasn't called?"
+        assert not observed[0].exists()
 
 
 class TestProxmoxPrepareError:

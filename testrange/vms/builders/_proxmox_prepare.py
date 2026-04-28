@@ -1,7 +1,7 @@
 """Prepare a ProxMox VE installer ISO for unattended installation.
 
 Activation mechanism (verified against PVE 9.x's
-`proxmox-fetch-answer` source at
+``proxmox-fetch-answer`` source at
 ``proxmox-fetch-answer/src/main.rs``): the installer's squashfs
 contains an entry-point that reads ``/cdrom/auto-installer-mode.toml``
 (the mounted-ISO path for the root of the prepared installer ISO).
@@ -11,21 +11,38 @@ fetches ``answer.toml`` per the mode declared in the file
 drops to interactive mode.
 
 Preparation is therefore one operation: add ``auto-installer-mode.toml``
-at the ISO root.  No initrd patching, no xorriso, no
-``proxmox-auto-install-assistant`` binary — pure pycdlib.
+at the ISO root.  The catch is that the PVE installer ISO is a
+**hybrid** image — its UEFI boot path depends on a precise El Torito
++ GPT/MBR/HFS+ layout that's far more involved than a vanilla
+ISO9660 filesystem.  PVE's UEFI GRUB has an embedded prefix-finding
+config that walks the GPT to locate the EFI System Partition, and
+without that GPT entry GRUB drops to its interactive ``grub>`` shell
+instead of loading ``/boot/grub/grub.cfg``.
 
-PVE 8.x used a different mechanism (the mode file lived *inside* the
-installer initrd), so this module is intentionally PVE 9.x-shaped.
-Adding 8.x support would mean version-detecting the ISO and branching
-the prep strategy.
+We therefore drive ``xorriso`` (libisoburn's CLI) with
+``-boot_image any keep`` so the original boot setup is preserved
+byte-for-byte while the new file is appended.  An earlier pure-Python
+implementation using ``pycdlib.write_fp()`` only preserved the basic
+El Torito boot record and stripped the hybrid GPT/MBR/HFS+
+infrastructure — same symptom every time: the prepared ISO booted
+to ``grub>``, never to the installer.
+
+xorriso is a system dependency.  It ships with libisoburn on every
+mainstream Linux distro (``apt install xorriso`` on Debian/Ubuntu;
+already in ``buildah``, ``ostree``, and the Proxmox toolchain).
+
+PVE 8.x used a different activation mechanism (the mode file lived
+*inside* the installer initrd), so this module is intentionally
+PVE 9.x-shaped.  Adding 8.x support would mean version-detecting the
+ISO and branching the prep strategy.
 """
 
 from __future__ import annotations
 
-import io
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
-
-from pycdlib import PyCdlib  # type: ignore[attr-defined]
 
 from testrange._logging import get_logger, log_duration
 from testrange.exceptions import TestRangeError
@@ -54,8 +71,8 @@ Field names come from PVE 9.x's
 class ProxmoxPrepareError(TestRangeError):
     """Raised when preparing a ProxMox installer ISO fails.
 
-    Covers pycdlib open/write errors and anything else unexpected in
-    the ISO-manipulation path.
+    Covers a missing ``xorriso`` binary, a corrupted vanilla input,
+    or any non-zero exit from the xorriso subprocess.
     """
 
 
@@ -67,10 +84,11 @@ def prepare_iso_bytes(
 ) -> None:
     """Write an auto-install-enabled copy of *vanilla_iso_path* to *out_path*.
 
-    Opens the vanilla PVE installer ISO with pycdlib, adds a small
-    ``auto-installer-mode.toml`` at the ISO root, and writes a new
-    ISO.  El Torito boot records — including the UEFI boot catalog
-    entry — are preserved through pycdlib's standard write path.
+    Drives ``xorriso -indev VANILLA -outdev OUT -boot_image any keep
+    -map TOML /auto-installer-mode.toml -commit``: the ``-boot_image
+    any keep`` flag preserves the original El Torito + hybrid
+    GPT/MBR/HFS+ infrastructure so PVE's UEFI GRUB can still find the
+    EFI System Partition the way it expects.
 
     :param vanilla_iso_path: Existing PVE installer ISO on disk.
     :param out_path: Where to write the prepared ISO.  Must not exist
@@ -78,10 +96,24 @@ def prepare_iso_bytes(
     :param partition_label: Volume label the prepared installer
         searches for at install time to read ``answer.toml``.
         Defaults to ``PROXMOX-AIS``.
-    :raises ProxmoxPrepareError: On any pycdlib failure.
+    :raises ProxmoxPrepareError: When ``xorriso`` is missing on
+        ``$PATH``, when the vanilla ISO can't be opened, or when
+        ``xorriso`` itself returns non-zero.
     """
     vanilla_iso_path = vanilla_iso_path.expanduser().resolve()
     out_path = out_path.expanduser().resolve()
+
+    xorriso_bin = shutil.which("xorriso")
+    if xorriso_bin is None:
+        raise ProxmoxPrepareError(
+            "xorriso not found on $PATH — install it with "
+            "``apt install xorriso`` (Debian/Ubuntu), ``dnf install "
+            "xorriso`` (Fedora/RHEL), or ``brew install xorriso`` "
+            "(macOS).  Required to preserve the PVE installer ISO's "
+            "hybrid UEFI boot setup while injecting "
+            "/auto-installer-mode.toml."
+        )
+
     _log.info(
         "preparing PVE ISO %s → %s (partition_label=%s)",
         vanilla_iso_path, out_path, partition_label,
@@ -89,55 +121,58 @@ def prepare_iso_bytes(
 
     toml_body = _AUTO_INSTALLER_MODE_TOML.format(
         label=partition_label,
-    ).encode()
+    )
 
-    iso = PyCdlib()
+    # xorriso's ``-map LOCAL ISO`` takes a real filesystem path, so
+    # stage the TOML body in a temp file for the duration of the
+    # subprocess call.
+    with tempfile.NamedTemporaryFile(
+        prefix="testrange-auto-installer-mode-",
+        suffix=".toml",
+        delete=False,
+    ) as tmp:
+        tmp.write(toml_body.encode("utf-8"))
+        tmp_path = Path(tmp.name)
+
     try:
-        iso.open(str(vanilla_iso_path))
-    except Exception as exc:  # noqa: BLE001
-        raise ProxmoxPrepareError(
-            f"failed to open PVE ISO {vanilla_iso_path}: {exc}"
-        ) from exc
-
-    try:
-        # PVE 9.x ISOs ship Rock Ridge + ISO9660 (no Joliet).  The
-        # installer reads `/cdrom/auto-installer-mode.toml` by Rock
-        # Ridge name, so we must emit the Rock Ridge basename; the
-        # ISO9660 alias (uppercase, ``;1``-suffixed) is required by
-        # pycdlib's add_fp contract whenever the ISO has an ISO9660
-        # namespace (always, in practice).
-        add_kwargs: dict[str, object] = {
-            "iso_path": "/AUTOINST.TOM;1",
-        }
-        if iso.has_rock_ridge():
-            add_kwargs["rr_name"] = "auto-installer-mode.toml"
-        if iso.has_joliet():
-            add_kwargs["joliet_path"] = "/auto-installer-mode.toml"
-
-        try:
-            iso.add_fp(
-                io.BytesIO(toml_body),
-                len(toml_body),
-                **add_kwargs,  # type: ignore[arg-type]
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise ProxmoxPrepareError(
-                "failed to add auto-installer-mode.toml to ISO: "
-                f"{exc}"
-            ) from exc
-
-        _log.debug(
-            "added /auto-installer-mode.toml (%d bytes) to prepared ISO",
-            len(toml_body),
-        )
-
-        with (
-            log_duration(_log, "write prepared PVE ISO"),
-            open(out_path, "wb") as fh,
-        ):
-            iso.write_fp(fh)
+        cmd = [
+            xorriso_bin,
+            "-indev", str(vanilla_iso_path),
+            "-outdev", str(out_path),
+            # ``any keep`` preserves the original El Torito catalog,
+            # MBR/GPT hybrid layout, and EFI System Partition pointer
+            # exactly — which PVE's UEFI GRUB depends on for
+            # locating its own ``grub.cfg``.
+            "-boot_image", "any", "keep",
+            "-map", str(tmp_path), "/auto-installer-mode.toml",
+            "-commit",
+        ]
+        with log_duration(_log, "write prepared PVE ISO"):
+            try:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                # xorriso writes diagnostics to stderr; bubble them up
+                # so a corrupted vanilla ISO or a libisoburn quirk is
+                # immediately obvious in the test runner's log.
+                stderr = (exc.stderr or "").strip()
+                raise ProxmoxPrepareError(
+                    f"xorriso prepare-iso failed (exit {exc.returncode}): "
+                    f"{stderr or '(no stderr)'}"
+                ) from exc
+            except FileNotFoundError as exc:  # pragma: no cover — racy with shutil.which
+                raise ProxmoxPrepareError(
+                    f"xorriso disappeared between which() and exec(): {exc}"
+                ) from exc
     finally:
-        iso.close()
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
 
 
 __all__ = [
