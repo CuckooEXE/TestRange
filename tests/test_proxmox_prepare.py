@@ -100,6 +100,28 @@ class TestPrepareIsoBytesXorrisoCommand:
         # argv[i+1] is the local temp file; argv[i+2] is the ISO path.
         assert argv[i + 2] == "/auto-installer-mode.toml"
 
+    def test_lifts_return_with_threshold_to_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # xorriso's default ``-return_with SORRY 32`` exits non-zero
+        # on any SORRY-level event — including the benign
+        # post-write re-assessment SORRY about the protective MBR's
+        # partition-size field referring to the *original* image
+        # size when the new image grew by one file.  We lift the
+        # threshold to FAILURE so SORRY-only sessions still exit
+        # zero; real write-side issues still surface as FAILURE /
+        # FATAL.
+        run_mock = _stub_xorriso(monkeypatch)
+        src, out = tmp_path / "v.iso", tmp_path / "p.iso"
+        src.write_bytes(b"")
+
+        prepare_iso_bytes(src, out)
+
+        argv = run_mock.call_args.args[0]
+        i = argv.index("-return_with")
+        assert argv[i + 1] == "FAILURE"
+        assert argv[i + 2] == "32"
+
     def test_routes_through_indev_outdev(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

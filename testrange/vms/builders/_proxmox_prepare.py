@@ -137,6 +137,23 @@ def prepare_iso_bytes(
     try:
         cmd = [
             xorriso_bin,
+            # ``-return_with FAILURE 32``: lift the exit-code
+            # threshold from xorriso's default ``SORRY`` so the
+            # post-write re-assessment doesn't fail us when it
+            # spots that the *original* ISO's protective MBR
+            # encoded the *original* image size and the new
+            # image, having grown by one file, is now slightly
+            # smaller than the MBR's partition entry implies.
+            # That's a libburn SORRY about MBR metadata, not a
+            # write failure (the "Writing to ... completed
+            # successfully" line precedes it) and the resulting
+            # ISO is still bootable: UEFI uses the GPT, BIOS uses
+            # the El Torito catalog, and hybrid-USB boot uses the
+            # MBR's *boot code* offset — none of those care about
+            # the MBR partition entry's encoded size.  Real
+            # write-side problems still surface as FAILURE or
+            # FATAL events and exit non-zero.
+            "-return_with", "FAILURE", "32",
             "-indev", str(vanilla_iso_path),
             "-outdev", str(out_path),
             # ``any keep`` preserves the original El Torito catalog,
