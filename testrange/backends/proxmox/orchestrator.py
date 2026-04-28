@@ -590,6 +590,12 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         except Exception:
             # Roll back in reverse provisioning order so we don't
             # leak any SDN / VMID state into the user's exception.
+            from testrange._debug import pause_on_error_if_enabled
+            pause_on_error_if_enabled(
+                "ProxmoxOrchestrator __enter__ raised; "
+                "VMs and SDN vnets are still up on the PVE node",
+                orchestrator=self,
+            )
             if self._nested_stack is not None:
                 self._nested_stack.close()
                 self._nested_stack = None

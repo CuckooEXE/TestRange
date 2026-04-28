@@ -78,6 +78,33 @@ Running
 First run: expect ~15–25 min for the ProxMox install (ISO download +
 auto-install).  Second run: cache-hit, boots from the cached disk in
 <60 s.
+
+Debugging an install/test failure
+---------------------------------
+
+Set ``TESTRANGE_PAUSE_ON_ERROR=1`` in the environment before running.
+Any exception during the outer ``__enter__``, the inner
+``ProxmoxOrchestrator.__enter__``, or the test function pauses on
+``input()`` before teardown — the proxmox VM (and any inner VMs that
+already booted) stay alive so you can SSH in and inspect.  See
+:func:`testrange._debug.pause_on_error_if_enabled`.
+
+Useful starting points once paused, for the dnsmasq/first-boot path
+this example exercises:
+
+::
+
+    # SSH into the outer PVE VM (deterministic-pick on OuterNet → .3)
+    ssh -J <ssh-server> root@10.0.0.3
+
+    # Did the first-boot script actually run?
+    cat /var/log/proxmox-first-boot.log 2>/dev/null \
+        || journalctl -u proxmox-first-boot --no-pager
+    which dnsmasq && dnsmasq --version
+
+    # Any SDN config issues at the inner layer?
+    pvesh get /cluster/sdn/vnets
+    pvesh get /cluster/sdn/subnets
 """
 
 from __future__ import annotations

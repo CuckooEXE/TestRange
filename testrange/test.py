@@ -121,13 +121,34 @@ class Test:
         The orchestrator context manager is used to ensure that resources are
         always cleaned up, even if the test function raises.
 
+        Honours :envvar:`TESTRANGE_PAUSE_ON_ERROR`: when set, an
+        exception raised by the test function pauses for operator
+        input before the ``with`` block's ``__exit__`` tears down,
+        leaving every VM alive for SSH-based debugging.  See
+        :func:`testrange._debug.pause_on_error_if_enabled` (the same
+        hook fires inside each backend orchestrator's ``__enter__``
+        for setup-phase failures).
+
         :returns: A :class:`TestResult` describing the outcome.
         """
+        from testrange._debug import pause_on_error_if_enabled
+
         start = time.monotonic()
         tb_str = ""
         try:
             with self._orchestrator as orch:
-                self._func(orch)
+                try:
+                    self._func(orch)
+                except BaseException:
+                    # Catch BaseException so KeyboardInterrupt during
+                    # the test body still gets the debug pause; the
+                    # ``with`` block's ``__exit__`` runs immediately
+                    # after this returns regardless.
+                    pause_on_error_if_enabled(
+                        "test function raised; orchestrator is still alive",
+                        orchestrator=orch,
+                    )
+                    raise
             return TestResult(
                 passed=True,
                 error=None,

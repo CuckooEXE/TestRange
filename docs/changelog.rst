@@ -8,6 +8,42 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Operator pause-on-error for SSH-based debugging
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Added: ``TESTRANGE_PAUSE_ON_ERROR=1`` env var.**  When set, any
+exception during the orchestrator's ``__enter__`` (libvirt or
+proxmox) or during the test function blocks on ``input()`` before
+teardown.  Provisioned VMs and SDN vnets stay alive so the
+operator can SSH in and inspect log files (``cat
+/var/log/proxmox-first-boot.log``), poll PVE state (``pvesh get
+/cluster/sdn/vnets``), examine guest network config, etc., before
+the resources get torn down.  Intercepts the three places an
+exception can fire: libvirt ``__enter__``, proxmox ``__enter__``,
+and the test body inside ``Test.run``.
+
+EOF / Ctrl+C at the prompt lets teardown proceed without
+re-raising — operators can ^C twice to interrupt the whole run if
+they actually want to abort.  Default off; pause-only-on-opt-in
+keeps CI runs from hanging on a debug prompt.
+
+Implementation lives in a tiny new module
+``testrange/_debug.py``; the prompt also surfaces the
+orchestrator's ``keep_alive_hints()`` so the operator sees exactly
+which ``virsh`` / ``pvesh`` invocations correspond to live
+resources.
+
+**Test surface:** new ``tests/test_debug.py`` (6 tests):
+no-op-when-unset, prompts-when-set, EOF + KeyboardInterrupt let
+teardown proceed, orchestrator hints printed, and
+hints-failure-is-swallowed-not-raised.  Suite is now 1040 passed
+/ 14 skipped / 0 failed.
+
+The example ``examples/nested_proxmox_public_private.py`` gets a
+"Debugging an install/test failure" docstring section pointing at
+the env var and listing useful starting points (the first-boot
+log, dnsmasq presence check, SDN vnet listing).
+
 PVE first-boot: prep-version cache key (closes the cache-vs-fix loop)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

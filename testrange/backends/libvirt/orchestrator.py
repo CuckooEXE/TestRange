@@ -622,6 +622,12 @@ class Orchestrator(AbstractOrchestrator):
             # Best-effort cleanup on partial setup.  ``BaseException`` —
             # not ``Exception`` — so Ctrl+C during a long install wait
             # still runs teardown before the interrupt propagates.
+            from testrange._debug import pause_on_error_if_enabled
+            pause_on_error_if_enabled(
+                "libvirt orchestrator __enter__ raised; "
+                "VMs are still alive on the libvirt host",
+                orchestrator=self,
+            )
             self._teardown()
             raise
 
