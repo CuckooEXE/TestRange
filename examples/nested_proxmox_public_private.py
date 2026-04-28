@@ -85,6 +85,7 @@ from testrange import (
     Apt,
     Credential,
     HardDrive,
+    Hypervisor,
     Memory,
     Orchestrator,
     Test,
@@ -93,7 +94,6 @@ from testrange import (
     run_tests,
     vCPU,
 )
-from testrange.backends.libvirt import Hypervisor
 from testrange.backends.proxmox import ProxmoxOrchestrator
 
 DEBIAN_CLOUD = (

@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from testrange.backends.proxmox.guest_agent import (
     ProxmoxGuestAgentCommunicator,
 )
+from testrange.backends.proxmox.hypervisor import ProxmoxHypervisor
 from testrange.backends.proxmox.network import (
     ProxmoxSwitch,
     ProxmoxVirtualNetwork,
@@ -39,7 +40,10 @@ from testrange.backends.proxmox.orchestrator import ProxmoxOrchestrator
 from testrange.backends.proxmox.vm import ProxmoxVM
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from testrange.orchestrator_base import AbstractOrchestrator
+    from testrange.vms.hypervisor_base import AbstractHypervisor
 
 # ---------------------------------------------------------------------------
 # CLI integration — see the corresponding section in
@@ -104,11 +108,31 @@ def cli_build_orchestrator(
     )
 
 
+def hypervisor_for_orchestrator(
+    orchestrator: type[AbstractOrchestrator], **kwargs: Any,
+) -> AbstractHypervisor | None:
+    """Return a :class:`ProxmoxHypervisor` for *orchestrator* if it's
+    the proxmox backend's, else ``None``.
+
+    Called by the top-level :func:`testrange.Hypervisor` factory's
+    backend dispatcher.  Mirrors the
+    :func:`cli_build_orchestrator` registry shape: each backend
+    publishes one of these and returns ``None`` for orchestrator
+    classes it doesn't own, letting the dispatcher try the next
+    backend.
+    """
+    if issubclass(orchestrator, ProxmoxOrchestrator):
+        return ProxmoxHypervisor(orchestrator=orchestrator, **kwargs)
+    return None
+
+
 __all__ = [
     "ProxmoxGuestAgentCommunicator",
+    "ProxmoxHypervisor",
     "ProxmoxOrchestrator",
     "ProxmoxSwitch",
     "ProxmoxVirtualNetwork",
     "ProxmoxVM",
     "cli_build_orchestrator",
+    "hypervisor_for_orchestrator",
 ]

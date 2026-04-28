@@ -31,8 +31,13 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
+from testrange.exceptions import OrchestratorError
+
 if TYPE_CHECKING:
+    from typing import Any
+
     from testrange.orchestrator_base import AbstractOrchestrator
+    from testrange.vms.hypervisor_base import AbstractHypervisor
 
 
 _CLI_BACKENDS: tuple[str, ...] = (
@@ -71,4 +76,40 @@ def cli_build_orchestrator(
     return None
 
 
-__all__ = ["cli_build_orchestrator"]
+def hypervisor_for_orchestrator(
+    orchestrator: type[AbstractOrchestrator],
+    **kwargs: Any,
+) -> AbstractHypervisor:
+    """Construct the hypervisor class native to *orchestrator*.
+
+    Each backend exposes a ``hypervisor_for_orchestrator(cls, **kwargs)``
+    function that returns its own concrete :class:`AbstractHypervisor`
+    subclass when *cls* is one of its orchestrators, or ``None``
+    otherwise.  We iterate the registry in the same order
+    :func:`cli_build_orchestrator` does and return the first match.
+
+    Used by the top-level :func:`testrange.Hypervisor` factory; see
+    its docstring for the call shape.
+
+    :raises OrchestratorError: If no registered backend handles
+        *orchestrator*.
+    """
+    for mod_name in _CLI_BACKENDS:
+        mod = importlib.import_module(mod_name)
+        builder = getattr(mod, "hypervisor_for_orchestrator", None)
+        if builder is None:
+            continue
+        result = builder(orchestrator, **kwargs)
+        if result is not None:
+            return result
+    raise OrchestratorError(
+        f"No hypervisor implementation registered for orchestrator "
+        f"class {orchestrator.__name__!r}.  Either pass an orchestrator "
+        f"class from one of the shipped backends "
+        f"(testrange.backends.libvirt.Orchestrator, "
+        f"testrange.backends.proxmox.ProxmoxOrchestrator), or add the "
+        f"backend's package to testrange.backends._CLI_BACKENDS."
+    )
+
+
+__all__ = ["cli_build_orchestrator", "hypervisor_for_orchestrator"]
