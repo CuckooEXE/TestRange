@@ -150,6 +150,40 @@ class AbstractVM(ABC):
         drives = [d for d in self.devices if isinstance(d, HardDrive)]
         return drives[0].size_string if drives else "20G"
 
+    def _vcpu_count(self) -> int:
+        """Return the declared vCPU count, or 2 when none is declared.
+
+        Pure spec lookup — reads :attr:`devices` for the first
+        :class:`~testrange.devices.vCPU` entry.  Generic enough that
+        every backend reuses it; previously duplicated on
+        :class:`LibvirtVM` and :class:`ProxmoxVM`.
+        """
+        from testrange.devices import vCPU
+        vcpus = [d for d in self.devices if isinstance(d, vCPU)]
+        return vcpus[0].count if vcpus else 2
+
+    def _memory_kib(self) -> int:
+        """Return the declared memory in **KiB**, or 2 GiB when none.
+
+        Reads the first :class:`~testrange.devices.Memory` entry on
+        :attr:`devices`.  Backends that render in different units
+        compose this with a unit conversion (see
+        :meth:`_memory_mib`).  Lifted to the abstract base because the
+        same body lived verbatim on both LibvirtVM and ProxmoxVM, and
+        the libvirt memory preflight needs it on every VM in the list
+        — including a top-level :class:`Hypervisor` that hasn't yet
+        been promoted to a concrete backend class.
+        """
+        from testrange.devices import Memory
+        mems = [d for d in self.devices if isinstance(d, Memory)]
+        return mems[0].kib if mems else 2 * 1024 * 1024
+
+    def _memory_mib(self) -> int:
+        """Return the declared memory in **MiB**.  Convenience wrapper
+        around :meth:`_memory_kib` for backends (Proxmox) whose API
+        takes mebibytes."""
+        return self._memory_kib() // 1024
+
     def _network_refs(self) -> list[Any]:
         """Return every :class:`~testrange.devices.vNIC`
         on :attr:`devices` in declaration order.

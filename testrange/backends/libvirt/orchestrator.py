@@ -56,6 +56,7 @@ _log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from testrange.backends.libvirt.vm import LibvirtVM
+    from testrange.credentials import Credential
     from testrange.networks.base import AbstractVirtualNetwork
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
@@ -125,24 +126,86 @@ def check_name_collisions(
         seen_net_trunc[trunc] = net.name
 
 
-def _promote_to_libvirt(vm: LibvirtVM | GenericVM) -> LibvirtVM:
-    """Convert a backend-agnostic :class:`GenericVM` to the libvirt
-    backend's concrete :class:`LibvirtVM`.
+_HYPERVISOR_PKGS: tuple[str, ...] = (
+    "libvirt-daemon-system",
+    "qemu-system-x86",
+    "qemu-utils",
+    "libvirt-clients",
+)
+"""APT packages a libvirt-on-libvirt hypervisor VM needs.
 
-    The two share their entire constructor surface (since GenericVM
-    exists exactly to be pluggable into any backend), so the
-    translation is a field-for-field copy.  An already-LibvirtVM
-    input passes through unchanged.
+Just enough to answer ``virsh -c qemu:///system`` from the inner
+orchestrator and run domains it defines.  Heavier tooling
+(``virtinst``, ``libguestfs``) is unnecessary — TestRange drives
+libvirt through its Python bindings."""
+
+
+def _hypervisor_post_install_cmds(users: list[Credential]) -> list[str]:
+    """Post-install steps that get libvirtd reachable on the outer VM.
+
+    - ``systemctl enable --now libvirtd`` so the daemon survives a
+      reboot.
+    - ``virsh net-autostart default`` + ``net-start default`` (both
+      ``|| true``) so inner VMs get upstream connectivity out of the
+      box; idempotent, both succeed harmlessly when the network is
+      already in the desired state.
+    - Add every declared user to ``libvirt`` and ``kvm`` so the inner
+      ``qemu+ssh://user@.../system`` URI authenticates without sudo.
     """
+    cmds: list[str] = [
+        "systemctl enable --now libvirtd",
+        "virsh net-autostart default || true",
+        "virsh net-start default || true",
+    ]
+    for cred in users:
+        cmds.append(f"usermod -aG libvirt,kvm {cred.username}")
+    return cmds
+
+
+def _promote_to_libvirt(vm: LibvirtVM | GenericVM) -> LibvirtVM:
+    """Convert a backend-agnostic :class:`GenericVM` (or generic
+    :class:`~testrange.vms.hypervisor.Hypervisor`) to the libvirt
+    backend's concrete :class:`LibvirtVM` /
+    :class:`~testrange.backends.libvirt.hypervisor.Hypervisor`.
+
+    Hypervisors take a separate path because the result must have
+    *both* the libvirt VM lifecycle methods and the
+    :class:`~testrange.vms.hypervisor_base.AbstractHypervisor` data
+    fields — that's what the libvirt-flavoured
+    :class:`~testrange.backends.libvirt.hypervisor.Hypervisor`
+    concrete class provides.  An already-libvirt input (concrete
+    LibvirtVM or libvirt-flavoured Hypervisor) passes through
+    unchanged.
+    """
+    from testrange.backends.libvirt.hypervisor import Hypervisor as _LibvirtHV
+    from testrange.backends.libvirt.vm import LibvirtVM as _LibvirtVM
+    from testrange.vms.hypervisor_base import AbstractHypervisor
+
+    if isinstance(vm, _LibvirtVM):
+        # Includes the libvirt-flavoured concrete Hypervisor.
+        return vm
+    if isinstance(vm, AbstractHypervisor):
+        return _LibvirtHV(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,  # type: ignore[arg-type]
+            builder=vm.builder,
+            communicator=vm.communicator,
+            orchestrator=vm.orchestrator,
+            vms=vm.vms,
+            networks=vm.networks,
+        )
     if isinstance(vm, GenericVM):
-        from testrange.backends.libvirt.vm import LibvirtVM as _LibvirtVM
         return _LibvirtVM(
             name=vm.name,
             iso=vm.iso,
             users=vm.users,
             pkgs=vm.pkgs,
             post_install_cmds=vm.post_install_cmds,
-            devices=vm.devices,  # type: ignore[arg-type]  # device-type union narrows on construction
+            devices=vm.devices,  # type: ignore[arg-type]
             builder=vm.builder,
             communicator=vm.communicator,
         )
@@ -333,6 +396,31 @@ class Orchestrator(AbstractOrchestrator):
     def backend_type(cls) -> str:
         """Return ``"libvirt"``."""
         return "libvirt"
+
+    @classmethod
+    def prepare_outer_vm(cls, hv: AbstractHypervisor) -> None:
+        """Inject the libvirtd-host payload on top of the base VM spec.
+
+        For an outer VM to serve as an inner ``LibvirtOrchestrator``'s
+        host, the VM's installed Debian needs ``libvirt-daemon-system``
+        + ``qemu-system-x86`` + ``qemu-utils`` + ``libvirt-clients``,
+        ``libvirtd`` enabled, the default NAT network started, and
+        every declared user added to ``libvirt`` + ``kvm``.  The
+        original concrete ``Hypervisor`` class did this in
+        ``__init__``; with the generic
+        :class:`~testrange.vms.hypervisor.Hypervisor`, the per-inner
+        payload moves here so that ``Hypervisor(orchestrator=
+        ProxmoxOrchestrator, …)`` doesn't drag libvirt apt packages
+        through its cache hash.
+        """
+        from testrange.packages import Apt
+        # Prepend rather than extend: libvirtd needs to be installed +
+        # running before any caller-supplied post-install commands run
+        # (those typically depend on it — e.g. ``virsh net-define``
+        # against the inner default network).  Same ordering the
+        # original libvirt-only Hypervisor used.
+        hv.pkgs[:0] = [Apt(p) for p in _HYPERVISOR_PKGS]
+        hv.post_install_cmds[:0] = _hypervisor_post_install_cmds(hv.users)
 
     @classmethod
     def root_on_vm(

@@ -390,14 +390,6 @@ class LibvirtVM(AbstractVM):
         """
         return self._name
 
-    def _vcpu_count(self) -> int:
-        vcpus = [d for d in self.devices if isinstance(d, vCPU)]
-        return vcpus[0].count if vcpus else 2
-
-    def _memory_kib(self) -> int:
-        mems = [d for d in self.devices if isinstance(d, Memory)]
-        return mems[0].kib if mems else 2 * 1024 * 1024
-
     def _hard_drives(self) -> list[AbstractHardDrive]:
         return [d for d in self.devices if isinstance(d, AbstractHardDrive)]
 

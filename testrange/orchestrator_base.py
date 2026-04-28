@@ -250,6 +250,28 @@ class AbstractOrchestrator(ABC):
         self._leaked = True
 
     @classmethod
+    def prepare_outer_vm(cls, hv: AbstractHypervisor) -> None:
+        """Stamp this orchestrator's outer-VM requirements onto *hv*.
+
+        Called by :class:`~testrange.vms.hypervisor.Hypervisor` at
+        construction time so the inner orchestrator class can declare
+        what software the outer VM needs in order to host an instance
+        of it — extra apt packages, post-install commands, group
+        memberships, ``systemctl enable`` lines, etc.
+
+        Default: no-op.  Suits any inner orchestrator whose install
+        ISO is a self-contained installer (PVE, ESXi, …): the install
+        phase brings up the entire control plane on its own, and the
+        outer VM's spec needs no extra payload from us.
+
+        Subclasses that need a payload override this and mutate
+        ``hv.pkgs`` / ``hv.post_install_cmds`` in place.
+
+        :param hv: The Hypervisor being constructed.  Mutate fields
+            directly.
+        """
+
+    @classmethod
     def root_on_vm(
         cls,
         hypervisor: AbstractHypervisor,

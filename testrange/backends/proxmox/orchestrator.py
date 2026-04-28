@@ -129,15 +129,40 @@ with PVE's built-in zones (which all start with ``localnetwork``)."""
 
 
 def _promote_to_proxmox(vm: ProxmoxVM | "GenericVM") -> ProxmoxVM:
-    """Convert a backend-agnostic :class:`GenericVM` to the
-    proxmox backend's concrete :class:`ProxmoxVM`.
+    """Convert a backend-agnostic :class:`GenericVM` (or generic
+    :class:`~testrange.vms.hypervisor.Hypervisor`) to the proxmox
+    backend's concrete :class:`ProxmoxVM` /
+    :class:`~testrange.backends.proxmox.hypervisor.Hypervisor`.
 
-    Field-for-field translation since GenericVM exists exactly to
-    be pluggable into any backend.  An already-ProxmoxVM input
-    passes through unchanged.  Symmetric with
-    :func:`testrange.backends.libvirt.orchestrator._promote_to_libvirt`.
+    Symmetric with
+    :func:`testrange.backends.libvirt.orchestrator._promote_to_libvirt`:
+    a hypervisor input becomes the proxmox-flavoured concrete
+    Hypervisor (``ProxmoxVM + AbstractHypervisor``); a plain
+    GenericVM becomes a plain ProxmoxVM.  Already-ProxmoxVM (or
+    proxmox-flavoured Hypervisor) inputs pass through unchanged.
     """
+    from testrange.backends.proxmox.hypervisor import (
+        Hypervisor as _ProxmoxHV,
+    )
     from testrange.vms.generic import GenericVM as _GenericVM
+    from testrange.vms.hypervisor_base import AbstractHypervisor
+
+    if isinstance(vm, ProxmoxVM):
+        return vm
+    if isinstance(vm, AbstractHypervisor):
+        return _ProxmoxHV(
+            name=vm.name,
+            iso=vm.iso,
+            users=vm.users,
+            pkgs=vm.pkgs,
+            post_install_cmds=vm.post_install_cmds,
+            devices=vm.devices,
+            builder=vm.builder,
+            communicator=vm.communicator,
+            orchestrator=vm.orchestrator,
+            vms=vm.vms,
+            networks=vm.networks,
+        )
     if isinstance(vm, _GenericVM):
         return ProxmoxVM(
             name=vm.name,

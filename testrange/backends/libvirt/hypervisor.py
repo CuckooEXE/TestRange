@@ -1,22 +1,26 @@
-"""libvirt-backed :class:`Hypervisor` — a VM that hosts an inner
-libvirt orchestrator.
+"""Libvirt-flavoured concrete :class:`Hypervisor`.
 
-A :class:`Hypervisor` is a regular libvirt
-:class:`~testrange.backends.libvirt.vm.VM` pre-loaded with the
-packages and post-install steps needed to run ``libvirtd`` inside
-it:
+Internal companion to the user-facing
+:class:`testrange.vms.hypervisor.Hypervisor`.  The generic class is
+``GenericVM + AbstractHypervisor``; this is its libvirt-shaped twin
+(``LibvirtVM + AbstractHypervisor``) with the lifecycle methods
+:class:`~testrange.backends.libvirt.orchestrator.LibvirtOrchestrator`'s
+provisioning pipeline expects (``_memory_kib``, ``build``,
+``start_run``, ``shutdown``, etc.).
 
-- ``libvirt-daemon-system``, ``qemu-system-x86``, ``qemu-utils`` via apt
-- ``systemctl enable --now libvirtd`` so the daemon is reachable on
-  first boot
-- members of the ``libvirt`` group for every declared user so that
-  ``qemu+ssh://`` connections work without sudo
-- the ``default`` libvirt NAT network started so inner VMs can reach
-  the outside world
+The translation happens inside
+:func:`~testrange.backends.libvirt.orchestrator._promote_to_libvirt`
+when the outer orchestrator instantiates: a generic
+:class:`Hypervisor` carries its already-prepared spec (the inner
+orchestrator's :meth:`prepare_outer_vm` ran at construction time, so
+``pkgs`` / ``post_install_cmds`` are final) into a fresh instance of
+this class.
 
-The three extra fields required by :class:`AbstractHypervisor`
-(``orchestrator``, ``vms``, ``networks``) are accepted as keyword
-arguments alongside the usual :class:`VM` ones.
+Most users don't import this directly — they use the top-level
+:class:`testrange.Hypervisor`.  It's still exported as
+``testrange.backends.libvirt.Hypervisor`` for callers that want to
+pin to libvirt-shaped behaviour explicitly or for ``isinstance``
+checks against a concrete libvirt VM.
 """
 
 from __future__ import annotations
@@ -25,7 +29,6 @@ from typing import TYPE_CHECKING
 
 from testrange.backends.libvirt.orchestrator import check_name_collisions
 from testrange.backends.libvirt.vm import LibvirtVM
-from testrange.packages import Apt
 from testrange.vms.hypervisor_base import AbstractHypervisor
 
 if TYPE_CHECKING:
@@ -38,94 +41,24 @@ if TYPE_CHECKING:
     from testrange.vms.builders import Builder
 
 
-_HYPERVISOR_PKGS: tuple[str, ...] = (
-    "libvirt-daemon-system",
-    "qemu-system-x86",
-    "qemu-utils",
-    "libvirt-clients",
-)
-"""APT packages pre-installed on every hypervisor VM.
-
-Kept minimal on purpose: this is the set ``virsh -c qemu:///system``
-needs to respond to a ``qemu+ssh://`` connection and run domains
-built by the inner orchestrator.  Heavier tooling (``virtinst``,
-``libguestfs``) is not needed — TestRange drives libvirt directly
-through its Python bindings.
-"""
-
-
-def _default_post_install_cmds(users: list[Credential]) -> list[str]:
-    """Return the post-install shell commands that get libvirtd
-    reachable for the inner orchestrator.
-
-    - Start + enable ``libvirtd``.
-    - Start the ``default`` libvirt NAT network so inner VMs have
-      upstream connectivity out of the box.
-    - Add each user in ``users`` to the ``libvirt`` and ``kvm``
-      groups so the inner ``qemu+ssh://user@.../system`` URI resolves
-      without sudo.
-    """
-    cmds: list[str] = [
-        "systemctl enable --now libvirtd",
-        # ``net-autostart default`` is idempotent; ``net-start`` fails
-        # harmlessly if the network is already active, which is fine
-        # for a one-shot post-install hook.
-        "virsh net-autostart default || true",
-        "virsh net-start default || true",
-    ]
-    for cred in users:
-        cmds.append(
-            f"usermod -aG libvirt,kvm {cred.username}"
-        )
-    return cmds
-
-
 class Hypervisor(LibvirtVM, AbstractHypervisor):
-    """A libvirt VM that hosts an inner libvirt orchestrator.
+    """A libvirt-shaped VM that hosts an inner orchestrator.
 
-    .. code-block:: python
+    Instances of this class are produced by
+    :func:`~testrange.backends.libvirt.orchestrator._promote_to_libvirt`
+    when the outer orchestrator is libvirt; user code should normally
+    construct :class:`testrange.Hypervisor` (the backend-neutral
+    factory) instead.
 
-        from testrange import Hypervisor, LibvirtOrchestrator, VM
-        from testrange import Credential, vNIC, HardDrive, Memory
-
-        hv = Hypervisor(
-            name="hv",
-            iso="https://cloud.debian.org/.../debian-12-generic-amd64.qcow2",
-            users=[Credential("root", "Password123!")],
-            devices=[
-                Memory(8),
-                HardDrive(80),
-                vNIC("OuterNet", ip="10.0.0.10"),
-            ],
-            orchestrator=LibvirtOrchestrator,
-            vms=[
-                VM(
-                    name="inner-web",
-                    iso="https://cloud.debian.org/.../debian-12-generic-amd64.qcow2",
-                    users=[Credential("root", "Password123!")],
-                    devices=[vNIC("InnerNet", ip="10.42.0.5")],
-                ),
-            ],
-            networks=[
-                VirtualNetwork("InnerNet", "10.42.0.0/24", internet=True),
-            ],
-        )
-
-    The :attr:`vms` and :attr:`networks` fields describe the inner
-    layer; everything else describes *this* VM.  The packages and
-    post-install commands needed to run ``libvirtd`` are injected
-    automatically — pass ``pkgs=`` / ``post_install_cmds=`` to add
-    more on top.
-
-    :param orchestrator: The orchestrator class that drives the inner
-        layer.  Most callers will pass
-        :class:`~testrange.backends.libvirt.Orchestrator`.
-    :param vms: VM specs to run inside this hypervisor.
-    :param networks: Virtual-network specs for the inner layer.
-
-    All other parameters are forwarded to
-    :class:`~testrange.backends.libvirt.vm.VM`; see its docstring for
-    the full list.
+    The constructor takes both the regular VM kwargs and the three
+    :class:`AbstractHypervisor` data fields.  Unlike the previous
+    incarnation of this class, no payload (``libvirt-daemon-system``
+    apt packages, ``systemctl enable libvirtd`` post-install hook,
+    libvirt/kvm group additions) is injected here — that lives on
+    :meth:`LibvirtOrchestrator.prepare_outer_vm` and runs at the
+    generic Hypervisor's construction site, so by the time we get
+    here the ``pkgs`` / ``post_install_cmds`` lists already reflect
+    whatever the inner orchestrator class declared.
     """
 
     orchestrator: type[AbstractOrchestrator]
@@ -146,20 +79,12 @@ class Hypervisor(LibvirtVM, AbstractHypervisor):
         builder: Builder | None = None,
         communicator: str | None = None,
     ) -> None:
-        # Pre-pend libvirtd-enablement steps so caller-supplied
-        # post_install_cmds still run, but only once libvirtd is up.
-        merged_pkgs: list[AbstractPackage] = [
-            Apt(p) for p in _HYPERVISOR_PKGS
-        ] + list(pkgs or [])
-        merged_post: list[str] = (
-            _default_post_install_cmds(users) + list(post_install_cmds or [])
-        )
         super().__init__(
             name=name,
             iso=iso,
             users=users,
-            pkgs=merged_pkgs,
-            post_install_cmds=merged_post,
+            pkgs=pkgs,
+            post_install_cmds=post_install_cmds,
             devices=devices,
             builder=builder,
             communicator=communicator,

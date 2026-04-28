@@ -56,7 +56,6 @@ implementation of the same abstract surface.
 
 from testrange._version import __version__
 from testrange.backends.libvirt import (
-    Hypervisor,
     LibvirtOrchestrator,
     LibvirtVM,
     Orchestrator,
@@ -98,6 +97,7 @@ from testrange.vms.builders import (
     NoOpBuilder,
     WindowsUnattendedBuilder,
 )
+from testrange.vms.hypervisor import Hypervisor
 from testrange.vms.hypervisor_base import AbstractHypervisor
 
 __all__ = [

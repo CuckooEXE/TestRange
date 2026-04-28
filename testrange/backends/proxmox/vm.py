@@ -851,18 +851,6 @@ class ProxmoxVM(AbstractVM):
         # public resolver fallback.
         return [(install_network_mac, cidr, gateway, _PUBLIC_DNS)]
 
-    def _vcpu_count(self) -> int:
-        from testrange.devices import vCPU
-        vcpus = [d for d in self.devices if isinstance(d, vCPU)]
-        return vcpus[0].count if vcpus else 2
-
-    def _memory_mib(self) -> int:
-        from testrange.devices import Memory
-        mems = [d for d in self.devices if isinstance(d, Memory)]
-        if not mems:
-            return 2048
-        # Memory.kib gives kibibytes; convert to mebibytes for PVE.
-        return mems[0].kib // 1024
 
     @staticmethod
     def _short_hash(path: Path) -> str:
