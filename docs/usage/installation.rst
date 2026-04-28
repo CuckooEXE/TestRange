@@ -5,10 +5,13 @@ System Prerequisites
 --------------------
 
 TestRange ships with multiple hypervisor backends under
-:mod:`testrange.backends`; the default — and currently the only fully
-implemented one — drives KVM/QEMU through libvirt.  The packages
-below get that backend working.  See :doc:`/api/backends` for the
-full list and for what each alternative backend needs.
+:mod:`testrange.backends`.  The default drives KVM/QEMU through
+libvirt; the Proxmox backend
+(:class:`~testrange.backends.proxmox.ProxmoxOrchestrator`) drives a
+remote PVE cluster over the REST API.  The packages below get the
+libvirt backend working.  See :doc:`/api/backends` for the full
+list, and the *ProxMox VE installs* and *Windows VMs* sub-sections
+below for the optional extras each alternative needs.
 
 On Debian / Ubuntu:
 

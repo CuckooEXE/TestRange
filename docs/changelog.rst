@@ -8,6 +8,61 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Docs + tests cleanup
+~~~~~~~~~~~~~~~~~~~~
+
+**Changed: user guide covers the Proxmox networking knobs.**
+:doc:`/usage/networks` gains a new ``DHCP-discovery vNICs``
+sub-section under "Static IPs" that documents the no-``ip=`` form,
+the deterministic-pick rule, and the subnet-exhausted error path.
+A second new section, ``Proxmox: install-vnet pool and
+install_dns``, walks through the per-run vnet picker (10-entry pool,
+``OrchestratorError`` when full, where to widen) and the
+``install_dns=`` resolver pin (default ``"1.1.1.1"``, override for
+air-gapped / sovereign-DNS / split-horizon, also fixes run-phase
+``dns=True`` resolution on PVE SDN).
+
+**Changed: API reference no longer claims the Proxmox backend is
+"scaffolding only".**  :doc:`/api/backends`'s "The Proxmox backend"
+block previously said the orchestrator's ``__enter__`` raised
+``NotImplementedError``.  Rewrote it to reflect what's actually in
+the box: the SDN simple-zone, per-run vnet naming, qcow2 install-
+cache equivalent, guest-agent communicator, install-vnet pool +
+``install_dns``, and the explicit-Switch two-layer model.
+:doc:`/usage/installation`'s top sentence loses the
+"libvirt is currently the only fully implemented backend" claim
+and points readers at the Proxmox-specific install steps below.
+
+**Fixed: two flaky/broken tests.**
+``tests/test_orchestrator.py::TestCleanupStaleInstallNetworks::test_runs_before_install_network_start``
+intermittently raised ``TypeError: unsupported format string passed
+to MagicMock.__format__`` because the test fed the install-cleanup
+ordering check a bare ``MagicMock`` VM whose ``_memory_kib()``
+return value the memory preflight then tried to format with
+``f"{...:.2f}"``.  The test isn't checking memory behaviour, so it
+now monkeypatches ``_preflight_memory`` to a no-op.
+``tests/test_proxmox_template_cache.py::TestBuildCacheMiss::test_install_flow_runs_and_promotes_then_clones``
+broke under ``proxmox: networking parity`` because the new
+``install_dns`` look-up path (``getattr(context, "_install_dns",
+…)``) returns an auto-generated child mock when ``context`` is a
+bare ``MagicMock`` — that mock then leaked into cloud-init seed
+serialisation as ``sentinel.DEFAULT`` and crashed YAML.  Pinned a
+real ``_install_dns="1.1.1.1"`` on the test's context.  Test suite
+now reports 1020 passed, 14 skipped, 0 failed across five
+back-to-back runs.
+
+**Fixed: ``examples/nested_proxmox_public_private.py`` no longer
+hardcodes the user's ``~/.ssh/id_ed25519`` keypair.**  The example
+had a session-debug ``TEMP:`` block bypassing
+``_generate_run_keypair()`` because the user's specific
+``testrange.exe.xyz`` host has an accept-any-key registration shell
+that was contaminating the libvirt RPC stream.  That's a
+deployment-specific quirk, not example material; reverted to the
+original ephemeral-keypair flow.
+
+**Removed: TODO #11.**  The flaky preflight test it described is now
+fixed; the remaining numbered items keep their numbers.
+
 Proxmox networking parity
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 

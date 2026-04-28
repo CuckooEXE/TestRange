@@ -125,6 +125,95 @@ Static IPs *without* ``internet=True`` also omit ``gateway4`` from
 the cloud-init network-config, so an isolated NIC cannot accidentally
 become the VM's default route.
 
+DHCP-discovery vNICs
+~~~~~~~~~~~~~~~~~~~~
+
+Omitting ``ip=`` on a vNIC asks the orchestrator to pick an address
+for you:
+
+.. code-block:: python
+
+    vNIC("NetA")  # no ip= → orchestrator allocates one
+
+The orchestrator walks the network's subnet host range in declaration
+order, skips the gateway (``.1``) and any address an earlier vNIC
+already claimed (static or auto-allocated), and registers the first
+free host with ``register_vm``.  The picked address is threaded into
+cloud-init / answer.toml exactly as if you had written it as
+``ip=`` yourself — the guest still gets a stable, deterministic
+address.
+
+* **Determinism:** the Nth DHCP-discovery vNIC in declaration order
+  always lands on the Nth host address.  Test assertions that name
+  expected IPs stay stable across re-runs.
+* **Subnet-exhausted:** raises :class:`NetworkError` naming the VM
+  and subnet rather than silently spinning.  Either add explicit
+  ``ip=`` values or widen the subnet.
+
+Both backends accept the no-``ip=`` form: libvirt threads it through
+its bridge-local DHCP reservation, Proxmox writes the picked address
+into the VM's cloud-init seed (PVE SDN doesn't run a per-vnet DHCP
+service, so the deterministic-pick approach gives the same stable-IP
+guarantee without one).
+
+.. _proxmox-networking-knobs:
+
+Proxmox: install-vnet pool and ``install_dns``
+----------------------------------------------
+
+Two operator-facing knobs on
+:class:`~testrange.backends.proxmox.ProxmoxOrchestrator` shape what
+guests see during the install pass and how concurrent runs share
+one PVE cluster.
+
+**Install-vnet subnet pool.**  Every Proxmox run creates a per-run
+SDN vnet (``inst<run_id[:4]>``) so cloud-init / answer.toml can
+reach upstream package mirrors regardless of whether any
+user-declared network has internet.  At ``__enter__`` the
+orchestrator picks one subnet from a 10-entry pool spanning
+``192.168.230.0/24`` – ``192.168.239.0/24`` (sits below libvirt's
+``240.0/24``+ pool to avoid cross-backend collision when both run on
+the same host).  PVE's ``cluster/sdn/subnets`` is queried once and
+the first pool entry not already claimed by another in-flight run on
+the cluster wins.
+
+* Capacity is 10 concurrent runs against one PVE cluster.  The
+  picker raises :class:`OrchestratorError` with hints when every
+  pool entry is in use rather than silently colliding — at that
+  scale the operator wants the backpressure.
+* Larger CI fleets can widen the pool by editing
+  ``_INSTALL_SUBNET_POOL`` in
+  ``testrange/backends/proxmox/orchestrator.py`` (one-line change;
+  the rest of the picker iterates the tuple).
+* Crashed runs that leave ``inst<run_id[:4]>`` vnets behind are
+  swept by the next ``testrange cleanup MODULE RUN_ID`` against the
+  same orchestrator factory.
+
+**``install_dns=`` resolver pin.**  PVE SDN simple-zones don't ship a
+per-bridge DNS resolver (libvirt's dnsmasq pattern doesn't apply), so
+the orchestrator pins one resolver address that cloud-init /
+answer.toml advertise to every guest:
+
+.. code-block:: python
+
+    ProxmoxOrchestrator(
+        host="pve.example.com",
+        user="root@pam",
+        token_name="testrange",
+        token_value="...",
+        install_dns="10.0.0.53",   # internal resolver, default "1.1.1.1"
+        networks=[...],
+        vms=[...],
+    )
+
+Override for air-gapped, sovereign-DNS, or split-horizon setups
+where ``1.1.1.1`` either isn't reachable or is the wrong answer.
+The same value also resolves run-phase NICs on networks declared
+``dns=True`` — without the pin, a ``dns=True`` Proxmox network would
+otherwise leave the guest's ``/etc/resolv.conf`` pointing at the SDN
+gateway IP, which is just a router.  ``dns=False`` networks continue
+to leave the guest's ``nameserver`` empty.
+
 Coexisting with a host-level DNS service
 ----------------------------------------
 

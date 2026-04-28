@@ -68,11 +68,13 @@ wants to be unambiguous about which backend it's asking for.
 The Proxmox backend
 -------------------
 
-**Status: scaffolding only.**  The classes are importable and the
-abstract contracts are satisfied, but instantiating
-:meth:`~testrange.backends.proxmox.ProxmoxOrchestrator.__enter__`
-raises :class:`NotImplementedError` with a message pointing at the
-work still to do.
+Drives a remote PVE cluster over the REST API (``proxmoxer``).  The
+orchestrator authenticates, creates a per-run SDN vnet for each
+declared network, uploads cloud-init / answer.toml seeds and base
+disk images into the configured storage pool, and lifecycles VMs via
+``POST /nodes/{node}/qemu`` + ``status/start`` / ``status/stop``.
+QEMU guest-agent calls (``/agent/exec``, ``/agent/file-read``, …)
+carry remote-exec, so SSH never has to reach the inner network.
 
 Reachable as:
 
@@ -82,17 +84,39 @@ Reachable as:
        ProxmoxOrchestrator,
        ProxmoxVM,
        ProxmoxVirtualNetwork,
+       ProxmoxGuestAgentCommunicator,
    )
 
-The TODO list lives in the module docstring of
-:mod:`testrange.backends.proxmox.orchestrator`.  Summary: authenticate
-via REST (``proxmoxer``), create SDN vnets for each network, upload
-disk images into the configured storage pool, drive VM lifecycle via
-``POST /nodes/{node}/qemu`` + ``status/start`` / ``status/stop``.
+No top-level alias — ``testrange.Orchestrator`` resolves to the
+libvirt backend.  Code that targets PVE imports
+:class:`~testrange.backends.proxmox.ProxmoxOrchestrator` explicitly,
+which keeps the choice of backend visible at the call site.
 
-No top-level export — ``testrange.Orchestrator`` stays libvirt until
-the Proxmox backend is implemented, so nobody accidentally dispatches
-against a stub.
+What landed (in the order it shipped):
+
+* SDN simple-zone (``"tr"``) created at ``__enter__``, dropped at
+  ``__exit__``.  Per-run vnet names (``inst<run_id[:4]>``) keep
+  concurrent runs on the same cluster from colliding.
+* qcow2 install-cache equivalent of the libvirt path:
+  install-phase output is hashed and stored as a PVE template
+  (``tr-template-<hash>``); per-run clones are linked clones of that
+  template.
+* :class:`~testrange.backends.proxmox.ProxmoxGuestAgentCommunicator`
+  shuttles ``exec`` / ``file_*`` / ``copy`` calls through PVE's
+  ``/agent/`` REST endpoints, so guests never need a routable IP from
+  the host running the test.
+* Install-phase SDN vnet is picked from a 10-entry subnet pool
+  (``192.168.230.0/24`` – ``239.0/24``); ``install_dns=`` on the
+  orchestrator pins the resolver cloud-init / answer.toml advertise
+  to install- and run-phase guests.
+* Switch / VirtualNetwork two-layer model: an explicit
+  :class:`~testrange.Switch` selects a non-default SDN zone type
+  (``vlan``, ``vxlan``, ``evpn``); switch-less networks land in the
+  default ``"tr"`` simple zone.
+
+Open follow-ups (cleanup, WinRM communicator parity, SDN-side
+dnsmasq for cross-VM DNS, …) are tracked in ``TODO.md`` at the
+repo root.
 
 Adding a new backend
 --------------------
