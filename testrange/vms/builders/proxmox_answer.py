@@ -506,15 +506,34 @@ def _first_boot_script(vm: VM) -> str | None:
     if not apt_pkgs and not cmds:
         return None
 
+    # Tee both stdout AND stderr to a log file so post-mortem
+    # debugging on the freshly-installed PVE node has something
+    # concrete to grep when ``_preflight_dnsmasq_installed`` fails
+    # or anything else looks off.  The log is at a stable path
+    # (``/var/log/testrange-first-boot.log``) so docs can point at
+    # it without needing the runtime to know the exact name.
     lines: list[str] = [
         "#!/bin/bash",
+        "exec > >(tee -a /var/log/testrange-first-boot.log) 2>&1",
+        "echo \"=== testrange first-boot starting at $(date -Is) ===\"",
         "set -euo pipefail",
         "export DEBIAN_FRONTEND=noninteractive",
     ]
     if apt_pkgs:
-        lines.append("apt-get update -y")
+        # ``apt-get update`` can transiently fail on a fresh PVE
+        # install if the network configuration is still settling
+        # — wait briefly for default-route and retry once before
+        # giving up.
+        lines.append(
+            "for i in 1 2 3; do apt-get update -y && break || "
+            "{ echo \"apt-get update attempt $i failed; sleeping\"; "
+            "sleep 5; }; done"
+        )
         lines.append("apt-get install -y " + " ".join(apt_pkgs))
     lines.extend(cmds)
+    lines.append(
+        "echo \"=== testrange first-boot completed at $(date -Is) ===\""
+    )
     return "\n".join(lines) + "\n"
 
 
