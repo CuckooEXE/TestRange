@@ -54,19 +54,14 @@ pulled in directly from :mod:`testrange.backends` — each is a peer
 implementation of the same abstract surface.
 """
 
-from typing import TYPE_CHECKING, Any
-
 from testrange._version import __version__
 from testrange.backends.libvirt import (
-    Hypervisor as LibvirtHypervisor,
-)
-from testrange.backends.libvirt import (
+    Hypervisor,
     LibvirtOrchestrator,
     LibvirtVM,
     Orchestrator,
     VirtualNetwork,
 )
-from testrange.backends.proxmox import ProxmoxHypervisor
 from testrange.communication.base import ExecResult
 from testrange.credentials import Credential
 from testrange.devices import HardDrive, Memory, vNIC, vCPU
@@ -105,65 +100,6 @@ from testrange.vms.builders import (
 )
 from testrange.vms.hypervisor_base import AbstractHypervisor
 
-if TYPE_CHECKING:
-    from testrange.orchestrator_base import AbstractOrchestrator
-
-
-def Hypervisor(
-    *,
-    orchestrator: type["AbstractOrchestrator"],
-    **kwargs: Any,
-) -> AbstractHypervisor:
-    """Construct a backend-native :class:`AbstractHypervisor` for the
-    inner *orchestrator* class.
-
-    This is the backend-neutral entry point: pass any registered
-    orchestrator class as ``orchestrator=`` and you get back an
-    instance of the matching concrete hypervisor — :class:`Hypervisor`
-    from the libvirt backend for
-    :class:`~testrange.backends.libvirt.Orchestrator`,
-    :class:`ProxmoxHypervisor` from the proxmox backend for
-    :class:`~testrange.backends.proxmox.ProxmoxOrchestrator`, etc.
-
-    .. code-block:: python
-
-        from testrange import Hypervisor, VM, VirtualNetwork
-        from testrange.backends.proxmox import ProxmoxOrchestrator
-
-        hv = Hypervisor(
-            orchestrator=ProxmoxOrchestrator,
-            name="proxmox",
-            iso="...",
-            users=[...],
-            devices=[...],
-            vms=[...],
-            networks=[...],
-        )
-
-    Equivalent to importing :class:`ProxmoxHypervisor` directly; the
-    factory exists so test authors can swap the inner backend by
-    changing one ``orchestrator=`` argument without touching imports
-    or class names.
-
-    Backends without a hypervisor implementation (a Hyper-V backend
-    that hasn't shipped one yet, say) raise
-    :class:`OrchestratorError`.  Use the concrete class from your
-    backend's package directly if you need to override fields the
-    factory doesn't surface.
-
-    :param orchestrator: The orchestrator class that drives the inner
-        layer.
-    :param kwargs: Forwarded to the concrete hypervisor's ``__init__``
-        — see :class:`testrange.backends.libvirt.Hypervisor` /
-        :class:`testrange.backends.proxmox.ProxmoxHypervisor` for the
-        accepted parameters.
-    :returns: A backend-native hypervisor instance.
-    :raises OrchestratorError: If no registered backend handles
-        *orchestrator*.
-    """
-    from testrange.backends import hypervisor_for_orchestrator
-    return hypervisor_for_orchestrator(orchestrator, **kwargs)
-
 __all__ = [
     "__version__",
     # Core
@@ -179,8 +115,6 @@ __all__ = [
     "LibvirtVM",
     "AbstractVM",
     "Hypervisor",
-    "LibvirtHypervisor",
-    "ProxmoxHypervisor",
     "AbstractHypervisor",
     "Credential",
     # Builders

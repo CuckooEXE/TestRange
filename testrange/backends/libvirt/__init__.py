@@ -43,10 +43,7 @@ from testrange.backends.libvirt.storage import (
 from testrange.backends.libvirt.vm import LibvirtVM
 
 if TYPE_CHECKING:
-    from typing import Any
-
     from testrange.orchestrator_base import AbstractOrchestrator
-    from testrange.vms.hypervisor_base import AbstractHypervisor
 
 # ---------------------------------------------------------------------------
 # CLI integration — consumed by ``testrange --orchestrator URL``.  Each
@@ -97,21 +94,6 @@ def cli_build_orchestrator(
     )
 
 
-def hypervisor_for_orchestrator(
-    orchestrator: type[AbstractOrchestrator], **kwargs: Any,
-) -> AbstractHypervisor | None:
-    """Return a :class:`Hypervisor` for *orchestrator* if it's the
-    libvirt backend's, else ``None``.
-
-    See :func:`testrange.backends.proxmox.hypervisor_for_orchestrator`
-    — same registry shape, called by the top-level
-    :func:`testrange.Hypervisor` factory's backend dispatcher.
-    """
-    if issubclass(orchestrator, LibvirtOrchestrator):
-        return Hypervisor(orchestrator=orchestrator, **kwargs)
-    return None
-
-
 __all__ = [
     "GuestAgentCommunicator",
     "Hypervisor",
@@ -125,5 +107,4 @@ __all__ = [
     "SSHStorageBackend",
     "VirtualNetwork",
     "cli_build_orchestrator",
-    "hypervisor_for_orchestrator",
 ]
