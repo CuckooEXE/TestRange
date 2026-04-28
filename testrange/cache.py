@@ -391,11 +391,24 @@ class CacheManager:
             ISO unreadable, etc.).
         """
         import hashlib
-        from testrange.vms.builders._proxmox_prepare import prepare_iso_bytes
+        from testrange.vms.builders._proxmox_prepare import (
+            PREP_VERSION,
+            prepare_iso_bytes,
+        )
 
+        # Fold the prep-behaviour version into the cache key so
+        # that any change to *how* prepare_iso_bytes builds its
+        # output (e.g. the chmod-0755-on-the-first-boot-script fix
+        # in v2) invalidates every cached prepared ISO regardless
+        # of the input bytes.  Without this, code-side fixes to
+        # the prep step silently keep returning the broken cached
+        # file because the input hash hasn't changed.
+        version_sha = hashlib.sha256(
+            PREP_VERSION.encode("utf-8")
+        ).hexdigest()[:8]
         vanilla_sha = _sha256_file(vanilla_iso)[:24]
         if first_boot_script is None:
-            sha = vanilla_sha
+            sha = f"{vanilla_sha}-{version_sha}"
         else:
             script_sha = hashlib.sha256(
                 first_boot_script.encode("utf-8")
@@ -403,7 +416,7 @@ class CacheManager:
             # Compose the cache key so vanilla-only prep and
             # first-boot-augmented prep land in distinct files; the
             # script hash is stable across runs of the same script.
-            sha = f"{vanilla_sha}-fb{script_sha}"
+            sha = f"{vanilla_sha}-{version_sha}-fb{script_sha}"
         dest = self.images_dir / f"proxmox-prepared-{sha}.iso"
         lock_path = self.images_dir / f"proxmox-prepared-{sha}.lock"
         with FileLock(str(lock_path), timeout=1800):

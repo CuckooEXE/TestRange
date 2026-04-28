@@ -8,6 +8,47 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE first-boot: prep-version cache key (closes the cache-vs-fix loop)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Final piece of the first-boot saga: the previous chmod-0755 fix
+in ``prepare_iso_bytes`` was correct but didn't take effect on
+re-runs because the *prepared-ISO cache* hit the broken file from
+the previous prep version.  The cache key was hashing only the
+input bytes (vanilla ISO + first-boot script), not the prep
+*behaviour*.  Same input → same hash → cache hit on the file that
+was built before the chmod fix existed.
+
+**Fixed: prepared-ISO cache key now incorporates a behaviour
+version.**  New ``PREP_VERSION = "v2-chmod0755-firstboot"``
+constant in ``testrange/vms/builders/_proxmox_prepare.py``;
+``CacheManager.get_proxmox_prepared_iso`` folds an 8-char sha256
+prefix of it into the cache filename
+(``proxmox-prepared-<vanilla>-<version>[-fb<script>].iso``).  Bump
+the constant whenever ``prepare_iso_bytes`` semantics change
+(POSIX mode bits on embedded files, boot-image preservation
+strategy, mode-toml schema, etc.) — every cached prepared ISO
+re-preps on next access, picking up the new behaviour.
+
+The ``v2`` value bakes in the chmod-0755 fix from the previous
+slice so existing v1 caches (where the embedded
+``/proxmox-first-boot`` was mode 0600 and PVE silently couldn't
+exec it) get bypassed and re-prepped.
+
+**Test surface:** new
+``tests/test_cache.py::TestGetProxmoxPreparedIso::test_prep_version_bump_invalidates_cache``
+monkeypatches ``PREP_VERSION`` to a different value and asserts
+the cache misses + re-preps.  Suite is now 1034 passed / 14
+skipped / 0 failed.
+
+**Operator impact:** cached prepared ISOs from before this commit
+(filename pattern ``proxmox-prepared-<vanilla>[-fb<script>].iso``,
+no version segment) become orphans on disk — the new cache key
+doesn't match them.  Safe to ``rm
+/var/tmp/testrange/<user>/images/proxmox-prepared-*-fb*.iso`` to
+reclaim space; they'll regenerate on first PVE Hypervisor build
+under the new key.
+
 PVE first-boot: chmod 0755 + script body in qcow2 cache key
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

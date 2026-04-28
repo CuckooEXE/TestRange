@@ -55,6 +55,35 @@ _PARTITION_LABEL_DEFAULT = "PROXMOX-AIS"
 ``proxmox-fetch-answer``, so emitting uppercase here is safe whether
 the seed ISO's volume identifier ends up upper- or lowercase."""
 
+PREP_VERSION = "v2-chmod0755-firstboot"
+"""Marker for the *behaviour* of :func:`prepare_iso_bytes`.
+
+Bumped whenever the prep step's output changes in a way the file
+contents alone don't capture — most commonly POSIX-mode bits on
+embedded files, but also things like the boot-image preservation
+strategy or the auto-installer-mode TOML schema.
+
+:meth:`testrange.cache.CacheManager.get_proxmox_prepared_iso` folds
+this string into the prepared-ISO cache key, so a bump here forces
+every cached prepared ISO to re-prep on next access regardless of
+whether the input ISO + first-boot script bytes are unchanged.
+Without this, a code-side fix to prep behaviour would silently
+not take effect: the cached file from the old behaviour would
+keep getting reused.
+
+History:
+
+* ``v1`` (implicit, never recorded) — initial xorriso prep with
+  no first-boot embedding.  Files added via ``-map`` from
+  ``tempfile.NamedTemporaryFile`` defaults (mode 0600).
+* ``v2-chmod0755-firstboot`` — first-boot script now embedded at
+  ``/proxmox-first-boot``; script temp file is ``chmod 0755``
+  before xorriso reads it (matches ``proxmox-auto-install-assistant
+  prepare-iso --on-first-boot`` upstream output).  Caches built
+  under v1 had the script at mode 0600, PVE's first-boot service
+  hit EACCES, install completed silently with no dnsmasq.
+"""
+
 _AUTO_INSTALLER_MODE_TOML = """\
 mode = "partition"
 partition_label = "{label}"
@@ -239,6 +268,7 @@ def prepare_iso_bytes(
 
 
 __all__ = [
+    "PREP_VERSION",
     "ProxmoxPrepareError",
     "prepare_iso_bytes",
 ]

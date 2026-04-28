@@ -585,6 +585,42 @@ class TestGetProxmoxPreparedIso:
         second = c.get_proxmox_prepared_iso(vanilla)
         assert second == first
 
+    def test_prep_version_bump_invalidates_cache(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Bumping ``PREP_VERSION`` must produce a different cached
+        file path — that's what guarantees a code-side fix to
+        ``prepare_iso_bytes`` (e.g. the chmod-0755 fix on the
+        first-boot script in v2) actually takes effect on the next
+        run instead of silently reusing the broken cached ISO from
+        the previous prep version."""
+        c = CacheManager(root=tmp_cache_root)
+        vanilla = tmp_cache_root / "vanilla.iso"
+        vanilla.write_bytes(b"v")
+
+        import testrange.vms.builders._proxmox_prepare as pp
+
+        prep_calls: list[Path] = []
+
+        def _fake_prep(_s, dst, **_kw):
+            prep_calls.append(Path(dst))
+            Path(dst).write_bytes(b"prepared")
+
+        monkeypatch.setattr(pp, "prepare_iso_bytes", _fake_prep)
+
+        # First prep with the current version.
+        first = c.get_proxmox_prepared_iso(vanilla)
+        # Bump the version (simulates a future code change to
+        # prep behaviour) and re-request — must MISS the cache and
+        # re-prep into a different file.
+        monkeypatch.setattr(pp, "PREP_VERSION", "v3-future-fix")
+        second = c.get_proxmox_prepared_iso(vanilla)
+        assert first != second, (
+            "PREP_VERSION must be in the cache key path; otherwise "
+            "code-side prep fixes silently reuse the broken cached file."
+        )
+        assert len(prep_calls) == 2
+
     def test_first_boot_script_changes_cache_key(
         self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
