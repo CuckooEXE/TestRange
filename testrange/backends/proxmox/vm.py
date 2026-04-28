@@ -153,11 +153,24 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-_PUBLIC_DNS = "1.1.1.1"
-"""Cloudflare's public resolver, used by the install-phase seed's
-network-config when an SDN subnet has ``internet=True`` but no
-DNS service of its own — see
-:meth:`ProxmoxVM._build_install_mac_ip_pairs` for the rationale."""
+_PUBLIC_DNS_FALLBACK = "1.1.1.1"
+"""Last-resort resolver if the orchestrator can't surface its own
+``install_dns``.  Production code paths always reach the
+orchestrator's value via :func:`_install_dns_for`; this constant
+exists to keep tests that construct a ``ProxmoxVM`` with a stubbed
+context (no ``_install_dns`` attribute) from blowing up on the
+attribute miss."""
+
+
+def _install_dns_for(context: AbstractOrchestrator) -> str:
+    """Fetch the orchestrator's configured install-DNS resolver.
+
+    Set at ``ProxmoxOrchestrator.__init__`` time via the
+    ``install_dns=`` kwarg (default ``1.1.1.1``).  Routed through a
+    helper rather than ``getattr`` chains so the read site stays
+    self-documenting and a rename of the underlying attribute only
+    has to happen here."""
+    return getattr(context, "_install_dns", _PUBLIC_DNS_FALLBACK)
 
 _INSTALL_TIMEOUT_S = 1800
 """Maximum wait for the install-phase domain to power itself off
@@ -804,7 +817,10 @@ class ProxmoxVM(AbstractVM):
         Unlike the libvirt backend (where each NAT network's gateway
         runs dnsmasq), PVE SDN subnets *don't* ship a DNS resolver
         unless the user explicitly configures DHCP+DNS at the SDN
-        layer.  We send :data:`_PUBLIC_DNS` for the install vnet so
+        layer.  We send the orchestrator's configured ``install_dns``
+        (default ``1.1.1.1``, override via the
+        :class:`ProxmoxOrchestrator` ``install_dns=`` kwarg for
+        air-gapped or sovereign-DNS setups) for the install vnet so
         apt / dnf can resolve package mirrors during install.
 
         :param install_network_name: SDN vnet name the install VM is
@@ -848,8 +864,10 @@ class ProxmoxVM(AbstractVM):
         gateway = install_vnet.gateway_ip
         # Install vnet is always ``internet=True`` (see
         # ``_create_install_network``), so DNS goes through the
-        # public resolver fallback.
-        return [(install_network_mac, cidr, gateway, _PUBLIC_DNS)]
+        # orchestrator's configured ``install_dns`` resolver.
+        return [(
+            install_network_mac, cidr, gateway, _install_dns_for(context),
+        )]
 
 
     @staticmethod

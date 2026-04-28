@@ -101,18 +101,31 @@ if TYPE_CHECKING:
 
 _log = get_logger(__name__)
 
-_PROXMOX_INSTALL_SUBNET = "192.168.230.0/24"
-"""Fixed subnet for the install-phase SDN vnet.
+_INSTALL_SUBNET_POOL: tuple[str, ...] = tuple(
+    f"192.168.{o}.0/24" for o in range(230, 240)
+)
+"""Candidate subnets for the ephemeral install-phase SDN vnet.
 
 Sits below libvirt's install pool (``192.168.240.0/24`` –
 ``192.168.254.0/24``) so concurrent libvirt + proxmox runs on the
-same host don't confuse each other.  PVE-side, vnets are isolated
-inside the orchestrator's :data:`DEFAULT_ZONE`, so the choice only
-matters for collisions with operator-managed routes on the PVE node.
-Two test processes targeting the same PVE node would race on this
-subnet — addressing that needs a per-PVE-zone subnet pool with a
-PVE-side lock, which is a future slice; the single-orchestrator
-case is what this constant covers."""
+same host don't confuse each other.  Ten candidates leaves enough
+headroom for a small CI fleet hitting the same PVE node without
+collisions; ``_pick_install_subnet`` consults PVE's existing SDN
+subnets at ``__enter__`` time and chooses the first pool entry not
+already claimed by another in-flight run.
+
+Per-process atomicity comes from the SDN vnet's per-run name
+(``inst<run_id[:4]>``) — the create call wins or fails outright, and
+on conflict we'd surface a clear NetworkError.  No PVE-side lock is
+required because picking a still-unused subnet from a 10-entry pool
+plus the random-prefixed vnet name closes the race window past CI-
+fleet scale.
+"""
+
+_PROXMOX_INSTALL_SUBNET = _INSTALL_SUBNET_POOL[0]
+"""Backwards-compat alias for the first pool entry — the constant
+some tests still import directly.  Prefer
+:data:`_INSTALL_SUBNET_POOL` for new code."""
 
 
 DEFAULT_ZONE = "tr"
@@ -205,6 +218,21 @@ def _promote_to_proxmox_network(
         dns=net.dns,
         switch=net.switch,
     )
+
+
+def _registered_ip_for(net: ProxmoxVirtualNetwork, vm_name: str) -> str | None:
+    """Return the IP *vm_name* is registered with on *net*, or ``None``.
+
+    Walks the network's ``_vm_entries`` ledger written by
+    :meth:`ProxmoxVirtualNetwork.register_vm`.  Used by
+    :meth:`ProxmoxOrchestrator._vm_network_refs` to thread the
+    DHCP-allocated IP through to cloud-init's network-config without
+    each caller re-walking the ledger.
+    """
+    for entry_vm, _, entry_ip in net._vm_entries:
+        if entry_vm == vm_name:
+            return entry_ip
+    return None
 
 
 def _promote_to_proxmox_switch(sw: "AbstractSwitch") -> ProxmoxSwitch:
@@ -316,6 +344,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         token_value: str | None = None,
         verify_ssl: bool = False,
         zone: str = DEFAULT_ZONE,
+        install_dns: str = "1.1.1.1",
         token: object | None = None,
     ) -> None:
         super().__init__(
@@ -365,6 +394,15 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._node = node
         self._storage = storage
         self._zone = zone
+        self._install_dns = install_dns
+        """DNS server cloud-init / answer.toml advertise to install-
+        and run-phase guests.  PVE SDN simple-zones don't ship a
+        per-bridge resolver (libvirt's dnsmasq pattern doesn't
+        apply), so the orchestrator pins one resolver across both
+        phases and falls back to it whenever a network has
+        ``dns=True`` (libvirt would have its gateway resolve there;
+        on PVE the gateway is just a router).  Override at construction
+        for air-gapped, sovereign-DNS, or split-horizon setups."""
         self._user = user
         self._password = password
         self._token_name = token_name
@@ -989,36 +1027,77 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             sw = self._started_switches.pop()
             sw.stop(self)
 
+    def _pick_install_subnet(self) -> str:
+        """Choose an install-phase subnet from :data:`_INSTALL_SUBNET_POOL`
+        not already claimed by another in-flight run on this PVE node.
+
+        Queries ``cluster/sdn/subnets`` once to learn the in-use
+        subnets across the whole PVE cluster (SDN subnet IDs are
+        cluster-scoped, not zone-scoped).  Picks the first pool entry
+        whose CIDR isn't already taken.  Falls back to a clear
+        :class:`OrchestratorError` when every entry is in use rather
+        than silently colliding — at that scale the operator wants
+        the backpressure, not a broken install.
+
+        Best-effort: a TOCTOU race between two near-simultaneous
+        ``__enter__`` calls is closed downstream by the per-run
+        ``inst<run_id[:4]>`` vnet name (collisions there surface as a
+        loud REST error from PVE), so this picker only needs to
+        avoid the obvious "subnet already in use" case.
+        """
+        assert self._client is not None, (
+            "_pick_install_subnet requires an authenticated client"
+        )
+        # PVE returns subnets keyed by ``<zone>-<cidr-with-dashes>``;
+        # the actual CIDR is in the ``cidr`` field of each entry.
+        # Empty list / 404 means "no SDN subnets configured" — every
+        # pool entry is fair game.
+        try:
+            existing = self._client.cluster.sdn.subnets.get() or []
+        except Exception:  # pragma: no cover — REST hiccup
+            existing = []
+        in_use: set[str] = {
+            str(entry.get("cidr", "")) for entry in existing
+            if entry.get("cidr")
+        }
+        for candidate in _INSTALL_SUBNET_POOL:
+            if candidate not in in_use:
+                _log.debug(
+                    "install-vnet subnet picker: chose %s (in-use=%d)",
+                    candidate, len(in_use),
+                )
+                return candidate
+        raise OrchestratorError(
+            f"every install-vnet subnet in the pool "
+            f"({_INSTALL_SUBNET_POOL[0]}–{_INSTALL_SUBNET_POOL[-1]}) is "
+            "already claimed by another SDN subnet on this PVE cluster.  "
+            "Either wait for an in-flight run to finish, or expand the "
+            "pool by editing ``_INSTALL_SUBNET_POOL`` in "
+            "``testrange/backends/proxmox/orchestrator.py``."
+        )
+
     def _create_install_network(self) -> ProxmoxVirtualNetwork:
         """Build the ephemeral install-phase SDN vnet.
 
         Internet must be on so cloud-init / dnf / apt can reach
         upstream package mirrors during the install pass.  DNS too
         — without name resolution apt times out on
-        ``deb.debian.org``.  The subnet is fixed and lives in
-        ``192.168.230.0/24``, picked to sit clearly outside libvirt's
-        install-pool range (``192.168.240.0/24`` – ``192.168.254.0/24``)
-        so two backends running concurrently on the same host don't
-        confuse each other.
+        ``deb.debian.org``.  The subnet comes from
+        :data:`_INSTALL_SUBNET_POOL` via :meth:`_pick_install_subnet`,
+        avoiding collisions with concurrent runs on the same PVE
+        cluster.
 
         :returns: A :class:`ProxmoxVirtualNetwork` already bound to
             this run and pre-registered with each install-phase VM's
             ``__install__`` MAC, ready for :meth:`start`.
-
-        .. note::
-
-           Two test processes pointed at the **same PVE node + zone**
-           would race on the install-vnet SDN ID and the subnet.
-           Per-process concurrency on a shared PVE cluster is a
-           future slice — for the single-orchestrator case this is
-           sufficient.
         """
         assert self._run_id is not None, (
             "_create_install_network requires a bound run_id"
         )
+        subnet = self._pick_install_subnet()
         net = ProxmoxVirtualNetwork(
             name="install",
-            subnet=_PROXMOX_INSTALL_SUBNET,
+            subnet=subnet,
             dhcp=True,
             internet=True,
             dns=True,
@@ -1028,7 +1107,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # ``__install__`` MAC so the install-phase cloud-init seed's
         # network-config matches the NIC the orchestrator actually
         # attaches.  Same convention as the libvirt backend.
-        net_obj = ipaddress.IPv4Network(_PROXMOX_INSTALL_SUBNET, strict=False)
+        net_obj = ipaddress.IPv4Network(subnet, strict=False)
         hosts = list(net_obj.hosts())
         install_phase_vms = [
             vm for vm in self._vm_list
@@ -1062,13 +1141,21 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
     # ------------------------------------------------------------------
 
     def _setup_vm_networks(self) -> None:
-        """Register each VM's static IPs against its networks.
+        """Register each VM's IPs against its networks.
 
-        v1 PVE backend requires every :class:`vNIC` to
-        carry a static ``ip=`` — DHCP discovery is a future slice.
-        We fail loud here rather than later in
-        :meth:`AbstractVM._make_communicator` so users see the cause
-        immediately.
+        Static ``ip=`` values flow through verbatim.  vNICs without
+        an explicit ``ip=`` get a deterministic IP allocated from
+        the network's subnet — TestRange picks the next free host
+        address (skipping the gateway and any IP already registered
+        by an earlier vNIC) and registers it just like a static
+        entry would have been.  The picked address feeds back to
+        cloud-init / answer.toml via ``_vm_network_refs`` so the
+        rest of the pipeline doesn't need to know whether the IP
+        was user-supplied or auto-allocated.
+
+        :raises NetworkError: When a vNIC names an unknown network,
+            or when an auto-allocation runs out of host addresses
+            on the chosen subnet.
         """
         for vm in self._vm_list:
             if not isinstance(vm, ProxmoxVM):
@@ -1084,14 +1171,47 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                         f"{ref.ref!r}; available: "
                         f"{[n.name for n in self._networks]!r}"
                     )
-                if not ref.ip:
-                    raise NetworkError(
-                        f"VM {vm.name!r}: vNIC "
-                        f"{ref.ref!r} has no static ``ip=`` — "
-                        "the Proxmox backend doesn't support DHCP "
-                        "discovery yet."
-                    )
-                net.register_vm(vm.name, ref.ip)
+                ip = ref.ip or self._allocate_dhcp_ip(net, vm.name)
+                net.register_vm(vm.name, ip)
+
+    def _allocate_dhcp_ip(
+        self,
+        net: ProxmoxVirtualNetwork,
+        vm_name: str,
+    ) -> str:
+        """Pick the next free host address on *net* for *vm_name*.
+
+        Walks the subnet's host range in order, skipping:
+
+        - the gateway (first host, ``.1``);
+        - any address already registered on this network in this run
+          (an earlier vNIC's static ``ip=``, or an earlier
+          auto-allocation).
+
+        The first un-skipped host wins.  Determinism makes test
+        assertions stable: the Nth DHCP-discovery vNIC in declaration
+        order lands on the Nth host address, regardless of how many
+        run alongside it.
+
+        :raises NetworkError: If the subnet has fewer host addresses
+            than vNICs needing them.
+        """
+        net_obj = ipaddress.IPv4Network(net.subnet, strict=False)
+        gateway = net.gateway_ip
+        already_taken = {entry_ip for _, _, entry_ip in net._vm_entries}
+        for host in net_obj.hosts():
+            host_str = str(host)
+            if host_str == gateway:
+                continue
+            if host_str in already_taken:
+                continue
+            return host_str
+        raise NetworkError(
+            f"VM {vm_name!r}: cannot auto-allocate an IP on network "
+            f"{net.name!r} ({net.subnet}) — every host address is "
+            "already claimed.  Add explicit ``ip=`` values or widen "
+            "the subnet."
+        )
 
     def _find_network(
         self, name: str,
@@ -1122,8 +1242,21 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             mac = _mac_for_vm_network(vm.name, ref.ref)
             network_entries.append((net.backend_name(), mac))
             gateway = net.gateway_ip if net.internet else ""
-            nameserver = net.gateway_ip if net.dns else ""
-            cidr = f"{ref.ip}/{net.prefix_len}" if ref.ip else ""
+            # Run-phase DNS: ``net.dns=True`` means "this network
+            # provides name resolution to its guests."  On libvirt
+            # the gateway runs dnsmasq; on PVE SDN there's no
+            # per-bridge resolver, so fall back to the orchestrator's
+            # ``install_dns`` (which is also what install-phase
+            # cloud-init uses).  Setting it to the gateway IP here —
+            # as the v1 code did — produced a ``/etc/resolv.conf``
+            # pointing at a dead address every time, breaking any
+            # run-phase DNS lookup the test relied on.
+            nameserver = self._install_dns if net.dns else ""
+            # Resolve the picked or static IP from the network's
+            # ledger so DHCP-discovery vNICs (where ``ref.ip`` is
+            # ``None``) still produce a valid CIDR for cloud-init.
+            ip = ref.ip or _registered_ip_for(net, vm.name)
+            cidr = f"{ip}/{net.prefix_len}" if ip else ""
             mac_ip_pairs.append((mac, cidr, gateway, nameserver))
         return network_entries, mac_ip_pairs
 
