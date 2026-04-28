@@ -251,6 +251,11 @@ class TestBuildCacheMiss:
                 _node="pve01",
                 _storage="local-lvm",
                 _install_network=install_net,
+                # Without an explicit value MagicMock auto-generates a
+                # child mock for ``_install_dns`` and that mock leaks
+                # into the cloud-init seed → YAML serialisation blows
+                # up.  Pin a real string so the seed serialises cleanly.
+                _install_dns="1.1.1.1",
             ),
             cache=MagicMock(),
             run=run,

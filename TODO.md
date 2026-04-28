@@ -325,19 +325,3 @@ codebase.
 isn't on ``$PATH``, so the failure mode is a clear "install this
 package" rather than a confusing prepared-ISO bug.
 
-### 11. Module of test_orchestrator.py has a flaky memory-preflight test
-
-**Where:**
-`tests/test_orchestrator.py::TestCleanupStaleInstallNetworks::test_runs_before_install_network_start`.
-
-**Why it bothers us:** failing intermittently with
-``TypeError: unsupported format string passed to MagicMock.__format__``
-in `_preflight.py:163`.  The test wires a `MagicMock` for the
-declared-memory dict; the format string `:.2f` doesn't accept it.
-Pre-existing — was failing before this branch's work — but
-the failure looks like a real regression in CI logs every time it
-trips.
-
-**Sketch:** the test should pass real `Memory(...)` instances
-(or a dict of `{name: float}`) instead of a bare MagicMock.  One-
-line fix, just hasn't been done.

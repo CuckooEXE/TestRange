@@ -508,6 +508,10 @@ class TestCleanupStaleInstallNetworks:
         stub_vm.name = "cloud"
         o = Orchestrator(vms=[stub_vm])
         o._cache = MagicMock()
+        # Memory preflight isn't what we're checking here; without this
+        # stub it would format ``stub_vm._memory_kib()`` (a MagicMock)
+        # through ``f"{...:.2f}"`` and intermittently raise.
+        monkeypatch.setattr(o, "_preflight_memory", lambda: None)
         monkeypatch.setattr(
             o,
             "_cleanup_stale_install_networks",
