@@ -158,17 +158,80 @@ guarantee without one).
 
 .. _proxmox-networking-knobs:
 
-Proxmox: install-vnet pool and ``install_dns``
-----------------------------------------------
+Proxmox: per-vnet dnsmasq + IPAM
+--------------------------------
 
-Two operator-facing knobs on
-:class:`~testrange.backends.proxmox.ProxmoxOrchestrator` shape what
-guests see during the install pass and how concurrent runs share
-one PVE cluster.
+The Proxmox backend mirrors libvirt's bridge-local-dnsmasq
+networking model on top of PVE's SDN: every TestRange-created subnet
+ships with ``dhcp = "dnsmasq"`` enabled and each registered VM lands
+in PVE's IPAM.  The result is feature parity with libvirt for the
+two networking concerns tests usually care about — deterministic
+DHCP-leased IPs and ``<vm>.<vnet>`` DNS resolution from any guest on
+the vnet — without manual SDN configuration.
+
+**Dependency: ``dnsmasq`` on the PVE node.**  PVE only spawns the
+per-vnet dnsmasq instance if the binary is installed.  TestRange
+checks for it on every ``__enter__`` (substring search of
+``GET /nodes/{node}/apt/versions``) and refuses to provision if
+missing — without dnsmasq, subnet creation succeeds but no leases
+get served and guests time out at boot.  Install on the node:
+
+.. code-block:: bash
+
+    # Debian / Ubuntu (and PVE itself)
+    sudo apt-get install -y dnsmasq
+
+    # RHEL / Rocky
+    sudo dnf install -y dnsmasq
+
+When TestRange builds the PVE node itself via
+:class:`~testrange.Hypervisor` (the nested
+``Hypervisor(orchestrator=ProxmoxOrchestrator, …)`` pattern from
+``examples/nested_proxmox_public_private.py``),
+:meth:`~testrange.backends.proxmox.ProxmoxOrchestrator.prepare_outer_vm`
+injects ``dnsmasq`` into the install package list automatically and
+the PVE installer's ``[first-boot]`` hook runs ``apt-get install -y
+dnsmasq`` on the freshly-installed node — so the preflight passes
+by construction, no manual install needed.
+
+**What each subnet ships with.**  Every ``ProxmoxVirtualNetwork.start``
+POSTs a subnet config of the form:
+
+.. code-block:: text
+
+    type     = subnet
+    subnet   = <user CIDR>
+    gateway  = <subnet>.1
+    dhcp     = dnsmasq
+    dhcp-range = start-address=<subnet>.11, end-address=<subnet>.254
+    snat     = 1   (only when internet=True)
+
+The reserved low-end head (``.1`` gateway + ``.2``–``.10`` for IPAM
+static reservations) keeps registered VMs out of the dynamic range
+so dnsmasq's lease pool only fires for unregistered MACs (rare in
+TestRange — useful for hand-attached debug VMs).  Subnets smaller
+than ``/28`` raise :class:`NetworkError` since there's not enough
+host space to honour the split.
+
+**IPAM-backed determinism.**  When a vNIC reaches
+:meth:`ProxmoxVirtualNetwork.register_vm` (whether from an explicit
+``ip=`` or the deterministic-pick path described under
+``DHCP-discovery vNICs`` above), TestRange POSTs ``(mac, ip,
+hostname=<vm>.<vnet>)`` to ``POST /cluster/sdn/vnets/{vnet}/ips``.
+PVE's ``pve``-IPAM plugin records the binding and the next SDN
+reload regenerates the per-vnet dnsmasq config with matching
+``dhcp-host=...`` lines.  That gives:
+
+* **Deterministic DHCP**: a registered MAC always receives its
+  reserved IP.  Test assertions that name expected IPs stay stable
+  across runs.
+* **DNS for ``<vm>.<vnet>``**: dnsmasq treats every ``dhcp-host``
+  hostname as a DNS A record for any querier on the vnet — same
+  shape libvirt's per-network dnsmasq has always given.
 
 **Install-vnet subnet pool.**  Every Proxmox run creates a per-run
-SDN vnet (``inst<run_id[:4]>``) so cloud-init / answer.toml can
-reach upstream package mirrors regardless of whether any
+ephemeral SDN vnet (``inst<run_id[:4]>``) so cloud-init / answer.toml
+can reach upstream package mirrors regardless of whether any
 user-declared network has internet.  At ``__enter__`` the
 orchestrator picks one subnet from a 10-entry pool spanning
 ``192.168.230.0/24`` – ``192.168.239.0/24`` (sits below libvirt's
@@ -189,30 +252,13 @@ the cluster wins.
   swept by the next ``testrange cleanup MODULE RUN_ID`` against the
   same orchestrator factory.
 
-**``install_dns=`` resolver pin.**  PVE SDN simple-zones don't ship a
-per-bridge DNS resolver (libvirt's dnsmasq pattern doesn't apply), so
-the orchestrator pins one resolver address that cloud-init /
-answer.toml advertise to every guest:
-
-.. code-block:: python
-
-    ProxmoxOrchestrator(
-        host="pve.example.com",
-        user="root@pam",
-        token_name="testrange",
-        token_value="...",
-        install_dns="10.0.0.53",   # internal resolver, default "1.1.1.1"
-        networks=[...],
-        vms=[...],
-    )
-
-Override for air-gapped, sovereign-DNS, or split-horizon setups
-where ``1.1.1.1`` either isn't reachable or is the wrong answer.
-The same value also resolves run-phase NICs on networks declared
-``dns=True`` — without the pin, a ``dns=True`` Proxmox network would
-otherwise leave the guest's ``/etc/resolv.conf`` pointing at the SDN
-gateway IP, which is just a router.  ``dns=False`` networks continue
-to leave the guest's ``nameserver`` empty.
+**Air-gapped / sovereign-DNS notes.**  PVE's per-vnet dnsmasq
+forwards uncached DNS queries to whatever the PVE node's
+``/etc/resolv.conf`` lists upstream.  Air-gapped or sovereign-DNS
+environments configure that at the node level (the way they would
+for any other service on the node); TestRange has no kwarg to
+override it because there's no clean way to push per-vnet upstream
+config through PVE's SDN API today.
 
 Coexisting with a host-level DNS service
 ----------------------------------------

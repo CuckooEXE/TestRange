@@ -8,6 +8,86 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Proxmox SDN: per-vnet dnsmasq + IPAM (libvirt parity)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Closes the last big gap between the libvirt and Proxmox backends:
+guests on a Proxmox SDN vnet now get the same per-network
+DHCP + DNS surface libvirt's bridge-local dnsmasq has always
+provided.
+
+**Changed: every TestRange-created subnet ships with**
+``dhcp = "dnsmasq"`` **enabled.**
+:meth:`ProxmoxVirtualNetwork.start` POSTs the SDN subnet with
+PVE's ``dhcp = "dnsmasq"`` field set, plus a ``dhcp-range`` covering
+the subnet's high half (``.11`` upward — the low ten host addresses
+stay reserved for IPAM static entries).  PVE then spawns a per-vnet
+``dnsmasq`` instance bound to the gateway address that serves DHCP
++ DNS for the vnet.
+
+**Added: IPAM registration for every** :meth:`register_vm` **call.**
+Each ``(mac, ip, hostname=<vm>.<vnet>)`` tuple lands in PVE's
+``pve``-IPAM via ``POST /cluster/sdn/vnets/{vnet}/ips``.  PVE turns
+those into ``dhcp-host=mac,ip,hostname`` directives in the
+auto-generated dnsmasq config, which gives:
+
+* deterministic DHCP leases — a registered MAC always gets its
+  reserved IP, so test assertions naming expected IPs stay stable
+  across runs;
+* libvirt-style FQDN DNS — querying the gateway for ``<vm>.<vnet>``
+  from another guest on the same vnet returns the right IP, with
+  no extra DNS-plugin (PowerDNS) configuration.
+
+**Added: ``dnsmasq`` apt-package preflight in
+:meth:`ProxmoxOrchestrator.__enter__`.**  Substring-searches
+``GET /nodes/{node}/apt/versions`` for ``dnsmasq``; raises
+:class:`OrchestratorError` with apt/dnf install hints if missing.
+Catches the dependency at orchestrator entry rather than letting it
+manifest as a cryptic guest-boot timeout.
+
+**Added: ``dnsmasq`` injection into the PVE Hypervisor's default
+package list.**  New
+:meth:`ProxmoxOrchestrator.prepare_outer_vm` override prepends
+``Apt("dnsmasq")`` so any
+``Hypervisor(orchestrator=ProxmoxOrchestrator, …)`` build
+satisfies the preflight by construction — no manual install on
+the freshly-built PVE node.  This in turn required teaching
+:class:`~testrange.vms.builders.ProxmoxAnswerBuilder` to consume
+``vm.pkgs`` / ``vm.post_install_cmds`` (silently ignored before):
+when either is set, the answer-toml emitter adds a ``[first-boot]``
+section pointing at a ``/first-boot`` script on the seed ISO that
+runs ``apt-get update`` + ``apt-get install -y <pkgs>`` followed by
+the post-install commands.  Non-Apt packages on PVE are skipped
+with a warning (the platform is Debian-based; Pip/Dnf/Brew don't
+make sense as install-time deps for the host).
+
+**Removed: ``ProxmoxOrchestrator(install_dns=…)`` kwarg.**  The
+kwarg was a stop-gap for "PVE SDN doesn't ship a per-bridge
+resolver"; with the dnsmasq integration now standard, dnsmasq is
+the resolver and its upstream forwarder is whatever the PVE
+node's ``/etc/resolv.conf`` lists.  Air-gapped / sovereign-DNS
+deploys configure the node-level resolv.conf instead — there's no
+clean per-vnet upstream override through PVE's SDN API today, and
+the kwarg was always going to give the wrong impression about
+what could be controlled.  Run-phase NICs on ``dns=True`` networks
+now point at the gateway IP (which is dnsmasq), matching the
+libvirt backend's bridge-local-dnsmasq pattern exactly.  Removed
+helpers: ``_install_dns_for`` and ``_PUBLIC_DNS_FALLBACK`` in
+``testrange/backends/proxmox/vm.py``.
+
+**Test surface:** the previous ``TestRunPhaseDns`` /
+``TestInstallDnsKwarg`` classes in
+``tests/test_proxmox_networking_parity.py`` are replaced with
+``TestDnsmasqPreflight`` (3 tests: package-present pass, package-
+missing fail, error-message contents) and ``TestSubnetDnsmasq``
+(3 tests: subnet POST carries ``dhcp = "dnsmasq"``, IPAM POST is
+called per VM with the FQDN, ``/30`` subnets raise clearly).
+``TestRunPhaseDns`` keeps the same shape but asserts gateway-as-DNS
+instead of install_dns-as-DNS.  ``test_proxmox_answer.py`` gains a
+new ``TestFirstBootScript`` class plus two ``[first-boot]``-aware
+seed-ISO tests.  Suite is now 1030 passed / 14 skipped (live PVE
+tests, expected) / 0 failed across five back-to-back runs.
+
 Docs + tests cleanup
 ~~~~~~~~~~~~~~~~~~~~
 
