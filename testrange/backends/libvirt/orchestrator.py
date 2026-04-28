@@ -853,7 +853,18 @@ class Orchestrator(AbstractOrchestrator):
                 ):
                     self._install_network.start(self)
 
-        # 2. Build (or retrieve from cache) installed disk images.
+        # 2. Bind test networks + assign per-VM IPs.  Pure
+        # bookkeeping (no libvirt calls, no network bring-up) — but
+        # ordered BEFORE the build phase so that
+        # :meth:`_setup_test_networks`'s "stamp the picked IP back
+        # onto the vNIC" step has happened before any builder reads
+        # ``vNIC.ip``.  ``ProxmoxAnswerBuilder._network_block`` is
+        # the one that cares: without the stamp it falls back to
+        # ``source = "from-dhcp"`` and the PVE installer freezes the
+        # install-phase 192.168.24x lease as the run-phase IP.
+        self._setup_test_networks(run.run_id)
+
+        # 3. Build (or retrieve from cache) installed disk images.
         # Refs are backend-local strings — for LocalStorageBackend
         # these are outer-host paths identical to the pre-backend
         # behaviour; for SSH backends they're paths on the remote.
@@ -879,14 +890,11 @@ class Orchestrator(AbstractOrchestrator):
                         install_network_mac=install_mac,
                     )
 
-        # 3. Stop the install network (VMs are off at this point)
+        # 4. Stop the install network (VMs are off at this point)
         if self._install_network is not None:
             _log.debug("stopping install network")
             self._install_network.stop(self)
             self._install_network = None
-
-        # 4. Register VMs with their test networks and assign IPs
-        self._setup_test_networks(run.run_id)
 
         # 5. Start test networks
         for net in self._networks:
