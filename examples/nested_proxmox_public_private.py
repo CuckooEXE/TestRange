@@ -322,7 +322,7 @@ def _log_inner_state(orch) -> None:
 
 
 def _verify_inner_reachability(orch: Orchestrator) -> None:
-    """Inner-layer reachability: L2 → L2 + L2 → L1.
+    """Inner-layer reachability: L2 → L2 + L2 → L1, IP and FQDN.
 
     Mirrors the assertions the libvirt-on-libvirt counterpart in
     :mod:`examples.nested_public_private` makes, just with the
@@ -343,6 +343,18 @@ def _verify_inner_reachability(orch: Orchestrator) -> None:
        proves cross-network reachability *within* the inner layer
        and that the ``PrivateNet`` (``internet=False``) doesn't
        isolate inner peers from each other.
+    4. **FQDN DNS via PVE's per-vnet dnsmasq.**  Curl by name —
+       ``http://webpublic.PublicNet/`` and
+       ``http://dbprivate.PrivateNet/`` — exercises the IPAM →
+       dnsmasq DNS path TestRange now configures on every Proxmox
+       SDN vnet.  An IP-only success would mean DHCP worked but
+       DNS could be silently broken; this assertion pins the
+       libvirt-parity behaviour where ``<vm>.<vnet>`` resolves
+       cluster-side without a separate DNS plugin.  The client
+       resolves each FQDN via the gateway on the matching vnet
+       (where that vnet's dnsmasq runs); cross-vnet name lookups
+       would NXDOMAIN by design (each vnet's IPAM is its own
+       scope), so we query the matching vnet for each FQDN.
 
     On failure, dumps every inner VM's network + service state
     (see :func:`_log_inner_state`) before re-raising so the
@@ -373,6 +385,30 @@ def _verify_inner_reachability(orch: Orchestrator) -> None:
         timeout=20,
     ).check()
     assert b"Private DB" in priv.stdout, priv.stdout_text
+
+    # 4. FQDN resolution — proves PVE's per-vnet dnsmasq is
+    #    answering for the IPAM-registered hostnames TestRange
+    #    pushed at __enter__.  ``host`` (from dnsutils, which the
+    #    client gets via its package list) takes an explicit DNS
+    #    server as its second argument so each query lands on the
+    #    matching vnet's dnsmasq directly — bypassing the
+    #    cloud-init-configured /etc/resolv.conf order, which on a
+    #    multi-NIC VM depends on NIC declaration order and would
+    #    NXDOMAIN cross-vnet lookups (each vnet's IPAM is its own
+    #    DNS scope).  We verify both the lookup succeeds AND
+    #    returns the IP we registered, then curl by FQDN as the
+    #    end-to-end check.
+    pub_lookup = client.exec(
+        ["host", "webpublic.PublicNet", "10.42.0.1"],
+        timeout=15,
+    ).check()
+    assert b"10.42.0.5" in pub_lookup.stdout, pub_lookup.stdout_text
+
+    priv_lookup = client.exec(
+        ["host", "dbprivate.PrivateNet", "10.43.0.1"],
+        timeout=15,
+    ).check()
+    assert b"10.43.0.5" in priv_lookup.stdout, priv_lookup.stdout_text
 
 
 def verify(orch: Orchestrator) -> None:
@@ -527,7 +563,14 @@ def gen_tests() -> list[Test]:
                                 name="client",
                                 iso=DEBIAN_CLOUD,
                                 users=[root_cred],
-                                pkgs=[Apt("curl"), Apt("iputils-ping")],
+                                # ``dnsutils`` ships ``host`` for the
+                                # FQDN lookups in
+                                # ``_verify_inner_reachability``.
+                                pkgs=[
+                                    Apt("curl"),
+                                    Apt("iputils-ping"),
+                                    Apt("dnsutils"),
+                                ],
                                 communicator="guest-agent",
                                 devices=[
                                     vCPU(1),
