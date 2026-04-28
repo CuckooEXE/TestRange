@@ -40,6 +40,45 @@ On Fedora / RHEL / Rocky:
    sudo systemctl enable --now libvirtd
    sudo usermod -aG libvirt $USER
 
+ProxMox VE installs (optional)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To provision ProxMox VE VMs (boot a vanilla PVE installer ISO and
+land in a cached post-install image, the way
+:class:`~testrange.backends.proxmox.ProxmoxOrchestrator` and
+``examples/nested_proxmox_public_private.py`` do), TestRange needs
+``xorriso`` on ``$PATH``.  ``xorriso`` (libisoburn's CLI) drives
+the modification of the vanilla PVE ISO so the unattended-install
+mode marker (``/auto-installer-mode.toml``) gets injected without
+disturbing the ISO's hybrid El Torito + GPT/MBR + HFS+ + EFI
+System Partition layout — which PVE's UEFI GRUB depends on for
+locating its own ``grub.cfg``.
+
+On Debian / Ubuntu:
+
+.. code-block:: bash
+
+   sudo apt-get install -y xorriso
+
+On Fedora / RHEL / Rocky:
+
+.. code-block:: bash
+
+   sudo dnf install -y xorriso
+
+On macOS:
+
+.. code-block:: bash
+
+   brew install xorriso
+
+When the binary is missing, the prepare-iso step fails fast with a
+:class:`~testrange.vms.builders._proxmox_prepare.ProxmoxPrepareError`
+explaining what to install — no broken ISO ever lands in the
+cache.  Migrating away from the binary is on the roadmap (see
+``TODO.md``); for now it's required to use the Proxmox backend
+against PVE 9.x ISOs.
+
 Windows VMs (optional)
 ~~~~~~~~~~~~~~~~~~~~~~~
 

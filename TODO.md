@@ -214,7 +214,136 @@ of "preflight catches it before any state changes".
 backend.  Proxmox queries `/nodes/{node}/status` for total + used
 memory and runs the same arithmetic.
 
-### 10. Module of test_orchestrator.py has a flaky memory-preflight test
+### 10. Ctrl+C during a remote run leaks resources on the remote
+
+**Where:** `testrange/backends/libvirt/orchestrator.py` —
+`__exit__` / `_teardown` over a `qemu+ssh://` connection.
+
+**Why it bothers us:** SIGINT raises `KeyboardInterrupt` on the
+main thread.  Paramiko's SSH transport (the tunnel libvirt rides
+on for `qemu+ssh://`) tears itself down on SIGINT before
+`__exit__` runs, so every teardown call hits ``client socket is
+closed`` / ``Cannot recv data: Connection reset by peer``.  The
+orchestrator catches each error and logs ``(ignored)``, then
+reports ``teardown complete`` even though nothing was actually
+cleaned up.  Result: a Ctrl+C mid-run consistently leaves
+``tr-build-*`` domains, install networks, and (in the nested case)
+inner-orchestrator PVE-side state behind on the remote host.
+``testrange cleanup MODULE RUN_ID`` recovers it but the user has to
+remember to run it.
+
+A second smaller smell visible in the same trace: the network
+teardown loop tries to stop run-phase networks (``OuterNet`` etc.)
+that were never bound when Ctrl+C lands during the install phase,
+surfacing ``bind_run() must be called before backend_name()`` as
+an ignored teardown error.
+
+**Sketch:**
+
+- Block SIGINT inside ``__exit__`` so the connection survives long
+  enough for teardown to drive every libvirt destroy/undefine.
+  Standard pattern: install a no-op ``SIGINT`` handler at
+  ``__exit__`` entry, restore on exit, and treat a *second* Ctrl+C
+  as an explicit force-quit that skips remaining teardown.
+- Reconnect-on-demand for the case where the connection was
+  already dead before ``__exit__`` ran (e.g. paramiko transport
+  thread crashed for an unrelated reason).  One ``libvirt.open``
+  retry per resource is fine — teardown ops are idempotent.
+- Skip-if-not-bound in the network teardown loop so unstarted
+  run-phase networks don't pollute the log with teardown errors.
+
+### 11. Migrate ``_proxmox_prepare`` off the ``xorriso`` binary
+
+**Where:** ``testrange/vms/builders/_proxmox_prepare.py`` —
+:func:`prepare_iso_bytes` shells out to the ``xorriso`` CLI via
+``subprocess.run`` to inject ``/auto-installer-mode.toml`` into a
+vanilla PVE installer ISO while preserving the hybrid boot
+layout (``-boot_image any keep``).
+
+**Why it bothers us:** xorriso is the only TestRange dependency
+the user can't satisfy via ``pip install``.  Goal across the
+project is a single ``pip install testrange[proxmox]`` and zero
+binary-shelling-out — every external system call is a portability
+hazard (different distros, different versions, missing PATH on
+container images, locked-down CI runners) and a test surface
+(mocking ``subprocess.run`` to pin argv is not the same kind of
+coverage as exercising a real implementation in-process).
+
+The previous pure-Python attempt used :mod:`pycdlib` and silently
+broke the prepared ISO's UEFI boot — pycdlib's ``write_fp()``
+rebuilt the ISO from its data model, which doesn't track the
+hybrid GPT / protective MBR / HFS+ / EFI System Partition layout
+PVE's UEFI GRUB depends on.  So the migration target needs to
+preserve those four extra layers exactly while still being
+in-process Python.
+
+**Migration plan, in tiers from easiest-to-ship to most-correct:**
+
+1. **Try a more-careful pycdlib path that copies the hybrid system
+   area verbatim.**  pycdlib has ``rr_strict_iso9660_filenames`` /
+   ``add_eltorito`` knobs we didn't use; the hybrid system area
+   (the first 32 KiB of the ISO that holds the protective MBR +
+   GPT + APM) can be carried across via ``set_system_use_area`` /
+   raw-byte preservation if pycdlib exposes a hook.  Cheapest
+   option *if* pycdlib's APIs admit it; needs a real boot test
+   against PVE 9.x to confirm GRUB no longer drops to ``grub>``.
+   Risk: if pycdlib fundamentally rebuilds the GPT during write
+   (likely), no amount of careful API use will preserve the
+   ESP-as-GPT-partition link, and we end up exactly where we
+   started.
+
+2. **Bind ``libisoburn`` directly via ctypes / cffi.**
+   ``libisoburn.so.1`` ships in the same OS package as the
+   ``xorriso`` binary, so it's available wherever xorriso is —
+   but we drop the subprocess hop and gain in-process error
+   handling.  pip-installable wrappers exist (search
+   ``isoburn``-named projects) but appear unmaintained; we'd
+   likely need a thin in-tree ctypes wrapper covering only the
+   ``-boot_image any keep`` + ``-map`` operations we use.
+   Doesn't pip-install libisoburn itself, so this is a halfway
+   house: the subprocess goes away but the system dependency
+   remains.
+
+3. **Build a libisoburn-equivalent hybrid-ISO writer in pure
+   Python.**  The actual data we need to emit is well-defined:
+   ISO9660 + Rock Ridge + El Torito (boot catalog + BIOS image
+   pointer + UEFI image pointer) + protective MBR + GPT entries
+   for the EFI System Partition + (for Mac) APM + HFS+ wrapper.
+   pycdlib handles ISO9660 + Rock Ridge + basic El Torito
+   already; we'd need to layer the hybrid bits on top.  Most
+   correct, hardest to ship, biggest test surface.  Worth doing
+   if (a) we have other ISO-prep needs (cloud-init seed, Windows
+   unattend) that benefit from a shared in-process writer, or
+   (b) the Proxmox backend grows enough that ``[proxmox]`` extra
+   becomes the canonical install path and binary-free becomes a
+   selling point.
+
+4. **Vendor a ``proxmox-auto-install-assistant``-equivalent Rust
+   crate via PyO3.**  Upstream Proxmox already has a Rust
+   implementation of exactly this prep step in
+   ``proxmox-auto-install-assistant``.  PyO3 lets us bundle it
+   into a Python wheel.  Trades the xorriso runtime dependency
+   for a PyO3 build-time dependency, which **is** pip-installable
+   (wheels ship pre-compiled).  Probably the most pragmatic path
+   to "no system binaries" if we're willing to take a Rust
+   build-time toolchain.
+
+**Sketch of the decision criterion:** pick (1) if a quick
+investigation shows pycdlib has the hooks we need.  Otherwise (4)
+— PyO3-wrapped upstream Rust — is the smallest change with the
+strongest correctness guarantee, since we'd be using the same
+code Proxmox itself ships.  (2) is OK as a stopgap but doesn't
+solve the pip-install goal.  (3) is the long-term ideal and the
+right choice if more in-process ISO writing shows up across the
+codebase.
+
+**Until then,** the system dependency is documented in
+``docs/usage/installation.rst`` and ``prepare_iso_bytes`` raises
+:class:`ProxmoxPrepareError` with install hints when ``xorriso``
+isn't on ``$PATH``, so the failure mode is a clear "install this
+package" rather than a confusing prepared-ISO bug.
+
+### 12. Module of test_orchestrator.py has a flaky memory-preflight test
 
 **Where:**
 `tests/test_orchestrator.py::TestCleanupStaleInstallNetworks::test_runs_before_install_network_start`.
