@@ -142,6 +142,40 @@ with a deployment-specific zone name (``"trtest"``, ``"trprod"``,
 with PVE's built-in zones (which all start with ``localnetwork``)."""
 
 
+def _parse_token_string(token: str) -> tuple[str, str, str] | None:
+    """Decompose a PVE API-token string into ``(user, name, value)``.
+
+    Token shape per PVE: ``<user>@<realm>!<token-name>=<secret>``.
+    Returns ``None`` when the input doesn't fit that shape so callers
+    can fall back to ticket auth.  Used for the
+    ``proxmox://TOKEN@host`` CLI URL form, where the URL parser
+    delivers the raw concatenated string and the orchestrator
+    decomposes it for :meth:`_resolve_client_kwargs`.
+
+    Examples accepted:
+
+    * ``root@pam!ci=abcd-ef01-2345`` → ``("root@pam", "ci", "abcd-ef01-2345")``
+    * ``automation@pve!buildbot=hex...`` → likewise.
+
+    Examples rejected (returns ``None``):
+
+    * ``"root"``  — no realm, no token marker
+    * ``"root@pam"`` — no token marker, just a user
+    * ``"root@pam!ci"`` — token name without secret
+    """
+    # ``=`` splits user@realm!name from secret; ``!`` splits user@realm
+    # from name.  Order matters because the secret can contain ``!``.
+    if "=" not in token or "!" not in token:
+        return None
+    user_realm_name, _, value = token.partition("=")
+    if not value:
+        return None
+    user_realm, _, name = user_realm_name.partition("!")
+    if not user_realm or "@" not in user_realm or not name:
+        return None
+    return user_realm, name, value
+
+
 def _promote_to_proxmox(vm: ProxmoxVM | "GenericVM") -> ProxmoxVM:
     """Convert a backend-agnostic :class:`GenericVM` (or generic
     :class:`~testrange.vms.hypervisor.Hypervisor`) to the proxmox
@@ -404,14 +438,25 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # handler.  The dict carries one of three credential shapes
         # depending on what the URL spelled — see
         # :func:`testrange.backends.proxmox.cli_build_orchestrator`.
+        # Token strings have the PVE-canonical shape
+        # ``user@realm!name=secret``; parse it into the proper
+        # ``_user`` / ``_token_name`` / ``_token_value`` fields here
+        # so :meth:`_resolve_client_kwargs` finds an API-token
+        # combination.  An earlier cut stashed the unparsed string on
+        # ``_legacy_token`` and silently failed auth.
         if isinstance(token, dict):
             if not self._user and token.get("user"):
                 self._user = token["user"]
             if not self._password and token.get("password"):
                 self._password = token["password"]
-            self._legacy_token = token.get("token")
-        else:
-            self._legacy_token = None
+            raw_token = token.get("token")
+            if raw_token:
+                parsed = _parse_token_string(raw_token)
+                if parsed is not None:
+                    user, name, value = parsed
+                    self._user = self._user or user
+                    self._token_name = self._token_name or name
+                    self._token_value = self._token_value or value
 
         self._client: Any = None
         self.vms = {}
@@ -571,9 +616,12 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             # already-entered inner orchestrator before we propagate
             # to the outer teardown path.
             self._enter_nested_orchestrators()
-        except Exception:
-            # Roll back in reverse provisioning order so we don't
-            # leak any SDN / VMID state into the user's exception.
+        except BaseException:
+            # ``BaseException`` (not ``Exception``) so that a Ctrl+C
+            # during a long install also runs rollback before the
+            # interrupt propagates — otherwise SDN vnets, VMIDs, and
+            # nested-orchestrator state leak on operator-cancel.
+            # Mirrors libvirt's ``__enter__`` rollback discipline.
             from testrange._debug import pause_on_error_if_enabled
             pause_on_error_if_enabled(
                 "ProxmoxOrchestrator __enter__ raised; "
@@ -612,6 +660,21 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         any other unexpected error here is logged.
         """
         try:
+            # Propagate ``leak()`` to every inner orchestrator BEFORE
+            # closing the nested stack — without this, each inner's
+            # ``__exit__`` runs full teardown on its own VMs while
+            # the operator was trying to preserve them.  Mirrors
+            # libvirt's pattern in ``backends/libvirt/orchestrator.py``.
+            if self._leaked:
+                for inner in self._inner_orchestrators:
+                    try:
+                        inner.leak()
+                    except Exception as exc:  # pragma: no cover
+                        _log.warning(
+                            "could not propagate leak() to inner "
+                            "orchestrator %r: %s", inner, exc,
+                        )
+
             # Unwind nested inner orchestrators first (LIFO) so each
             # inner orchestrator's __exit__ runs while its hosting
             # PVE VM is still alive.  Tear down our own VMs / vnets
@@ -925,8 +988,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         rollback path when a later network's :meth:`start` fails.
         """
         assert self._run_id is not None, "run id must be set first"
+        # Networks are already bound to ``self._run_id`` by
+        # :meth:`_setup_vm_networks` (it calls ``bind_run`` at the
+        # top so subsequent ``register_vm`` calls write into the
+        # right run's ledger).  An earlier cut bound networks here
+        # too — but ``bind_run`` clears ``_vm_entries`` as a side
+        # effect, so binding *after* registration wiped every IPAM
+        # entry the orchestrator had just collected.  Don't re-bind.
         for net in self._networks:
-            net.bind_run(self._run_id)
             net.start(self)
             self._started_networks.append(net)
             _log.debug(
@@ -1082,6 +1151,18 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             vm for vm in self._vm_list
             if vm.builder.needs_install_phase()
         ]
+        # ``hosts[idx + 1]`` indexing skips the gateway (.1).  Bound
+        # the loop explicitly so a fleet larger than the subnet
+        # raises a clear NetworkError instead of a bare IndexError.
+        if len(install_phase_vms) > len(hosts) - 1:
+            raise NetworkError(
+                f"install vnet subnet {subnet} has {len(hosts) - 1} "
+                f"non-gateway host(s) but {len(install_phase_vms)} "
+                "VMs need an install-phase NIC.  Pick a wider install-"
+                "subnet pool entry (edit ``_INSTALL_SUBNET_POOL`` in "
+                "``testrange/backends/proxmox/orchestrator.py``) or "
+                "split the run across multiple orchestrator instances."
+            )
         for idx, vm in enumerate(install_phase_vms):
             ip = str(hosts[idx + 1])  # skip gateway (.1)
             mac = _mac_for_vm_network(vm.name, "__install__")
@@ -1126,6 +1207,19 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             or when an auto-allocation runs out of host addresses
             on the chosen subnet.
         """
+        # Bind every network to this run BEFORE registering any VMs.
+        # ``bind_run`` clears the network's ``_vm_entries`` ledger
+        # as a side effect (so a re-entered orchestrator doesn't
+        # carry stale entries from a prior run); doing it here, not
+        # in ``_start_networks``, means our registrations land in
+        # the right run's ledger and survive to the IPAM-push step.
+        # Mirrors ``LibvirtOrchestrator._setup_test_networks``.
+        assert self._run_id is not None, (
+            "_setup_vm_networks requires a bound run_id"
+        )
+        for net in self._networks:
+            net.bind_run(self._run_id)
+
         for vm in self._vm_list:
             if not isinstance(vm, ProxmoxVM):
                 raise OrchestratorError(

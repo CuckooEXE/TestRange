@@ -459,35 +459,46 @@ class TestBackendUrlDispatch:
         assert orch._user == "root"
         assert orch._password == "hunter2"
 
-    def test_proxmox_token_in_userinfo(self, tmp_path: Path) -> None:
+    def test_proxmox_token_userinfo_auth_kwargs(self, tmp_path: Path) -> None:
+        """The userinfo-as-token form must produce a working
+        ``_resolve_client_kwargs`` result — earlier cuts stashed the
+        raw token on ``_legacy_token`` and silently failed auth at
+        ``__enter__`` time because ``_resolve_client_kwargs`` never
+        read it.  Verify the orchestrator's resolved kwargs carry
+        the parsed user / token-name / token-value."""
         from testrange.backends.proxmox import cli_build_orchestrator
         orch = cli_build_orchestrator(
-            "proxmox://abcdefghij@pve.example.com/pve01",
+            "proxmox://root@pam!ci=abcd-ef01-2345@pve.example.com/pve01",
             self._fake_original(tmp_path),
         )
         assert orch is not None
-        # Userinfo without a colon is treated as a token.  The
-        # orchestrator stashes it on ``_legacy_token`` until the URL
-        # handler grows explicit ``token_name``/``token_value``
-        # parsing for the ``user@realm!name=secret`` form.
-        assert orch._legacy_token == "abcdefghij"
         assert orch._node == "pve01"
+        kwargs = orch._resolve_client_kwargs()
+        assert kwargs["user"] == "root@pam"
+        assert kwargs["token_name"] == "ci"
+        assert kwargs["token_value"] == "abcd-ef01-2345"
 
-    def test_proxmox_token_query_param(self, tmp_path: Path) -> None:
-        """``?token=`` takes precedence over userinfo (lets callers
-        pass the full ``user@realm!name=secret`` blob without
-        URL-encoding)."""
+    def test_proxmox_token_query_param_auth_kwargs(self, tmp_path: Path) -> None:
+        """``?token=`` lets callers pass the full
+        ``user@realm!name=secret`` blob without URL-encoding the
+        ``@`` in the userinfo position; result is the same parsed
+        token-auth kwargs."""
         from testrange.backends.proxmox import (
             ProxmoxOrchestrator,
             cli_build_orchestrator,
         )
         orch = cli_build_orchestrator(
-            "proxmox://pve.example.com?token=root!auto&storage=local-lvm",
+            "proxmox://pve.example.com"
+            "?token=automation@pve!buildbot=hex-secret"
+            "&storage=local-lvm",
             self._fake_original(tmp_path),
         )
         assert isinstance(orch, ProxmoxOrchestrator)
-        assert orch._legacy_token == "root!auto"
         assert orch._storage == "local-lvm"
+        kwargs = orch._resolve_client_kwargs()
+        assert kwargs["user"] == "automation@pve"
+        assert kwargs["token_name"] == "buildbot"
+        assert kwargs["token_value"] == "hex-secret"
 
     def test_central_dispatcher_iterates_backends(
         self, tmp_path: Path

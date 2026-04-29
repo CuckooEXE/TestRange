@@ -122,8 +122,40 @@ class TestExec:
         c.exec(["ipconfig"], env={"FOO": "bar"})
         c._session.run_ps.assert_called_once()
         script = c._session.run_ps.call_args[0][0]
-        assert '$env:FOO="bar";' in script
-        assert script.endswith("ipconfig")
+        # Single-quoted PowerShell strings are pure literals (no
+        # ``$var`` expansion / ``"`` interpolation / backtick
+        # escapes), so they neutralise injection through env values
+        # or argv.  An earlier cut used double quotes and only
+        # escaped ``'`` — anything containing ``"`` / ``$`` /
+        # backtick would break out of the literal and run arbitrary
+        # PowerShell.
+        assert "$env:FOO='bar'; " in script
+        assert script.endswith("'ipconfig'")
+
+    def test_exec_env_value_with_doublequote_is_literal(
+        self, WinRMCommunicator,
+    ) -> None:
+        """Regression: an env value containing a double quote
+        previously broke out of the script.  With single-quoted
+        literals, ``"`` is just data."""
+        c = self._prime(WinRMCommunicator)
+        c._session.run_ps.return_value = MagicMock(
+            status_code=0, std_out=b"", std_err=b""
+        )
+        c.exec(["whoami"], env={"PROMPT": 'evil"; rm -rf /; echo "'})
+        script = c._session.run_ps.call_args[0][0]
+        # The dangerous value lives intact inside single-quote
+        # delimiters.
+        assert "$env:PROMPT='evil\"; rm -rf /; echo \"'; " in script
+        # Single quotes inside the value get doubled per PowerShell
+        # rules (covered by ``_ps_escape``).
+        c._session.run_ps.reset_mock()
+        c._session.run_ps.return_value = MagicMock(
+            status_code=0, std_out=b"", std_err=b""
+        )
+        c.exec(["echo"], env={"X": "it's a value"})
+        script = c._session.run_ps.call_args[0][0]
+        assert "$env:X='it''s a value'; " in script
 
     def test_exec_wraps_session_error(self, WinRMCommunicator) -> None:
         c = self._prime(WinRMCommunicator)

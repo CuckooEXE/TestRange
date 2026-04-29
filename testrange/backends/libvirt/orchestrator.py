@@ -1072,6 +1072,19 @@ class Orchestrator(AbstractOrchestrator):
             vm for vm in self._vm_list
             if vm.builder.needs_install_phase()
         ]
+        # Bound the host-index loop so a fleet larger than the
+        # subnet raises a clear NetworkError instead of a bare
+        # IndexError ("list index out of range" with no context).
+        if len(install_phase_vms) > len(hosts) - 1:
+            raise NetworkError(
+                f"install network subnet {subnet} has {len(hosts) - 1} "
+                f"non-gateway host(s) but {len(install_phase_vms)} "
+                "VMs need an install-phase NIC.  Either pick a wider "
+                "install-subnet pool entry (edit "
+                "``_INSTALL_SUBNET_POOL`` in "
+                "``testrange/backends/libvirt/orchestrator.py``) or "
+                "split the run across multiple orchestrator instances."
+            )
         for idx, vm in enumerate(install_phase_vms):
             ip = str(hosts[idx + 1])  # skip gateway (.1)
             mac = _mac_for_vm_network(vm.name, "__install__")

@@ -85,6 +85,12 @@ def _orch(
 
     client.cluster.sdn.vnets.side_effect = _subnets_for
     orch._client = client
+    # ``_setup_vm_networks`` asserts a bound run_id (it calls
+    # ``bind_run`` on every network at the top, so a missing run_id
+    # is a clear contract violation).  Stamp a deterministic ID
+    # here so test cases that exercise the IP-allocation path don't
+    # need to set it themselves.
+    orch._run_id = "abcd1234-1111-2222-3333-4444"
     return orch
 
 

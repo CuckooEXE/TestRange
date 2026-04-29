@@ -150,11 +150,19 @@ class WinRMCommunicator(AbstractCommunicator):
 
         try:
             if env:
+                # Use SINGLE-quoted PowerShell strings — they're pure
+                # literals (no ``$var`` expansion, no backtick escapes,
+                # no ``"`` interpolation).  Only ``'`` itself needs
+                # escaping (doubled), which ``_ps_escape`` handles.
+                # Double-quoted strings would let an env value or
+                # argv item containing ``"`` / ``$`` / `` ` `` break
+                # out of the literal and run arbitrary PowerShell.
                 env_prefix = "".join(
-                    f'$env:{k}="{_ps_escape(v)}"; ' for k, v in env.items()
+                    f"$env:{k}='{_ps_escape(v)}'; " for k, v in env.items()
                 )
-                quoted_args = " ".join(f'"{_ps_escape(a)}"' for a in args)
-                script = f"{env_prefix}& {cmd} {quoted_args}".rstrip()
+                quoted_cmd = f"'{_ps_escape(cmd)}'"
+                quoted_args = " ".join(f"'{_ps_escape(a)}'" for a in args)
+                script = f"{env_prefix}& {quoted_cmd} {quoted_args}".rstrip()
                 response = session.run_ps(script)
             else:
                 response = session.run_cmd(cmd, args)

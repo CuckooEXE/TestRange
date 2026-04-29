@@ -186,13 +186,16 @@ class ProxmoxGuestAgentCommunicator(AbstractCommunicator):
                     f"agent/exec-status failed for pid {pid}: {exc}"
                 ) from exc
             if status.get("exited"):
-                # PVE returns ``out-data`` / ``err-data`` already
-                # base64-decoded as strings; the libvirt path gets raw
-                # base64 because it talks the JSON-RPC protocol
-                # directly.  Coerce to bytes so AbstractCommunicator's
-                # caller-facing ExecResult contract is identical.
-                stdout = _coerce_output(status.get("out-data", ""))
-                stderr = _coerce_output(status.get("err-data", ""))
+                # PVE returns ``out-data`` / ``err-data`` as already-
+                # decoded text (PVE's qemu-guest-agent.pl base64-decodes
+                # the QMP buffer before serialising the JSON
+                # response).  Coerce text→bytes via UTF-8 — never
+                # treat as base64.  An earlier cut tried base64 first
+                # and corrupted any output whose ASCII happened to
+                # match the base64 alphabet (4-char-aligned strings
+                # like "OKOK", "data", etc.).
+                stdout = _text_payload_to_bytes(status.get("out-data", ""))
+                stderr = _text_payload_to_bytes(status.get("err-data", ""))
                 return ExecResult(
                     exit_code=int(status.get("exitcode", 0)),
                     stdout=stdout,
@@ -233,11 +236,12 @@ class ProxmoxGuestAgentCommunicator(AbstractCommunicator):
                 "(file too large for a single read).  Read it via "
                 "exec(['dd', ...]) instead."
             )
-        # Newer PVE returns the bytes already-decoded as a str; older
-        # versions returned base64.  Try base64 first; on failure
-        # treat the value as already-decoded text.
+        # PVE's ``file-read`` always base64-encodes binary file
+        # content on the wire — even on PVE 9.x where ``exec-status``
+        # output fields come back as already-decoded text.  Decode
+        # unconditionally; an empty string round-trips to ``b""``.
         content = result.get("content", "")
-        return _coerce_output(content)
+        return _b64_payload_to_bytes(content)
 
     def put_file(self, path: str, data: bytes) -> None:
         """Write *data* to *path* via ``POST /agent/file-write``.
@@ -303,24 +307,48 @@ class ProxmoxGuestAgentCommunicator(AbstractCommunicator):
         )
 
 
-def _coerce_output(value: object) -> bytes:
-    """Coerce a PVE agent payload field to bytes.
+def _text_payload_to_bytes(value: object) -> bytes:
+    """Coerce an *already-decoded* PVE agent payload to bytes.
 
-    PVE's REST layer base64-decodes ``out-data`` / ``err-data`` /
-    ``content`` for us in current releases (returns the raw text as
-    a str), but a few older releases hand back the encoded form.
-    Attempt base64 decoding first; fall back to UTF-8 encoding on
-    failure so callers always see ``bytes``.
+    Use for ``out-data`` / ``err-data`` from
+    ``/agent/exec-status`` — PVE's qemu-guest-agent layer
+    base64-decodes the QMP buffer before serialising the JSON
+    response, so the value reaches us as plain text.  Encoding is
+    UTF-8 with a ``replace`` errors handler so a process that
+    emits a stray non-UTF-8 byte (rare; mostly a Windows-side
+    cmd.exe quirk) still produces inspectable output rather than
+    blowing up the run.
+
+    NEVER call this for ``/agent/file-read`` content — that path
+    IS base64-encoded on the wire.  Use :func:`_b64_payload_to_bytes`.
     """
     if isinstance(value, bytes):
         return value
     if not isinstance(value, str):
-        return str(value).encode("utf-8")
+        return str(value).encode("utf-8", errors="replace")
+    return value.encode("utf-8", errors="replace")
+
+
+def _b64_payload_to_bytes(value: object) -> bytes:
+    """Decode a base64-encoded PVE agent payload to bytes.
+
+    Use for ``content`` from ``/agent/file-read``.  An empty
+    string round-trips to ``b""``; non-string / non-empty values
+    raise so the caller surfaces a clear error rather than
+    returning corrupted bytes.
+    """
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        raise GuestAgentError(
+            f"expected base64 string from agent payload, got "
+            f"{type(value).__name__}: {value!r}"
+        )
     if not value:
         return b""
     try:
-        # Strict base64 — catches "looks like base64 but isn't" cases
-        # like file content that happens to be ASCII.
         return base64.b64decode(value, validate=True)
-    except (ValueError, base64.binascii.Error):
-        return value.encode("utf-8")
+    except (ValueError, base64.binascii.Error) as exc:
+        raise GuestAgentError(
+            f"agent payload was not valid base64: {exc}"
+        ) from exc
