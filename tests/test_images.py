@@ -36,6 +36,16 @@ class TestIsWindowsImage:
             "alpine.img",
             "https://example.com/image.qcow2",
             "",
+            # Regression: Linux ISOs that look Windows-ish from
+            # naïve substring matches.  Bare ``"server"`` would
+            # match these via the old predicate; the regex form
+            # requires ``server`` followed by a 4-digit year.
+            "ubuntu-22.04-live-server-amd64.iso",
+            "debian-12-server.iso",
+            "ubuntu-server-22.04.iso",
+            # Bare ``"win"`` would match these too.
+            "winetricks.iso",
+            "darwin-2024.iso",
         ],
     )
     def test_non_windows_not_detected(self, name: str) -> None:

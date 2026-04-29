@@ -42,12 +42,13 @@ path.
 
 The ``dnsmasq`` package is required on every PVE node TestRange
 talks to.  :meth:`ProxmoxOrchestrator._preflight_dnsmasq_installed`
-checks for it on every ``__enter__``; the
-:meth:`~testrange.backends.proxmox.ProxmoxOrchestrator.prepare_outer_vm`
-hook injects ``Apt("dnsmasq")`` into the package list of any
-:class:`~testrange.Hypervisor` whose inner orchestrator is
-:class:`~testrange.backends.proxmox.ProxmoxOrchestrator`, so nested
-PVE-on-libvirt setups satisfy the dependency by construction.
+checks for it on every ``__enter__``.  For the nested
+``Hypervisor(orchestrator=ProxmoxOrchestrator, …)`` case,
+:meth:`ProxmoxOrchestrator._bootstrap_pve_node` (run from
+``root_on_vm``) SSHes a script onto the freshly-installed PVE node
+that installs the package + disables the systemd unit + swaps
+the apt repos to ``pve-no-subscription``, so nested setups satisfy
+the dependency by construction.
 
 PVE name length cap
 -------------------

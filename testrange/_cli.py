@@ -674,8 +674,12 @@ def cache_list(cache_dir: Path | None) -> None:
         click.echo(f"  {data.get('url', '?')}  ({size_mb} MiB)")
 
     click.echo("\nInstalled VM images:")
-    for manifest in sorted(cache.vms_dir.glob("*.json")):
-        config_hash = manifest.stem
+    # Cache layout is ``vms_dir/<config_hash>/manifest.json`` (one
+    # subdirectory per cached install + sidecars), not flat.  An
+    # earlier cut globbed ``*.json`` directly and silently
+    # reported "no cached VMs" regardless of cache state.
+    for manifest in sorted(cache.vms_dir.glob("*/manifest.json")):
+        config_hash = manifest.parent.name
         data = json.loads(manifest.read_text())
         click.echo(
             f"  [{config_hash[:12]}]  {data.get('name', '?')} "

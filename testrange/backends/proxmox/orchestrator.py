@@ -861,8 +861,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 "with ``pip install testrange[proxmox]``."
             ) from exc
         client_kwargs = self._resolve_client_kwargs()
+        # ``_resolve_client_kwargs`` already populates ``host=`` in
+        # the dict; passing ``self._host`` positionally too duplicates
+        # it and raises ``TypeError: got multiple values for argument
+        # 'host'``.  ``__enter__`` calls ``ProxmoxAPI(**client_kwargs)``
+        # for the same reason — keep the two paths consistent.
         try:
-            client = ProxmoxAPI(self._host, **client_kwargs)
+            client = ProxmoxAPI(**client_kwargs)
         except Exception as exc:
             raise OrchestratorError(
                 f"cannot connect to PVE at {self._host!r}: {exc}"
@@ -1477,13 +1482,13 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         ``dnsmasq`` was definitely present.
 
         When TestRange itself built the PVE node as the outer VM of
-        a :class:`Hypervisor` (see :meth:`prepare_outer_vm`), the
-        first-boot script ``apt-get install -y dnsmasq`` runs before
-        the inner orchestrator's ``__enter__`` so this check passes
-        by construction; the explicit probe matters only against
+        a :class:`Hypervisor`, the SSH bootstrap from
+        :meth:`_bootstrap_pve_node` (called by :meth:`root_on_vm`)
+        runs ``apt-get install -y dnsmasq`` before the inner
+        orchestrator's ``__enter__``, so this check passes by
+        construction; the explicit probe matters only against
         pre-existing PVE clusters the user pointed us at and as a
-        defence against the first-boot install having silently
-        failed.
+        defence against the bootstrap having silently failed.
 
         :raises OrchestratorError: When the package isn't present.
         """
@@ -1503,10 +1508,10 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 "per-vnet instances; the default systemd service would "
                 "conflict on port 53/67) and re-run.\n"
                 "When TestRange builds the PVE host itself via "
-                "testrange.Hypervisor, both steps run via the answer-"
-                "toml [first-boot] hook automatically — if the hook "
-                "ran but failed, look at "
-                "``/var/log/proxmox-first-boot.log`` on the PVE node."
+                "testrange.Hypervisor, both steps run via the SSH "
+                "bootstrap from ``ProxmoxOrchestrator._bootstrap_pve_node`` "
+                "automatically — if the bootstrap ran but failed, look at "
+                "``/var/log/testrange-pve-bootstrap.log`` on the PVE node."
             ) from exc
         _log.debug("dnsmasq present on node %r", self._node)
 

@@ -1,13 +1,20 @@
-"""Proxmox VE backend for TestRange (SCAFFOLDING — not yet implemented).
+"""Proxmox VE backend for TestRange.
 
-Importing this package succeeds without the Proxmox Python client
-(``proxmoxer``) being installed.  All heavy lifting is deferred to
-:meth:`ProxmoxOrchestrator.__enter__`, which raises
-:class:`NotImplementedError` with a clear message explaining what still
-needs to be wired up.
+Drives a remote PVE cluster over the REST API (``proxmoxer``).
+Authenticates via root@pam ticket or API token, creates a per-run
+SDN simple-zone with ``dhcp = "dnsmasq"``, manages per-network
+vnets + subnets + IPAM entries, uploads cloud-init / answer.toml
+seeds and base disk images, and lifecycles VMs via
+``POST /nodes/{node}/qemu`` + ``status/start`` / ``status/stop``.
+QEMU guest-agent calls (``/agent/exec``, ``/agent/file-read``, …)
+carry remote-exec, so SSH never needs to reach the inner network.
 
-Once implementation lands, the package-level API mirrors the other
-shipped backends:
+Importing this package succeeds without ``proxmoxer`` being
+installed; the missing-dep error surfaces from
+:meth:`ProxmoxOrchestrator.__enter__` with a clear ``pip install
+testrange[proxmox]`` hint.
+
+Package-level API:
 
 .. code-block:: python
 
@@ -15,13 +22,15 @@ shipped backends:
         ProxmoxOrchestrator,
         ProxmoxVM,
         ProxmoxVirtualNetwork,
+        ProxmoxSwitch,
+        ProxmoxGuestAgentCommunicator,
     )
 
     with ProxmoxOrchestrator(host="pve.example.com", ...) as orch:
         orch.vms["web"].exec([...])
 
-See :mod:`testrange.backends.proxmox.orchestrator` for the full TODO
-list.
+Open follow-ups (cleanup edge cases, WinRM-on-Proxmox parity, etc.)
+are tracked in ``TODO.md`` at the repo root.
 """
 
 from __future__ import annotations

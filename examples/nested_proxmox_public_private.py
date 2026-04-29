@@ -89,22 +89,27 @@ Any exception during the outer ``__enter__``, the inner
 already booted) stay alive so you can SSH in and inspect.  See
 :func:`testrange._debug.pause_on_error_if_enabled`.
 
-Useful starting points once paused, for the dnsmasq/first-boot path
-this example exercises:
+Useful starting points once paused, for the dnsmasq path this
+example exercises:
 
 ::
 
     # SSH into the outer PVE VM (deterministic-pick on OuterNet → .3)
     ssh -J <ssh-server> root@10.0.0.3
 
-    # Did the first-boot script actually run?
-    cat /var/log/proxmox-first-boot.log 2>/dev/null \
-        || journalctl -u proxmox-first-boot --no-pager
+    # Did the SSH bootstrap actually run?
+    cat /var/log/testrange-pve-bootstrap.log
     which dnsmasq && dnsmasq --version
+    systemctl is-enabled dnsmasq    # should print "disabled"
 
     # Any SDN config issues at the inner layer?
+    pvesh get /cluster/sdn/zones
     pvesh get /cluster/sdn/vnets
-    pvesh get /cluster/sdn/subnets
+    # No /cluster/sdn/subnets — walk vnets:
+    for v in $(pvesh get /cluster/sdn/vnets --output json | jq -r '.[].vnet'); do
+        echo "=== $v ==="
+        pvesh get /cluster/sdn/vnets/$v/subnets
+    done
 """
 
 from __future__ import annotations

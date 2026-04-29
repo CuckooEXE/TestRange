@@ -2,13 +2,12 @@
 
 The install phase boots the prepared ProxMox installer ISO with a
 ``PROXMOX-AIS``-labeled seed ISO attached as a second CD-ROM.  The
-installer reads ``answer.toml`` off the seed, runs unattended, and —
-because the install domain is configured with
-``<on_reboot>destroy</on_reboot>`` via
-:class:`~testrange.vms.builders.base.InstallDomain.reboot_is_install_done`
-— the first reboot out of the installer (into the freshly-installed
-system) is treated as install completion.  The orchestrator then
-snapshots the disk into the cache.
+installer reads ``answer.toml`` off the seed and runs unattended.
+``reboot-mode = "power-off"`` in the global block tells PVE's
+installer to POWER OFF (rather than reboot) on success, so the
+orchestrator's install-phase wait sees a clean SHUTOFF edge to key
+on for "install complete".  The orchestrator then snapshots the
+disk into the cache.
 
 The run phase boots the cached disk normally, with no seed ISO —
 ``answer.toml`` baked in the root password and SSH keys during
