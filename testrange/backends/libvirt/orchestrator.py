@@ -1040,7 +1040,21 @@ class Orchestrator(AbstractOrchestrator):
             if not any(cand_net.overlaps(u) for u in used):
                 return candidate
 
-        return _INSTALL_SUBNET_POOL[0]
+        # Pool exhausted — raise rather than fall back to
+        # ``_INSTALL_SUBNET_POOL[0]`` (which would then collide
+        # with whichever peer run already owns it).  Symmetric
+        # with the proxmox backend's ``_pick_install_subnet``
+        # error path.  Operators with bigger CI fleets can widen
+        # the pool by editing the constant; backpressure here is
+        # the right failure mode.
+        raise OrchestratorError(
+            f"every install-subnet pool entry "
+            f"({_INSTALL_SUBNET_POOL[0]} – {_INSTALL_SUBNET_POOL[-1]}) "
+            f"overlaps an existing libvirt network on this host.  "
+            "Either wait for an in-flight run to finish, or expand "
+            "the pool by editing ``_INSTALL_SUBNET_POOL`` in "
+            "``testrange/backends/libvirt/orchestrator.py``."
+        )
 
     def _create_install_network(self, run_id: str) -> VirtualNetwork:
         """Create an ephemeral NAT network for the install phase.

@@ -14,7 +14,9 @@ Protocol reference:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import threading
 import time
 from typing import Any, cast
 
@@ -32,6 +34,48 @@ _POLL_INTERVAL = 1.0
 
 _CHUNK_SIZE = 65536
 """Bytes to read per ``guest-file-read`` call."""
+
+_ERROR_HANDLER_LOCK = threading.Lock()
+"""Serialise the ``libvirt.registerErrorHandler`` install + restore.
+
+``libvirt.registerErrorHandler`` is process-global — there's no
+per-thread or per-connection handler scope.  Under
+``run_tests(..., concurrency=N)`` two threads racing on the same
+install/restore pair would have the second-finishing thread restore
+the default handler while the first was still polling, dumping the
+expected ``Guest agent is not responding`` errors that the silencer
+is supposed to swallow.  The counter below tracks active silencers
+so the handler stays installed until the last one exits."""
+
+_error_handler_active: int = 0
+
+
+@contextlib.contextmanager
+def _silenced_libvirt_errors() -> Any:
+    """Context manager that installs a no-op libvirt error handler.
+
+    Reference-counted so concurrent ``wait_ready`` calls share one
+    handler install instead of racing on register/restore.  The
+    handler is only restored when the last in-flight silencer
+    exits the ``with`` block.
+    """
+    global _error_handler_active
+    with _ERROR_HANDLER_LOCK:
+        if _error_handler_active == 0:
+            libvirt.registerErrorHandler(
+                lambda _ctx, _err: None, None,
+            )
+        _error_handler_active += 1
+    try:
+        yield
+    finally:
+        with _ERROR_HANDLER_LOCK:
+            _error_handler_active -= 1
+            if _error_handler_active == 0:
+                # libvirt's stub annotates ``f`` as a required
+                # callback, but ``None`` is the documented way
+                # to reset to the default stderr handler.
+                libvirt.registerErrorHandler(None, None)  # pyright: ignore[reportArgumentType]
 
 class GuestAgentCommunicator(AbstractCommunicator):
     """QEMU Guest Agent communicator backed by libvirt.
@@ -99,9 +143,8 @@ class GuestAgentCommunicator(AbstractCommunicator):
             *timeout* seconds.
         """
         _log.debug("waiting for guest agent on %r (timeout %ds)", self._dom.name(), timeout)
-        libvirt.registerErrorHandler(lambda _ctx, _err: None, None)
         attempts = 0
-        try:
+        with _silenced_libvirt_errors():
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 attempts += 1
@@ -119,12 +162,6 @@ class GuestAgentCommunicator(AbstractCommunicator):
                 f"QEMU guest agent not ready after {timeout}s "
                 f"(domain: {self._dom.name()!r})"
             )
-        finally:
-            # Restore libvirt's default stderr error handler by
-            # passing ``None`` — libvirt's stub annotates the
-            # ``f`` parameter as a required callback, but ``None``
-            # is the documented way to reset.
-            libvirt.registerErrorHandler(None, None)  # pyright: ignore[reportArgumentType]
 
     def exec(
         self,

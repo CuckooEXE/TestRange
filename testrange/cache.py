@@ -296,22 +296,33 @@ class CacheManager:
         :raises requests.RequestException: On HTTP or network errors.
         """
         tmp = dest.with_suffix(".tmp")
-        with requests.get(url, stream=True, timeout=30) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            with (
-                open(tmp, "wb") as fh,
-                tqdm(
-                    total=total,
-                    unit="B",
-                    unit_scale=True,
-                    desc=dest.name,
-                ) as bar,
-            ):
-                for chunk in resp.iter_content(chunk_size=1 << 20):
-                    fh.write(chunk)
-                    bar.update(len(chunk))
-        tmp.rename(dest)
+        try:
+            with requests.get(url, stream=True, timeout=30) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                with (
+                    open(tmp, "wb") as fh,
+                    tqdm(
+                        total=total,
+                        unit="B",
+                        unit_scale=True,
+                        desc=dest.name,
+                    ) as bar,
+                ):
+                    for chunk in resp.iter_content(chunk_size=1 << 20):
+                        fh.write(chunk)
+                        bar.update(len(chunk))
+            tmp.rename(dest)
+        except BaseException:
+            # Clean up the partial ``.tmp`` so a flaky network
+            # doesn't leave half-downloaded ISOs accumulating
+            # under the cache.  ``BaseException`` (not
+            # ``Exception``) so Ctrl+C also triggers cleanup.
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:  # pragma: no cover — best-effort
+                pass
+            raise
 
     def stage_local_iso(self, src: Path) -> Path:
         """Copy *src* into the cache so it lives at a stable, managed path.
@@ -503,6 +514,17 @@ class CacheManager:
         if transport.exists(dest_ref):
             _log.debug("backend image cache hit (%s)", digest)
             return dest_ref
+        # Upload to a ``.part`` sibling first, then atomic-rename to
+        # the final content-addressed name.  Without the temp file,
+        # an interrupted upload (Ctrl+C, OOM, network blip) leaves a
+        # truncated file at ``dest_ref`` that passes ``exists()`` on
+        # the next run and gets returned as a "cache hit" — silent
+        # corruption that propagates into every subsequent VM build.
+        # Two concurrent runs hit different ``.part`` filenames per
+        # transport rename semantics; the ``exists()`` short-circuit
+        # above means whichever one renames first wins, the other
+        # finds the cache populated and skips the upload entirely.
+        part_ref = f"{dest_ref}.part"
         _log.info(
             "staging source image %s → %s",
             local_path.name, dest_ref,
@@ -510,7 +532,19 @@ class CacheManager:
         with log_duration(
             _log, f"upload {local_path.name} to backend"
         ):
-            transport.upload(local_path, dest_ref)
+            try:
+                transport.upload(local_path, part_ref)
+            except BaseException:
+                # Clean up the partial file so retries (or another
+                # concurrent run) start from a clean state.  Best-
+                # effort — if the backend is also broken, the next
+                # upload will overwrite anyway.
+                try:
+                    transport.remove(part_ref)
+                except Exception:  # pragma: no cover — best-effort
+                    pass
+                raise
+        transport.rename(part_ref, dest_ref)
         return dest_ref
 
     # ------------------------------------------------------------------

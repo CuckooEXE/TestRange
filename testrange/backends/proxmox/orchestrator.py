@@ -381,20 +381,27 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         zone: str = DEFAULT_ZONE,
         token: object | None = None,
     ) -> None:
+        # ``storage_backend`` is a generic abstraction the libvirt
+        # backend uses to switch transports (local FS / SSH SFTP).
+        # The Proxmox backend bypasses it entirely — every disk-
+        # image operation goes through the PVE REST API instead of
+        # a transport-shaped tool wrapper.  Accepting the kwarg and
+        # silently ignoring it (as an earlier cut did "for the
+        # contract test") was a footgun: users could pass any
+        # backend and nothing happened.  Reject explicitly so the
+        # mismatch surfaces at construction time.
+        if storage_backend is not None:
+            raise OrchestratorError(
+                "ProxmoxOrchestrator does not consume "
+                "``storage_backend=`` — disk operations go through "
+                "the PVE REST API.  Use ``node=`` and ``storage=`` "
+                "to select the PVE storage pool instead."
+            )
         super().__init__(
             host=host, networks=networks, vms=vms, cache_root=cache_root,
             cache=cache, cache_verify=cache_verify,
-            storage_backend=storage_backend,  # type: ignore[arg-type]
+            storage_backend=None,  # type: ignore[arg-type]
         )
-        # ``storage_backend`` is a generic abstraction the libvirt
-        # backend uses to switch transports (local FS / SSH SFTP);
-        # the proxmox backend bypasses it entirely because every
-        # disk-image operation goes through the PVE REST API instead
-        # of a transport-shaped tool wrapper.  Stash it so the
-        # cross-backend contract test in
-        # ``tests/test_backend_contract.py`` still passes — never
-        # consumed by any proxmox-side code.
-        self._storage_backend_override = storage_backend
         self._host = host
         self._port = port
         # Promote any non-Proxmox networks to ProxmoxVirtualNetwork
@@ -1880,7 +1887,13 @@ echo "=== testrange PVE bootstrap completed at $(date -Is) ==="
         last_stderr = b""
         while time.monotonic() < deadline:
             r = hypervisor.exec(["systemctl", "is-active", "pveproxy"])
-            if r.exit_code == 0 and b"active" in r.stdout:
+            # ``systemctl is-active`` outputs one of ``active`` /
+            # ``inactive`` / ``activating`` / ``failed``.  Substring
+            # match (``b"active" in r.stdout``) is a footgun:
+            # ``inactive`` and ``activating`` both contain ``active``
+            # and would silently pass.  Compare against the trimmed
+            # exact word.
+            if r.exit_code == 0 and r.stdout.strip() == b"active":
                 return
             last_stderr = r.stderr
             time.sleep(2)

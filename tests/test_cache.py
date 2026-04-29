@@ -390,6 +390,113 @@ class TestStageLocalIso:
             c.stage_local_iso(Path("/nonexistent/win10.iso"))
 
 
+class TestStageSourceAtomic:
+    """``stage_source`` uploads to a ``.part`` sibling and atomic-
+    renames to the final content-addressed path.  Without this, an
+    interrupted upload leaves a partial file at the final ref that
+    passes ``exists()`` next run and gets returned as a "cache hit"
+    — silent corruption that propagates into VM builds."""
+
+    def _stub_remote_backend(self, tmp_cache_root: Path) -> object:
+        """Build a backend that pretends to be remote (so the local
+        fast-path doesn't kick in) but records uploads in-memory."""
+        from unittest.mock import MagicMock
+
+        transport = MagicMock()
+        transport.images_dir.return_value = "/remote/images"
+        transport._join.side_effect = lambda *parts: "/".join(parts)
+        # Track what's been written.
+        written: dict[str, bytes] = {}
+
+        def _exists(ref: str) -> bool:
+            return ref in written
+
+        def _upload(local_path: Path, ref: str) -> None:
+            written[ref] = local_path.read_bytes()
+
+        def _remove(ref: str) -> None:
+            written.pop(ref, None)
+
+        def _rename(src: str, dst: str) -> None:
+            written[dst] = written.pop(src)
+
+        transport.exists.side_effect = _exists
+        transport.upload.side_effect = _upload
+        transport.remove.side_effect = _remove
+        transport.rename.side_effect = _rename
+
+        backend = MagicMock()
+        backend.transport = transport
+        # Return a sentinel as an MagicMock attribute so the
+        # ``_transport_is_local`` check returns False for our stub.
+        return backend, transport, written
+
+    def test_uploads_to_part_then_renames(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from testrange import cache as cache_mod
+
+        # Force the "not local" branch so we exercise the upload path.
+        monkeypatch.setattr(
+            cache_mod, "_transport_is_local", lambda _t: False,
+        )
+
+        c = CacheManager(root=tmp_cache_root)
+        src = tmp_cache_root / "src.iso"
+        src.write_bytes(b"image bytes")
+
+        backend, transport, written = self._stub_remote_backend(tmp_cache_root)
+        ref = c.stage_source(src, backend)
+
+        # Final ref doesn't carry ``.part`` — we renamed.
+        assert not ref.endswith(".part")
+        # Only the final ref is in the backend; the ``.part`` was
+        # renamed away (not left lingering).
+        assert ref in written
+        assert f"{ref}.part" not in written
+
+    def test_failed_upload_cleans_up_part(
+        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: an interrupted upload (Ctrl+C, OOM, network
+        blip) used to leave a partial file at the final content-
+        addressed path, where the next run's ``exists()`` check
+        would treat it as a cache hit.  Now uploads target a
+        ``.part`` sibling and the partial gets cleaned on failure
+        — the final path stays empty so the next run re-uploads."""
+        from testrange import cache as cache_mod
+
+        monkeypatch.setattr(
+            cache_mod, "_transport_is_local", lambda _t: False,
+        )
+
+        c = CacheManager(root=tmp_cache_root)
+        src = tmp_cache_root / "src.iso"
+        src.write_bytes(b"image bytes")
+
+        backend, transport, written = self._stub_remote_backend(tmp_cache_root)
+
+        # Make ``upload`` half-write then raise — mimics a network
+        # interruption mid-upload.
+        def _bad_upload(local_path: Path, ref: str) -> None:
+            written[ref] = b"half"  # partial
+            raise IOError("connection reset")
+
+        transport.upload.side_effect = _bad_upload
+
+        with pytest.raises(IOError, match="connection reset"):
+            c.stage_source(src, backend)
+
+        # Neither the .part nor the final ref is left behind.
+        assert all(not k.endswith(".part") for k in written)
+        # And the final content-addressed ref is unwritten — next
+        # run will retry rather than serving the partial as a hit.
+        digest_refs = [
+            k for k in written if k.startswith("/remote/images/")
+        ]
+        assert not digest_refs
+
+
 class TestGetVirtioWinIso:
     """Downloads virtio-win.iso into the cache with a stable filename so
     domain XML can reference a known path."""
