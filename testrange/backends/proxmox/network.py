@@ -8,13 +8,16 @@ the user-supplied :attr:`subnet`.
 DHCP + DNS via PVE SDN dnsmasq
 ------------------------------
 
-Every TestRange-created subnet ships with ``dhcp = "dnsmasq"`` set,
-which tells PVE to spin up a per-vnet ``dnsmasq`` instance bound to
-the vnet's bridge interface.  Each VM that calls :meth:`register_vm`
-also lands in the SDN IPAM (``POST /cluster/sdn/vnets/{vnet}/ips``)
-with ``(mac, ip, hostname=<vm>.<vnet>)``.  PVE turns those IPAM
-entries into ``dhcp-host=...`` directives for the dnsmasq config it
-generates, so:
+The TestRange-created SDN zone ships with ``dhcp = "dnsmasq"`` set
+(at *zone* scope per the PVE 9.x schema — putting it on the subnet
+POST is a 400 ``"property is not defined in schema"``).  That tells
+PVE to spin up a per-vnet ``dnsmasq`` instance for every subnet
+under the zone, bound to the vnet's bridge interface.  Each subnet
+carries a ``dhcp-range`` defining the lease pool.  Each VM that
+calls :meth:`register_vm` also lands in the SDN IPAM (``POST
+/cluster/sdn/vnets/{vnet}/ips``) with ``(mac, ip,
+hostname=<vm>.<vnet>)``.  PVE turns those IPAM entries into
+``dhcp-host=...`` directives for the dnsmasq config it generates, so:
 
 * DHCP requests from registered MACs receive their reserved IP
   (deterministic for tests; same address every run).
@@ -234,6 +237,13 @@ class ProxmoxSwitch(AbstractSwitch):
         params: dict[str, Any] = {
             "type": self.switch_type,
             "zone": zone_id,
+            # ``dhcp`` lives at zone scope per the PVE 9.x SDN
+            # schema (subnets only carry ``dhcp-range`` /
+            # ``dhcp-dns-server``); set it here so every vnet in
+            # this user-defined zone gets the per-subnet dnsmasq
+            # behaviour TestRange relies on, same as the default
+            # zone created by ``ProxmoxOrchestrator._ensure_sdn_zone``.
+            "dhcp": "dnsmasq",
         }
         if self.uplinks:
             # PVE's VLAN/QinQ zones take ``bridge=`` (a single host
@@ -490,14 +500,14 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
                 "type": "subnet",
                 "subnet": self.subnet,
                 "gateway": self.gateway_ip,
-                # ``dhcp = "dnsmasq"`` makes PVE spin up a per-vnet
-                # dnsmasq instance that serves DHCP from the
-                # ``dhcp-range`` we set below and DNS from the IPAM
-                # entries TestRange writes via ``register_vm``.  See
-                # the module docstring for the full DHCP/DNS shape;
-                # the orchestrator preflight has already verified
-                # ``dnsmasq`` is installed on the node.
-                "dhcp": "dnsmasq",
+                # PVE 9.x SDN schema: the ``dhcp = "dnsmasq"``
+                # selector lives at ZONE scope (set in
+                # :meth:`ProxmoxOrchestrator._ensure_sdn_zone` and
+                # :meth:`ProxmoxSwitch.start`); the subnet only
+                # carries the lease range.  Putting ``dhcp`` on the
+                # subnet POST is a 400 with "property is not defined
+                # in schema and the schema does not allow additional
+                # properties".
                 "dhcp-range": [
                     f"start-address={dhcp_start},end-address={dhcp_end}",
                 ],

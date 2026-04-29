@@ -1572,14 +1572,40 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         """Create our SDN simple-zone if it doesn't already exist.
 
         TestRange parks every vnet under one zone so concurrent runs
-        only have to namespace by vnet name.  Idempotent: a no-op if
-        the zone already exists.
+        only have to namespace by vnet name.  The zone carries
+        ``dhcp = "dnsmasq"`` so PVE spawns a per-vnet dnsmasq
+        instance for every subnet under it (the dhcp setting lives
+        at zone scope per the PVE 9.x SDN schema, NOT at subnet
+        scope — putting it on the subnet POST is a 400 with
+        "property is not defined in schema").
+
+        Idempotent: if the zone already exists *with* the dhcp
+        field set, no-op.  If it exists without it (e.g. left over
+        from an earlier TestRange version that wrote zone-less
+        config), the field is added via PUT so the existing zone
+        starts spawning dnsmasq instances on next subnet create.
         """
         zones = self._client.cluster.sdn.zones.get()
-        if any(z.get("zone") == self._zone for z in zones):
-            return
-        _log.info("creating SDN simple-zone %s", self._zone)
-        self._client.cluster.sdn.zones.post(type="simple", zone=self._zone)
+        existing = next(
+            (z for z in zones if z.get("zone") == self._zone), None,
+        )
+        if existing is None:
+            _log.info(
+                "creating SDN simple-zone %s with dhcp=dnsmasq",
+                self._zone,
+            )
+            self._client.cluster.sdn.zones.post(
+                type="simple",
+                zone=self._zone,
+                dhcp="dnsmasq",
+            )
+        elif existing.get("dhcp") != "dnsmasq":
+            # Pre-existing zone without dhcp — PUT to upgrade it
+            # in place so VMs land on a dnsmasq-capable zone.
+            _log.info(
+                "updating SDN zone %s to set dhcp=dnsmasq", self._zone,
+            )
+            self._client.cluster.sdn.zones(self._zone).put(dhcp="dnsmasq")
         # ``cluster/sdn`` accepts an empty PUT to apply pending config.
         # Without it, the zone exists in the "pending" state and isn't
         # usable for vnets yet.

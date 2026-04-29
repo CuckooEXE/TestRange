@@ -102,6 +102,11 @@ class TestProxmoxSwitchLifecycle:
         assert kwargs["zone"] == sw.backend_name()
         # VLAN zone takes the first uplink as the bridge.
         assert kwargs["bridge"] == "eno1"
+        # ``dhcp = "dnsmasq"`` lives at zone scope per PVE 9.x SDN
+        # schema (subnets reject the field as unknown); switches must
+        # set it the same way the orchestrator's default zone does
+        # so per-vnet dnsmasq spawning works in user-defined zones too.
+        assert kwargs["dhcp"] == "dnsmasq"
         # SDN config applied via the empty PUT.
         ctx._client.cluster.sdn.put.assert_called_once()
         assert sw._zone_created is True

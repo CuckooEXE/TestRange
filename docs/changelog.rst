@@ -8,6 +8,50 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE SDN: ``dhcp = "dnsmasq"`` moves to zone scope (PVE 9.x schema)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Fixed: subnet POST rejected with "property is not defined in
+schema" for the** ``dhcp`` **field.**  Earlier slices put
+``dhcp = "dnsmasq"`` on the SDN subnet POST, but PVE 9.x's SDN
+schema only accepts that field at the *zone* level — the subnet
+endpoint rejects it with::
+
+  400 Bad Request: Parameter verification failed. -
+  {'dhcp': 'property is not defined in schema and the schema does
+   not allow additional properties'}
+
+Schema split per PVE 9.x:
+
+* **Zone**: ``dhcp = "dnsmasq"`` selects the DHCP backend for
+  every subnet under it.
+* **Subnet**: ``dhcp-range = ["start-address=…,end-address=…"]``
+  defines the lease range; ``dhcp-dns-server`` overrides the
+  advertised resolver.  No ``dhcp`` field.
+
+Moved the field to both zone-creation paths:
+
+* :meth:`ProxmoxOrchestrator._ensure_sdn_zone` — POSTs the
+  default zone with ``dhcp="dnsmasq"`` set.  Pre-existing zones
+  from earlier TestRange versions (no ``dhcp`` field) are
+  upgraded in place via PUT so the next subnet create starts
+  spawning dnsmasq.
+* :meth:`ProxmoxSwitch.start` — same field added to user-defined
+  zone POSTs so DHCP/DNS works in non-default zones (VLAN /
+  VXLAN / EVPN with explicit ``Switch(...)``).
+
+Subnet POST keeps ``dhcp-range`` and drops ``dhcp``.
+
+**Test surface:** new ``TestZoneCreationCarriesDhcpDnsmasq``
+class in ``test_proxmox_networking_parity.py`` with three tests
+(create-includes-dhcp, present-with-dhcp-noop,
+present-without-dhcp-upgraded).  ``TestSubnetDnsmasq``'s
+``test_subnet_post_carries_dhcp_dnsmasq`` renamed to
+``test_subnet_post_carries_dhcp_range_only`` and now asserts
+``dhcp not in kwargs``.  ``TestProxmoxSwitchLifecycle.test_creates_zone_when_absent``
+gains a ``dhcp == "dnsmasq"`` assertion.  Suite is now 1047
+passed / 14 skipped / 0 failed.
+
 PVE dnsmasq: preflight via /apt/changelog + disable systemd service
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

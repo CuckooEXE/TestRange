@@ -365,11 +365,16 @@ class TestSubnetDnsmasq:
         net.start(ctx)
         return net, client
 
-    def test_subnet_post_carries_dhcp_dnsmasq(self) -> None:
+    def test_subnet_post_carries_dhcp_range_only(self) -> None:
         _net, client = self._started_net()
         subnet_call = client.cluster.sdn.vnets.return_value.subnets.post
         kwargs = subnet_call.call_args.kwargs
-        assert kwargs["dhcp"] == "dnsmasq"
+        # ``dhcp = "dnsmasq"`` is set at ZONE scope (see
+        # :meth:`ProxmoxOrchestrator._ensure_sdn_zone` /
+        # :meth:`ProxmoxSwitch.start`), NOT at subnet scope.  PVE
+        # 9.x's subnet schema rejects ``dhcp`` as an unknown
+        # property: the subnet only carries the dhcp-range.
+        assert "dhcp" not in kwargs
         # Range starts past the reserved head (.1 gateway + 9 IPAM
         # static slots) so static reservations and dynamic leases
         # don't fight over the low end.
@@ -410,3 +415,50 @@ class TestSubnetDnsmasq:
         ctx = MagicMock(_client=client, _zone="tr", _switches=[])
         with pytest.raises(NetworkError, match="too small"):
             net.start(ctx)
+
+
+class TestZoneCreationCarriesDhcpDnsmasq:
+    """The ``dhcp = "dnsmasq"`` selector lives at zone scope per the
+    PVE 9.x SDN schema.  Both the orchestrator's default zone
+    (:meth:`ProxmoxOrchestrator._ensure_sdn_zone`) and user-defined
+    :class:`ProxmoxSwitch` zones must set it; otherwise PVE doesn't
+    spawn the per-vnet dnsmasq instances and DHCP/DNS silently does
+    nothing inside the vnet."""
+
+    def test_default_zone_create_includes_dhcp_dnsmasq(self) -> None:
+        orch = _orch()
+        # No existing zone — should POST a new one with the dhcp field.
+        orch._client.cluster.sdn.zones.get.return_value = []
+        orch._ensure_sdn_zone()
+        post = orch._client.cluster.sdn.zones.post
+        post.assert_called_once()
+        kwargs = post.call_args.kwargs
+        assert kwargs["type"] == "simple"
+        assert kwargs["zone"] == "tr"
+        assert kwargs["dhcp"] == "dnsmasq"
+
+    def test_default_zone_already_present_with_dhcp_is_noop(self) -> None:
+        orch = _orch()
+        orch._client.cluster.sdn.zones.get.return_value = [
+            {"zone": "tr", "type": "simple", "dhcp": "dnsmasq"},
+        ]
+        orch._ensure_sdn_zone()
+        # No POST and no PUT against the zone itself — just the
+        # cluster-wide apply at the end.
+        orch._client.cluster.sdn.zones.post.assert_not_called()
+        orch._client.cluster.sdn.zones.assert_not_called()
+
+    def test_default_zone_present_without_dhcp_gets_upgraded(self) -> None:
+        # Pre-existing zone from an earlier TestRange version that
+        # didn't set ``dhcp`` — must be upgraded in place via PUT
+        # so the existing zone starts spawning dnsmasq for any
+        # subsequent subnet create.
+        orch = _orch()
+        orch._client.cluster.sdn.zones.get.return_value = [
+            {"zone": "tr", "type": "simple"},  # no dhcp
+        ]
+        orch._ensure_sdn_zone()
+        # PUT against the specific zone with dhcp=dnsmasq.
+        orch._client.cluster.sdn.zones.assert_any_call("tr")
+        zone_handle = orch._client.cluster.sdn.zones.return_value
+        zone_handle.put.assert_called_once_with(dhcp="dnsmasq")
