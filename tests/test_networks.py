@@ -66,10 +66,16 @@ class TestSubnetMath:
         with pytest.raises(ValueError):
             net.static_ip_for_index(10_000)
 
-    def test_tiny_subnet_dhcp_range_fallback(self) -> None:
+    def test_tiny_subnet_dhcp_raises(self) -> None:
+        # ``/30`` (2 usable hosts) can't honour the static-block
+        # reservation that ``static_ip_for_index`` hands out at
+        # ``.2``-``.9``.  Earlier ``dhcp_range_start`` fell back to
+        # ``.2`` here, overlapping the static pool — a registered
+        # MAC and a DHCP lease could end up sharing an IP.  Now
+        # raises so the misconfiguration is loud.
         tiny = VirtualNetwork("T", "192.168.99.0/30")
-        # Only two usable hosts; range_start falls back to second host
-        assert tiny.dhcp_range_start in ("192.168.99.1", "192.168.99.2")
+        with pytest.raises(ValueError, match=r"at least 10|/28 or larger"):
+            _ = tiny.dhcp_range_start
 
 
 class TestBackendNameAndBridge:

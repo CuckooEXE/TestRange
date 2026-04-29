@@ -673,6 +673,13 @@ class ProxmoxVM(AbstractVM):
         self._vmid = None
         self._node = None
         self._phase2_seed_filename = None
+        # Drop the client reference too — the orchestrator's
+        # ``__exit__`` will set its own ``_client`` to None right
+        # after this; holding a stale handle here means a stray
+        # ``shutdown()`` retry from ``cleanup`` would try to use
+        # the closed underlying transport.  ``set_client`` re-
+        # populates it on the next orchestrator entry.
+        self._client = None
         # Note: ``_template_vmid`` is intentionally not cleared —
         # leaks no resources (templates persist across runs by
         # design) and lets debuggers see what we cloned from.
@@ -1088,6 +1095,23 @@ class ProxmoxVM(AbstractVM):
             try:
                 task = client.nodes(node).tasks(upid).status.get()
             except Exception as exc:
+                # Differentiate "transient" (network, 5xx) from
+                # "terminal" (4xx auth/not-found) — looping on a
+                # 401 or 404 wastes the full timeout window
+                # producing the same useless retries.  proxmoxer's
+                # ``ResourceException`` carries an HTTP
+                # ``status_code``; if it's a 4xx that isn't 408
+                # (request timeout), bail.
+                status_code = getattr(exc, "status_code", None)
+                if (
+                    isinstance(status_code, int)
+                    and 400 <= status_code < 500
+                    and status_code != 408
+                ):
+                    raise VMBuildError(
+                        f"PVE task {upid} status poll failed with "
+                        f"HTTP {status_code} (terminal): {exc}"
+                    ) from exc
                 _log.debug("task %s status poll error: %s", upid, exc)
                 time.sleep(1)
                 continue

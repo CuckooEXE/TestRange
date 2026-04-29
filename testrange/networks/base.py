@@ -206,13 +206,31 @@ class AbstractVirtualNetwork(ABC):
     def dhcp_range_start(self) -> str:
         """Return the first DHCP lease address.
 
-        Starts at the 10th host to leave room for static assignments.
+        Starts at the 10th host (``.10``) to leave room for static
+        assignments at ``.2`` – ``.9`` (gateway is ``.1``).  Subnets
+        with fewer than 10 hosts can't honour that reservation —
+        previously this fell back to ``hosts[1]`` (``.2``), which
+        *overlaps* the static-reservation pool returned by
+        :meth:`static_ip_for_index`, so a registered VM would silently
+        share its IP with a dhcp lease.  Raise instead so the
+        misconfiguration surfaces at network start time.
 
-        :returns: IP address string.
+        :raises ValueError: If the subnet has fewer than 10 hosts
+            (must be ``/28`` or larger to honour the static-block
+            reservation).
         """
         hosts = list(self._network.hosts())
+        if len(hosts) < 10:
+            raise ValueError(
+                f"subnet {self.subnet} has {len(hosts)} usable hosts; "
+                "DHCP needs at least 10 (gateway + 8 static slots + "
+                "1 lease) to avoid overlap with static reservations.  "
+                "Pick a ``/28`` or larger subnet, or set "
+                "``dhcp=False`` on this network so no DHCP range is "
+                "needed."
+            )
         # Skip gateway (.1) and leave a static block (.2 – .9)
-        return str(hosts[9]) if len(hosts) > 9 else str(hosts[1])
+        return str(hosts[9])
 
     @property
     def dhcp_range_end(self) -> str:
