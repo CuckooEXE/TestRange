@@ -509,7 +509,19 @@ def _first_boot_script(vm: VM) -> str | None:
       "dnsmasq missing" error;
     * sets ``DEBIAN_FRONTEND=noninteractive`` + ``apt-get update``
       before any install so we don't need a separate package-cache
-      refresh hook in the spec.
+      refresh hook in the spec;
+    * **swaps the PVE enterprise repos for ``pve-no-subscription``
+      before any apt fetch** when there are apt packages to install.
+      The PVE installer pre-configures
+      ``enterprise.proxmox.com/debian/{pve,ceph-squid}`` repos which
+      require a paid subscription; without one, ``apt-get update``
+      returns 401 against those mirrors and ``set -euo pipefail``
+      kills the script before the install line ever runs.  The swap
+      reads the Debian codename from ``/etc/os-release`` so PVE 8
+      (bookworm), PVE 9 (trixie), and any future PVE release all
+      get the right ``pve-no-subscription`` URL.  Subscription
+      users who actually want to keep the enterprise repos can
+      subclass the builder and override ``_first_boot_script``.
     """
     apt_pkgs = [p.name for p in vm.pkgs if isinstance(p, Apt)]
     skipped = [p for p in vm.pkgs if not isinstance(p, Apt)]
@@ -530,6 +542,22 @@ def _first_boot_script(vm: VM) -> str | None:
         "export DEBIAN_FRONTEND=noninteractive",
     ]
     if apt_pkgs:
+        # PVE installer pre-configures enterprise repos that 401
+        # without a paid subscription; clear them and add the
+        # public no-subscription mirror so apt-get update succeeds.
+        # Both ``.list`` (legacy) and ``.sources`` (PVE 9 deb822)
+        # variants are removed because PVE 9 ships the new format
+        # but older installers and admins may have either.
+        lines.extend([
+            "rm -f /etc/apt/sources.list.d/pve-enterprise.list",
+            "rm -f /etc/apt/sources.list.d/pve-enterprise.sources",
+            "rm -f /etc/apt/sources.list.d/ceph.list",
+            "rm -f /etc/apt/sources.list.d/ceph.sources",
+            'codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"',
+            'echo "deb http://download.proxmox.com/debian/pve $codename '
+            'pve-no-subscription" > '
+            "/etc/apt/sources.list.d/pve-no-subscription.list",
+        ])
         lines.append("apt-get update -y")
         lines.append("apt-get install -y " + " ".join(apt_pkgs))
     lines.extend(cmds)

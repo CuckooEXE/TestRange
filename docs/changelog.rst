@@ -8,6 +8,53 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE first-boot: swap enterprise repos for pve-no-subscription
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Fixed: first-boot apt-install failed on fresh PVE installs without
+a paid subscription.**  The PVE installer pre-configures
+``enterprise.proxmox.com/debian/{pve,ceph-squid}`` repos in
+``/etc/apt/sources.list.d/``; without an enterprise subscription,
+``apt-get update`` returns ``401 Unauthorized`` against those
+mirrors and the ``set -euo pipefail`` first-boot script aborts
+before reaching the install line.  Net effect: ``dnsmasq`` (and any
+other ``vm.pkgs``) silently never installed, the inner
+``ProxmoxOrchestrator``'s ``_preflight_dnsmasq_installed`` then
+reported "package missing" with no obvious cause.
+
+The first-boot script now removes the enterprise repo files
+(both ``.list`` and ``.sources`` variants — PVE 9 ships the
+deb822 ``.sources`` format) and adds
+``deb http://download.proxmox.com/debian/pve $codename
+pve-no-subscription`` to ``/etc/apt/sources.list.d/`` before the
+``apt-get update`` call.  The codename is read from
+``/etc/os-release`` so PVE 8 (bookworm), PVE 9 (trixie), and any
+future release all resolve to the right mirror.
+
+Subscription users who actually want the enterprise repos can
+subclass ``ProxmoxAnswerBuilder`` and override
+``_first_boot_script``; the default behaviour matches what
+TestRange's primary use case (test-range provisioning of
+throwaway PVE nodes) needs.
+
+The repo swap is only emitted when ``vm.pkgs`` carries at least
+one ``Apt`` package — VMs whose first-boot script only carries
+``post_install_cmds`` skip the fetch path entirely and don't
+need their repo config touched.
+
+**Test surface:** new
+``test_apt_install_swaps_to_pve_no_subscription`` (asserts both
+``.list`` and ``.sources`` are removed, the no-subscription URL
+is added, codename is dynamic, and the swap precedes
+``apt-get update``) plus
+``test_no_repo_swap_when_only_post_install_cmds``.  Suite is now
+1042 passed / 14 skipped / 0 failed.
+
+**Operator note:** the script body changed, which invalidates both
+the qcow2 and the prepared-ISO caches via the cache-key folds
+landed in earlier commits.  The next nested-PVE build will
+re-prep + re-install once; subsequent runs cache-hit normally.
+
 Operator pause-on-error for SSH-based debugging
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -543,6 +543,52 @@ class TestFirstBootScript:
         assert script.startswith("#!/bin/bash\n")
         assert "set -euo pipefail" in script
 
+    def test_apt_install_swaps_to_pve_no_subscription(self) -> None:
+        """The PVE installer pre-configures the enterprise repos
+        which 401 without a paid subscription; ``apt-get update``
+        then fails under ``set -euo pipefail`` and the install line
+        never runs.  Verify the script clears those repos and adds
+        ``pve-no-subscription`` BEFORE the apt-get update."""
+        from testrange.packages import Apt
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
+        script = _first_boot_script(vm)
+        assert script is not None
+
+        # Both .list (legacy) and .sources (PVE 9 deb822) removed.
+        assert "pve-enterprise.list" in script
+        assert "pve-enterprise.sources" in script
+        assert "ceph.list" in script
+        assert "ceph.sources" in script
+        # No-subscription repo added.
+        assert "pve-no-subscription" in script
+        assert "download.proxmox.com/debian/pve" in script
+        # Codename comes from /etc/os-release so PVE 8/9/future all
+        # get the right URL — pinned hardcoded codename would break
+        # on the next PVE release.
+        assert "VERSION_CODENAME" in script
+
+        # Critical ordering: the swap MUST happen before apt-get
+        # update, otherwise update hits the broken enterprise repo
+        # and the script aborts before reaching install.
+        swap_idx = script.index("pve-no-subscription")
+        update_idx = script.index("apt-get update")
+        install_idx = script.index("apt-get install")
+        assert swap_idx < update_idx < install_idx
+
+    def test_no_repo_swap_when_only_post_install_cmds(self) -> None:
+        # When the spec carries no apt packages (only free-form
+        # post_install_cmds), no apt fetch happens — so the repo
+        # swap is unnecessary.  Skip it to keep the script minimal
+        # and avoid touching repo config on VMs that didn't ask
+        # for any packages.
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        vm = _proxmox_vm(post_install_cmds=["echo hello"])
+        script = _first_boot_script(vm)
+        assert script is not None
+        assert "pve-no-subscription" not in script
+        assert "apt-get update" not in script
+
     def test_post_install_cmds_appended_verbatim(self) -> None:
         from testrange.vms.builders.proxmox_answer import _first_boot_script
         vm = _proxmox_vm(post_install_cmds=["echo hi", "systemctl start foo"])
