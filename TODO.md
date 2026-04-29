@@ -303,3 +303,50 @@ codebase.
 isn't on ``$PATH``, so the failure mode is a clear "install this
 package" rather than a confusing prepared-ISO bug.
 
+### 10. ``shutdown(self)`` ABC takes no orchestrator context
+
+**Where:** `testrange/vms/base.py` — `AbstractVM.shutdown` is
+zero-arg.  `ProxmoxVM` works around it with a `set_client(client)`
+method that the orchestrator must call before teardown so
+`shutdown()` can drive REST without a context handle.
+
+**Why it bothers us:** the workaround couples VM lifetime to the
+orchestrator that constructed it.  A VM moved between orchestrators
+(theoretically possible — we don't, but the contract allows it)
+silently fails on `shutdown()`.  An earlier cut also leaked stale
+client references past orchestrator close (now fixed; the handle
+is cleared at end of `shutdown`).  The contract is still ugly.
+
+**Sketch:** Change `AbstractVM.shutdown(self)` →
+`shutdown(self, context: AbstractOrchestrator)` to match
+`build()` / `start_run()`.  Drop `set_client` / `_client`.  Touches
+every test that mocks `vm.shutdown()` (call sites pass `self` so
+the orchestrator changes are mechanical; test mocks need the
+arg added).  Worth doing but invasive — defer until the next
+contract-change-friendly slice.
+
+### 11. ``ProxmoxOrchestrator`` is 1900+ lines doing too many things
+
+**Where:** `testrange/backends/proxmox/orchestrator.py` — auth
+resolution, node/storage discovery, SDN zone management, install-
+vnet picker, switch lifecycle, network lifecycle, VM provisioning,
+nested orchestration, bootstrap script, pveproxy wait, cleanup-
+by-run-id, list-templates / prune-templates admin, keep_alive_hints.
+
+**Why it bothers us:** large file = expensive to read, expensive
+to review, harder to spot logic errors.  Line count itself isn't
+a bug, but several recent fixes (zone DHCP, IPAM ordering, IPAM
+ledger race) sat in this file because the integration points were
+buried in noise.
+
+**Sketch:** Extract three sibling modules:
+- `proxmox/sdn.py` — zone ensure, install-subnet picker, dnsmasq
+  preflight, IPAM helpers.
+- `proxmox/admin.py` — `cleanup`, `list_templates`,
+  `prune_templates`, `_open_admin_connection`.
+- The remaining `__enter__` / `__exit__` / `_provision_vms` flow
+  becomes legible.
+
+High-churn refactor; do it when the next big feature lands so
+the diff isn't pure code-movement.
+

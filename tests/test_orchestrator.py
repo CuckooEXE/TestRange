@@ -44,6 +44,19 @@ class TestInitialState:
         o = Orchestrator(cache_root=tmp_path / "alt")
         assert o._cache.root == tmp_path / "alt"
 
+    def test_switches_kwarg_accepted_as_noop(self) -> None:
+        """The ``Switch`` two-layer model is a Proxmox concept; on
+        libvirt every network is its own bridge with no separate
+        switch layer.  An earlier cut omitted the kwarg entirely
+        from libvirt's ``Orchestrator.__init__`` and passing one
+        TypeErrored — but ``docs/usage/networks.rst`` documented
+        ``Switch`` as portable.  Now accepted as a no-op so
+        cross-backend test specs work unchanged."""
+        from testrange import Switch
+        sw = Switch("Corp")
+        # No raise: the kwarg is accepted and ignored.
+        Orchestrator(switches=[sw])
+
 
 class TestNameCollisions:
     """Collision checks fire at construction time, not at defineXML."""

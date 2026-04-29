@@ -233,3 +233,87 @@ class TestPrepareOuterVmDefault:
         hv = Hypervisor(orchestrator=_StubOrch, **_common_kwargs())
         assert hv.pkgs == []
         assert hv.post_install_cmds == []
+
+
+class TestPromoteFieldParity:
+    """The ``_promote_to_*`` functions in the libvirt and proxmox
+    orchestrators copy generic-spec fields one-by-one into the
+    backend-native concrete classes.  These field lists are
+    duplicated across backends — easy to forget to update when a
+    new field lands.  The tests below catch the case where a generic
+    spec carries a field the promote function silently drops.
+
+    They don't replace adding the field to the promote function;
+    they just make the lapse loud at test time instead of "VM
+    works in libvirt but the same spec breaks on Proxmox."
+    """
+
+    def test_promote_proxmox_preserves_vm_fields(self) -> None:
+        from testrange.backends.proxmox.orchestrator import (
+            _promote_to_proxmox,
+        )
+        kwargs = _common_kwargs()
+        # Use the generic Hypervisor — covers the
+        # AbstractHypervisor branch which has the most fields.
+        hv = Hypervisor(orchestrator=ProxmoxOrchestrator, **kwargs)
+        promoted = _promote_to_proxmox(hv)
+        for field in ("name", "iso", "users", "pkgs",
+                      "post_install_cmds", "devices", "builder",
+                      "communicator", "orchestrator", "vms",
+                      "networks"):
+            assert getattr(promoted, field) == getattr(hv, field), (
+                f"_promote_to_proxmox dropped field {field!r}"
+            )
+
+    def test_promote_libvirt_preserves_vm_fields(self) -> None:
+        from testrange.backends.libvirt.orchestrator import (
+            _promote_to_libvirt,
+        )
+        kwargs = _common_kwargs()
+        hv = Hypervisor(orchestrator=LibvirtOrchestrator, **kwargs)
+        promoted = _promote_to_libvirt(hv)
+        for field in ("name", "iso", "users", "pkgs",
+                      "post_install_cmds", "devices", "builder",
+                      "communicator", "orchestrator", "vms",
+                      "networks"):
+            assert getattr(promoted, field) == getattr(hv, field), (
+                f"_promote_to_libvirt dropped field {field!r}"
+            )
+
+    def test_promote_proxmox_network_preserves_fields(self) -> None:
+        from testrange.backends.libvirt.network import (
+            VirtualNetwork as LibvirtVirtualNetwork,
+        )
+        from testrange.backends.proxmox.network import (
+            ProxmoxVirtualNetwork,
+        )
+        from testrange.backends.proxmox.orchestrator import (
+            _promote_to_proxmox_network,
+        )
+        from testrange.networks import Switch
+        sw = Switch("Corp", switch_type="vlan")
+        src = LibvirtVirtualNetwork(
+            "Net", "10.42.0.0/24",
+            internet=True, dhcp=False, dns=False, switch=sw,
+        )
+        promoted = _promote_to_proxmox_network(src)
+        assert isinstance(promoted, ProxmoxVirtualNetwork)
+        for field in ("name", "subnet", "internet", "dhcp", "dns",
+                      "switch"):
+            assert getattr(promoted, field) == getattr(src, field), (
+                f"_promote_to_proxmox_network dropped field {field!r}"
+            )
+
+    def test_promote_proxmox_switch_preserves_fields(self) -> None:
+        from testrange.backends.proxmox.network import ProxmoxSwitch
+        from testrange.backends.proxmox.orchestrator import (
+            _promote_to_proxmox_switch,
+        )
+        from testrange.networks import Switch
+        src = Switch("Corp", switch_type="vlan", uplinks=["eno1"])
+        promoted = _promote_to_proxmox_switch(src)
+        assert isinstance(promoted, ProxmoxSwitch)
+        for field in ("name", "switch_type", "uplinks"):
+            assert getattr(promoted, field) == getattr(src, field), (
+                f"_promote_to_proxmox_switch dropped field {field!r}"
+            )

@@ -352,7 +352,19 @@ class Orchestrator(AbstractOrchestrator):
         cache: str | None = None,
         cache_verify: bool | str = True,
         storage_backend: AbstractStorageBackend | None = None,
+        switches: Sequence[object] | None = None,
     ) -> None:
+        # ``switches`` is accepted for cross-backend portability —
+        # libvirt's network model puts every network on its own
+        # bridge with no separate switch layer, so the field is
+        # ignored after construction.  See
+        # :doc:`/usage/networks`'s "Multiple networks per switch"
+        # section: passing a ``Switch`` works on libvirt for
+        # config portability but the underlying virsh net definition
+        # doesn't carry a switch concept.  An earlier cut omitted
+        # this kwarg entirely, so passing one TypeErrored — docs
+        # claimed portability the code didn't deliver.
+        del switches
         self._host = host
         # The narrower concrete types declared in the class body are
         # what internal code relies on.  Pyright re-checks the type
