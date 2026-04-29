@@ -15,17 +15,24 @@ PVE to spin up a per-vnet ``dnsmasq`` instance for every subnet
 under the zone, bound to the vnet's bridge interface.  Each subnet
 carries a ``dhcp-range`` defining the lease pool.  Each VM that
 calls :meth:`register_vm` also lands in the SDN IPAM (``POST
-/cluster/sdn/vnets/{vnet}/ips``) with ``(mac, ip,
-hostname=<vm>.<vnet>)``.  PVE turns those IPAM entries into
-``dhcp-host=...`` directives for the dnsmasq config it generates, so:
+/cluster/sdn/vnets/{vnet}/ips`` with ``(ip, mac, zone)`` — the
+endpoint does NOT accept a hostname field).  PVE turns those IPAM
+entries into ``dhcp-host=mac,ip`` directives for the dnsmasq config
+it generates, so:
 
 * DHCP requests from registered MACs receive their reserved IP
   (deterministic for tests; same address every run).
-* dnsmasq's DNS service resolves ``<vm>.<vnet>`` to the reserved IP
-  for any querier on the vnet — libvirt-style cross-VM hostname
-  resolution.
 * The vnet's gateway is dnsmasq itself (via DHCP option 6), so VMs
-  inherit DNS without further configuration.
+  that DHCP get DNS for free.
+
+**FQDN DNS resolution status:** ``<vm>.<vnet>`` resolution via
+dnsmasq's lease database depends on the guest sending its hostname
+in the DHCP request.  TestRange currently configures NICs
+statically (cloud-init / answer.toml emit ``cidr = "<ip>/24"``),
+so guests don't DHCP and dnsmasq doesn't learn the hostname.  The
+IPAM only pins MAC→IP for now; FQDN lookups would need cloud-init
+flipped to ``dhcp4: true`` plus ``fqdn`` set to ``<vm>.<vnet>`` in
+the network-config.  Tracked as future work.
 
 Cloud-init / answer.toml still emit a static-IP block matching the
 IPAM-reserved address (so VMs come up immediately without a DHCP
@@ -529,14 +536,16 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
             # versions.
             self._subnet_id = self._lookup_subnet_id(client, vnet)
 
-            # Push every (mac, ip, hostname) tuple register_vm /
+            # Push every (mac, ip) pair register_vm /
             # register_vm_with_mac collected before start() into PVE's
             # SDN IPAM.  PVE turns these into ``dhcp-host`` directives
             # in the auto-generated dnsmasq config, which gives us
-            # deterministic DHCP leases AND FQDN DNS for ``<vm>.<vnet>``
-            # (libvirt parity).  Done before the final ``put()`` so a
-            # single SDN apply covers vnet + subnet + IPAM entries.
-            self._push_ipam_entries(client)
+            # deterministic DHCP leases.  Done before the final
+            # ``put()`` so a single SDN apply covers vnet + subnet +
+            # IPAM entries.  Zone is required by the IPAM POST
+            # schema; resolved at the call site so this helper stays
+            # context-free.
+            self._push_ipam_entries(client, zone)
 
             # Apply pending SDN config — without this, the vnet sits
             # in a "pending" state and isn't actually attached to any
@@ -597,20 +606,26 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _push_ipam_entries(self, client: Any) -> None:
-        """POST each registered ``(mac, ip, hostname)`` to PVE's IPAM.
+    def _push_ipam_entries(self, client: Any, zone: str) -> None:
+        """POST each registered ``(mac, ip)`` pair to PVE's IPAM.
 
         Endpoint: ``POST /cluster/sdn/vnets/{vnet}/ips`` with
-        ``mac`` + ``ip`` + ``hostname`` body.  PVE's pve-ipam plugin
-        records the binding and the next SDN reload regenerates the
-        per-vnet dnsmasq config with matching ``dhcp-host=...`` lines
-        — that's what gives DHCP determinism and ``<vm>.<vnet>``
-        DNS in one shot.
+        ``ip`` (required) + ``zone`` (required) + ``mac`` (optional).
+        PVE's pve-ipam plugin records the binding and the next SDN
+        reload regenerates the per-vnet dnsmasq config with matching
+        ``dhcp-host=mac,ip`` lines — that's what gives DHCP
+        determinism (a registered MAC always gets its reserved IP).
 
-        Hostname format: ``<vm>.<vnet>`` (libvirt parity).  We FQDN-
-        ify here rather than at :meth:`register_vm` time so callers
-        keep seeing the simple two-arg signature; the FQDN only
-        matters at the IPAM-push site.
+        The endpoint does **not** accept a ``hostname`` field;
+        ``<vm>.<vnet>`` DNS resolution happens through dnsmasq's
+        own lease-tracking when guests DHCP-in with their hostname
+        in the request.  TestRange-built VMs currently configure
+        their NIC statically via cloud-init / answer.toml, so they
+        don't send a DHCP request and dnsmasq doesn't learn the
+        hostname.  Wiring DHCP-side hostnames is a separate slice
+        (would need cloud-init flipped to ``dhcp4: true`` plus
+        ``fqdn`` set to ``<vm>.<vnet>``); for now the IPAM only
+        pins MAC→IP.
 
         Errors during IPAM push surface as :class:`NetworkError` —
         if the IPAM POST fails the resulting dnsmasq config won't
@@ -620,16 +635,15 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
         """
         if not self._vm_entries:
             return
-        for vm_name, mac, ip in self._vm_entries:
-            hostname = f"{vm_name}.{self.name}"
+        for _vm_name, mac, ip in self._vm_entries:
             try:
                 client.cluster.sdn.vnets(self._vnet_name).ips.post(
-                    mac=mac, ip=ip, hostname=hostname,
+                    ip=ip, mac=mac, zone=zone,
                 )
             except Exception as exc:
                 raise NetworkError(
                     f"VirtualNetwork {self.name!r}: failed to register "
-                    f"IPAM entry mac={mac} ip={ip} hostname={hostname!r}: "
+                    f"IPAM entry mac={mac} ip={ip} (zone={zone}): "
                     f"{exc}"
                 ) from exc
 

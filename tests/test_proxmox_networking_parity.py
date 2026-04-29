@@ -382,7 +382,11 @@ class TestSubnetDnsmasq:
             "start-address=10.0.0.11,end-address=10.0.0.254",
         ]
 
-    def test_register_vm_pushes_ipam_entry_with_fqdn(self) -> None:
+    def test_register_vm_pushes_ipam_entry_with_zone(self) -> None:
+        # PVE IPAM endpoint requires ``ip`` + ``zone``; ``mac`` is
+        # optional but always supplied by us (deterministic-MAC
+        # scheme).  ``hostname`` is NOT a valid field on this
+        # endpoint — earlier slices passed one and got 400s.
         _net, client = self._started_net(
             register=[
                 ("web", "52:54:00:11:22:33", "10.0.0.5"),
@@ -390,20 +394,24 @@ class TestSubnetDnsmasq:
             ],
         )
         ips_post = client.cluster.sdn.vnets.return_value.ips.post
-        # Two POSTs, one per registered VM, each with the FQDN.
         assert ips_post.call_count == 2
         first = ips_post.call_args_list[0].kwargs
         assert first == {
-            "mac": "52:54:00:11:22:33",
             "ip": "10.0.0.5",
-            "hostname": "web.OuterNet",
+            "mac": "52:54:00:11:22:33",
+            "zone": "tr",
         }
         second = ips_post.call_args_list[1].kwargs
         assert second == {
-            "mac": "52:54:00:44:55:66",
             "ip": "10.0.0.6",
-            "hostname": "db.OuterNet",
+            "mac": "52:54:00:44:55:66",
+            "zone": "tr",
         }
+        # Regression guard: the endpoint rejects ``hostname`` as
+        # an unknown property; never put it back without first
+        # verifying the schema accepts it.
+        for call in ips_post.call_args_list:
+            assert "hostname" not in call.kwargs
 
     def test_subnet_too_small_for_reservation_slice_raises(self) -> None:
         # /30 has 2 hosts.  Reserved-head is 10 → no dynamic range
