@@ -1523,45 +1523,49 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         what would be a cryptic boot timeout into a clear
         "install ``dnsmasq`` on this node" error.
 
-        Probe shape: ``GET /nodes/{node}/apt/versions`` returns the
-        installed-package list; we substring-match for ``dnsmasq`` in
-        the package names.  When TestRange itself built the PVE node
-        as the outer VM of a :class:`Hypervisor` (see
-        :meth:`prepare_outer_vm`), ``dnsmasq`` is in the install-time
-        package list so this check passes by construction; the
-        explicit probe matters only against pre-existing PVE clusters
-        the user pointed us at.
+        Probe shape: ``GET /nodes/{node}/apt/changelog?name=dnsmasq``.
+        That endpoint runs ``apt-get changelog dnsmasq`` server-side
+        and returns the changelog text on success or errors with a
+        500 if the package isn't installed.  We *don't* use
+        ``/apt/versions`` because PVE hardcodes that endpoint to a
+        curated list of "important Proxmox packages" (kernel,
+        pveproxy, qemu-server, …) and never lists ``dnsmasq``
+        regardless of install state — using it gave false-negative
+        preflights even on freshly-installed PVE nodes where
+        ``dnsmasq`` was definitely present.
+
+        When TestRange itself built the PVE node as the outer VM of
+        a :class:`Hypervisor` (see :meth:`prepare_outer_vm`), the
+        first-boot script ``apt-get install -y dnsmasq`` runs before
+        the inner orchestrator's ``__enter__`` so this check passes
+        by construction; the explicit probe matters only against
+        pre-existing PVE clusters the user pointed us at and as a
+        defence against the first-boot install having silently
+        failed.
 
         :raises OrchestratorError: When the package isn't present.
         """
         assert self._client is not None
         try:
-            packages = self._client.nodes(self._node).apt.versions.get() or []
+            self._client.nodes(self._node).apt.changelog.get(name="dnsmasq")
         except Exception as exc:
             raise OrchestratorError(
-                f"ProxmoxOrchestrator: cannot query installed packages "
-                f"on node {self._node!r} via /apt/versions: {exc}"
-            ) from exc
-        # Each entry is a dict with ``Package`` (or ``Title`` on older
-        # PVE) keying the apt name; substr-match keeps us tolerant of
-        # both shapes and of extras like ``dnsmasq-base`` shipping
-        # without ``dnsmasq`` itself.
-        names = [
-            str(entry.get("Package") or entry.get("Title") or "")
-            for entry in packages
-        ]
-        if not any("dnsmasq" in name and "base" not in name for name in names):
-            raise OrchestratorError(
-                f"ProxmoxOrchestrator: ``dnsmasq`` is not installed on "
-                f"PVE node {self._node!r}.  TestRange relies on PVE's "
-                "SDN dnsmasq integration for per-vnet DHCP + DNS.  "
-                "Install on the node:\n"
+                f"ProxmoxOrchestrator: ``dnsmasq`` does not appear to "
+                f"be installed on PVE node {self._node!r} "
+                f"(``GET /apt/changelog?name=dnsmasq`` errored: {exc}).  "
+                "TestRange relies on PVE's SDN dnsmasq integration for "
+                "per-vnet DHCP + DNS.  Install on the node:\n"
                 "  Debian/Ubuntu:  sudo apt-get install -y dnsmasq\n"
                 "  RHEL/Rocky:     sudo dnf install -y dnsmasq\n"
-                "Then re-run.  (When TestRange builds the PVE host "
-                "itself via testrange.Hypervisor, dnsmasq is added to "
-                "the install package list automatically.)"
-            )
+                "Then ``systemctl disable --now dnsmasq`` (PVE owns the "
+                "per-vnet instances; the default systemd service would "
+                "conflict on port 53/67) and re-run.\n"
+                "When TestRange builds the PVE host itself via "
+                "testrange.Hypervisor, both steps run via the answer-"
+                "toml [first-boot] hook automatically — if the hook "
+                "ran but failed, look at "
+                "``/var/log/proxmox-first-boot.log`` on the PVE node."
+            ) from exc
         _log.debug("dnsmasq present on node %r", self._node)
 
     def _ensure_sdn_zone(self) -> None:

@@ -576,6 +576,35 @@ class TestFirstBootScript:
         install_idx = script.index("apt-get install")
         assert swap_idx < update_idx < install_idx
 
+    def test_dnsmasq_install_is_followed_by_systemctl_disable(self) -> None:
+        """PVE's SDN spawns dnsmasq per-vnet via ``ifupdown`` hooks;
+        the default systemd ``dnsmasq.service`` ships enabled by the
+        apt postinst and binds ``0.0.0.0:53/67`` immediately,
+        conflicting with every per-vnet instance PVE tries to start.
+        Per the PVE SDN docs, the service must be disabled (and
+        stopped) right after install.  Pin the order: install, then
+        disable, then any free-form post_install_cmds."""
+        from testrange.packages import Apt
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
+        script = _first_boot_script(vm)
+        assert script is not None
+
+        install_idx = script.index("apt-get install")
+        disable_idx = script.index("systemctl disable --now dnsmasq")
+        assert install_idx < disable_idx
+
+    def test_disable_only_when_dnsmasq_is_in_pkg_list(self) -> None:
+        # The systemctl-disable line is dnsmasq-specific.  A VM
+        # whose first-boot installs (say) ``tmux`` should not have
+        # a stray systemctl call on a service it didn't install.
+        from testrange.packages import Apt
+        from testrange.vms.builders.proxmox_answer import _first_boot_script
+        vm = _proxmox_vm(pkgs=[Apt("tmux")])
+        script = _first_boot_script(vm)
+        assert script is not None
+        assert "systemctl disable --now dnsmasq" not in script
+
     def test_no_repo_swap_when_only_post_install_cmds(self) -> None:
         # When the spec carries no apt packages (only free-form
         # post_install_cmds), no apt fetch happens — so the repo

@@ -89,36 +89,55 @@ def _vm(
 class TestDnsmasqPreflight:
     """Top-level orchestrator must check dnsmasq is installed on the
     target PVE node before any subnet hits ``dhcp = "dnsmasq"`` —
-    otherwise the dnsmasq instance never spawns and guests time out."""
+    otherwise the dnsmasq instance never spawns and guests time out.
 
-    def test_passes_when_package_present(self) -> None:
+    Probe shape: ``GET /nodes/{node}/apt/changelog?name=dnsmasq``.
+    That endpoint succeeds when the package is installed and errors
+    when it isn't — much more reliable than ``/apt/versions``, which
+    PVE hardcodes to a curated "important Proxmox packages" list
+    that never includes ``dnsmasq``.
+    """
+
+    def test_passes_when_changelog_lookup_succeeds(self) -> None:
         orch = _orch()
-        orch._client.nodes.return_value.apt.versions.get.return_value = [
-            {"Package": "dnsmasq", "Version": "2.90-1"},
-            {"Package": "qemu-server", "Version": "8.0.0"},
-        ]
-        # Should not raise.
+        # A successful changelog lookup returns the changelog text
+        # (or an empty string on some PVE versions); both count as
+        # "installed".
+        orch._client.nodes.return_value.apt.changelog.get.return_value = (
+            "dnsmasq (2.90-1) unstable; urgency=medium\n  * release\n"
+        )
         orch._preflight_dnsmasq_installed()
+        # Verify we hit the right endpoint with the right query.
+        orch._client.nodes.return_value.apt.changelog.get.assert_called_once_with(
+            name="dnsmasq",
+        )
 
-    def test_raises_when_only_dnsmasq_base_present(self) -> None:
-        # ``dnsmasq-base`` ships separately and isn't enough — the
-        # SDN integration needs the ``dnsmasq`` service.  Substring
-        # match deliberately excludes the ``-base`` fallback.
+    def test_raises_when_changelog_errors(self) -> None:
+        # Package not installed → PVE returns 500 from
+        # ``apt-get changelog dnsmasq`` which proxmoxer surfaces as
+        # an exception.
         orch = _orch()
-        orch._client.nodes.return_value.apt.versions.get.return_value = [
-            {"Package": "dnsmasq-base", "Version": "2.90-1"},
-        ]
-        with pytest.raises(OrchestratorError, match="dnsmasq.*not installed"):
+        orch._client.nodes.return_value.apt.changelog.get.side_effect = (
+            RuntimeError("E: Unable to find a source package for dnsmasq")
+        )
+        with pytest.raises(OrchestratorError, match="dnsmasq.*not.*installed"):
             orch._preflight_dnsmasq_installed()
 
-    def test_error_includes_install_hint(self) -> None:
+    def test_error_includes_install_hint_and_disable_step(self) -> None:
         orch = _orch()
-        orch._client.nodes.return_value.apt.versions.get.return_value = []
+        orch._client.nodes.return_value.apt.changelog.get.side_effect = (
+            RuntimeError("nope")
+        )
         with pytest.raises(OrchestratorError) as exc:
             orch._preflight_dnsmasq_installed()
         msg = str(exc.value)
         assert "apt-get install" in msg
         assert "dnf install" in msg
+        # Per PVE SDN docs, the systemd dnsmasq.service must be
+        # disabled after install (PVE owns the per-vnet instances);
+        # the error message should mention this so manual installers
+        # don't hit the same port-conflict footgun.
+        assert "systemctl disable" in msg
 
 
 # =====================================================================

@@ -8,6 +8,52 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE dnsmasq: preflight via /apt/changelog + disable systemd service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Two related fixes after the first-boot script finally started
+running its apt steps successfully.
+
+**Fixed: ``_preflight_dnsmasq_installed`` always reported missing
+even when ``dnsmasq`` was demonstrably installed.**  The probe was
+``GET /nodes/{node}/apt/versions``, but PVE hardcodes that endpoint
+to a curated list of "important Proxmox packages" (kernel,
+pveproxy, qemu-server, …); ``dnsmasq`` is never in the list
+regardless of install state.  Switched to
+``GET /nodes/{node}/apt/changelog?name=dnsmasq``, which actually
+runs ``apt-get changelog dnsmasq`` server-side and returns the
+changelog text on success or errors with a 500 if the package
+isn't installed.  Works for any installed package, doesn't depend
+on a hardcoded allowlist.
+
+**Added: first-boot script disables ``dnsmasq.service`` after
+install.**  Per the PVE SDN docs, after ``apt install dnsmasq`` the
+default systemd ``dnsmasq.service`` (shipped enabled by the apt
+postinst) must be disabled and stopped, because PVE's SDN spawns
+its own dnsmasq instances per-vnet via ``ifupdown`` hooks — not
+via the systemd unit.  The systemd unit binds ``0.0.0.0:53/67``
+immediately on install and conflicts with every per-vnet instance
+PVE tries to start on a bridge.  ``_first_boot_script`` now
+appends ``systemctl disable --now dnsmasq`` whenever ``dnsmasq``
+is in ``vm.pkgs`` — only that case, since the disable is
+dnsmasq-specific.
+
+The preflight error message also gained the ``systemctl disable``
+hint so manual installers (pre-existing PVE clusters where the
+operator runs the install themselves) don't hit the same
+port-conflict footgun.
+
+**Test surface:** ``TestDnsmasqPreflight`` rewritten for the new
+endpoint shape (``apt.changelog.get(name="dnsmasq")``); asserts
+both the success and "package missing" paths and that the error
+message includes the disable hint.  New
+``test_dnsmasq_install_is_followed_by_systemctl_disable`` pins
+the install→disable ordering, and
+``test_disable_only_when_dnsmasq_is_in_pkg_list`` pins that the
+systemctl call doesn't fire for unrelated apt packages (a VM
+asking for ``tmux`` doesn't get a stray dnsmasq disable).  Suite
+is now 1044 passed / 14 skipped / 0 failed.
+
 PVE first-boot: swap enterprise repos for pve-no-subscription
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

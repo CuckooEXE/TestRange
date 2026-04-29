@@ -560,6 +560,18 @@ def _first_boot_script(vm: VM) -> str | None:
         ])
         lines.append("apt-get update -y")
         lines.append("apt-get install -y " + " ".join(apt_pkgs))
+        if "dnsmasq" in apt_pkgs:
+            # PVE's SDN per-vnet dnsmasq integration spawns its own
+            # dnsmasq instances via ``ifupdown`` hooks, NOT via the
+            # systemd ``dnsmasq.service`` unit.  The unit ships
+            # enabled by the apt postinst and binds ``0.0.0.0:53/67``
+            # the moment install completes — which then collides with
+            # every per-vnet instance PVE tries to start on its
+            # bridge.  Per the PVE SDN docs (Datacenter > SDN >
+            # IPAM > "Configure dnsmasq"), the service must be
+            # disabled (and stopped) immediately after install so PVE
+            # owns dnsmasq end-to-end.
+            lines.append("systemctl disable --now dnsmasq")
     lines.extend(cmds)
     return "\n".join(lines) + "\n"
 
