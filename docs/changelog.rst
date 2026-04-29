@@ -8,6 +8,50 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Proxmox API audit against PVE 9.x schema (`apidoc.js`)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Cross-checked every proxmoxer call against the PVE API schema
+(``https://pve.proxmox.com/pve-docs/api-viewer/apidoc.js``) and
+live-validated the SDN paths against a running PVE 9.1.1 node.
+
+**Fixed: ``GET /cluster/sdn/subnets`` doesn't exist in PVE 9.x.**
+``ProxmoxOrchestrator._pick_install_subnet`` was calling that
+endpoint to enumerate cluster-wide claimed subnets; the live API
+returns 501.  The schema has only per-vnet subnet listings
+(``GET /cluster/sdn/vnets/{vnet}/subnets``), so the picker now
+walks all vnets via ``GET /cluster/sdn/vnets`` and unions their
+subnet CIDRs.  Per-subnet entries carry an explicit ``cidr``
+field; older PVE versions get a fallback that derives the CIDR
+from the auto-generated ``subnet`` ID
+(``<zone>-<addr>-<prefix>`` → ``<addr>/<prefix>``).
+
+The previous code soft-failed on 501 with an empty result set,
+which silently turned the picker's collision detection into a
+no-op — concurrent runs against the same cluster would race the
+same install subnet.  The walk fixes that.
+
+**Validated** (no code change needed): every other proxmoxer call
+in ``testrange/backends/proxmox/`` matches the schema —
+``/nodes/{node}/qemu/...`` for VM lifecycle (create / start /
+stop / delete / clone / template / resize / config),
+``/nodes/{node}/storage/...`` for content + upload,
+``/nodes/{node}/tasks/{upid}/{status,log}`` for task polling,
+``/nodes/{node}/apt/changelog`` for the dnsmasq preflight,
+``/cluster/sdn/{zones,vnets,subnets,ips}`` for SDN management,
+``/cluster/nextid``, ``/version``, and the agent endpoints (which
+already use the call-syntax ``agent("file-read")`` to handle
+hyphens since proxmoxer's attribute access doesn't translate
+``_`` → ``-``).
+
+**Test surface:** ``_orch`` helper in
+``test_proxmox_networking_parity.py`` updated to stub the
+walk-vnets shape (one synthetic vnet per claimed CIDR) instead
+of the no-longer-existent single-call shape; the
+``TestInstallSubnetPool`` tests pass unchanged.
+``test_proxmox_install_vnet.py``'s shared helper updated the
+same way.  Suite: 1047 passed / 14 skipped / 0 failed.
+
 PVE SDN: ``dhcp = "dnsmasq"`` moves to zone scope (PVE 9.x schema)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

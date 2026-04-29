@@ -1070,18 +1070,41 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         assert self._client is not None, (
             "_pick_install_subnet requires an authenticated client"
         )
-        # PVE returns subnets keyed by ``<zone>-<cidr-with-dashes>``;
-        # the actual CIDR is in the ``cidr`` field of each entry.
-        # Empty list / 404 means "no SDN subnets configured" — every
-        # pool entry is fair game.
+        # PVE 9.x's API has no cluster-wide ``GET /cluster/sdn/subnets``
+        # endpoint (verified against the apidoc.js schema — only
+        # ``GET /cluster/sdn/vnets/{vnet}/subnets`` exists, scoped to a
+        # single vnet).  Walk all vnets and union their subnet CIDRs
+        # to find what's claimed cluster-wide.  Each subnet entry's
+        # CIDR lives in the ``cidr`` field; the auto-generated
+        # ``subnet`` ID (``<zone>-<cidr-with-dashes>``) is the
+        # fallback when ``cidr`` is missing on older PVE versions.
+        in_use: set[str] = set()
         try:
-            existing = self._client.cluster.sdn.subnets.get() or []
+            vnets = self._client.cluster.sdn.vnets.get() or []
         except Exception:  # pragma: no cover — REST hiccup
-            existing = []
-        in_use: set[str] = {
-            str(entry.get("cidr", "")) for entry in existing
-            if entry.get("cidr")
-        }
+            vnets = []
+        for v in vnets:
+            vnet_name = v.get("vnet")
+            if not vnet_name:
+                continue
+            try:
+                subs = (
+                    self._client.cluster.sdn.vnets(vnet_name).subnets.get()
+                    or []
+                )
+            except Exception:  # pragma: no cover — vnet vanished mid-walk
+                continue
+            for entry in subs:
+                cidr = entry.get("cidr")
+                if not cidr:
+                    # Older PVE: derive CIDR from the subnet ID
+                    # (``<zone>-<addr>-<prefix>`` → ``<addr>/<prefix>``).
+                    sub_id = str(entry.get("subnet", ""))
+                    parts = sub_id.rsplit("-", 2)
+                    if len(parts) == 3 and parts[2].isdigit():
+                        cidr = f"{parts[1]}/{parts[2]}"
+                if cidr:
+                    in_use.add(str(cidr))
         for candidate in _INSTALL_SUBNET_POOL:
             if candidate not in in_use:
                 _log.debug(

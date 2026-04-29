@@ -44,14 +44,15 @@ def _orch_with_vms(vms: list[ProxmoxVM]) -> ProxmoxOrchestrator:
         node="pve01",
     )
     orch._vm_list = vms
-    # Stub a client whose ``cluster.sdn.subnets.get()`` returns no
-    # claimed subnets, so ``_pick_install_subnet`` lands on the
-    # first pool entry deterministically — that's what every
-    # existing test assumed when the install subnet was a fixed
-    # constant.  Tests that want to exercise pool-collision picking
-    # override this stub locally.
+    # Stub a client whose vnet listing is empty, so
+    # ``_pick_install_subnet`` walks zero vnets, finds zero claimed
+    # CIDRs, and lands on the first pool entry deterministically.
+    # That matches what every existing test assumed when the install
+    # subnet was a fixed constant.  Tests that want to exercise
+    # pool-collision picking override the vnet/subnet getters
+    # locally.
     client = MagicMock()
-    client.cluster.sdn.subnets.get.return_value = []
+    client.cluster.sdn.vnets.get.return_value = []
     orch._client = client
     return orch
 

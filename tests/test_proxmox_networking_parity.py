@@ -46,9 +46,13 @@ def _orch(
 ) -> ProxmoxOrchestrator:
     """Build a ProxmoxOrchestrator with a stubbed client.
 
-    ``claimed_subnets`` controls what ``cluster.sdn.subnets.get()``
-    returns — the mechanism ``_pick_install_subnet`` consults to skip
-    in-use pool entries.
+    ``claimed_subnets`` controls what cluster-wide subnets the
+    install-vnet picker sees as "in use".  PVE 9.x's API has no
+    ``GET /cluster/sdn/subnets`` endpoint (returns 501); the picker
+    walks ``GET /cluster/sdn/vnets`` and per-vnet
+    ``GET /cluster/sdn/vnets/{vnet}/subnets`` to enumerate.  The
+    stub here parks each claimed CIDR in its own synthetic vnet so
+    the walk picks them up the same way it would on a real cluster.
     """
     orch = ProxmoxOrchestrator(
         host="pve.example.com",
@@ -59,9 +63,27 @@ def _orch(
     orch._vm_list = vms or []
     orch._networks = networks or []
     client = MagicMock()
-    client.cluster.sdn.subnets.get.return_value = [
-        {"cidr": cidr} for cidr in (claimed_subnets or [])
+
+    cidrs = list(claimed_subnets or [])
+    # ``cluster.sdn.vnets.get()`` returns one synthetic vnet per
+    # claimed CIDR; the picker calls ``cluster.sdn.vnets(name).subnets.get()``
+    # for each, and we route those through a side_effect so each
+    # synthetic vnet returns its own CIDR.
+    vnet_names = [f"vnet{i}" for i, _ in enumerate(cidrs)]
+    client.cluster.sdn.vnets.get.return_value = [
+        {"vnet": name} for name in vnet_names
     ]
+    cidr_by_vnet = dict(zip(vnet_names, cidrs))
+
+    def _subnets_for(name: object) -> MagicMock:
+        result = MagicMock()
+        cidr = cidr_by_vnet.get(str(name))
+        result.subnets.get.return_value = (
+            [{"cidr": cidr, "subnet": f"tr-{cidr}"}] if cidr else []
+        )
+        return result
+
+    client.cluster.sdn.vnets.side_effect = _subnets_for
     orch._client = client
     return orch
 
