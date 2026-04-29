@@ -116,29 +116,7 @@ names and delete them.  Requires the inner-orchestrator class
 to know its own naming conventions, which it already does for
 its own `cleanup()` impl.
 
-### 6. SDN routing warning is informational, not actionable
-
-**Where:** `testrange/backends/proxmox/orchestrator.py` —
-`_warn_if_unroutable` logs ``Add a route through the PVE node,
-e.g.: sudo ip route add 10.42.0.0/24 via 10.0.0.10`` but doesn't
-add the route.
-
-**Why it bothers us:** the user has to copy-paste a sudo command
-manually for SSH-based communicators to reach inner SDN-VM IPs.
-The guest-agent communicator sidesteps the whole routing problem
-(traffic hops through PVE REST), so the warning only matters when
-``communicator='ssh'`` is selected — but it always fires.
-
-**Sketch:**
-- Suppress the warning when every VM that lives on the
-  unroutable subnet uses ``communicator='guest-agent'`` (no
-  SSH attempt → no route needed).
-- For the SSH case, optionally have the orchestrator add the
-  route via a privileged subprocess at ``__enter__`` and remove
-  it at ``__exit__``.  Behind a flag — most CI environments
-  don't have passwordless sudo.
-
-### 7. Memory preflight is libvirt-only
+### 6. Memory preflight is libvirt-only
 
 **Where:**
 `testrange/backends/libvirt/_preflight.py` — `check_memory()`
@@ -156,7 +134,7 @@ of "preflight catches it before any state changes".
 backend.  Proxmox queries `/nodes/{node}/status` for total + used
 memory and runs the same arithmetic.
 
-### 8. Ctrl+C during a remote run leaks resources on the remote
+### 7. Ctrl+C during a remote run leaks resources on the remote
 
 **Where:** `testrange/backends/libvirt/orchestrator.py` —
 `__exit__` / `_teardown` over a `qemu+ssh://` connection.
@@ -194,7 +172,7 @@ an ignored teardown error.
 - Skip-if-not-bound in the network teardown loop so unstarted
   run-phase networks don't pollute the log with teardown errors.
 
-### 9. WinRM communicator missing on Proxmox
+### 8. WinRM communicator missing on Proxmox
 
 **Where:** `testrange/backends/proxmox/` — no parallel to
 `testrange.backends.libvirt.guest_agent.GuestAgentCommunicator` /
@@ -234,7 +212,7 @@ case.
   hop through a PVE-side proxy (proxy via guest-agent if
   available; otherwise raise a helpful error).
 
-### 10. Migrate `_proxmox_prepare` off the `xorriso` binary
+### 9. Migrate `_proxmox_prepare` off the `xorriso` binary
 
 **Where:** ``testrange/vms/builders/_proxmox_prepare.py`` —
 :func:`prepare_iso_bytes` shells out to the ``xorriso`` CLI via

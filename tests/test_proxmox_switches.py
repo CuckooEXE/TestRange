@@ -318,9 +318,6 @@ class TestEnterStartsSwitchesFirst:
             ProxmoxOrchestrator, "_setup_vm_networks", lambda self: None,
         )
         monkeypatch.setattr(
-            ProxmoxOrchestrator, "_warn_if_unroutable", lambda self: None,
-        )
-        monkeypatch.setattr(
             ProxmoxOrchestrator, "_provision_vms", lambda self: None,
         )
         monkeypatch.setattr(

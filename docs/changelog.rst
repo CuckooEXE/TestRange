@@ -8,6 +8,44 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+Drop ``_warn_if_unroutable`` + pause-on-error prints exception
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Removed: ``ProxmoxOrchestrator._warn_if_unroutable`` and
+``_check_network_reachable``.**  The pair of methods shelled out
+to ``ip route get <gateway>`` to predict whether the test runner
+could reach a freshly-created SDN subnet, then logged a
+``sudo ip route add ... via ...`` hint when not.  Multiple smells:
+
+* Linux-only (``ip`` doesn't exist on macOS or Windows runners).
+* Brittle parsing of ``ip route get`` output, depending on
+  ``self._host`` matching the kernel's ``via`` field exactly.
+* Speculative — guesses at failure rather than letting the actual
+  operation surface a real error with diagnostic context.
+* Doesn't apply to ``communicator='guest-agent'`` at all (REST-
+  mediated, no routing needed) but always fires.
+
+The routing requirement is now documented in the Proxmox VM module
+docstring (``testrange/backends/proxmox/vm.py``) where users
+already look for backend-specific notes — including a clear
+"use ``communicator='guest-agent'`` to skip routing entirely"
+escape hatch.  TODO #6 is closed by the removal; remaining items
+keep their numbers (#7 → #6, #8 → #7, etc.).
+
+**Changed: ``TESTRANGE_PAUSE_ON_ERROR`` prints the triggering
+exception before the prompt.**  Operators debugging a paused run
+shouldn't have to scroll above the pause banner to find what
+failed.  ``pause_on_error_if_enabled`` now reads ``sys.exc_info()``
+(populated when called from inside an ``except`` handler — every
+caller does), formats the traceback, and writes it to stderr just
+above the "VMs are still alive" banner.  Outside an except
+handler the section is skipped cleanly (no spurious "None"s).
+
+Two new ``test_debug.py`` tests pin the contract:
+``test_prints_active_exception_traceback`` (in-handler case) and
+``test_no_traceback_when_called_outside_except``.  Suite is now
+1041 passed / 14 skipped / 0 failed.
+
 PVE first-boot machinery → SSH bootstrap (big simplification)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

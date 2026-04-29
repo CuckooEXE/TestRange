@@ -106,3 +106,41 @@ class TestPauseOnErrorIfEnabled:
         orch = MagicMock()
         orch.keep_alive_hints.side_effect = RuntimeError("boom")
         pause_on_error_if_enabled("test", orchestrator=orch)  # no raise
+
+    def test_prints_active_exception_traceback(
+        self, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """When called from inside an ``except`` handler, the prompt
+        prints the triggering exception's traceback first — operators
+        shouldn't have to grep above the prompt to find what failed.
+        """
+        monkeypatch.setenv("TESTRANGE_PAUSE_ON_ERROR", "1")
+        monkeypatch.setattr("builtins.input", lambda *_a, **_kw: "")
+
+        try:
+            raise ValueError("the specific failure operators care about")
+        except ValueError:
+            pause_on_error_if_enabled("setup phase failed")
+
+        out = capsys.readouterr().err
+        assert "Exception that triggered the pause" in out
+        assert "ValueError: the specific failure operators care about" in out
+        # Traceback frame info ("File ..., line ...") is in the format
+        # output too — sanity-check that we got real format_exception
+        # output rather than just a stringified exception.
+        assert 'File "' in out
+
+    def test_no_traceback_when_called_outside_except(
+        self, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Outside an ``except`` handler ``sys.exc_info`` is empty;
+        # the prompt must skip the traceback section cleanly rather
+        # than print "None".
+        monkeypatch.setenv("TESTRANGE_PAUSE_ON_ERROR", "1")
+        monkeypatch.setattr("builtins.input", lambda *_a, **_kw: "")
+        pause_on_error_if_enabled("just a debug stop")
+        out = capsys.readouterr().err
+        assert "Exception that triggered the pause" not in out
+        assert "None" not in out

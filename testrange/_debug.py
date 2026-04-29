@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from typing import TYPE_CHECKING
 
 from testrange._logging import get_logger
@@ -63,8 +64,21 @@ def pause_on_error_if_enabled(
     bar = "=" * 70
     sys.stderr.write(f"\n{bar}\n")
     sys.stderr.write(f"[{_ENV_VAR}] {reason}\n")
+
+    # Print the exception that triggered the pause first — operators
+    # debugging a paused run want to know WHAT failed before they
+    # start poking at logs.  ``sys.exc_info()`` returns the active
+    # exception when called from inside an ``except`` handler (every
+    # caller does); outside one it returns ``(None, None, None)``
+    # and we just skip the section.
+    exc_type, exc_value, exc_tb = sys.exc_info()
+    if exc_type is not None:
+        sys.stderr.write("\nException that triggered the pause:\n")
+        for line in traceback.format_exception(exc_type, exc_value, exc_tb):
+            sys.stderr.write(line)
+
     sys.stderr.write(
-        "VMs and networks are still alive.  Inspect now; teardown is\n"
+        "\nVMs and networks are still alive.  Inspect now; teardown is\n"
         "blocked until you press Enter (or send EOF / Ctrl+C).\n"
     )
     if orchestrator is not None:

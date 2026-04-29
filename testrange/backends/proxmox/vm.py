@@ -24,14 +24,17 @@ Gotchas
 -------
 
 * **Reachability.** PVE SDN subnets live on a bridge inside the PVE
-  node, so the test runner host needs an IP route through the PVE to
-  reach VM IPs.  Without it, SSH attach will time out at 300s.  Add
-  a route once per subnet on the test runner::
+  node, so a test runner using ``communicator='ssh'`` against an
+  inner-VM IP needs an IP route through the PVE to reach it.
+  Without one, the SSH attach times out at 300s.  Add the route
+  once per subnet on the test runner::
 
       sudo ip route add <subnet> via <pve-host>
 
-  The orchestrator probes the gateway at ``__enter__`` and logs a
-  clear WARNING with the exact command if the route is missing.
+  Use ``communicator='guest-agent'`` instead to skip routing
+  entirely — agent traffic hops through PVE's REST API on the
+  routable PVE-host IP, so the inner subnet doesn't need to be
+  reachable from the test runner at all.
 
 * **Root SSH on Debian cloud images.** Debian's stock sshd ships
   with ``PermitRootLogin prohibit-password`` and cloud-init defaults
