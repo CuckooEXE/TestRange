@@ -6,6 +6,13 @@ classes.  Each concern — VM, network, communicator, package —
 has its own ABC so you can add new backends without touching the
 orchestrator.
 
+This page covers the small ABCs (packages, communicators).  For
+the larger surfaces (a new install **builder** like cloud-init /
+Windows-autounattend / PVE-answer-toml, or a new **orchestrator
+backend** like libvirt / Proxmox), see :doc:`extending-checklists`
+— deep-dive checklists with the integration points you have to
+think through.
+
 New package managers
 --------------------
 

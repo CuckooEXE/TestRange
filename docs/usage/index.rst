@@ -16,4 +16,5 @@ User Guide
    communication
    debugging
    extending
+   extending-checklists
    examples
