@@ -138,41 +138,6 @@ class TestProxmoxAnswerBuilderCacheKey:
         # locality is worth a deliberate decision.
         assert b.cache_key(a) == b.cache_key(c)
 
-    def test_changes_with_first_boot_script_body(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The first-boot script body MUST be folded into the cache
-        key.  Without this, a fix to the first-boot mechanism (chmod
-        on the embedded script, a different render output, anything
-        that changes what the install actually does) regenerates the
-        prepared ISO but the qcow2 cache hits the old install — and
-        the new prepared ISO is never used.  Regression case: a
-        previous slice fixed a chmod bug on /proxmox-first-boot but
-        the user's run continued to fail because the qcow2 cache had
-        baked in the broken-permission install.
-        """
-        from testrange.packages import Apt
-        b = ProxmoxAnswerBuilder()
-        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
-
-        # Snapshot the cache key with the current rendered script.
-        key_before = b.cache_key(vm)
-
-        # Now simulate a code change to ``_first_boot_script``: same
-        # vm.pkgs, but the rendered body is different (e.g. logging
-        # added, chmod fix changing the embed path, etc.).
-        import testrange.vms.builders.proxmox_answer as pa
-        monkeypatch.setattr(
-            pa, "_first_boot_script",
-            lambda _vm: "#!/bin/bash\nexec > /var/log/foo 2>&1\n"
-                        "apt-get install -y dnsmasq\n",
-        )
-        key_after = b.cache_key(vm)
-
-        assert key_before != key_after, (
-            "Changing the first-boot script body must invalidate the "
-            "qcow2 cache; otherwise stale installs shadow new builds."
-        )
 
 
 # ----------------------------------------------------------------------
@@ -512,161 +477,39 @@ class TestBuildProxmoxSeedIsoBytes:
 
 
 # ----------------------------------------------------------------------
-# First-boot composition — vm.pkgs / vm.post_install_cmds → bash
+# Answer.toml stays minimal — no [first-boot] or other post-install
+# section.  PVE installer doesn't have a generic post-install hook
+# in answer.toml; for the dnsmasq-on-Hypervisor case TestRange runs
+# the bootstrap over SSH from
+# ProxmoxOrchestrator._bootstrap_pve_node instead of trying to
+# embed a script in the prepared installer ISO.
 # ----------------------------------------------------------------------
 
 
-class TestFirstBootScript:
-    """``_first_boot_script`` is the only seam between ``vm.pkgs`` /
-    ``vm.post_install_cmds`` and the PVE installer.  Before the
-    [first-boot] support landed both fields were silently ignored on
-    PVE Hypervisor builds; tests here pin the new behaviour."""
+class TestAnswerTomlOmitsFirstBoot:
+    """Pin that the answer.toml generator never emits a
+    ``[first-boot]`` section, regardless of ``vm.pkgs`` /
+    ``vm.post_install_cmds``.  An earlier slice tried to render a
+    first-boot script via answer.toml ``source = "from-iso"`` mode
+    — that needed a script embedded in the prepared installer ISO
+    via xorriso, plus cache-key invalidation across two layers, plus
+    a chmod-via-Rock-Ridge dance to make the embedded file
+    executable.  All ~300 lines deleted in favour of an SSH-side
+    bootstrap; this test guards against the section coming back."""
 
-    def test_returns_none_when_nothing_to_run(self) -> None:
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
-        # No pkgs, no post_install_cmds → no script.  Builder must
-        # then omit the [first-boot] section entirely (empty section
-        # is a hard error from PVE's TOML validator).
-        assert _first_boot_script(_proxmox_vm()) is None
+    def test_no_first_boot_with_no_pkgs(self) -> None:
+        toml = ProxmoxAnswerBuilder().build_answer_toml(_proxmox_vm())
+        assert "[first-boot]" not in toml
 
-    def test_apt_packages_become_one_install_line(self) -> None:
+    def test_no_first_boot_with_pkgs(self) -> None:
         from testrange.packages import Apt
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
         vm = _proxmox_vm(pkgs=[Apt("dnsmasq"), Apt("tmux")])
-        script = _first_boot_script(vm)
-        assert script is not None
-        # Single apt-get invocation so the network round trip happens
-        # once.
-        assert "apt-get install -y dnsmasq tmux" in script
-        assert "apt-get update" in script
-        assert "DEBIAN_FRONTEND=noninteractive" in script
-        assert script.startswith("#!/bin/bash\n")
-        assert "set -euo pipefail" in script
-
-    def test_apt_install_swaps_to_pve_no_subscription(self) -> None:
-        """The PVE installer pre-configures the enterprise repos
-        which 401 without a paid subscription; ``apt-get update``
-        then fails under ``set -euo pipefail`` and the install line
-        never runs.  Verify the script clears those repos and adds
-        ``pve-no-subscription`` BEFORE the apt-get update."""
-        from testrange.packages import Apt
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
-        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
-        script = _first_boot_script(vm)
-        assert script is not None
-
-        # Both .list (legacy) and .sources (PVE 9 deb822) removed.
-        assert "pve-enterprise.list" in script
-        assert "pve-enterprise.sources" in script
-        assert "ceph.list" in script
-        assert "ceph.sources" in script
-        # No-subscription repo added.
-        assert "pve-no-subscription" in script
-        assert "download.proxmox.com/debian/pve" in script
-        # Codename comes from /etc/os-release so PVE 8/9/future all
-        # get the right URL — pinned hardcoded codename would break
-        # on the next PVE release.
-        assert "VERSION_CODENAME" in script
-
-        # Critical ordering: the swap MUST happen before apt-get
-        # update, otherwise update hits the broken enterprise repo
-        # and the script aborts before reaching install.
-        swap_idx = script.index("pve-no-subscription")
-        update_idx = script.index("apt-get update")
-        install_idx = script.index("apt-get install")
-        assert swap_idx < update_idx < install_idx
-
-    def test_dnsmasq_install_is_followed_by_systemctl_disable(self) -> None:
-        """PVE's SDN spawns dnsmasq per-vnet via ``ifupdown`` hooks;
-        the default systemd ``dnsmasq.service`` ships enabled by the
-        apt postinst and binds ``0.0.0.0:53/67`` immediately,
-        conflicting with every per-vnet instance PVE tries to start.
-        Per the PVE SDN docs, the service must be disabled (and
-        stopped) right after install.  Pin the order: install, then
-        disable, then any free-form post_install_cmds."""
-        from testrange.packages import Apt
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
-        vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
-        script = _first_boot_script(vm)
-        assert script is not None
-
-        install_idx = script.index("apt-get install")
-        disable_idx = script.index("systemctl disable --now dnsmasq")
-        assert install_idx < disable_idx
-
-    def test_disable_only_when_dnsmasq_is_in_pkg_list(self) -> None:
-        # The systemctl-disable line is dnsmasq-specific.  A VM
-        # whose first-boot installs (say) ``tmux`` should not have
-        # a stray systemctl call on a service it didn't install.
-        from testrange.packages import Apt
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
-        vm = _proxmox_vm(pkgs=[Apt("tmux")])
-        script = _first_boot_script(vm)
-        assert script is not None
-        assert "systemctl disable --now dnsmasq" not in script
-
-    def test_no_repo_swap_when_only_post_install_cmds(self) -> None:
-        # When the spec carries no apt packages (only free-form
-        # post_install_cmds), no apt fetch happens — so the repo
-        # swap is unnecessary.  Skip it to keep the script minimal
-        # and avoid touching repo config on VMs that didn't ask
-        # for any packages.
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
-        vm = _proxmox_vm(post_install_cmds=["echo hello"])
-        script = _first_boot_script(vm)
-        assert script is not None
-        assert "pve-no-subscription" not in script
-        assert "apt-get update" not in script
-
-    def test_post_install_cmds_appended_verbatim(self) -> None:
-        from testrange.vms.builders.proxmox_answer import _first_boot_script
-        vm = _proxmox_vm(post_install_cmds=["echo hi", "systemctl start foo"])
-        script = _first_boot_script(vm)
-        assert script is not None
-        assert script.rstrip().endswith("systemctl start foo")
-        assert "echo hi" in script
-
-    def test_non_apt_packages_are_skipped_with_warning(
-        self, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # caplog interacts badly with TestRange's per-module logger
-        # config under the full suite — patch the module logger
-        # directly so the test stays deterministic regardless of run
-        # order.
-        from testrange.packages import Apt, Pip
-        from testrange.vms.builders import proxmox_answer
-        warnings: list[str] = []
-
-        class _SpyLog:
-            def warning(self, fmt: str, *args: Any) -> None:
-                warnings.append(fmt % args if args else fmt)
-
-        monkeypatch.setattr(proxmox_answer, "_log", _SpyLog())
-
-        vm = _proxmox_vm(pkgs=[Apt("dnsmasq"), Pip("requests")])
-        script = proxmox_answer._first_boot_script(vm)
-        assert script is not None
-        assert "dnsmasq" in script
-        # Pip wouldn't make sense on a PVE node and we don't try to
-        # render it as a broken command.
-        assert "requests" not in script
-        assert any("not an Apt package" in w for w in warnings)
-
-    def test_answer_toml_emits_first_boot_section_iff_script(self) -> None:
-        # The [first-boot] section in answer.toml must only appear
-        # when there's actually a script to run; an empty section
-        # is a TOML-validator error from the PVE installer.
-        from testrange.packages import Apt
-        toml_no_pkgs = ProxmoxAnswerBuilder().build_answer_toml(
-            _proxmox_vm()
-        )
-        toml_with_pkgs = ProxmoxAnswerBuilder().build_answer_toml(
-            _proxmox_vm(pkgs=[Apt("dnsmasq")])
-        )
-        assert "[first-boot]" not in toml_no_pkgs
-        assert "[first-boot]" in toml_with_pkgs
-        assert 'source = "from-iso"' in toml_with_pkgs
-        assert 'ordering = "fully-up"' in toml_with_pkgs
+        toml = ProxmoxAnswerBuilder().build_answer_toml(vm)
+        assert "[first-boot]" not in toml
+        # And the package names don't accidentally leak into the
+        # answer-toml as some misguided `[packages]` section.
+        assert "dnsmasq" not in toml
+        assert "tmux" not in toml
 
 
 # ----------------------------------------------------------------------
@@ -744,19 +587,19 @@ class TestPrepareInstallDomain:
         assert spec.uefi is False
         run.cleanup()
 
-    def test_first_boot_script_threads_to_prepared_iso(
+    def test_get_proxmox_prepared_iso_called_with_only_vanilla(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When ``vm.pkgs`` carries an apt package, the rendered
-        first-boot script must be passed to
-        ``cache.get_proxmox_prepared_iso`` (so the script lands at
-        ``/proxmox-first-boot`` on the prepared installer ISO PVE
-        actually reads).  Easy regression to spot if a future
-        refactor accidentally puts the script back on the seed ISO
-        — call args on the cache.get_proxmox_prepared_iso mock
-        nail it down."""
+        """The prepared-ISO call must NOT carry a first-boot script
+        kwarg.  Earlier slices threaded a rendered script through
+        ``cache.get_proxmox_prepared_iso(vanilla,
+        first_boot_script=...)`` to embed it on the prepared ISO via
+        xorriso ``--on-first-boot``; that machinery is gone (the
+        dnsmasq bootstrap runs over SSH from
+        ``ProxmoxOrchestrator._bootstrap_pve_node`` instead).
+        Regression guard against putting the kwarg back."""
         from testrange._run import RunDir
         from testrange.backends.libvirt.storage import LocalStorageBackend
         from testrange.packages import Apt
@@ -778,11 +621,8 @@ class TestPrepareInstallDomain:
         vm = _proxmox_vm(pkgs=[Apt("dnsmasq")])
         ProxmoxAnswerBuilder().prepare_install_domain(vm, run, cache)
 
-        script = cache.get_proxmox_prepared_iso.call_args.kwargs[
-            "first_boot_script"
-        ]
-        assert script is not None
-        assert "apt-get install -y dnsmasq" in script
+        call = cache.get_proxmox_prepared_iso.call_args
+        assert "first_boot_script" not in call.kwargs
         run.cleanup()
 
 

@@ -8,6 +8,76 @@ during the ``0.1.x`` series anything may change.
 Unreleased
 ----------
 
+PVE first-boot machinery → SSH bootstrap (big simplification)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ~300 lines of plumbing that delivered ``apt install dnsmasq``
+on a freshly-installed PVE node — answer.toml ``[first-boot]``
+section, xorriso script embedding at ``/proxmox-first-boot``,
+``chmod 0755`` on the temp file, ``PREP_VERSION`` cache invalidation
+constant, script-body folds in BOTH the qcow2 and prepared-ISO
+cache keys, ``ProxmoxOrchestrator.prepare_outer_vm`` injection of
+``Apt("dnsmasq")``, ``_first_boot_script`` rendering with repo swap
++ apt update + install + systemctl disable + tee logging — all
+deleted in favour of a single SSH-side bootstrap.
+
+**New:** ``ProxmoxOrchestrator._bootstrap_pve_node(hypervisor)``.
+Runs the same bash (repo swap, ``apt install -y dnsmasq``,
+``systemctl disable --now dnsmasq``) over the hypervisor's
+existing communicator, called from ``root_on_vm`` BEFORE
+``_wait_for_pveproxy``.  The bootstrap script is a static
+``_PVE_BOOTSTRAP_SCRIPT`` class constant — no caching, no
+invalidation logic, no ISO embedding.  Idempotent
+(``rm -f``, ``apt install -y``, ``systemctl disable --now`` all
+re-run cleanly), so a re-entry against an already-bootstrapped
+node is a no-op.
+
+**Deleted:**
+
+* ``_first_boot_script`` and the ``[first-boot]`` emission in
+  ``proxmox_answer.py::build_answer_toml``;
+* ``first_boot_script=`` parameter on
+  ``build_proxmox_seed_iso_bytes`` and ``prepare_iso_bytes``;
+* ``_first_boot_script`` body fold in
+  ``ProxmoxAnswerBuilder.cache_key`` and the prepared-ISO cache
+  key in ``CacheManager.get_proxmox_prepared_iso``;
+* ``PREP_VERSION`` constant + the version-hash fold;
+* ``ProxmoxOrchestrator.prepare_outer_vm`` override (back to the
+  base no-op — keeps the PVE Hypervisor's qcow2 cache hash clean
+  of any payload that would rebuild on every bootstrap-script
+  edit);
+* ``TestFirstBootScript`` class (8 tests) plus the cache-key /
+  cache-version tests in ``test_cache.py`` and
+  ``test_first_boot_script_threads_to_prepared_iso`` in
+  ``test_proxmox_answer.py``.
+
+**Added:** ``TestRunOnVm::test_runs_pve_node_bootstrap`` and
+``test_bootstrap_failure_raises`` cover the new code path; one new
+``TestAnswerTomlOmitsFirstBoot`` class as a regression guard so the
+``[first-boot]`` section never sneaks back into answer.toml.
+
+**Also fixed in the same pass: IPAM-vs-SDN-apply ordering bug.**
+The user's run after the previous "IPAM POST takes ``zone``"
+commit hit::
+
+  500 Internal Server Error: can't find any subnet for ip
+  192.168.230.2 at /usr/share/perl5/PVE/Network/SDN/Subnets.pm
+  line 115
+
+PVE's IPAM subnet lookup checks the *active* subnet table, but
+TestRange was POSTing IPAM entries before the first
+``cluster.sdn.put()`` apply — the freshly-created subnet was
+still in the "pending" state.  ``ProxmoxVirtualNetwork.start``
+now applies SDN config TWICE: once after subnet create (so the
+subnet leaves pending and IPAM can see it) and once after the
+IPAM POSTs (so the per-vnet dnsmasq config regenerates with the
+new ``dhcp-host=mac,ip`` directives).  Symmetric trade-off:
+two SDN reloads per network instead of one, but each network
+correctly reaches its end state without manual SDN reapply.
+
+**Net change:** ~300 lines deleted, ~50 added.  Suite:
+1039 passed / 14 skipped / 0 failed.
+
 Proxmox API audit against PVE 9.x schema (`apidoc.js`)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

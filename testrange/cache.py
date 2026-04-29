@@ -352,23 +352,16 @@ class CacheManager:
             tmp.rename(dest)
         return dest
 
-    def get_proxmox_prepared_iso(
-        self,
-        vanilla_iso: Path,
-        first_boot_script: str | None = None,
-    ) -> Path:
+    def get_proxmox_prepared_iso(self, vanilla_iso: Path) -> Path:
         """Return the local path to a prepared ProxMox installer ISO.
 
         The ProxMox VE installer only enters unattended (answer-file)
         mode when its initrd carries ``/auto-installer-mode.toml``.
         :func:`testrange.vms.builders._proxmox_prepare.prepare_iso_bytes`
         produces that modified ISO; we cache the output here keyed by
-        the SHA-256 of the vanilla ISO **plus the SHA-256 of the
-        first-boot script** when one is provided.  Same vanilla + same
-        script → cache hit; different script (e.g. a hypervisor that
-        adds an extra apt package) → fresh prep so PVE's
-        ``proxmox-fetch-answer`` finds the right ``/proxmox-first-boot``
-        executable.
+        the SHA-256 of the vanilla ISO.  One base ISO version → one
+        prepared copy, reused across every ProxMox VM that builds
+        against that source.
 
         Concurrent callers contend on a :class:`FileLock` sibling;
         whoever wins writes the prepared ISO atomically via a
@@ -378,45 +371,16 @@ class CacheManager:
         :param vanilla_iso: Local path to an unmodified PVE installer
             ISO (typically the result of :meth:`get_image` for a
             ProxMox VE release URL).
-        :param first_boot_script: Optional bash script body to embed
-            at ``/proxmox-first-boot`` on the prepared ISO.
-            Forwarded to ``prepare_iso_bytes``.  When ``None``, the
-            prepared ISO carries no first-boot hook (PVE skips the
-            section even if ``answer.toml`` requests it).
         :returns: Path to the prepared ISO under
-            ``<cache_root>/images/proxmox-prepared-<vanilla>[-<script>].iso``.
+            ``<cache_root>/images/proxmox-prepared-<sha>.iso``.
         :raises CacheError: On filesystem errors during prep.
         :raises ~testrange.vms.builders._proxmox_prepare.ProxmoxPrepareError:
             If the ISO can't be prepared (xorriso missing, vanilla
             ISO unreadable, etc.).
         """
-        import hashlib
-        from testrange.vms.builders._proxmox_prepare import (
-            PREP_VERSION,
-            prepare_iso_bytes,
-        )
+        from testrange.vms.builders._proxmox_prepare import prepare_iso_bytes
 
-        # Fold the prep-behaviour version into the cache key so
-        # that any change to *how* prepare_iso_bytes builds its
-        # output (e.g. the chmod-0755-on-the-first-boot-script fix
-        # in v2) invalidates every cached prepared ISO regardless
-        # of the input bytes.  Without this, code-side fixes to
-        # the prep step silently keep returning the broken cached
-        # file because the input hash hasn't changed.
-        version_sha = hashlib.sha256(
-            PREP_VERSION.encode("utf-8")
-        ).hexdigest()[:8]
-        vanilla_sha = _sha256_file(vanilla_iso)[:24]
-        if first_boot_script is None:
-            sha = f"{vanilla_sha}-{version_sha}"
-        else:
-            script_sha = hashlib.sha256(
-                first_boot_script.encode("utf-8")
-            ).hexdigest()[:12]
-            # Compose the cache key so vanilla-only prep and
-            # first-boot-augmented prep land in distinct files; the
-            # script hash is stable across runs of the same script.
-            sha = f"{vanilla_sha}-{version_sha}-fb{script_sha}"
+        sha = _sha256_file(vanilla_iso)[:24]
         dest = self.images_dir / f"proxmox-prepared-{sha}.iso"
         lock_path = self.images_dir / f"proxmox-prepared-{sha}.lock"
         with FileLock(str(lock_path), timeout=1800):
@@ -431,10 +395,7 @@ class CacheManager:
                 with log_duration(
                     _log, f"prepare proxmox ISO {vanilla_iso.name!r}"
                 ):
-                    prepare_iso_bytes(
-                        vanilla_iso, tmp,
-                        first_boot_script=first_boot_script,
-                    )
+                    prepare_iso_bytes(vanilla_iso, tmp)
                 os.chmod(tmp, 0o644)
                 tmp.rename(dest)
             except BaseException:

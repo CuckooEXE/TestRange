@@ -81,16 +81,18 @@ class TestPayloadInjection:
             for c in hv.post_install_cmds
         )
 
-    def test_proxmox_inner_injects_dnsmasq(self) -> None:
-        # PVE installer is the whole install phase, but TestRange's
-        # SDN dnsmasq integration needs the ``dnsmasq`` apt package
-        # on the node — ProxmoxOrchestrator.prepare_outer_vm stamps
-        # it onto the spec so the nested case satisfies its own
-        # _preflight_dnsmasq_installed by construction.  Nothing else
-        # gets injected (the PVE installer ISO covers pveproxy + the
-        # rest), and post_install_cmds stays empty.
+    def test_proxmox_inner_injects_nothing(self) -> None:
+        # PVE installer is the whole install phase — pveproxy and
+        # friends ship with the install ISO.  ``dnsmasq`` (needed
+        # for the SDN integration the inner orch relies on) is
+        # NOT injected via ``prepare_outer_vm`` because that would
+        # rebake the whole qcow2 cache whenever the bootstrap script
+        # changed; instead it's installed over SSH from
+        # ``ProxmoxOrchestrator._bootstrap_pve_node`` after the
+        # cached qcow2 boots.  Cache hash stays clean: empty pkgs
+        # / post_install_cmds.
         hv = Hypervisor(orchestrator=ProxmoxOrchestrator, **_common_kwargs())
-        assert [p.name for p in hv.pkgs] == ["dnsmasq"]
+        assert hv.pkgs == []
         assert hv.post_install_cmds == []
 
     def test_caller_pkgs_run_after_payload(self) -> None:
@@ -173,11 +175,12 @@ class TestPromotionByOuterOrchestrator:
         assert isinstance(promoted, LibvirtConcreteHypervisor)
         assert isinstance(promoted, LibvirtVM)
         assert promoted.orchestrator is ProxmoxOrchestrator
-        # ProxmoxOrchestrator.prepare_outer_vm injects ``dnsmasq``
-        # (needed for the SDN-dnsmasq integration the inner orch
-        # relies on).  No libvirt-daemon-system packages — those
-        # belong to the outer-libvirt-inner-libvirt path only.
-        assert [p.name for p in promoted.pkgs] == ["dnsmasq"]
+        # No package injection — ProxmoxOrchestrator doesn't override
+        # ``prepare_outer_vm`` (the dnsmasq the SDN integration needs
+        # is installed via SSH bootstrap from
+        # ``_bootstrap_pve_node`` AFTER the cached qcow2 boots, NOT
+        # via the install-time package list).
+        assert promoted.pkgs == []
 
     def test_proxmox_outer_libvirt_inner(self) -> None:
         hv = Hypervisor(orchestrator=LibvirtOrchestrator, **_common_kwargs())
@@ -196,10 +199,9 @@ class TestPromotionByOuterOrchestrator:
         assert isinstance(promoted, ProxmoxConcreteHypervisor)
         assert isinstance(promoted, ProxmoxVM)
         assert promoted.orchestrator is ProxmoxOrchestrator
-        # ``dnsmasq`` injected by prepare_outer_vm survives the
-        # cross-backend hop (same shape as the libvirt-inner test
-        # above, just with proxmox-on-proxmox instead).
-        assert [p.name for p in promoted.pkgs] == ["dnsmasq"]
+        # No package injection — ProxmoxOrchestrator doesn't override
+        # ``prepare_outer_vm``; bootstrap happens over SSH after boot.
+        assert promoted.pkgs == []
 
 
 class TestPromoteIdempotence:

@@ -35,7 +35,6 @@ from testrange._logging import get_logger
 from testrange.cache import vm_config_hash
 from testrange.devices import vNIC
 from testrange.exceptions import CloudInitError
-from testrange.packages.apt import Apt
 from testrange.vms.builders.base import Builder, InstallDomain, RunDomain
 from testrange.vms.images import resolve_image
 
@@ -197,22 +196,26 @@ class ProxmoxAnswerBuilder(Builder):
 
         Includes the same fields other install-phase builders use
         (iso, users, packages, post-install, disk size) plus the
-        ``[network]`` block of ``answer.toml`` AND the rendered
-        ``[first-boot]`` script body.  The network block ends up
-        baked into the installed system's
+        ``[network]`` block of ``answer.toml``.  The network block
+        ends up baked into the installed system's
         ``/etc/network/interfaces``, so two VMs with different
         static IPs produce different installed systems and MUST NOT
-        share a cache entry.  The first-boot script is what
-        actually installs ``vm.pkgs`` on a PVE host — folding it in
-        means any change to the script (different packages, the
-        rendering function being patched, the embed mechanism on
-        the prepared ISO being fixed) invalidates the qcow2 cache
-        too, so a stale install can't shadow a new build.  Without
-        this fold the prepared-ISO cache key changes when the script
-        changes (good) but the qcow2 cache hits the old install
-        (bad) and the new prepared ISO is never used.  SSH keys
-        are intentionally excluded so key rotation does not
-        invalidate cached builds.
+        share a cache entry.  SSH keys are intentionally excluded
+        so key rotation does not invalidate cached builds.
+
+        ``vm.pkgs`` and ``vm.post_install_cmds`` are hashed for
+        the cache-key contract but **not actually applied** by the
+        PVE installer — its answer.toml schema has no equivalent of
+        cloud-init's ``packages`` / ``runcmd``.  For nested
+        ``Hypervisor(orchestrator=ProxmoxOrchestrator)``, the
+        dnsmasq + repo-swap bootstrap runs over SSH from
+        :meth:`ProxmoxOrchestrator._bootstrap_pve_node` after the
+        cached qcow2 boots; user-supplied ``vm.pkgs`` /
+        ``vm.post_install_cmds`` on a PVE Hypervisor are silently
+        ignored today.  Documented here so a future slice
+        deliberately decides whether to plumb them (e.g. via the
+        SSH bootstrap) instead of re-introducing the prior
+        ``[first-boot]`` rendering machinery.
         """
         return vm_config_hash(
             iso=vm.iso,
@@ -220,15 +223,7 @@ class ProxmoxAnswerBuilder(Builder):
                 (c.username, c.password, c.sudo) for c in vm.users
             ],
             package_reprs=[repr(p) for p in vm.pkgs],
-            post_install_cmds=[
-                *vm.post_install_cmds,
-                *self._network_block(vm),
-                # Empty string (instead of None) when no script —
-                # keeps the hash stable for the no-pkgs / no-cmds
-                # case while still catching any change to the
-                # rendered script body.
-                _first_boot_script(vm) or "",
-            ],
+            post_install_cmds=[*vm.post_install_cmds, *self._network_block(vm)],
             disk_size=vm._primary_disk_size(),
         )
 
@@ -240,23 +235,9 @@ class ProxmoxAnswerBuilder(Builder):
     ) -> InstallDomain:
         # 1. Resolve the vanilla installer ISO (download if needed),
         #    then produce a prepared copy whose initrd drops into
-        #    auto-install / fetch-from-partition mode.  The first-
-        #    boot script (if vm.pkgs / vm.post_install_cmds asked
-        #    for one) lands on the *prepared installer ISO* at
-        #    ``/proxmox-first-boot`` — the literal path PVE's
-        #    ``proxmox-fetch-answer`` reads.  An earlier version put
-        #    it on the answer seed ISO; PVE's installer aborts with
-        #    "Failed loading first-boot executable from iso (was iso
-        #    prepared with --on-first-boot)" because it only checks
-        #    the installer ISO for that file.  Cache key on the
-        #    prepared-ISO side incorporates the script hash so VMs
-        #    with different first-boot payloads get distinct cached
-        #    images.
+        #    auto-install / fetch-from-partition mode.
         vanilla = resolve_image(vm.iso, cache)
-        prepared_local = cache.get_proxmox_prepared_iso(
-            vanilla,
-            first_boot_script=_first_boot_script(vm),
-        )
+        prepared_local = cache.get_proxmox_prepared_iso(vanilla)
         prepared_ref = cache.stage_source(prepared_local, run.storage)
 
         # 2. Blank OS disk — the PVE installer partitions it itself
@@ -265,14 +246,11 @@ class ProxmoxAnswerBuilder(Builder):
             vm.name, vm._primary_disk_size()
         )
 
-        # 3. Seed ISO carrying answer.toml only — the [first-boot]
-        #    section in the TOML points the installer at the
-        #    ``/proxmox-first-boot`` file we already embedded in the
-        #    prepared installer ISO above.  The filename convention
-        #    is builder-specific (the PVE installer looks for the
-        #    ``PROXMOX-AIS`` label rather than reading the filename),
-        #    so compose via the generic :meth:`RunDir.path_for`
-        #    helper rather than the cloud-init-specific seed helpers.
+        # 3. Seed ISO carrying answer.toml.  The PVE installer reads
+        #    it off the partition labelled ``PROXMOX-AIS`` (or
+        #    whatever ``self.partition_label`` is set to); compose
+        #    via the generic :meth:`RunDir.path_for` helper rather
+        #    than the cloud-init-specific seed helpers.
         seed_ref = run.path_for(f"{vm.name}-proxmox-answer.iso")
         run.storage.transport.write_bytes(
             seed_ref,
@@ -380,18 +358,6 @@ class ProxmoxAnswerBuilder(Builder):
 
         lines: list[str] = ["[global]", *global_block, "", "[network]",
                             *network_block, "", "[disk-setup]", *disk_block]
-
-        # Only emit ``[first-boot]`` when something actually wants to
-        # run there — a stray empty section trips PVE's installer
-        # validator.  When ``vm.pkgs`` (apt installs) or
-        # ``vm.post_install_cmds`` (free-form shell) are non-empty,
-        # ``_first_boot_script`` renders the bash that the embedded
-        # ``/first-boot`` script on the seed ISO will execute, and
-        # the ``[first-boot]`` block here points the installer at it.
-        if _first_boot_script(vm) is not None:
-            lines += ["", "[first-boot]",
-                      'source = "from-iso"',
-                      'ordering = "fully-up"']
         return "\n".join(lines) + "\n"
 
     def _network_block(self, vm: VM) -> list[str]:
@@ -474,108 +440,6 @@ def _primary_network_ref(vm: VM) -> vNIC | None:
     return None
 
 
-def _first_boot_script(vm: VM) -> str | None:
-    """Compose a ``/first-boot`` bash script for *vm* or return ``None``.
-
-    The PVE auto-installer's ``[first-boot] source = "from-iso"`` mode
-    runs an executable named ``first-boot`` from the answer ISO at
-    first boot of the freshly-installed system.  We use it as the
-    one-and-only seam between TestRange's per-VM ``vm.pkgs`` /
-    ``vm.post_install_cmds`` declarations and the PVE installer
-    (which otherwise has no notion of "extra packages" — its design
-    is "full PVE node, nothing else").
-
-    Two ingredients land in the script when present:
-
-    * Apt packages from ``vm.pkgs`` — collected into a single
-      ``apt-get install -y <pkg> <pkg>...`` line so the network round
-      trip happens once.  Non-Apt :class:`AbstractPackage` subclasses
-      (``Pip``, ``Dnf``, …) on a PVE host don't make sense and are
-      skipped with a warning rather than rendered as broken commands.
-
-    * Free-form shell from ``vm.post_install_cmds`` — appended verbatim
-      after the package install runs, so a hook that depends on a just-
-      installed package finds it on ``$PATH``.
-
-    Returns ``None`` when neither is set so callers can omit the
-    ``[first-boot]`` section entirely (an empty section is a hard
-    error from the installer's TOML validator).
-
-    The rendered script:
-
-    * runs under ``set -euo pipefail`` so any failed step aborts the
-      first boot — better to surface "dnsmasq install failed" than to
-      let the orchestrator's downstream preflight raise a misleading
-      "dnsmasq missing" error;
-    * sets ``DEBIAN_FRONTEND=noninteractive`` + ``apt-get update``
-      before any install so we don't need a separate package-cache
-      refresh hook in the spec;
-    * **swaps the PVE enterprise repos for ``pve-no-subscription``
-      before any apt fetch** when there are apt packages to install.
-      The PVE installer pre-configures
-      ``enterprise.proxmox.com/debian/{pve,ceph-squid}`` repos which
-      require a paid subscription; without one, ``apt-get update``
-      returns 401 against those mirrors and ``set -euo pipefail``
-      kills the script before the install line ever runs.  The swap
-      reads the Debian codename from ``/etc/os-release`` so PVE 8
-      (bookworm), PVE 9 (trixie), and any future PVE release all
-      get the right ``pve-no-subscription`` URL.  Subscription
-      users who actually want to keep the enterprise repos can
-      subclass the builder and override ``_first_boot_script``.
-    """
-    apt_pkgs = [p.name for p in vm.pkgs if isinstance(p, Apt)]
-    skipped = [p for p in vm.pkgs if not isinstance(p, Apt)]
-    for pkg in skipped:
-        _log.warning(
-            "VM %r: package %r is not an Apt package and will be "
-            "skipped on the PVE first-boot hook (PVE is Debian-based "
-            "and the answer-builder only knows ``Apt``).",
-            vm.name, pkg,
-        )
-    cmds = list(vm.post_install_cmds)
-    if not apt_pkgs and not cmds:
-        return None
-
-    lines: list[str] = [
-        "#!/bin/bash",
-        "set -euo pipefail",
-        "export DEBIAN_FRONTEND=noninteractive",
-    ]
-    if apt_pkgs:
-        # PVE installer pre-configures enterprise repos that 401
-        # without a paid subscription; clear them and add the
-        # public no-subscription mirror so apt-get update succeeds.
-        # Both ``.list`` (legacy) and ``.sources`` (PVE 9 deb822)
-        # variants are removed because PVE 9 ships the new format
-        # but older installers and admins may have either.
-        lines.extend([
-            "rm -f /etc/apt/sources.list.d/pve-enterprise.list",
-            "rm -f /etc/apt/sources.list.d/pve-enterprise.sources",
-            "rm -f /etc/apt/sources.list.d/ceph.list",
-            "rm -f /etc/apt/sources.list.d/ceph.sources",
-            'codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"',
-            'echo "deb http://download.proxmox.com/debian/pve $codename '
-            'pve-no-subscription" > '
-            "/etc/apt/sources.list.d/pve-no-subscription.list",
-        ])
-        lines.append("apt-get update -y")
-        lines.append("apt-get install -y " + " ".join(apt_pkgs))
-        if "dnsmasq" in apt_pkgs:
-            # PVE's SDN per-vnet dnsmasq integration spawns its own
-            # dnsmasq instances via ``ifupdown`` hooks, NOT via the
-            # systemd ``dnsmasq.service`` unit.  The unit ships
-            # enabled by the apt postinst and binds ``0.0.0.0:53/67``
-            # the moment install completes — which then collides with
-            # every per-vnet instance PVE tries to start on its
-            # bridge.  Per the PVE SDN docs (Datacenter > SDN >
-            # IPAM > "Configure dnsmasq"), the service must be
-            # disabled (and stopped) immediately after install so PVE
-            # owns dnsmasq end-to-end.
-            lines.append("systemctl disable --now dnsmasq")
-    lines.extend(cmds)
-    return "\n".join(lines) + "\n"
-
-
 def _root_credential(users: list[Credential]) -> Credential:
     """Return the root :class:`Credential` or raise.
 
@@ -623,14 +487,6 @@ def build_proxmox_seed_iso_bytes(
     tools.  The PVE installer's partition fetch-from mode searches
     attached filesystems for one with *volume_label* and reads
     ``answer.toml`` from its root.
-
-    The first-boot script (when the answer.toml asks for one via
-    ``[first-boot] source = "from-iso"``) does **not** live here —
-    PVE's ``proxmox-fetch-answer`` reads it from
-    ``/proxmox-first-boot`` on the *prepared installer ISO* instead.
-    See :func:`testrange.vms.builders._proxmox_prepare.prepare_iso_bytes`
-    and :meth:`testrange.cache.CacheManager.get_proxmox_prepared_iso`
-    for the embed + cache path.
 
     :param answer_toml: The rendered TOML content (see
         :meth:`ProxmoxAnswerBuilder.build_answer_toml`).

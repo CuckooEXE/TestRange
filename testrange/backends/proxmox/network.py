@@ -536,20 +536,29 @@ class ProxmoxVirtualNetwork(AbstractVirtualNetwork):
             # versions.
             self._subnet_id = self._lookup_subnet_id(client, vnet)
 
+            # Apply pending SDN config so the vnet + subnet leave
+            # the "pending" state.  This MUST happen before the IPAM
+            # POST below — PVE's IPAM lookup checks the active
+            # subnet table, and an unapplied subnet returns
+            # ``500 can't find any subnet for ip <addr>`` from
+            # ``Subnets.pm`` even though the subnet is queued.
+            client.cluster.sdn.put()
+
             # Push every (mac, ip) pair register_vm /
             # register_vm_with_mac collected before start() into PVE's
             # SDN IPAM.  PVE turns these into ``dhcp-host`` directives
             # in the auto-generated dnsmasq config, which gives us
-            # deterministic DHCP leases.  Done before the final
-            # ``put()`` so a single SDN apply covers vnet + subnet +
-            # IPAM entries.  Zone is required by the IPAM POST
-            # schema; resolved at the call site so this helper stays
-            # context-free.
+            # deterministic DHCP leases.  Zone is required by the
+            # IPAM POST schema; resolved at the call site so this
+            # helper stays context-free.
             self._push_ipam_entries(client, zone)
 
-            # Apply pending SDN config — without this, the vnet sits
-            # in a "pending" state and isn't actually attached to any
-            # bridge.
+            # Second apply — picks up the new IPAM entries so PVE
+            # regenerates the per-vnet dnsmasq config with the
+            # ``dhcp-host=mac,ip`` directives.  Without this the
+            # vnet has dnsmasq running but no MAC reservations,
+            # and registered guests get random dynamic-range
+            # leases instead of their pinned IP.
             client.cluster.sdn.put()
 
         except Exception as exc:

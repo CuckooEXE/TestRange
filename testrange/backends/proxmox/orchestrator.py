@@ -464,29 +464,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         """Return ``"proxmox"``."""
         return "proxmox"
 
-    @classmethod
-    def prepare_outer_vm(cls, hv: AbstractHypervisor) -> None:
-        """Inject the PVE-on-host payload onto the outer VM spec.
-
-        For an outer VM to serve as an inner
-        :class:`ProxmoxOrchestrator`'s host, the installed PVE node
-        needs ``dnsmasq`` so the SDN dnsmasq integration can spin up
-        a per-vnet DHCP+DNS service (the orchestrator's
-        :meth:`_preflight_dnsmasq_installed` enforces this on every
-        ``__enter__``).  The PVE installer ISO is otherwise self-
-        contained, so ``dnsmasq`` is the only extra package we stamp
-        on the spec — no extra ``post_install_cmds`` required.
-
-        Mirrors the libvirt orchestrator's payload pattern: prepend
-        rather than extend so the dependency is present before any
-        caller-supplied post-install commands run.
-
-        :param hv: The :class:`Hypervisor` being constructed (a
-            ``GenericVM + AbstractHypervisor``).  Mutate ``hv.pkgs``
-            in place.
-        """
-        from testrange.packages import Apt
-        hv.pkgs[:0] = [Apt("dnsmasq")]
+    # ``prepare_outer_vm`` deliberately not overridden: the PVE
+    # installer ISO is self-contained for everything *except*
+    # dnsmasq, and dnsmasq gets installed via SSH bootstrap in
+    # :meth:`_bootstrap_pve_node` rather than through
+    # ``vm.pkgs`` / answer.toml ``[first-boot]``.  Inheriting the
+    # base no-op keeps the Hypervisor spec's cache hash clean of
+    # any payload that would otherwise rebuild every cached PVE
+    # qcow2 if the bootstrap script changed.
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1723,6 +1708,19 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         if outer_cache is not None:
             outer_cache_root = outer_cache.root
 
+        # Install dnsmasq + swap to the no-subscription repo before
+        # the inner orchestrator's ``_preflight_dnsmasq_installed``
+        # runs.  The PVE installer doesn't ship dnsmasq; without this
+        # bootstrap step the inner orch refuses to enter.  Done over
+        # the hypervisor's communicator (SSH) — much simpler than the
+        # previous answer.toml ``[first-boot]`` mechanism, which
+        # needed a script embedded in the prepared installer ISO,
+        # cache-key invalidation in two places, a ``PREP_VERSION``
+        # constant for prep-behaviour changes, and a chmod-via-
+        # xorriso dance to make the script executable.  Idempotent:
+        # re-runs against an already-bootstrapped node are no-ops.
+        cls._bootstrap_pve_node(hypervisor)
+
         # PVE's pveproxy.service depends on pve-cluster + pvedaemon
         # and reaches active state noticeably later than sshd on a
         # freshly-installed VM (see ``examples/nested_proxmox_*``'s
@@ -1743,6 +1741,90 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             vms=hypervisor.vms,  # pyright: ignore[reportArgumentType]
             cache_root=outer_cache_root,
         )
+
+    _PVE_BOOTSTRAP_SCRIPT = """\
+set -euo pipefail
+exec > >(tee -a /var/log/testrange-pve-bootstrap.log) 2>&1
+echo "=== testrange PVE bootstrap starting at $(date -Is) ==="
+
+# Swap PVE enterprise repos for the public no-subscription mirror —
+# enterprise.proxmox.com 401s without a paid subscription, and
+# apt-get update under set -e tanks the rest of the script.  Both
+# .list (legacy) and .sources (PVE 9 deb822) variants removed so
+# we don't depend on which format the installer chose.
+rm -f /etc/apt/sources.list.d/pve-enterprise.list \\
+      /etc/apt/sources.list.d/pve-enterprise.sources \\
+      /etc/apt/sources.list.d/ceph.list \\
+      /etc/apt/sources.list.d/ceph.sources
+codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+echo "deb http://download.proxmox.com/debian/pve $codename pve-no-subscription" \\
+  > /etc/apt/sources.list.d/pve-no-subscription.list
+
+# Install dnsmasq for the SDN per-vnet DHCP+DNS integration; disable
+# the default systemd unit because PVE's SDN spawns its own dnsmasq
+# instances per-vnet via ifupdown hooks and the systemd unit's
+# 0.0.0.0:53/67 binds would conflict.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y dnsmasq
+systemctl disable --now dnsmasq
+
+echo "=== testrange PVE bootstrap completed at $(date -Is) ==="
+"""
+    """Bash script run via SSH on the freshly-installed PVE node
+    before the inner :class:`ProxmoxOrchestrator` tries to use it.
+
+    Replaces the answer.toml ``[first-boot]`` mechanism that
+    previously embedded a script in the prepared installer ISO via
+    xorriso.  That path needed cache-invalidation hooks across two
+    cache layers (the prepared ISO and the qcow2 install snapshot)
+    plus a ``PREP_VERSION`` constant to keep code-side fixes from
+    being silently shadowed by stale cached files — net ~300 lines
+    of plumbing.  Running the script post-install via the
+    hypervisor's communicator deletes all of it: nothing gets
+    cached, code-side fixes take effect immediately, and the script
+    body is just a plain Python string here.
+
+    Idempotency: every step (``rm -f``, ``apt install``,
+    ``systemctl disable --now``) is idempotent, so re-running
+    against an already-bootstrapped node is a no-op.  Output goes to
+    ``/var/log/testrange-pve-bootstrap.log`` for post-mortem when
+    something does go wrong.
+    """
+
+    @classmethod
+    def _bootstrap_pve_node(
+        cls,
+        hypervisor: AbstractHypervisor,
+        timeout_s: int = 300,
+    ) -> None:
+        """SSH-run :data:`_PVE_BOOTSTRAP_SCRIPT` on the hypervisor VM.
+
+        :raises OrchestratorError: If the bootstrap exits non-zero.
+            The log is captured to
+            ``/var/log/testrange-pve-bootstrap.log`` on the node
+            for post-mortem; the exception message includes the
+            tail of stderr to make the cause obvious without
+            requiring the operator to log in first.
+        """
+        _log.info(
+            "bootstrapping PVE node on %r (apt install dnsmasq + repo swap)",
+            hypervisor.name,
+        )
+        result = hypervisor.exec(
+            ["bash", "-c", cls._PVE_BOOTSTRAP_SCRIPT],
+            timeout=timeout_s,
+        )
+        if result.exit_code != 0:
+            stderr_tail = (result.stderr or b"").decode("utf-8", "replace")[-500:]
+            raise OrchestratorError(
+                f"PVE bootstrap on hypervisor {hypervisor.name!r} "
+                f"exited {result.exit_code}.  See "
+                "``/var/log/testrange-pve-bootstrap.log`` on the node "
+                "for full output.  stderr tail:\n"
+                f"{stderr_tail}"
+            )
+        _log.debug("PVE bootstrap on %r completed", hypervisor.name)
 
     @staticmethod
     def _wait_for_pveproxy(

@@ -541,11 +541,7 @@ class TestGetProxmoxPreparedIso:
 
         prep_calls: list[tuple[Path, Path]] = []
 
-        def _fake_prep(
-            src, dst, *,
-            partition_label="PROXMOX-AIS",
-            first_boot_script=None,
-        ):
+        def _fake_prep(src, dst, *, partition_label="PROXMOX-AIS"):
             prep_calls.append((Path(src), Path(dst)))
             Path(dst).write_bytes(b"prepared iso contents")
 
@@ -584,79 +580,6 @@ class TestGetProxmoxPreparedIso:
 
         second = c.get_proxmox_prepared_iso(vanilla)
         assert second == first
-
-    def test_prep_version_bump_invalidates_cache(
-        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Bumping ``PREP_VERSION`` must produce a different cached
-        file path — that's what guarantees a code-side fix to
-        ``prepare_iso_bytes`` (e.g. the chmod-0755 fix on the
-        first-boot script in v2) actually takes effect on the next
-        run instead of silently reusing the broken cached ISO from
-        the previous prep version."""
-        c = CacheManager(root=tmp_cache_root)
-        vanilla = tmp_cache_root / "vanilla.iso"
-        vanilla.write_bytes(b"v")
-
-        import testrange.vms.builders._proxmox_prepare as pp
-
-        prep_calls: list[Path] = []
-
-        def _fake_prep(_s, dst, **_kw):
-            prep_calls.append(Path(dst))
-            Path(dst).write_bytes(b"prepared")
-
-        monkeypatch.setattr(pp, "prepare_iso_bytes", _fake_prep)
-
-        # First prep with the current version.
-        first = c.get_proxmox_prepared_iso(vanilla)
-        # Bump the version (simulates a future code change to
-        # prep behaviour) and re-request — must MISS the cache and
-        # re-prep into a different file.
-        monkeypatch.setattr(pp, "PREP_VERSION", "v3-future-fix")
-        second = c.get_proxmox_prepared_iso(vanilla)
-        assert first != second, (
-            "PREP_VERSION must be in the cache key path; otherwise "
-            "code-side prep fixes silently reuse the broken cached file."
-        )
-        assert len(prep_calls) == 2
-
-    def test_first_boot_script_changes_cache_key(
-        self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Different first-boot scripts must produce different cached
-        prepared-ISO files — otherwise a hypervisor that needs apt
-        package X would silently get a prepared ISO with another
-        hypervisor's script (Y).  Cache key incorporates a sha256
-        prefix of the script body."""
-        c = CacheManager(root=tmp_cache_root)
-        vanilla = tmp_cache_root / "vanilla.iso"
-        vanilla.write_bytes(b"vanilla")
-
-        import testrange.vms.builders._proxmox_prepare as pp
-        seen_scripts: list[str | None] = []
-
-        def _fake_prep(_s, dst, *, partition_label="PROXMOX-AIS",
-                       first_boot_script=None):
-            seen_scripts.append(first_boot_script)
-            Path(dst).write_bytes((first_boot_script or "").encode() or b"-")
-
-        monkeypatch.setattr(pp, "prepare_iso_bytes", _fake_prep)
-
-        no_script = c.get_proxmox_prepared_iso(vanilla)
-        with_script_a = c.get_proxmox_prepared_iso(
-            vanilla, first_boot_script="apt install dnsmasq",
-        )
-        with_script_b = c.get_proxmox_prepared_iso(
-            vanilla, first_boot_script="apt install nginx",
-        )
-        # All three are distinct files.
-        assert len({no_script, with_script_a, with_script_b}) == 3
-        # And each ran the prep exactly once (no script collapsed
-        # the two non-empty cases into one).
-        assert seen_scripts == [
-            None, "apt install dnsmasq", "apt install nginx",
-        ]
 
     def test_partial_cleaned_on_prep_failure(
         self, tmp_cache_root: Path, monkeypatch: pytest.MonkeyPatch,
