@@ -1748,19 +1748,6 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         if outer_cache is not None:
             outer_cache_root = outer_cache.root
 
-        # Install dnsmasq + swap to the no-subscription repo before
-        # the inner orchestrator's ``_preflight_dnsmasq_installed``
-        # runs.  The PVE installer doesn't ship dnsmasq; without this
-        # bootstrap step the inner orch refuses to enter.  Done over
-        # the hypervisor's communicator (SSH) — much simpler than the
-        # previous answer.toml ``[first-boot]`` mechanism, which
-        # needed a script embedded in the prepared installer ISO,
-        # cache-key invalidation in two places, a ``PREP_VERSION``
-        # constant for prep-behaviour changes, and a chmod-via-
-        # xorriso dance to make the script executable.  Idempotent:
-        # re-runs against an already-bootstrapped node are no-ops.
-        cls._bootstrap_pve_node(hypervisor)
-
         # PVE's pveproxy.service depends on pve-cluster + pvedaemon
         # and reaches active state noticeably later than sshd on a
         # freshly-installed VM (see ``examples/nested_proxmox_*``'s
@@ -1770,6 +1757,15 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # the wait here keeps ``__enter__`` simple — by the time
         # the ExitStack enters the returned orchestrator, the API
         # is ready.
+        #
+        # The dnsmasq install + repo-swap that used to run here is
+        # now baked into the cached PVE template by
+        # :meth:`ProxmoxAnswerBuilder.post_install_hook`, fired in
+        # the install phase on the bare-metal install network (always
+        # ``internet=True``).  The cache snapshot therefore contains
+        # everything the inner orchestrator needs — meaning the
+        # hypervisor's run-phase network can be ``internet=False``
+        # without breaking nested provisioning.
         cls._wait_for_pveproxy(hypervisor)
 
         return cls(
@@ -1782,89 +1778,18 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             cache_root=outer_cache_root,
         )
 
-    _PVE_BOOTSTRAP_SCRIPT = """\
-set -euo pipefail
-exec > >(tee -a /var/log/testrange-pve-bootstrap.log) 2>&1
-echo "=== testrange PVE bootstrap starting at $(date -Is) ==="
-
-# Swap PVE enterprise repos for the public no-subscription mirror —
-# enterprise.proxmox.com 401s without a paid subscription, and
-# apt-get update under set -e tanks the rest of the script.  Both
-# .list (legacy) and .sources (PVE 9 deb822) variants removed so
-# we don't depend on which format the installer chose.
-rm -f /etc/apt/sources.list.d/pve-enterprise.list \\
-      /etc/apt/sources.list.d/pve-enterprise.sources \\
-      /etc/apt/sources.list.d/ceph.list \\
-      /etc/apt/sources.list.d/ceph.sources
-codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-echo "deb http://download.proxmox.com/debian/pve $codename pve-no-subscription" \\
-  > /etc/apt/sources.list.d/pve-no-subscription.list
-
-# Install dnsmasq for the SDN per-vnet DHCP+DNS integration; disable
-# the default systemd unit because PVE's SDN spawns its own dnsmasq
-# instances per-vnet via ifupdown hooks and the systemd unit's
-# 0.0.0.0:53/67 binds would conflict.
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y dnsmasq
-systemctl disable --now dnsmasq
-
-echo "=== testrange PVE bootstrap completed at $(date -Is) ==="
-"""
-    """Bash script run via SSH on the freshly-installed PVE node
-    before the inner :class:`ProxmoxOrchestrator` tries to use it.
-
-    Replaces the answer.toml ``[first-boot]`` mechanism that
-    previously embedded a script in the prepared installer ISO via
-    xorriso.  That path needed cache-invalidation hooks across two
-    cache layers (the prepared ISO and the qcow2 install snapshot)
-    plus a ``PREP_VERSION`` constant to keep code-side fixes from
-    being silently shadowed by stale cached files — net ~300 lines
-    of plumbing.  Running the script post-install via the
-    hypervisor's communicator deletes all of it: nothing gets
-    cached, code-side fixes take effect immediately, and the script
-    body is just a plain Python string here.
-
-    Idempotency: every step (``rm -f``, ``apt install``,
-    ``systemctl disable --now``) is idempotent, so re-running
-    against an already-bootstrapped node is a no-op.  Output goes to
-    ``/var/log/testrange-pve-bootstrap.log`` for post-mortem when
-    something does go wrong.
-    """
-
-    @classmethod
-    def _bootstrap_pve_node(
-        cls,
-        hypervisor: AbstractHypervisor,
-        timeout_s: int = 300,
-    ) -> None:
-        """SSH-run :data:`_PVE_BOOTSTRAP_SCRIPT` on the hypervisor VM.
-
-        :raises OrchestratorError: If the bootstrap exits non-zero.
-            The log is captured to
-            ``/var/log/testrange-pve-bootstrap.log`` on the node
-            for post-mortem; the exception message includes the
-            tail of stderr to make the cause obvious without
-            requiring the operator to log in first.
-        """
-        _log.info(
-            "bootstrapping PVE node on %r (apt install dnsmasq + repo swap)",
-            hypervisor.name,
-        )
-        result = hypervisor.exec(
-            ["bash", "-c", cls._PVE_BOOTSTRAP_SCRIPT],
-            timeout=timeout_s,
-        )
-        if result.exit_code != 0:
-            stderr_tail = (result.stderr or b"").decode("utf-8", "replace")[-500:]
-            raise OrchestratorError(
-                f"PVE bootstrap on hypervisor {hypervisor.name!r} "
-                f"exited {result.exit_code}.  See "
-                "``/var/log/testrange-pve-bootstrap.log`` on the node "
-                "for full output.  stderr tail:\n"
-                f"{stderr_tail}"
-            )
-        _log.debug("PVE bootstrap on %r completed", hypervisor.name)
+    # ``_PVE_BOOTSTRAP_SCRIPT`` and ``_bootstrap_pve_node`` previously
+    # lived here — the bootstrap (apt install dnsmasq, repo swap) was
+    # SSH-run from this orchestrator on a fresh PVE hypervisor *after*
+    # the VM had been swapped to its final user-declared run network.
+    # That broke any topology where the run network has
+    # ``internet=False``: apt-get update couldn't reach the public
+    # mirror.  The bootstrap now lives in
+    # :meth:`ProxmoxAnswerBuilder.post_install_hook` and runs in the
+    # install phase on the bare-metal install network (always
+    # ``internet=True``).  Result: the cached PVE template is fully
+    # bootstrapped, and run-phase network internet state becomes
+    # irrelevant to nested provisioning.
 
     @staticmethod
     def _wait_for_pveproxy(

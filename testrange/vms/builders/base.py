@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.cache import CacheManager
+    from testrange.communication.base import AbstractCommunicator
     from testrange.vms.base import AbstractVM as VM
 
 
@@ -220,6 +221,74 @@ class Builder(ABC):
             f"{type(self).__name__}.ready_image() is only meaningful for "
             "builders whose needs_install_phase() returns False."
         )
+
+    def has_post_install_hook(self) -> bool:
+        """Whether this builder needs a re-boot for :meth:`post_install_hook`.
+
+        The orchestrator's install path checks this before re-starting
+        the just-installed VM to run the hook.  Re-booting the install
+        VM is a 30-60s round trip on a cache miss; skipping it for
+        builders with the default no-op hook keeps the cache-hit path
+        unchanged for cloud-init / NoOp / Windows builds.
+
+        Default is ``False``.  Override to ``True`` whenever
+        :meth:`post_install_hook` is overridden — the orchestrator
+        otherwise won't call your hook.
+        """
+        return False
+
+    def post_install_hook(
+        self,
+        vm: VM,
+        communicator: AbstractCommunicator,
+    ) -> None:
+        """Run setup commands inside the installed system before the
+        cache snapshot is taken.
+
+        Called by the orchestrator on a freshly **re-booted** install VM
+        — the install phase ended in a clean poweroff (cloud-init's
+        ``power_state: poweroff`` or PVE answer.toml's
+        ``reboot-mode = "power-off"``), then the orchestrator restarts
+        the same VM so this hook can SSH in.  After the hook returns,
+        the orchestrator issues a clean shutdown and snapshots the
+        result.
+
+        Default is a no-op.  Override to bake setup state (extra
+        package installs, repository swaps, persistent config files)
+        into the cached install artifact, so the run phase doesn't
+        depend on internet connectivity from the run-phase network.
+
+        :param vm: The VM spec being built.
+        :param communicator: A live :class:`AbstractCommunicator`
+            attached to the install VM on the install network.
+        :raises Exception: Anything raised by the hook propagates up;
+            the orchestrator treats it as an install-phase failure.
+
+        .. note::
+
+           Implementations must contribute a deterministic digest of
+           any script body or input they consume to
+           :meth:`post_install_cache_key_extra` so cached install
+           artifacts are invalidated when the hook changes.  Without
+           it, an old cached artifact would silently survive a hook
+           edit and the bug it was supposed to fix would persist.
+        """
+        del vm, communicator  # default no-op
+
+    def post_install_cache_key_extra(self, vm: VM) -> str:
+        """Return an extra string folded into the install cache key.
+
+        Default is ``""`` (no contribution).  Overriders that
+        implement :meth:`post_install_hook` return a deterministic
+        digest of the hook's input (typically a SHA-256 prefix of the
+        script body) so any edit to what the hook does invalidates
+        every cached install artifact built with the previous version.
+
+        Folded into :meth:`cache_key` by concrete implementations that
+        need it; the ABC does not assume a specific cache-key shape.
+        """
+        del vm
+        return ""
 
 
 __all__ = ["Builder", "InstallDomain", "RunDomain"]

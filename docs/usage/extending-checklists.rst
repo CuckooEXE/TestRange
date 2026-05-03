@@ -43,10 +43,16 @@ Pre-flight: do you actually need a new builder?
   format on top of the same shape is enough — :class:`ProxmoxAnswerBuilder`
   is exactly this (PVE's answer.toml instead of cloud-init's
   user-data).
-* Does your install need post-install hooks at run time, not install
-  time?  That's an orchestrator concern, not a builder concern —
-  see ``ProxmoxOrchestrator._bootstrap_pve_node`` for the SSH-side
-  pattern.
+* Does your install need post-install hooks that should be baked
+  into the cached install artifact (so they don't need to re-run
+  on every boot)?  Override :meth:`Builder.has_post_install_hook`
+  to ``True`` and :meth:`Builder.post_install_hook` to do the work
+  over an SSH-attached communicator — see
+  :meth:`ProxmoxAnswerBuilder.post_install_hook` for the dnsmasq
+  + repo-swap case.  The orchestrator re-boots the install VM on
+  the install network and runs the hook before snapshotting, so
+  the hook's effects survive into the cached artifact and the
+  run-phase network's internet state doesn't matter.
 
 The builder ABC
 ~~~~~~~~~~~~~~~
@@ -382,15 +388,20 @@ This is the most subtle area.  Read it twice.
     EMPTY when possible — every package you stamp invalidates the
     outer VM's qcow2 cache hash, so a bootstrap script change
     rebuilds the entire installed image.  See
-    ``ProxmoxOrchestrator._bootstrap_pve_node`` for the SSH-side
-    alternative (run apt installs after the cached qcow2 boots,
-    not as part of the install).
+    :meth:`ProxmoxAnswerBuilder.post_install_hook` for the
+    install-phase-SSH alternative (run apt installs while the VM
+    is still on the bare-metal install network with internet,
+    bake them into the cached artifact, no qcow2 rebake on
+    bootstrap-script edits — only the digest in
+    ``post_install_cache_key_extra`` changes).
 15. ``root_on_vm(hypervisor, outer)`` — class method that
     constructs a fresh inner orchestrator instance pointing at
     *hypervisor*'s reachable IP / API.  Doesn't enter it — the
-    outer's ExitStack does that.  This is the right hook for
-    SSH-side bootstrap (see #14) — run it inside ``root_on_vm``
-    before the inner ``__enter__`` fires.
+    outer's ExitStack does that.  Used to be the place to SSH-run
+    bootstrap scripts; that pattern is deprecated in favour of
+    :meth:`Builder.post_install_hook` (see #14) which works on
+    airgapped run-phase networks because the bootstrap is baked
+    in during install.
 
 API surface
 ~~~~~~~~~~~

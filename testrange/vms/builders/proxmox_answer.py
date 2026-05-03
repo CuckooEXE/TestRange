@@ -23,6 +23,7 @@ the prepared copy so each ISO version is prepared only once.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import ipaddress
 import re
@@ -40,6 +41,7 @@ from testrange.vms.images import resolve_image
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.cache import CacheManager
+    from testrange.communication.base import AbstractCommunicator
     from testrange.credentials import Credential
     from testrange.packages import AbstractPackage
     from testrange.vms.base import AbstractVM as VM
@@ -49,6 +51,62 @@ _log = get_logger(__name__)
 
 _DEFAULT_PARTITION_LABEL = "PROXMOX-AIS"
 """Stock label the PVE installer searches for in ``--fetch-from partition`` mode."""
+
+
+_PVE_BOOTSTRAP_SCRIPT = """\
+set -euo pipefail
+exec > >(tee -a /var/log/testrange-pve-bootstrap.log) 2>&1
+echo "=== testrange PVE bootstrap starting at $(date -Is) ==="
+
+# Swap PVE enterprise repos for the public no-subscription mirror —
+# enterprise.proxmox.com 401s without a paid subscription, and
+# apt-get update under set -e tanks the rest of the script.  Both
+# .list (legacy) and .sources (PVE 9 deb822) variants removed so
+# we don't depend on which format the installer chose.
+rm -f /etc/apt/sources.list.d/pve-enterprise.list \\
+      /etc/apt/sources.list.d/pve-enterprise.sources \\
+      /etc/apt/sources.list.d/ceph.list \\
+      /etc/apt/sources.list.d/ceph.sources
+codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
+echo "deb http://download.proxmox.com/debian/pve $codename pve-no-subscription" \\
+  > /etc/apt/sources.list.d/pve-no-subscription.list
+
+# Install dnsmasq for the SDN per-vnet DHCP+DNS integration; disable
+# the default systemd unit because PVE's SDN spawns its own dnsmasq
+# instances per-vnet via ifupdown hooks and the systemd unit's
+# 0.0.0.0:53/67 binds would conflict.
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y dnsmasq
+systemctl disable --now dnsmasq
+
+echo "=== testrange PVE bootstrap completed at $(date -Is) ==="
+"""
+"""Bash script run inside the freshly-installed PVE node, baked into
+the cached install artifact via :meth:`ProxmoxAnswerBuilder.post_install_hook`.
+
+Runs over SSH on the install network (always ``internet=True``) before
+the install VM is templated, so the cached PVE template carries
+dnsmasq + the no-subscription repo regardless of whatever run-phase
+network the orchestrator later swaps the clone onto.  This is what
+makes airgapped run topologies work — without it the run VM would
+need internet to apt-get install dnsmasq at first inner-orchestrator
+entry.
+
+Idempotency: every step (``rm -f``, ``apt install``,
+``systemctl disable --now``) is idempotent, so re-running against an
+already-bootstrapped node is a no-op.  Output goes to
+``/var/log/testrange-pve-bootstrap.log`` inside the guest for
+post-mortem when something does go wrong.
+"""
+
+
+_PVE_BOOTSTRAP_TIMEOUT_S = 300
+"""Maximum seconds for the bootstrap to complete.
+
+Apt-get update + install on a cold PVE node typically takes 30-90s.
+The cap here is generous to absorb slow public-mirror tails without
+masking a true hang."""
 
 
 class ProxmoxAnswerBuilder(Builder):
@@ -208,13 +266,15 @@ class ProxmoxAnswerBuilder(Builder):
         cloud-init's ``packages`` / ``runcmd``.  For nested
         ``Hypervisor(orchestrator=ProxmoxOrchestrator)``, the
         dnsmasq + repo-swap bootstrap runs over SSH from
-        :meth:`ProxmoxOrchestrator._bootstrap_pve_node` after the
-        cached qcow2 boots; user-supplied ``vm.pkgs`` /
-        ``vm.post_install_cmds`` on a PVE Hypervisor are silently
-        ignored today.  Documented here so a future slice
-        deliberately decides whether to plumb them (e.g. via the
-        SSH bootstrap) instead of re-introducing the prior
-        ``[first-boot]`` rendering machinery.
+        :meth:`post_install_hook` during the install phase (re-boot
+        between SHUTOFF and snapshot, on the bare-metal install
+        network) so it's baked into the cached PVE template.
+        User-supplied ``vm.pkgs`` / ``vm.post_install_cmds`` on a
+        PVE Hypervisor are silently ignored today.  Documented here
+        so a future slice deliberately decides whether to plumb
+        them (e.g. by extending :meth:`post_install_hook`) instead
+        of re-introducing the prior ``[first-boot]`` rendering
+        machinery.
         """
         return vm_config_hash(
             iso=vm.iso,
@@ -222,9 +282,80 @@ class ProxmoxAnswerBuilder(Builder):
                 (c.username, c.password, c.sudo) for c in vm.users
             ],
             package_reprs=[repr(p) for p in vm.pkgs],
-            post_install_cmds=[*vm.post_install_cmds, *self._network_block(vm)],
+            post_install_cmds=[
+                *vm.post_install_cmds,
+                *self._network_block(vm),
+                # Fold the bootstrap script digest into the cache key
+                # so any edit to ``_PVE_BOOTSTRAP_SCRIPT`` invalidates
+                # every cached PVE template — the bootstrap is baked
+                # into the installed system by ``post_install_hook``,
+                # so a stale template would silently survive the fix.
+                f"post_install_hook={self.post_install_cache_key_extra(vm)}",
+            ],
             disk_size=vm._primary_disk_size(),
         )
+
+    def has_post_install_hook(self) -> bool:
+        """Always ``True`` — :meth:`post_install_hook` runs the PVE
+        bootstrap (apt install dnsmasq, repo swap) and is required for
+        the cached install artifact to work on airgapped run-phase
+        networks.
+        """
+        return True
+
+    def post_install_hook(
+        self,
+        vm: VM,
+        communicator: AbstractCommunicator,
+    ) -> None:
+        """Run :data:`_PVE_BOOTSTRAP_SCRIPT` on the freshly-installed
+        PVE node so the cached install artifact carries dnsmasq +
+        the no-subscription repo.
+
+        The orchestrator re-starts the install VMID on the install
+        network (always ``internet=True``) before calling this; the
+        script reaches ``download.proxmox.com`` and ``deb.debian.org``
+        through the install-network gateway regardless of whatever
+        run-phase network the clone will eventually land on.
+
+        :raises CloudInitError: If the bootstrap exits non-zero.  The
+            exception message includes the tail of stderr to make the
+            cause obvious without requiring an SSH login.  The full
+            log is at ``/var/log/testrange-pve-bootstrap.log`` inside
+            the guest.
+        """
+        del vm  # unused — bootstrap is target-agnostic
+        _log.info(
+            "running PVE bootstrap (apt install dnsmasq + repo swap) "
+            "over %s; baking into cached install artifact",
+            type(communicator).__name__,
+        )
+        result = communicator.exec(
+            ["bash", "-c", _PVE_BOOTSTRAP_SCRIPT],
+            timeout=_PVE_BOOTSTRAP_TIMEOUT_S,
+        )
+        if result.exit_code != 0:
+            stderr_tail = (result.stderr or b"").decode("utf-8", "replace")[-500:]
+            raise CloudInitError(
+                f"PVE bootstrap exited {result.exit_code}.  See "
+                "``/var/log/testrange-pve-bootstrap.log`` inside the "
+                "install VM for full output.  stderr tail:\n"
+                f"{stderr_tail}"
+            )
+
+    def post_install_cache_key_extra(self, vm: VM) -> str:
+        """Return a deterministic 24-hex-char digest of
+        :data:`_PVE_BOOTSTRAP_SCRIPT`.
+
+        Matches the 24-char width of :func:`vm_config_hash`'s output so
+        debug logs that print partial hashes line up.  Folded into
+        :meth:`cache_key` to invalidate cached templates whenever the
+        bootstrap script changes.
+        """
+        del vm
+        return hashlib.sha256(
+            _PVE_BOOTSTRAP_SCRIPT.encode("utf-8"),
+        ).hexdigest()[:24]
 
     def prepare_install_domain(
         self,
@@ -519,3 +650,8 @@ __all__ = [
     "ProxmoxAnswerBuilder",
     "build_proxmox_seed_iso_bytes",
 ]
+
+# ``_PVE_BOOTSTRAP_SCRIPT`` and ``_PVE_BOOTSTRAP_TIMEOUT_S`` are
+# intentionally underscore-prefixed (module-private constants) but
+# imported by the proxmox backend's VM build path and by tests, so
+# they live above the ``__all__`` list rather than in it.

@@ -98,6 +98,45 @@ class TestBuilderContract:
     def test_needs_install_phase(self, builder: Builder, expected: bool) -> None:
         assert builder.needs_install_phase() is expected
 
+    @pytest.mark.parametrize("builder", [
+        CloudInitBuilder(),
+        WindowsUnattendedBuilder(),
+        NoOpBuilder(),
+    ])
+    def test_has_post_install_hook_default_is_false(
+        self, builder: Builder,
+    ) -> None:
+        # Default is False — cloud-init / Windows / NoOp builders
+        # don't need the orchestrator to re-boot for a hook.
+        assert builder.has_post_install_hook() is False
+
+    @pytest.mark.parametrize("builder", [
+        CloudInitBuilder(),
+        WindowsUnattendedBuilder(),
+        NoOpBuilder(),
+    ])
+    def test_post_install_hook_default_is_no_op(self, builder: Builder) -> None:
+        # Default hook does nothing.  Builders that need to bake
+        # bootstrap state into the cached install artifact (e.g.
+        # ProxmoxAnswerBuilder) override.
+        comm = MagicMock()
+        result = builder.post_install_hook(_linux_vm(), comm)
+        assert result is None
+        comm.exec.assert_not_called()
+
+    @pytest.mark.parametrize("builder", [
+        CloudInitBuilder(),
+        WindowsUnattendedBuilder(),
+        NoOpBuilder(),
+    ])
+    def test_post_install_cache_key_extra_default_is_empty(
+        self, builder: Builder,
+    ) -> None:
+        # Default contributes nothing to the cache key.  Overriders
+        # return a deterministic content-derived digest so script
+        # edits invalidate cached templates.
+        assert builder.post_install_cache_key_extra(_linux_vm()) == ""
+
 
 # ----------------------------------------------------------------------
 # CloudInitBuilder

@@ -31,6 +31,7 @@ from testrange._logging import get_logger, log_duration
 from testrange.backends.libvirt.guest_agent import GuestAgentCommunicator
 from testrange.cache import CacheManager
 from testrange.communication.base import AbstractCommunicator
+from testrange.communication.ssh import SSHCommunicator
 from testrange.backends.libvirt.devices import LibvirtHardDrive
 from testrange.devices import (
     AbstractHardDrive,
@@ -118,6 +119,17 @@ libvirt errors.  At :data:`_POLL_INTERVAL` = 5s that's ~25 seconds of
 lost connection before we bail — fast enough to surface a dead
 libvirtd within the user's attention span, slow enough to tolerate a
 hiccup during a heavy install."""
+
+_POST_HOOK_SSH_TIMEOUT_S = 300
+"""Seconds to wait for sshd on the just-installed VM before running
+the post-install hook.  Generous: a freshly-installed PVE 9 takes
+30-60s from VM start to sshd accept, plus paramiko's fresh-connection
+backoff window."""
+
+_POST_HOOK_SHUTDOWN_TIMEOUT_S = 180
+"""Seconds to wait for clean shutdown after the post-install hook
+returns.  Bash + apt + systemd shutdown converge in well under a
+minute on a healthy node; the cap absorbs slow-disk outliers."""
 
 _LINUX_KEY_SPACE = 57
 """Linux keycode for SPACE — consumes the 'Press any key' prompt without
@@ -641,6 +653,7 @@ class LibvirtVM(AbstractVM):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
+        install_network_ip: str = "",
     ) -> str:
         """Produce a runnable disk image for this VM.
 
@@ -701,6 +714,7 @@ class LibvirtVM(AbstractVM):
                 run=run,
                 install_network_name=install_network_name,
                 install_network_mac=install_network_mac,
+                install_network_ip=install_network_ip,
                 h=h,
             )
 
@@ -712,11 +726,20 @@ class LibvirtVM(AbstractVM):
         install_network_name: str,
         install_network_mac: str,
         h: str,
+        install_network_ip: str = "",
     ) -> str:
         """Boot the builder's install domain and snapshot the result.
 
         Factored out of :meth:`build` so the build lock only wraps the
         check-install-store sequence.
+
+        :param install_network_ip: IP the install-network's DHCP /
+            static-config assigned to this VM, used by
+            :meth:`Builder.post_install_hook` (when overridden) to
+            reach the just-installed VM over SSH for bootstrap
+            commands that must be baked into the cached artifact.
+            Empty string (default) skips the hook re-boot dance — see
+            :meth:`Builder.has_post_install_hook`.
         """
         domain_spec = self.builder.prepare_install_domain(self, run, cache)
         nvram_ref = (
@@ -829,6 +852,21 @@ class LibvirtVM(AbstractVM):
                         f"for VM {self._name!r}"
                     )
 
+            # Post-install hook (e.g. PVE bootstrap: apt install dnsmasq +
+            # repo swap).  Runs *before* the cache snapshot so the cached
+            # artifact carries whatever state the hook produced — keeps
+            # the run-phase network's internet state irrelevant to
+            # bootstrap success.  Re-boots the just-installed VM on the
+            # install network, runs the hook over SSH, then issues a
+            # clean shutdown and waits for SHUTOFF again.  Builders with
+            # the default no-op hook (``has_post_install_hook == False``)
+            # skip this dance entirely.
+            if self.builder.has_post_install_hook():
+                self._run_post_install_hook(
+                    domain=domain,
+                    install_network_ip=install_network_ip,
+                )
+
             manifest = self.builder.install_manifest(self, h)
             snapshot_ref = cache.store_vm(
                 h, domain_spec.work_disk, manifest, run.storage,
@@ -859,6 +897,108 @@ class LibvirtVM(AbstractVM):
             # qemu:///system with no Python process to tidy it.
             _destroy_and_undefine(domain)
             self._install_domain = None
+
+    def _run_post_install_hook(
+        self,
+        domain: libvirt.virDomain,
+        install_network_ip: str,
+    ) -> None:
+        """Re-boot the install domain, run the builder's post-install
+        hook over SSH, and shut it down cleanly.
+
+        Inserted between install SHUTOFF and cache snapshot so the
+        hook's side effects (apt installs, repo swaps, config writes)
+        are baked into the cached artifact.
+
+        :raises VMBuildError: If the domain refuses to re-start, the
+            SSH session never establishes, or the post-shutdown
+            SHUTOFF wait expires.  The hook itself may raise
+            backend-specific errors (e.g. :class:`CloudInitError`)
+            which propagate unchanged.
+        """
+        from testrange.vms.builders.proxmox_answer import _root_credential
+
+        if not install_network_ip:
+            raise VMBuildError(
+                f"VM {self._name!r}: builder.has_post_install_hook() "
+                "returned True but no install_network_ip was provided "
+                "by the orchestrator.  Cannot reach the just-installed "
+                "VM over SSH."
+            )
+
+        # ``_root_credential`` raises if no root user is present.  PVE
+        # answer.toml requires it; cloud-init builders typically do
+        # too.  We surface the error here (during the hook) rather
+        # than leaving SSH to time out against an account that doesn't
+        # exist.
+        root = _root_credential(self.users)
+
+        try:
+            domain.create()
+        except libvirt.libvirtError as exc:
+            raise VMBuildError(
+                f"VM {self._name!r}: failed to re-start install "
+                f"domain for post-install hook: {exc}"
+            ) from exc
+
+        _log.info(
+            "VM %r: re-booted install domain on install network for "
+            "post-install hook (SSH on %s)",
+            self._name, install_network_ip,
+        )
+
+        comm = SSHCommunicator(
+            host=install_network_ip,
+            username=root.username,
+            password=root.password,
+        )
+        try:
+            comm.wait_ready(timeout=_POST_HOOK_SSH_TIMEOUT_S)
+            self.builder.post_install_hook(self, comm)
+        finally:
+            try:
+                comm.close()
+            except Exception:
+                _log.debug(
+                    "VM %r: SSHCommunicator close raised during hook "
+                    "teardown — ignoring",
+                    self._name,
+                )
+
+        # Clean shutdown + wait for SHUTOFF.  The cache snapshot at
+        # the call site requires the disk to be quiesced.  Mirrors
+        # the install-phase poll loop's defensive pattern (transient
+        # libvirtError tolerance, clear timeout error).
+        try:
+            domain.shutdown()
+        except libvirt.libvirtError as exc:
+            raise VMBuildError(
+                f"VM {self._name!r}: clean shutdown after post-install "
+                f"hook failed: {exc}"
+            ) from exc
+
+        deadline = time.monotonic() + _POST_HOOK_SHUTDOWN_TIMEOUT_S
+        consecutive_errors = 0
+        while time.monotonic() < deadline:
+            try:
+                state, _ = domain.state()
+                consecutive_errors = 0
+                if state == libvirt.VIR_DOMAIN_SHUTOFF:
+                    return
+            except libvirt.libvirtError as exc:
+                consecutive_errors += 1
+                if consecutive_errors >= _MAX_CONSECUTIVE_STATE_ERRORS:
+                    raise VMBuildError(
+                        f"VM {self._name!r}: lost libvirt connection "
+                        f"while waiting for post-hook SHUTOFF "
+                        f"({consecutive_errors} consecutive state() "
+                        f"errors): {exc}"
+                    ) from exc
+            time.sleep(_POLL_INTERVAL)
+        raise VMBuildError(
+            f"VM {self._name!r}: post-install hook shutdown did not "
+            f"reach SHUTOFF within {_POST_HOOK_SHUTDOWN_TIMEOUT_S}s"
+        )
 
     def _make_guest_agent_communicator(self) -> AbstractCommunicator:
         """Construct the libvirt-backed QEMU guest-agent communicator.

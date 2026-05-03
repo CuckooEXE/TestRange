@@ -39,10 +39,14 @@ ISO and branching the prep strategy.
 We deliberately do NOT embed a ``/proxmox-first-boot`` script via
 ``--on-first-boot`` here.  TestRange runs the dnsmasq + repo-swap
 bootstrap over SSH from
-:meth:`testrange.backends.proxmox.ProxmoxOrchestrator._bootstrap_pve_node`
-after the cached qcow2 boots — much simpler than embedding a script
-in the prepared ISO (would need cache-key invalidation across two
-layers plus a chmod-via-Rock-Ridge dance to make it executable).
+:meth:`testrange.vms.builders.ProxmoxAnswerBuilder.post_install_hook`,
+fired in the install phase between SHUTOFF and template promotion —
+much simpler than embedding a script in the prepared ISO (would
+need cache-key invalidation across two layers plus a chmod-via-
+Rock-Ridge dance to make it executable).  The hook also runs on the
+bare-metal install network (always ``internet=True``), so the cached
+PVE template ships fully bootstrapped and the hypervisor's run-phase
+network can be ``internet=False`` without breaking nested provisioning.
 """
 
 from __future__ import annotations

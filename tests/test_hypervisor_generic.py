@@ -88,9 +88,11 @@ class TestPayloadInjection:
         # NOT injected via ``prepare_outer_vm`` because that would
         # rebake the whole qcow2 cache whenever the bootstrap script
         # changed; instead it's installed over SSH from
-        # ``ProxmoxOrchestrator._bootstrap_pve_node`` after the
-        # cached qcow2 boots.  Cache hash stays clean: empty pkgs
-        # / post_install_cmds.
+        # ``ProxmoxAnswerBuilder.post_install_hook`` during the
+        # install phase, between cloud-init SHUTOFF and template
+        # promotion.  Cache hash stays clean: empty pkgs /
+        # post_install_cmds (the hook script's digest is folded
+        # in via ``post_install_cache_key_extra`` instead).
         hv = Hypervisor(orchestrator=ProxmoxOrchestrator, **_common_kwargs())
         assert hv.pkgs == []
         assert hv.post_install_cmds == []
@@ -177,8 +179,9 @@ class TestPromotionByOuterOrchestrator:
         assert promoted.orchestrator is ProxmoxOrchestrator
         # No package injection — ProxmoxOrchestrator doesn't override
         # ``prepare_outer_vm`` (the dnsmasq the SDN integration needs
-        # is installed via SSH bootstrap from
-        # ``_bootstrap_pve_node`` AFTER the cached qcow2 boots, NOT
+        # is installed via the SSH bootstrap that
+        # ``ProxmoxAnswerBuilder.post_install_hook`` runs in the
+        # install phase between SHUTOFF and template promotion, NOT
         # via the install-time package list).
         assert promoted.pkgs == []
 

@@ -161,7 +161,7 @@ class TestBuildRoutesWindows:
 
         called = {}
         def _fake_install(*, conn, cache, run, install_network_name,
-                          install_network_mac, h):
+                          install_network_mac, h, install_network_ip=""):
             called["args"] = (install_network_name, install_network_mac, h)
             return tmp_cache_root / "fake-cached.qcow2"
 

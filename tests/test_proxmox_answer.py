@@ -330,6 +330,86 @@ class TestBuildAnswerTomlValidation:
 
 
 # ----------------------------------------------------------------------
+# post_install_hook — bake bootstrap (apt install dnsmasq + repo swap)
+# into the cached install artifact so the run-phase network's internet
+# state doesn't matter.
+# ----------------------------------------------------------------------
+
+
+class TestProxmoxAnswerHasPostInstallHook:
+    def test_returns_true(self) -> None:
+        # The bootstrap MUST run for the cached PVE template to work
+        # on airgapped run-phase networks.  ``False`` here would
+        # silently skip the hook and reintroduce the original bug.
+        assert ProxmoxAnswerBuilder().has_post_install_hook() is True
+
+
+class TestProxmoxAnswerPostInstallHook:
+    def test_runs_pve_bootstrap_script_over_communicator(self) -> None:
+        from testrange.vms.builders.proxmox_answer import _PVE_BOOTSTRAP_SCRIPT
+
+        comm = MagicMock()
+        comm.exec.return_value = MagicMock(exit_code=0, stderr=b"", stdout=b"")
+        ProxmoxAnswerBuilder().post_install_hook(_proxmox_vm(), comm)
+        comm.exec.assert_called_once()
+        argv = comm.exec.call_args.args[0]
+        assert argv == ["bash", "-c", _PVE_BOOTSTRAP_SCRIPT]
+        # Generous timeout — apt-get update against the public PVE
+        # mirror can take a minute on a cold node.
+        assert comm.exec.call_args.kwargs.get("timeout") == 300
+
+    def test_raises_when_bootstrap_exits_nonzero(self) -> None:
+        comm = MagicMock()
+        comm.exec.return_value = MagicMock(
+            exit_code=100,
+            stderr=b"E: Could not get lock /var/lib/dpkg/lock",
+            stdout=b"",
+        )
+        with pytest.raises(CloudInitError, match="bootstrap"):
+            ProxmoxAnswerBuilder().post_install_hook(_proxmox_vm(), comm)
+
+
+class TestProxmoxAnswerPostInstallCacheKeyExtra:
+    def test_returns_24_hex_chars(self) -> None:
+        extra = ProxmoxAnswerBuilder().post_install_cache_key_extra(_proxmox_vm())
+        assert len(extra) == 24
+        assert all(c in "0123456789abcdef" for c in extra)
+
+    def test_deterministic(self) -> None:
+        a = ProxmoxAnswerBuilder().post_install_cache_key_extra(_proxmox_vm())
+        b = ProxmoxAnswerBuilder().post_install_cache_key_extra(_proxmox_vm())
+        assert a == b
+
+    def test_changes_when_script_changes(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Bumping the script body must invalidate cached templates.
+        # Otherwise an old cached PVE template would silently survive
+        # a fix to the bootstrap and the airgapped-internet bug
+        # would persist.
+        from testrange.vms.builders import proxmox_answer as pa_mod
+
+        before = ProxmoxAnswerBuilder().post_install_cache_key_extra(_proxmox_vm())
+        monkeypatch.setattr(pa_mod, "_PVE_BOOTSTRAP_SCRIPT", "echo edited\n")
+        after = ProxmoxAnswerBuilder().post_install_cache_key_extra(_proxmox_vm())
+        assert before != after
+
+    def test_folded_into_cache_key(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The whole point of the extra: cache_key changes when the
+        # script changes, even with an otherwise-identical VM spec.
+        from testrange.vms.builders import proxmox_answer as pa_mod
+
+        b = ProxmoxAnswerBuilder()
+        vm = _proxmox_vm()
+        before = b.cache_key(vm)
+        monkeypatch.setattr(pa_mod, "_PVE_BOOTSTRAP_SCRIPT", "echo edited\n")
+        after = b.cache_key(vm)
+        assert before != after
+
+
+# ----------------------------------------------------------------------
 # Module-level helpers
 # ----------------------------------------------------------------------
 
@@ -481,8 +561,10 @@ class TestBuildProxmoxSeedIsoBytes:
 # section.  PVE installer doesn't have a generic post-install hook
 # in answer.toml; for the dnsmasq-on-Hypervisor case TestRange runs
 # the bootstrap over SSH from
-# ProxmoxOrchestrator._bootstrap_pve_node instead of trying to
-# embed a script in the prepared installer ISO.
+# ProxmoxAnswerBuilder.post_install_hook (which the orchestrator
+# fires by re-booting the install VM on the install network between
+# SHUTOFF and template promotion) instead of embedding a script in
+# the prepared installer ISO.
 # ----------------------------------------------------------------------
 
 
@@ -598,8 +680,9 @@ class TestPrepareInstallDomain:
         first_boot_script=...)`` to embed it on the prepared ISO via
         xorriso ``--on-first-boot``; that machinery is gone (the
         dnsmasq bootstrap runs over SSH from
-        ``ProxmoxOrchestrator._bootstrap_pve_node`` instead).
-        Regression guard against putting the kwarg back."""
+        ``ProxmoxAnswerBuilder.post_install_hook`` during the
+        install phase instead).  Regression guard against putting
+        the kwarg back."""
         from testrange._run import RunDir
         from testrange.backends.libvirt.storage import LocalStorageBackend
         from testrange.packages import Apt

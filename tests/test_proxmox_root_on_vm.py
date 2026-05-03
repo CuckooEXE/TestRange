@@ -172,61 +172,36 @@ class TestRootOnVm:
         assert promoted.dhcp is True
         assert promoted.dns is True
 
-    def test_runs_pve_node_bootstrap(self) -> None:
-        """``root_on_vm`` SSHes the dnsmasq + repo-swap bootstrap
-        onto the freshly-installed PVE node before constructing the
-        inner orchestrator.  Without this, the inner orch's
-        ``_preflight_dnsmasq_installed`` would fail because the PVE
-        installer doesn't ship dnsmasq.  Replaces the previous
-        ``[first-boot]`` mechanism (an embedded script in the
-        prepared installer ISO with cache-key invalidation across
-        two layers) — the simpler post-install SSH path means no
-        cache machinery and code-side fixes take effect immediately.
+    def test_does_not_re_run_bootstrap_over_ssh(self) -> None:
+        """The dnsmasq + repo-swap bootstrap is now baked into the
+        cached PVE template by
+        :meth:`ProxmoxAnswerBuilder.post_install_hook`, fired in the
+        install phase on the bare-metal install network.  ``root_on_vm``
+        must NOT re-run the bootstrap over SSH — doing so would (a)
+        break airgapped run topologies (where the hypervisor's
+        run-phase network has ``internet=False`` and apt-get update
+        can't reach the public mirror) and (b) double-execute an
+        idempotent-but-slow operation.
+
+        The only exec call ``root_on_vm`` makes on the hypervisor is
+        the pveproxy readiness probe.
         """
         hv = _hypervisor_with_communicator("10.0.0.10")
 
         ProxmoxOrchestrator.root_on_vm(hv, _outer_orchestrator())
 
-        # First exec should be the bootstrap script — bash -c '...'
-        # — and the script body should carry the dnsmasq install
-        # plus the no-subscription repo swap plus the systemctl
-        # disable.  Pin the substrings so a future refactor can't
-        # silently drop one.
-        bootstrap_call = hv.exec.call_args_list[0]
-        argv = bootstrap_call.args[0]
-        assert argv[0] == "bash"
-        assert argv[1] == "-c"
-        script = argv[2]
-        assert "apt-get install -y dnsmasq" in script
-        assert "pve-no-subscription" in script
-        assert "systemctl disable --now dnsmasq" in script
-        # Repo swap must precede the apt-get update *command* —
-        # otherwise update 401s on the enterprise repos and
-        # ``set -e`` aborts before install.  Match the bare command
-        # line so a comment mentioning ``apt-get update`` doesn't
-        # mislead the index search.
-        assert script.index("pve-no-subscription") < script.index("apt-get update -y")
-        # Bootstrap must run BEFORE the pveproxy readiness wait —
-        # the wait uses a separate command (``systemctl is-active
-        # pveproxy``) so it's a distinct exec call.
-        wait_call = hv.exec.call_args_list[1]
-        assert wait_call.args[0] == ["systemctl", "is-active", "pveproxy"]
-
-    def test_bootstrap_failure_raises(self) -> None:
-        """Non-zero exit from the bootstrap surfaces as a clear
-        OrchestratorError so the outer ExitStack unwinds cleanly
-        instead of moving on to a half-bootstrapped node where the
-        inner orch's preflight will fail with a less obvious
-        message."""
-        hv = _hypervisor_with_communicator("10.0.0.10")
-
-        # Bootstrap exits non-zero on the FIRST exec call (the
-        # bash script); pveproxy check is never reached.
-        bad = MagicMock(exit_code=42, stdout=b"", stderr=b"apt failed")
-        hv.exec.return_value = bad
-
-        with pytest.raises(OrchestratorError, match="bootstrap"):
-            ProxmoxOrchestrator.root_on_vm(hv, _outer_orchestrator())
+        # Every exec call must be the pveproxy probe — no ``bash -c
+        # <bootstrap script>`` invocation.
+        for call in hv.exec.call_args_list:
+            argv = call.args[0]
+            assert argv == ["systemctl", "is-active", "pveproxy"], (
+                f"unexpected exec call: {argv!r}"
+            )
+        # And there must be at least one — the readiness probe is
+        # mandatory.
+        assert hv.exec.call_args_list, (
+            "root_on_vm must still wait for pveproxy readiness"
+        )
 
     def test_pveproxy_failure_raises(
         self, monkeypatch: pytest.MonkeyPatch,
