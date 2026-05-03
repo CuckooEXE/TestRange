@@ -128,8 +128,10 @@ class GenericVM(AbstractVM):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
+        install_network_ip: str = "",
     ) -> str:
         del context, cache, run, install_network_name, install_network_mac
+        del install_network_ip
         raise self._generic_vm_misuse()
 
     def start_run(

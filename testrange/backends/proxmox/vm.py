@@ -247,6 +247,7 @@ class ProxmoxVM(AbstractVM):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
+        install_network_ip: str = "",
     ) -> str:
         """Find or build a PVE template for this spec, clone it for
         the run phase, and return the cloned VMID.
@@ -289,21 +290,46 @@ class ProxmoxVM(AbstractVM):
         with vm_build_lock(config_hash):
             template_vmid = _find_template(client, node, template_name)
             if template_vmid is None:
-                _log.info(
-                    "vm %r: PVE template cache MISS for %s — installing",
-                    self.name, config_hash[:12],
+                # PVE-side template missing.  Slice 3: before falling
+                # back to a full ISO-boot install, check the *outer*
+                # cache (shared via ``cache.root``) for a bare-metal-
+                # built qcow2 — the inner orchestrator can promote it
+                # to a template directly without booting anything.
+                # ``cache.vm_disk_ref`` resolves to the same path the
+                # outer libvirt orch wrote when the bare-metal install
+                # phase ran (Slice 2).  Concurrency is already
+                # handled by ``vm_build_lock(config_hash)`` above.
+                prebuilt_ref = cache.vm_disk_ref(
+                    config_hash, run.storage,
                 )
-                # Sweep any orphans (half-promoted templates from
-                # earlier crashed installs) so the new install
-                # doesn't trip over a duplicate display name.
+                prebuilt_hit = run.storage.transport.exists(prebuilt_ref)
                 _delete_orphan_templates(client, node, template_name)
-                template_vmid = self._install_and_template(
-                    context, cache, run,
-                    install_network_name=install_network_name,
-                    install_network_mac=install_network_mac,
-                    template_name=template_name,
-                    config_hash=config_hash,
-                )
+                if prebuilt_hit:
+                    _log.info(
+                        "vm %r: PVE template MISS but outer-cache "
+                        "qcow2 HIT (%s) — adopting prebuilt without "
+                        "ISO boot",
+                        self.name, config_hash[:12],
+                    )
+                    template_vmid = self._import_template_from_prebuilt(
+                        context, cache, run,
+                        prebuilt_ref=prebuilt_ref,
+                        template_name=template_name,
+                        config_hash=config_hash,
+                    )
+                else:
+                    _log.info(
+                        "vm %r: PVE template MISS + outer-cache MISS "
+                        "(%s) — running full install",
+                        self.name, config_hash[:12],
+                    )
+                    template_vmid = self._install_and_template(
+                        context, cache, run,
+                        install_network_name=install_network_name,
+                        install_network_mac=install_network_mac,
+                        template_name=template_name,
+                        config_hash=config_hash,
+                    )
             else:
                 _log.info(
                     "vm %r: PVE template cache HIT (%s, VMID %d) — "
@@ -734,6 +760,159 @@ class ProxmoxVM(AbstractVM):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _import_template_from_prebuilt(
+        self,
+        context: AbstractOrchestrator,
+        cache: CacheManager,
+        run: RunDir,
+        *,
+        prebuilt_ref: str,
+        template_name: str,
+        config_hash: str,
+    ) -> int:
+        """Import an outer-cache prebuilt qcow2 directly as a PVE
+        template — no boot, no install seed, no cloud-init.
+
+        Used by :meth:`build` when the inner orchestrator is nested
+        and the bare-metal cache has the disk under
+        ``<outer_cache>/vms/<config_hash>/disk.qcow2``.  Skips the
+        :meth:`_install_and_template` boot-and-wait dance entirely:
+        the prebuilt qcow2 is already a finished install (cloud-init
+        ran on the bare metal, post-install hook already baked in
+        whatever extra state the builder needed), so we just need PVE
+        to know about it as a template the next-clone-step can
+        consume.
+
+        :param prebuilt_ref: Backend-local path to the bare-metal-built
+            qcow2.  For the orchestrator's ``LocalStorageBackend``
+            this is an outer-host filesystem path; for SSH-backed
+            inners it's a remote path the transport can read.
+        :param template_name: Display name for the PVE template the
+            create-call produces.  Same name a regular
+            :meth:`_install_and_template` would have used so the
+            cache-hit lookup in :meth:`build` finds it.
+        :param config_hash: The builder's :meth:`Builder.cache_key` —
+            embedded in the upload filename so concurrent imports of
+            the same spec share storage.
+        :returns: The promoted-template VMID.
+        :raises VMBuildError: If the upload, create, or template-
+            promote step fails.
+        """
+        from pathlib import Path
+
+        del run  # unused; signature parallels _install_and_template
+
+        client = _proxmox_client(context)
+        node = _proxmox_node(context)
+        storage = _proxmox_storage(context)
+        del cache  # cache lookup is the caller's job; we just import
+
+        # Upload the prebuilt qcow2 to PVE's local:import/ pool.
+        # ``_upload_disk_image`` is idempotent — concurrent runs
+        # against the same prebuilt share the upload.
+        prebuilt_path = Path(prebuilt_ref).expanduser()
+        if not prebuilt_path.is_absolute():
+            # Defensive: outer cache refs are absolute filesystem paths
+            # on the orchestrator's host.  Anything else is the inner
+            # orchestrator misconfigured.
+            raise VMBuildError(
+                f"VM {self.name!r}: prebuilt ref {prebuilt_ref!r} is "
+                "not an absolute path; cannot upload to PVE."
+            )
+        if not prebuilt_path.is_file():
+            raise VMBuildError(
+                f"VM {self.name!r}: prebuilt qcow2 not found at "
+                f"{prebuilt_path} — outer-cache lookup said it was "
+                "there but it isn't.  Concurrent cache eviction?"
+            )
+        import_filename = (
+            f"tr-prebuilt-{config_hash[:12]}-"
+            f"{self._short_hash(prebuilt_path)}.qcow2"
+        )
+        self._upload_disk_image(
+            client, node, "local", prebuilt_path, import_filename,
+        )
+
+        # Allocate a VMID and create the template-shaped VM.  No
+        # ``ide2`` (no install seed) and no ``net0`` (template won't
+        # boot; clones get fresh NICs in start_run).
+        template_vmid = int(client.cluster.nextid.get())
+        _log.info(
+            "vm %r: allocated template VMID %d (prebuilt-import for %r)",
+            self.name, template_vmid, template_name,
+        )
+        params = self._template_qemu_params(
+            vmid=template_vmid,
+            storage=storage,
+            import_filename=import_filename,
+            display_name=template_name,
+        )
+        try:
+            create_upid = client.nodes(node).qemu.post(**params)
+            with log_duration(
+                _log,
+                f"create + import-disk for prebuilt template "
+                f"VMID {template_vmid}",
+            ):
+                self._wait_for_task(
+                    client, node, create_upid, timeout=600,
+                )
+        except Exception as exc:
+            self._best_effort_delete(client, node, template_vmid)
+            raise VMBuildError(
+                f"VM {self.name!r}: failed to create prebuilt-template "
+                f"VMID {template_vmid}: {exc}"
+            ) from exc
+
+        # Promote (no boot — prebuilt qcow2 is already a finished
+        # install).  Irreversible; failure leaves the VMID half-
+        # promoted, so best-effort cleanup matches
+        # :meth:`_install_and_template`.
+        try:
+            client.nodes(node).qemu(template_vmid).template.post()
+            _log.info(
+                "vm %r: promoted prebuilt VMID %d → template %r",
+                self.name, template_vmid, template_name,
+            )
+        except Exception as exc:
+            self._best_effort_delete(client, node, template_vmid)
+            raise VMBuildError(
+                f"VM {self.name!r}: promote prebuilt VMID "
+                f"{template_vmid} to template failed: {exc}"
+            ) from exc
+
+        return template_vmid
+
+    def _template_qemu_params(
+        self,
+        *,
+        vmid: int,
+        storage: str,
+        import_filename: str,
+        display_name: str,
+    ) -> dict[str, Any]:
+        """Slimmed-down :meth:`_install_qemu_params` for the
+        prebuilt-import path: no install seed (``ide2``) and no NIC
+        (``net0``).  The template never boots, and clones get a fresh
+        NIC + phase-2 seed in :meth:`start_run`.
+        """
+        memory_mib = max(self._memory_mib(), 512)
+        return {
+            "vmid": vmid,
+            "name": display_name[:63],  # PVE name length limit
+            "ostype": "l26",
+            "cores": self._vcpu_count(),
+            "memory": memory_mib,
+            "scsihw": "virtio-scsi-pci",
+            "scsi0": (
+                f"{storage}:0,import-from=local:import/{import_filename}"
+            ),
+            "boot": "order=scsi0",
+            "serial0": "socket",
+            "vga": "serial0",
+            "agent": "enabled=1",
+        }
 
     def _install_qemu_params(
         self,

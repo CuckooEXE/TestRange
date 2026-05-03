@@ -276,6 +276,165 @@ class TestBuildCacheMiss:
 
 
 # =====================================================================
+# build() — Slice 3 outer-cache prebuilt-import path
+# =====================================================================
+
+
+class TestBuildAdoptsPrebuiltFromOuterCache:
+    """When the inner orchestrator's PVE-template lookup misses but the
+    *outer* cache (shared via ``cache.root`` from the libvirt-side
+    bare-metal install loop) has the qcow2 on disk, ``build`` adopts
+    that prebuilt as a template directly — no ISO boot, no cloud-init
+    install.  The clone-for-run-phase step is unchanged."""
+
+    def test_prebuilt_hit_imports_template_without_booting(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        vm = _vm()
+        client = MagicMock()
+        # Find-template miss → triggers the outer-cache check.
+        client.nodes.return_value.qemu.get.return_value = []
+        # cluster.nextid called twice — once for the prebuilt-template
+        # VMID, once for the run-phase clone VMID.
+        client.cluster.nextid.get.side_effect = [201, 999]
+        client.nodes.return_value.qemu.post.return_value = "UPID:create"
+        client.nodes.return_value.qemu.return_value.template.post.return_value = (
+            None
+        )
+        client.nodes.return_value.qemu.return_value.clone.post.return_value = (
+            "UPID:clone"
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_task", lambda *a, **kw: None,
+        )
+        # Trip wire: ``_install_and_template`` MUST NOT run when the
+        # prebuilt path is taken.  Replace it with a fail-fast that
+        # raises if invoked.
+        def _explode(*_args: Any, **_kwargs: Any) -> int:
+            raise AssertionError(
+                "_install_and_template ran but the outer-cache prebuilt "
+                "path should have short-circuited it",
+            )
+        monkeypatch.setattr(
+            ProxmoxVM, "_install_and_template", _explode,
+        )
+        # Stub the upload primitive — we're asserting on the call, not
+        # exercising real proxmoxer.
+        upload_calls: list[tuple[Any, ...]] = []
+        def _record_upload(self, c, n, s, p, fn) -> None:  # type: ignore[no-untyped-def]
+            upload_calls.append((str(p), fn))
+        monkeypatch.setattr(
+            ProxmoxVM, "_upload_disk_image", _record_upload,
+        )
+
+        # Lay down a fake prebuilt qcow2 at the outer-cache path the
+        # inner orch will look up.  The path layout matches what the
+        # libvirt outer install phase produces:
+        # ``<cache_root>/vms/<config_hash>/disk.qcow2``.
+        from testrange.cache import CacheManager
+        from testrange._run import RunDir
+        cache = CacheManager(root=tmp_path)
+        config_hash = vm.builder.cache_key(vm)
+        run = RunDir(LocalStorageBackend(tmp_path))
+        run._run_id = "abcd1234-1111-2222-3333-4444"  # type: ignore[attr-defined]
+        prebuilt_ref = cache.vm_disk_ref(config_hash, run.storage)
+        Path(prebuilt_ref).parent.mkdir(parents=True, exist_ok=True)
+        Path(prebuilt_ref).write_bytes(b"fake-qcow2-bytes")
+
+        ref = vm.build(
+            context=MagicMock(
+                _client=client, _node="pve01", _storage="local-lvm",
+            ),
+            cache=cache,
+            run=run,
+            install_network_name="install-net",
+            install_network_mac="52:54:00:01:02:03",
+        )
+
+        # Returned ref is the run-phase clone VMID, just like cache-hit.
+        assert ref == "999"
+        # Template VMID stashed = prebuilt-template VMID, not the
+        # run-phase clone.
+        assert vm._template_vmid == 201
+        # Upload was called with the prebuilt path.
+        assert len(upload_calls) == 1
+        uploaded_path, _filename = upload_calls[0]
+        assert uploaded_path == str(prebuilt_ref)
+        # The prebuilt template's create body has NO ide2 (no install
+        # seed) and NO net0 (template never boots).  Inspect the
+        # qemu.post kwargs to pin this — the prebuilt-import path
+        # MUST NOT smuggle install-seed state into the cached template.
+        create_kwargs = client.nodes.return_value.qemu.post.call_args.kwargs
+        assert "ide2" not in create_kwargs
+        assert "net0" not in create_kwargs
+        # Boot order points at scsi0 (the imported disk).
+        assert create_kwargs["boot"] == "order=scsi0"
+        # No status.start.post was ever called — that's the load-
+        # bearing assertion: prebuilt-import skips the boot dance.
+        client.nodes.return_value.qemu.return_value.status.start.post.assert_not_called()
+
+    def test_outer_cache_miss_falls_back_to_install_path(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Outer cache empty → fall back to the existing
+        ``_install_and_template`` flow (full ISO boot)."""
+        from testrange.cache import CacheManager
+        from testrange._run import RunDir
+
+        vm = _vm()
+        client = MagicMock()
+        client.nodes.return_value.qemu.get.return_value = []
+        # Trip wire: prebuilt-import MUST NOT run when the outer cache
+        # is empty.
+        def _explode_prebuilt(self, *args: Any, **kwargs: Any) -> int:
+            raise AssertionError(
+                "_import_template_from_prebuilt ran on outer-cache "
+                "miss but should have been skipped",
+            )
+        monkeypatch.setattr(
+            ProxmoxVM, "_import_template_from_prebuilt", _explode_prebuilt,
+        )
+        # Confirm _install_and_template gets called with a sentinel.
+        called: list[str] = []
+        def _record_install(self, *args: Any, **kwargs: Any) -> int:
+            called.append("install")
+            return 200
+        monkeypatch.setattr(
+            ProxmoxVM, "_install_and_template", _record_install,
+        )
+        client.cluster.nextid.get.return_value = 999
+        client.nodes.return_value.qemu.return_value.clone.post.return_value = (
+            "UPID:clone"
+        )
+        monkeypatch.setattr(
+            ProxmoxVM, "_wait_for_task", lambda *a, **kw: None,
+        )
+
+        cache = CacheManager(root=tmp_path)  # empty cache root
+        run = RunDir(LocalStorageBackend(tmp_path))
+        run._run_id = "abcd1234-1111-2222-3333-4444"  # type: ignore[attr-defined]
+
+        ref = vm.build(
+            context=MagicMock(
+                _client=client, _node="pve01", _storage="local-lvm",
+            ),
+            cache=cache,
+            run=run,
+            install_network_name="install-net",
+            install_network_mac="52:54:00:01:02:03",
+        )
+
+        assert ref == "999"
+        assert called == ["install"], (
+            "outer-cache miss must fall back to _install_and_template"
+        )
+
+
+# =====================================================================
 # start_run() — phase-2 seed swap
 # =====================================================================
 

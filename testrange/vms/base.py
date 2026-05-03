@@ -424,6 +424,7 @@ class AbstractVM(ABC):
         run: RunDir,
         install_network_name: str,
         install_network_mac: str,
+        install_network_ip: str = "",
     ) -> str:
         """Produce (or fetch from cache) a runnable disk image.
 
@@ -441,6 +442,12 @@ class AbstractVM(ABC):
             the install phase).
         :param install_network_mac: MAC address for the install NIC
             (empty when the VM's builder skips the install phase).
+        :param install_network_ip: Static IP allocated to this VM on
+            the install network.  Used by builders whose
+            :meth:`Builder.has_post_install_hook` returns ``True``
+            (the orchestrator threads it through so the post-install
+            hook can reach the VM over SSH).  Empty string is the
+            default — most builders ignore it.
         :returns: Backend-local ref to the runnable disk image
             (outer-host path for a local backend; remote-host path or
             opaque storage-volume ID for remote ones).
