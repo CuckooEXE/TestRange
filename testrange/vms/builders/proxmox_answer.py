@@ -109,6 +109,29 @@ The cap here is generous to absorb slow public-mirror tails without
 masking a true hang."""
 
 
+_PVE_APT_INSECURE_PROLOGUE = """\
+# apt_insecure=True: skip TLS peer/host verification for every APT
+# HTTPS operation on this node, including the dnsmasq install below
+# AND any subsequent apt invocations on the installed system.
+# Useful when the PVE mirror is internal and presents a CA that
+# isn't in the default trust store; harmless otherwise.  The
+# drop-in survives in the cached template so user apt commands
+# after a cache hit also skip verification.  Filename matches the
+# cloud-init builder's drop-in
+# (``/etc/apt/apt.conf.d/99testrange-insecure``) for symmetry.
+mkdir -p /etc/apt/apt.conf.d
+cat >/etc/apt/apt.conf.d/99testrange-insecure <<'EOF'
+Acquire::https::Verify-Peer "false";
+Acquire::https::Verify-Host "false";
+EOF
+
+"""
+"""Prolog prepended to :data:`_PVE_BOOTSTRAP_SCRIPT` when
+``apt_insecure=True``.  Lands on disk before any apt command runs,
+so the dnsmasq install and any future apt operations both pick up
+the relaxed TLS config."""
+
+
 class ProxmoxAnswerBuilder(Builder):
     """ProxMox VE auto-installer strategy.
 
@@ -174,6 +197,19 @@ class ProxmoxAnswerBuilder(Builder):
         the NIC by name — so interface-name filtering is stable
         across the install-to-run MAC change.  Override for
         multi-NIC layouts or backends with different PCI topology.
+    :param apt_insecure: If ``True``, the post-install bootstrap
+        drops an apt.conf.d snippet that disables HTTPS peer/host
+        verification for every APT operation on the installed PVE
+        node.  Useful when the chosen mirror is internal and
+        presents a CA that isn't in the default trust store.
+        Defaults to ``False``.  Mirrors the flag of the same name
+        on :class:`~testrange.vms.builders.CloudInitBuilder` — APT
+        TLS trust is process-wide, so a per-:class:`Apt`-package
+        switch would be a lie.  The drop-in is written to
+        ``/etc/apt/apt.conf.d/99testrange-insecure`` (same path the
+        cloud-init builder uses) and survives in the cached PVE
+        template, so user apt commands inside the VM after a cache
+        hit also skip verification.
 
     .. note::
 
@@ -206,6 +242,8 @@ class ProxmoxAnswerBuilder(Builder):
     network_gateway: str | None
     network_dns: str | None
     network_interface: str
+    apt_insecure: bool
+    """If ``True``, post-install bootstrap configures APT to skip TLS verification."""
 
     def __init__(
         self,
@@ -222,6 +260,7 @@ class ProxmoxAnswerBuilder(Builder):
         network_gateway: str | None = None,
         network_dns: str | None = None,
         network_interface: str = "enp1s0",
+        apt_insecure: bool = False,
     ) -> None:
         self.country = country
         self.keyboard = keyboard
@@ -236,6 +275,7 @@ class ProxmoxAnswerBuilder(Builder):
         self.network_gateway = network_gateway
         self.network_dns = network_dns
         self.network_interface = network_interface
+        self.apt_insecure = apt_insecure
 
     def default_communicator(self) -> str:
         """PVE installs ship OpenSSH on by default; the host-side
@@ -308,9 +348,10 @@ class ProxmoxAnswerBuilder(Builder):
         vm: VM,
         communicator: AbstractCommunicator,
     ) -> None:
-        """Run :data:`_PVE_BOOTSTRAP_SCRIPT` on the freshly-installed
+        """Run :meth:`_build_bootstrap_script` on the freshly-installed
         PVE node so the cached install artifact carries dnsmasq +
-        the no-subscription repo.
+        the no-subscription repo (and, when :attr:`apt_insecure` is
+        ``True``, an apt.conf.d drop-in that disables TLS verification).
 
         The orchestrator re-starts the install VMID on the install
         network (always ``internet=True``) before calling this; the
@@ -326,12 +367,13 @@ class ProxmoxAnswerBuilder(Builder):
         """
         del vm  # unused — bootstrap is target-agnostic
         _log.info(
-            "running PVE bootstrap (apt install dnsmasq + repo swap) "
+            "running PVE bootstrap (apt install dnsmasq + repo swap%s) "
             "over %s; baking into cached install artifact",
+            ", apt_insecure=True" if self.apt_insecure else "",
             type(communicator).__name__,
         )
         result = communicator.exec(
-            ["bash", "-c", _PVE_BOOTSTRAP_SCRIPT],
+            ["bash", "-c", self._build_bootstrap_script()],
             timeout=_PVE_BOOTSTRAP_TIMEOUT_S,
         )
         if result.exit_code != 0:
@@ -344,18 +386,32 @@ class ProxmoxAnswerBuilder(Builder):
             )
 
     def post_install_cache_key_extra(self, vm: VM) -> str:
-        """Return a deterministic 24-hex-char digest of
-        :data:`_PVE_BOOTSTRAP_SCRIPT`.
+        """Return a deterministic 24-hex-char digest of the rendered
+        bootstrap script for this builder's config.
 
         Matches the 24-char width of :func:`vm_config_hash`'s output so
         debug logs that print partial hashes line up.  Folded into
-        :meth:`cache_key` to invalidate cached templates whenever the
-        bootstrap script changes.
+        :meth:`cache_key` to invalidate cached templates whenever any
+        script-affecting state (the script body itself OR the
+        :attr:`apt_insecure` toggle that prepends an apt.conf.d
+        prologue) changes.
         """
         del vm
         return hashlib.sha256(
-            _PVE_BOOTSTRAP_SCRIPT.encode("utf-8"),
+            self._build_bootstrap_script().encode("utf-8"),
         ).hexdigest()[:24]
+
+    def _build_bootstrap_script(self) -> str:
+        """Return the bootstrap script body for this builder's config.
+
+        Default returns :data:`_PVE_BOOTSTRAP_SCRIPT` unchanged.  When
+        :attr:`apt_insecure` is ``True``, prepends
+        :data:`_PVE_APT_INSECURE_PROLOGUE` so the apt.conf.d drop-in
+        lands before any apt command runs.
+        """
+        if self.apt_insecure:
+            return _PVE_APT_INSECURE_PROLOGUE + _PVE_BOOTSTRAP_SCRIPT
+        return _PVE_BOOTSTRAP_SCRIPT
 
     def prepare_install_domain(
         self,

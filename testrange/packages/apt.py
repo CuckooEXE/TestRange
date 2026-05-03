@@ -20,9 +20,11 @@ class Apt(AbstractPackage):
         APT's TLS trust config is process-wide for the install boot.  To
         install from a mirror whose CA isn't on the VM, pass
         ``apt_insecure=True`` to
-        :class:`~testrange.vms.builders.CloudInitBuilder` — the flag
-        lives on the builder because it applies to the whole install
-        phase, not a single package.
+        :class:`~testrange.vms.builders.CloudInitBuilder` (Linux cloud
+        images) or
+        :class:`~testrange.vms.builders.ProxmoxAnswerBuilder` (PVE
+        Hypervisor VMs) — the flag lives on the builder because it
+        applies to the whole install phase, not a single package.
     """
 
     @property

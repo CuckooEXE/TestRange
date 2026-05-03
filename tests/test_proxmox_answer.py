@@ -56,6 +56,82 @@ def _proxmox_vm(**overrides: Any) -> VM:
 # ----------------------------------------------------------------------
 
 
+class TestProxmoxAnswerAptInsecure:
+    """``apt_insecure=True`` mirrors :class:`CloudInitBuilder`'s flag of
+    the same name: it drops an apt.conf.d snippet on the installed PVE
+    node that skips TLS peer/host verification for every HTTPS APT
+    operation.  Useful when the node's chosen mirror is internal and
+    presents a CA that isn't in the default trust store.
+
+    Lives on the builder (not per-:class:`Apt` package) because APT
+    config is process-wide for any apt invocation.  The snippet is
+    written by the post-install bootstrap and persists in the cached
+    PVE template, so subsequent user apt commands inside the VM also
+    skip verification.
+    """
+
+    def test_default_is_false(self) -> None:
+        assert ProxmoxAnswerBuilder().apt_insecure is False
+
+    def test_kwarg_stored_on_instance(self) -> None:
+        b = ProxmoxAnswerBuilder(apt_insecure=True)
+        assert b.apt_insecure is True
+
+    def test_true_emits_apt_conf_dropin_in_bootstrap(self) -> None:
+        # The script body the post-install hook executes must drop in
+        # ``/etc/apt/apt.conf.d/99testrange-insecure`` with both
+        # Verify-Peer and Verify-Host disabled.  Filename matches the
+        # cloud-init builder's drop-in for symmetry.
+        script = ProxmoxAnswerBuilder(apt_insecure=True)._build_bootstrap_script()
+        assert "/etc/apt/apt.conf.d/99testrange-insecure" in script
+        assert 'Acquire::https::Verify-Peer "false"' in script
+        assert 'Acquire::https::Verify-Host "false"' in script
+
+    def test_false_omits_apt_conf_dropin(self) -> None:
+        # Symmetric negative — default builder must not drop in the
+        # snippet.  Otherwise enterprise nodes with proper trust
+        # stores would silently get TLS verification disabled.
+        script = ProxmoxAnswerBuilder(apt_insecure=False)._build_bootstrap_script()
+        assert "99testrange-insecure" not in script
+        assert "Verify-Peer" not in script
+
+    def test_dropin_written_before_first_apt_command(self) -> None:
+        # The snippet has to land BEFORE ``apt-get update`` (and any
+        # earlier apt write that touches HTTPS), or the first
+        # operation runs with the default trust config and fails on
+        # an internal mirror.  Index check pins the ordering.
+        script = ProxmoxAnswerBuilder(apt_insecure=True)._build_bootstrap_script()
+        assert script.index("99testrange-insecure") < script.index("apt-get update")
+
+    def test_changes_cache_key(self) -> None:
+        # apt_insecure flips the bootstrap script body; the cached
+        # template MUST split or a secure install would silently
+        # serve an insecure-template hit (or vice versa).
+        vm = _proxmox_vm()
+        secure = ProxmoxAnswerBuilder(apt_insecure=False)
+        insecure = ProxmoxAnswerBuilder(apt_insecure=True)
+        assert secure.cache_key(vm) != insecure.cache_key(vm)
+
+    def test_changes_post_install_cache_key_extra(self) -> None:
+        vm = _proxmox_vm()
+        secure = ProxmoxAnswerBuilder(apt_insecure=False).post_install_cache_key_extra(vm)
+        insecure = ProxmoxAnswerBuilder(apt_insecure=True).post_install_cache_key_extra(vm)
+        assert secure != insecure
+
+    def test_hook_invokes_modified_script_when_insecure(self) -> None:
+        # End-to-end at the hook boundary: the script the
+        # communicator runs must contain the apt.conf.d snippet when
+        # ``apt_insecure=True``.
+        comm = MagicMock()
+        comm.exec.return_value = MagicMock(exit_code=0, stderr=b"", stdout=b"")
+        ProxmoxAnswerBuilder(apt_insecure=True).post_install_hook(_proxmox_vm(), comm)
+        argv = comm.exec.call_args.args[0]
+        assert argv[0:2] == ["bash", "-c"]
+        script = argv[2]
+        assert "99testrange-insecure" in script
+        assert "Verify-Peer" in script
+
+
 class TestProxmoxAnswerBuilderContract:
     def test_is_a_builder(self) -> None:
         assert issubclass(ProxmoxAnswerBuilder, Builder)
