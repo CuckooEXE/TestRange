@@ -142,6 +142,23 @@ class TestBuilderContract:
         WindowsUnattendedBuilder(),
         NoOpBuilder(),
     ])
+    def test_preferred_install_format_default_is_qcow2(
+        self, builder: Builder,
+    ) -> None:
+        # Slice 4: every builder declares the format its install
+        # phase produces.  qcow2 is today's universal default
+        # because libvirt + Proxmox both consume it natively.
+        # Future builders for non-qcow2 backends (ESXi vmdk,
+        # Hyper-V vhdx) would override.  Used by
+        # :meth:`Builder.adopt_prebuilt` overrides to decide
+        # whether a :class:`DiskFormatConverter` is needed.
+        assert builder.preferred_install_format() == "qcow2"
+
+    @pytest.mark.parametrize("builder", [
+        CloudInitBuilder(),
+        WindowsUnattendedBuilder(),
+        NoOpBuilder(),
+    ])
     def test_adopt_prebuilt_default_raises(self, builder: Builder) -> None:
         # Default ``adopt_prebuilt`` raises — mirrors the "you should
         # have checked the phase indicator first" pattern that

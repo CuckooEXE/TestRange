@@ -290,6 +290,25 @@ class Builder(ABC):
         del vm
         return ""
 
+    def preferred_install_format(self) -> str:
+        """Return the disk format this builder's install phase
+        produces.
+
+        Default is ``"qcow2"`` — today's universal answer because
+        every shipped backend (libvirt, Proxmox) consumes qcow2
+        natively and every shipped builder produces it.  Override
+        only when adding a builder whose install pipeline outputs
+        something else (a hypothetical Windows-on-ESXi builder
+        emitting vmdk directly, for example).
+
+        Used by :meth:`adopt_prebuilt` overrides to decide whether a
+        :class:`~testrange._disk_format.DiskFormatConverter` is
+        needed before importing into the inner backend.  Slice 4
+        scaffolding — fully wired when the first non-qcow2 backend
+        lands.
+        """
+        return "qcow2"
+
     def adopt_prebuilt(
         self,
         vm: VM,
