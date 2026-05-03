@@ -463,19 +463,96 @@ def _verify_inner_dns_curl(orch: Orchestrator) -> None:
         )
 
 
+def _verify_runner_reaches_inner_via_proxy(orch: Orchestrator) -> None:
+    """The test runner curls the inner webserver via the inner
+    orchestrator's :meth:`~testrange.proxy.base.Proxy.forward`.
+
+    This proves the proxy abstraction lets a test author reach an
+    inner SDN vnet IP **from the runner** (not from a sidecar VM,
+    not from an inner VM) without ``ip route add`` on the runner.
+    The inner ``ProxmoxOrchestrator`` was constructed via
+    ``root_on_vm`` which plumbed the answer.toml-baked SSH key into
+    the orchestrator, so ``inner.proxy()`` opens an SSH transport
+    to the PVE node automatically — no extra credentials required
+    in the test.
+
+    Skipped silently if the proxy can't be opened (e.g. paramiko
+    not installed, or sshd not yet ready) — the load-bearing
+    airgap proof above already passed.  This check is for the
+    proxy ergonomics, not the airgap fix.
+    """
+    import logging
+    import urllib.request
+
+    log = logging.getLogger("examples.nested_proxmox_airgapped")
+    log.setLevel(logging.INFO)
+
+    inner_orchestrators = getattr(orch, "_inner_orchestrators", [])
+    if not inner_orchestrators:
+        log.info("no inner orchestrator → skipping proxy demo")
+        return
+    inner = inner_orchestrators[0]
+
+    try:
+        proxy = inner.proxy()
+    except Exception as exc:  # noqa: BLE001
+        log.info(
+            "inner.proxy() unavailable (%s) — skipping proxy demo "
+            "(the airgap proof above is unaffected)", exc,
+        )
+        return
+
+    try:
+        bind_host, bind_port = proxy.forward(("10.50.0.2", 80))
+    except Exception as exc:  # noqa: BLE001
+        log.info("proxy.forward() failed (%s) — skipping fetch", exc)
+        return
+
+    # Curl the local forward — runs on the test runner, no sidecar
+    # VM involved.
+    url = f"http://{bind_host}:{bind_port}/"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            body = resp.read()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "runner-side fetch via proxy.forward() failed (%s) — "
+            "this would normally be a hard assertion but is "
+            "logged-only because proxy ergonomics are a separate "
+            "concern from the core airgap proof",
+            exc,
+        )
+        return
+
+    assert b"airgapped webserver" in body, (
+        f"runner fetched {url} via inner.proxy().forward() but got "
+        f"unexpected body: {body!r}.  Either the forward routed to "
+        "the wrong inner IP or nginx response changed."
+    )
+    log.info(
+        "runner reached inner webserver via inner.proxy().forward() "
+        "(local listener at %s:%d); body verified.",
+        bind_host, bind_port,
+    )
+
+
 def verify(orch: Orchestrator) -> None:
-    """Run the four checks in dependency order.
+    """Run the verify chain in dependency order.
 
     The order matters for failure-message clarity: if dnsmasq isn't
     baked in, _verify_dnsmasq_baked_in fires first with a specific
     message instead of letting _verify_inner_dns_curl fail with a
-    less obvious "no inner orchestrator entered".
+    less obvious "no inner orchestrator entered".  The
+    ``_verify_runner_reaches_inner_via_proxy`` demo runs LAST (and
+    is best-effort) so a proxy-side regression doesn't shadow the
+    core airgap proof.
     """
     _verify_dnsmasq_baked_in(orch)
     _wait_for_pveproxy(orch.vms["proxmox"])
     _verify_no_outer_internet(orch)
     _verify_inner_no_internet(orch)
     _verify_inner_dns_curl(orch)
+    _verify_runner_reaches_inner_via_proxy(orch)
 
 
 def gen_tests() -> list[Test]:

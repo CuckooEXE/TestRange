@@ -45,6 +45,8 @@ from testrange.backends.libvirt.network import (
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
 from testrange.orchestrator_base import AbstractOrchestrator, recursive_vm_iter
+from testrange.proxy.base import Proxy
+from testrange.proxy.ssh import SSHProxy
 from testrange.vms.generic import GenericVM
 from testrange.backends.libvirt.storage import (
     LocalStorageBackend,
@@ -245,6 +247,55 @@ def _list_network_names(
     return active + defined
 
 
+def _open_ssh_for_proxy(
+    *,
+    host: str,
+    username: str,
+    port: int = 22,
+    key_filename: str | None = None,
+    connect_timeout: float = 30.0,
+) -> object:
+    """Open a paramiko SSH client for use as a proxy transport.
+
+    Module-level (rather than a method) so tests can ``patch`` it
+    cleanly.  Auth resolves through paramiko's standard discovery —
+    explicit ``key_filename`` first, then agent (``$SSH_AUTH_SOCK``),
+    then default key files (``~/.ssh/id_rsa`` etc.).
+
+    :raises OrchestratorError: On connection / auth failure.
+        Wrapped to keep paramiko exceptions from leaking out of
+        the orchestrator's API surface.
+    """
+    import paramiko  # noqa: PLC0415 — keep optional dep lazy
+
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host,
+            port=port,
+            username=username,
+            key_filename=key_filename,
+            timeout=connect_timeout,
+            allow_agent=True,
+            look_for_keys=True,
+        )
+    except (paramiko.SSHException, OSError) as exc:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise OrchestratorError(
+            f"LibvirtOrchestrator.proxy(): SSH connect to "
+            f"{username}@{host}:{port} failed: {exc}.  Confirm "
+            "the host is reachable, an authorized key is loaded "
+            "in ssh-agent (or a key file is in ~/.ssh/), and the "
+            "user has shell access."
+        ) from exc
+    return client
+
+
 class Orchestrator(AbstractOrchestrator):
     """libvirt / KVM / QEMU implementation of
     :class:`~testrange.orchestrator_base.AbstractOrchestrator`.
@@ -366,6 +417,14 @@ class Orchestrator(AbstractOrchestrator):
         # claimed portability the code didn't deliver.
         del switches
         self._host = host
+        # Memoized proxy + its underlying paramiko client — opened
+        # lazily on the first ``self.proxy()`` call, torn down by
+        # ``_teardown``.  ``_proxy_ssh_client`` is owned here (not
+        # by the SSHProxy) because ``Proxy.close()`` only tears
+        # down channels + listeners; the connection itself is
+        # orchestrator state.
+        self._proxy: Proxy | None = None
+        self._proxy_ssh_client: object | None = None
         # The narrower concrete types declared in the class body are
         # what internal code relies on.  Pyright re-checks the type
         # of the assignment against the ABC's declaration on each
@@ -540,6 +599,100 @@ class Orchestrator(AbstractOrchestrator):
                 f"&& sudo virsh net-undefine {net_name}"
             )
         return hints
+
+    def _ssh_coords_for_proxy(self) -> tuple[str, str, int]:
+        """Resolve ``(username, host, port)`` for the proxy's SSH hop.
+
+        Reuses the same parsing as :meth:`_select_storage_backend` —
+        ``qemu+ssh://[user@]host[:port]/system`` is the canonical
+        remote-libvirt URI shape, and the proxy's transport must
+        reach the same SSH endpoint as the storage transport.
+
+        :raises OrchestratorError: When the host is local (no SSH
+            transport to tunnel through; the runner is already on
+            the libvirt host's bridge).
+        """
+        import os
+
+        from testrange.storage.transport.ssh import _ssh_config_user
+
+        if self._host in ("localhost", "127.0.0.1", "::1") \
+                or self._host == "qemu:///system":
+            raise OrchestratorError(
+                "LibvirtOrchestrator.proxy() is for remote libvirt "
+                "hosts (qemu+ssh://...).  This orchestrator runs "
+                "against local libvirt; the test runner is already "
+                "on the same network namespace as the VMs and a "
+                "tunnel would be a no-op.  Reach inner VMs by IP "
+                "directly."
+            )
+        # Same parser shape as _select_storage_backend.
+        if "://" in self._host:
+            _, _, rest = self._host.partition("://")
+            hostpart, _, _ = rest.partition("/")
+        else:
+            hostpart = self._host
+        user: str | None = None
+        if "@" in hostpart:
+            user, _, hostpart = hostpart.partition("@")
+        port = 22
+        if ":" in hostpart:
+            hostpart, _, port_s = hostpart.partition(":")
+            try:
+                port = int(port_s)
+            except ValueError:
+                pass
+        # Username resolution mirrors SSHFileTransport: explicit
+        # user wins, then ssh_config user, then $USER.  Never
+        # ``None`` so the proxy can authenticate.
+        resolved_user = (
+            user
+            or _ssh_config_user(hostpart)
+            or os.environ.get("USER")
+            or "root"
+        )
+        return (resolved_user, hostpart, port)
+
+    def proxy(self) -> Proxy:
+        """Return an :class:`SSHProxy` reaching this libvirt host's
+        network namespace.
+
+        Memoized — the first call opens a paramiko ``Transport``;
+        subsequent calls return the same proxy instance.  Tunnels
+        share the transport (paramiko multiplexes channels), so a
+        test that opens 50 forwards pays one TCP+SSH handshake.
+
+        Tear-down is handled by :meth:`_teardown` via the proxy's
+        own ``close()``.
+
+        :raises OrchestratorError: When the orchestrator is
+            configured against a local libvirt host (no remote SSH
+            to tunnel through).
+        """
+        if self._proxy is not None:
+            return self._proxy
+        user, host, port = self._ssh_coords_for_proxy()
+        client = _open_ssh_for_proxy(
+            host=host, username=user, port=port,
+        )
+        transport = client.get_transport()
+        if transport is None or not transport.is_active():
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise OrchestratorError(
+                f"LibvirtOrchestrator.proxy(): SSH connection to "
+                f"{user}@{host}:{port} produced no active transport.  "
+                "Confirm the host is reachable and the SSH session "
+                "didn't immediately drop."
+            )
+        # Stash the client so we can close it on teardown — proxy's
+        # ``close()`` only tears down channels and listeners, not
+        # the transport's owning client.
+        self._proxy_ssh_client = client
+        self._proxy = SSHProxy(transport)
+        return self._proxy
 
     def _build_uri(self) -> str:
         """Translate :attr:`host` into a libvirt connection URI.
@@ -1296,6 +1449,25 @@ class Orchestrator(AbstractOrchestrator):
                 _log.debug("inner orchestrator teardown raised (ignored): %s", exc)
             self._nested_stack = None
             self._inner_orchestrators = []
+
+        # Tear down the proxy AFTER inner orchestrators (they may
+        # be using forwards via ``orch.proxy()`` mid-cleanup) but
+        # BEFORE the libvirt connection closes — the proxy's SSH
+        # transport is independent of libvirt's, but symmetry with
+        # the rest of teardown's resource ordering keeps the code
+        # easy to reason about.
+        if self._proxy is not None:
+            try:
+                self._proxy.close()
+            except Exception as exc:
+                _log.debug("proxy.close() raised (ignored): %s", exc)
+            self._proxy = None
+        if self._proxy_ssh_client is not None:
+            try:
+                self._proxy_ssh_client.close()  # type: ignore[attr-defined]
+            except Exception as exc:
+                _log.debug("proxy SSH close raised (ignored): %s", exc)
+            self._proxy_ssh_client = None
 
         for vm in self._vm_list:
             try:

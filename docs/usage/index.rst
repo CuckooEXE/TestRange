@@ -14,6 +14,7 @@ User Guide
    caching
    http_cache
    communication
+   proxy
    debugging
    extending
    extending-checklists

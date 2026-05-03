@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from testrange._run import RunDir
     from testrange.networks.base import AbstractVirtualNetwork
+    from testrange.proxy.base import Proxy
     from testrange.storage.base import StorageBackend
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
@@ -206,6 +207,42 @@ class AbstractOrchestrator(ABC):
         so they cannot mask the original exception (if any) that ended
         the ``with`` block.
         """
+
+    def proxy(self) -> Proxy:
+        """Return a tunnel into this orchestrator's hypervisor network.
+
+        Solves the "remote bare-metal hypervisor + unreachable inner-VM
+        IP" problem without requiring ``ip route add`` on the test
+        runner.  The returned :class:`~testrange.proxy.base.Proxy`
+        exposes:
+
+        * ``proxy.connect((host, port))`` → ``socket.socket`` for
+          clients that accept a ``sock=`` (paramiko, ``requests`` with
+          a custom adapter, asyncio).
+        * ``proxy.forward((host, port))`` → ``("127.0.0.1", port)``
+          for opaque clients that only know ``host:port`` strings
+          (``curl``, ``proxmoxer``, browsers, third-party SDKs).
+
+        Lifecycle: backends typically memoize one ``Proxy`` per
+        orchestrator and tear it down via the same ExitStack that
+        owns the inner orchestrators.  Repeated calls to
+        ``orch.proxy()`` return the same instance.
+
+        Default implementation raises :class:`NotImplementedError` so
+        backends have to opt in explicitly — silently no-op'ing
+        would mislead callers into thinking the tunnel was open.
+
+        :raises NotImplementedError: When this backend doesn't yet
+            wire the proxy.  ESXi and Hyper-V backends don't ship
+            today; when they do they'll override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement proxy() yet — "
+            "the backend cannot tunnel test-runner traffic into its "
+            "inner-VM network.  Until that lands, run reachability "
+            "tests from a sidecar VM on the same network as the "
+            "target, or set up an SSH tunnel manually."
+        )
 
     def cleanup(self, run_id: str) -> None:
         """Tear down resources from a prior run that exited uncleanly.

@@ -92,6 +92,8 @@ from testrange.backends.proxmox.network import (
 from testrange.backends.proxmox.vm import ProxmoxVM
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
+from testrange.proxy.base import Proxy
+from testrange.proxy.ssh import SSHProxy
 from testrange.orchestrator_base import AbstractOrchestrator, recursive_vm_iter
 
 if TYPE_CHECKING:
@@ -270,6 +272,58 @@ def _registered_ip_for(net: ProxmoxVirtualNetwork, vm_name: str) -> str | None:
     return None
 
 
+def _open_ssh_for_proxy(
+    *,
+    host: str,
+    username: str,
+    port: int = 22,
+    key_filename: str | None = None,
+    password: str | None = None,
+    connect_timeout: float = 30.0,
+) -> object:
+    """Open a paramiko SSH client for use as a :class:`SSHProxy`
+    transport.
+
+    Module-level (rather than a method) so tests can ``patch`` it
+    cleanly.  Mirrors the libvirt backend's helper of the same
+    name; lives here separately so each backend's exception
+    surface stays self-contained.
+
+    :raises OrchestratorError: On connection / auth failure.  The
+        message points at the SSH coords so the operator can
+        verify reachability without grepping a stack trace.
+    """
+    import paramiko  # noqa: PLC0415 — keep optional dep lazy
+
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(
+            hostname=host,
+            port=port,
+            username=username,
+            key_filename=key_filename,
+            password=password,
+            timeout=connect_timeout,
+            allow_agent=True,
+            look_for_keys=True,
+        )
+    except (paramiko.SSHException, OSError) as exc:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        raise OrchestratorError(
+            f"ProxmoxOrchestrator.proxy(): SSH connect to "
+            f"{username}@{host}:{port} failed: {exc}.  Confirm the "
+            "PVE node has sshd running on that port, the user has "
+            "shell access, and either the key file is on disk or "
+            "the agent has the right identity loaded."
+        ) from exc
+    return client
+
+
 def _promote_to_proxmox_switch(sw: "AbstractSwitch") -> ProxmoxSwitch:
     """Convert any :class:`AbstractSwitch` (typically the generic
     :class:`testrange.networks.Switch` spec) to the proxmox backend's
@@ -381,6 +435,10 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         zone: str = DEFAULT_ZONE,
         token: object | None = None,
         skip_dnsmasq_preflight: bool = False,
+        ssh_user: str | None = None,
+        ssh_key_filename: str | None = None,
+        ssh_password: str | None = None,
+        ssh_port: int = 22,
     ) -> None:
         # ``storage_backend`` is a generic abstraction the libvirt
         # backend uses to switch transports (local FS / SSH SFTP).
@@ -460,6 +518,21 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # leave the default ``False`` so the preflight still catches
         # operator misconfig.
         self._skip_dnsmasq_preflight = skip_dnsmasq_preflight
+        # Proxy state — see :meth:`proxy`.  ``_proxy_ssh_*`` carry
+        # the credentials the proxy uses to SSH into the PVE node.
+        # When ``root_on_vm`` builds this orchestrator, it stuffs the
+        # answer.toml-baked SSH key into ``_proxy_ssh_key_filename``
+        # so the proxy auto-authenticates.  External (operator-
+        # supplied) clusters require explicit ``ssh_user`` /
+        # ``ssh_key_filename`` (or ``ssh_password``) at construction
+        # time — the proxy raises a clear error otherwise rather
+        # than silently no-op'ing.
+        self._proxy: Proxy | None = None
+        self._proxy_ssh_client: object | None = None
+        self._proxy_ssh_user: str | None = ssh_user
+        self._proxy_ssh_key_filename: str | None = ssh_key_filename
+        self._proxy_ssh_password: str | None = ssh_password
+        self._proxy_ssh_port: int = ssh_port
 
         # Translate legacy dict-shaped ``token=`` glue from the URL
         # handler.  The dict carries one of three credential shapes
@@ -759,9 +832,95 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         except Exception as exc:  # pragma: no cover — defensive
             _log.warning("unexpected error during PVE teardown: %s", exc)
         finally:
+            # Tear down the proxy + its SSH transport.  Doing this
+            # in the finally block guarantees the resources are
+            # released even when one of the earlier teardown steps
+            # raised — proxy() is independent of every other piece
+            # of orchestrator state, so we never want it leaked.
+            if self._proxy is not None:
+                try:
+                    self._proxy.close()
+                except Exception as exc:  # pragma: no cover
+                    _log.warning("proxy.close() raised: %s", exc)
+                self._proxy = None
+            if self._proxy_ssh_client is not None:
+                try:
+                    self._proxy_ssh_client.close()  # type: ignore[attr-defined]
+                except Exception as exc:  # pragma: no cover
+                    _log.warning("proxy SSH close raised: %s", exc)
+                self._proxy_ssh_client = None
+
             self._client = None
             self._run_id = None
             self._run = None
+
+    def proxy(self) -> Proxy:
+        """Return an :class:`SSHProxy` reaching this PVE node's
+        network namespace.
+
+        The PVE node itself is the SSH endpoint: it owns the SDN
+        bridges and per-vnet dnsmasq, so any inner-VM IP is
+        routable from there.
+
+        Two construction paths:
+
+        * **Self-built node** (constructed via
+          :meth:`root_on_vm`): the answer.toml-baked SSH key from
+          the hypervisor's communicator is plumbed into the
+          orchestrator at construction time.  ``proxy()`` works
+          out-of-the-box.
+        * **External cluster** (constructed by the operator): pass
+          ``ssh_user`` + ``ssh_key_filename`` (or ``ssh_password``)
+          to the constructor.  Without those, ``proxy()`` raises
+          a clear error pointing at the missing kwargs — never
+          silently no-ops.
+
+        Memoized — repeated calls return the same instance.
+
+        :raises OrchestratorError: When SSH credentials are missing
+            (external cluster without ``ssh_user`` / key) or the
+            connection fails.
+        """
+        if self._proxy is not None:
+            return self._proxy
+        if self._proxy_ssh_user is None or (
+            self._proxy_ssh_key_filename is None
+            and self._proxy_ssh_password is None
+        ):
+            raise OrchestratorError(
+                "ProxmoxOrchestrator.proxy() needs SSH credentials to "
+                "tunnel into the PVE node's network namespace.  Pass "
+                "``ssh_user=<user>`` plus ``ssh_key_filename=<path>`` "
+                "(or ``ssh_password=<password>``) to the orchestrator "
+                "constructor.  When the orchestrator is built via "
+                "``root_on_vm``, these kwargs are populated "
+                "automatically from the hypervisor's communicator — "
+                "if you're seeing this error after ``root_on_vm``, "
+                "the answer.toml-baked SSH key wasn't propagated; "
+                "check the Hypervisor's ``users=`` for a credential "
+                "with an ``ssh_key`` field."
+            )
+        client = _open_ssh_for_proxy(
+            host=self._host,
+            username=self._proxy_ssh_user,
+            port=self._proxy_ssh_port,
+            key_filename=self._proxy_ssh_key_filename,
+            password=self._proxy_ssh_password,
+        )
+        transport = client.get_transport()
+        if transport is None or not transport.is_active():
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise OrchestratorError(
+                f"ProxmoxOrchestrator.proxy(): SSH connection to "
+                f"{self._proxy_ssh_user}@{self._host}:{self._proxy_ssh_port} "
+                "produced no active transport."
+            )
+        self._proxy_ssh_client = client
+        self._proxy = SSHProxy(transport)
+        return self._proxy
 
     def cleanup(self, run_id: str) -> None:
         """Reconstruct + tear down per-run PVE resources for *run_id*.
@@ -1855,6 +2014,18 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # and intermittently fails with "Connection refused".
         cls._wait_for_pveproxy(hypervisor)
 
+        # Plumb the hypervisor's SSH credentials into the inner
+        # orchestrator so ``inner.proxy()`` can authenticate without
+        # the operator passing creds again.  ``SSHCommunicator``
+        # stores the resolved username + key path on private
+        # attributes (``_user`` / ``_key_filename``); read defensively
+        # because non-SSH communicators won't carry these and the
+        # inner orchestrator should still construct cleanly (the
+        # operator can still hit ``inner.proxy()`` with explicit
+        # creds, or just skip the proxy feature).
+        proxy_ssh_user = getattr(comm, "_user", None)
+        proxy_ssh_key_filename = getattr(comm, "_key_filename", None)
+
         return cls(
             host=host,
             user="root@pam",
@@ -1870,6 +2041,10 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             # internet to fetch the changelog and breaks airgapped
             # run topologies — is redundant.  Trust the bake-in.
             skip_dnsmasq_preflight=True,
+            # See :meth:`proxy` — these populate the SSH credentials
+            # the inner proxy uses to tunnel into the PVE node.
+            ssh_user=proxy_ssh_user,
+            ssh_key_filename=proxy_ssh_key_filename,
         )
 
     @classmethod
