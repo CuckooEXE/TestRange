@@ -186,3 +186,42 @@ Troubleshooting
       namespace (wrong IP, network not up).
     * The destination port has no listener (the inner VM isn't
       running the service yet).
+
+When the hypervisor can't see the VM
+------------------------------------
+
+The proxy reaches whatever the **hypervisor itself** can reach at
+L3.  That's a deliberate constraint — there's no way for the proxy
+to route to an inner VM that the hypervisor can't route to either.
+A few topologies cut the hypervisor out of the L3 path:
+
+* **Bridges with no host IP** — a libvirt network defined with
+  :class:`testrange.VirtualNetwork(host_isolated=True)
+  <testrange.backends.libvirt.network.VirtualNetwork>`, or any
+  manual Linux bridge the operator created without giving the host
+  an IP on it.  L2 between VMs works; L3 from the host doesn't.
+* **PCIe / SR-IOV passthrough** — VM has a physical NIC attached
+  directly, hypervisor doesn't bridge the traffic at all.
+* **Macvtap private mode** — host and VM share a physical NIC but
+  the kernel deliberately segregates them.
+* **VLAN-tagged interfaces the host doesn't terminate** — Proxmox
+  SDN VLAN zones where PVE has the trunk but no L3 sub-interface
+  on the specific VLAN.
+* **Cross-vSwitch isolation on ESXi / Hyper-V** — VM on a vSwitch
+  whose uplink doesn't carry the host's management vmk port.
+
+In these topologies, ``proxy.connect()`` / ``proxy.forward()`` will
+fail at the SSH ``open_channel`` step (hypervisor's sshd reports
+"network is unreachable" or "channel administratively prohibited").
+The error message names the target and points at hypervisor
+reachability.
+
+Workaround: run the assertion **from a sidecar VM** that *is* on
+the same network as the target.  The orchestrator already exposes
+that VM via ``orch.vms[<name>]`` and its ``communicator`` rides
+virtio-serial (host-mediated, not IP-routed), so the test runner
+can ``vm.exec(["curl", ...])`` even on an isolated bridge.
+
+See :file:`examples/host_isolated_network.py` for a worked
+demonstration of the mutual-isolation pattern + the sidecar
+workaround.

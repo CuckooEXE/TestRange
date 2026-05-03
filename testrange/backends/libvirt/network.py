@@ -83,6 +83,27 @@ class VirtualNetwork(AbstractVirtualNetwork):
     _vm_entries: list[tuple[str, str, str]]
     """Registered VM entries as ``(vm_name, mac, ip)`` tuples."""
 
+    host_isolated: bool
+    """When ``True``, the host has NO IP address on the bridge.
+
+    Models the ESXi-style cross-vSwitch isolation: VMs on the bridge
+    can talk L2 to each other, but the libvirt host (and therefore
+    the test runner in local-libvirt mode) has no L3 path to any VM
+    on the network.  Setting this to ``True`` forces ``dhcp`` /
+    ``dns`` / ``internet`` to ``False`` because each of those
+    requires libvirt's dnsmasq running on a host-bound bridge IP.
+
+    Use case: tests that need to assert mutual unreachability
+    between management and a VM segment, or that exercise the
+    "hypervisor can't see the VM" failure mode of the
+    :meth:`~testrange.proxy.base.Proxy` abstraction.
+
+    VMs on a ``host_isolated`` network MUST declare an explicit
+    ``ip=`` on every :class:`~testrange.devices.vNIC` (no DHCP to
+    auto-assign) and use ``communicator='guest-agent'`` (no SSH
+    over an unrouted network).
+    """
+
     def __init__(
         self,
         name: str,
@@ -91,15 +112,27 @@ class VirtualNetwork(AbstractVirtualNetwork):
         internet: bool = False,
         dns: bool = True,
         switch: AbstractSwitch | str | None = None,
+        host_isolated: bool = False,
     ) -> None:
         # ``switch=`` is accepted for portable test code but the
         # libvirt backend has no separate switch layer — every
         # network IS its own bridge.  The field is preserved on the
         # instance for inspection but never consumed by the
         # provisioning path.
+        if host_isolated and (dhcp or dns or internet):
+            raise ValueError(
+                f"VirtualNetwork {name!r}: host_isolated=True is "
+                "incompatible with dhcp/dns/internet — each of those "
+                "requires libvirt's dnsmasq listening on a "
+                "host-bound bridge IP, and host_isolated=True is the "
+                "explicit promise that the host has no IP on the "
+                "bridge.  Pass dhcp=False, dns=False, internet=False "
+                "alongside host_isolated=True."
+            )
         super().__init__(
             name, subnet, dhcp, internet, dns, switch=switch,
         )
+        self.host_isolated = host_isolated
         self._run_id: str | None = None
         self._lv_network: libvirt.virNetwork | None = None
         # vm_name -> (mac, ip) mappings; populated by Orchestrator before start()
@@ -193,6 +226,17 @@ class VirtualNetwork(AbstractVirtualNetwork):
             stp="on",
             delay="0",
         )
+
+        if self.host_isolated:
+            # No <ip> on the bridge → libvirt creates the bridge
+            # but the host has no IP on it.  Bridge stays L2-only:
+            # VMs talk to each other via the bridge, host has zero
+            # L3 visibility.  No <dns> either (no dnsmasq target).
+            # Constructor already validated dhcp/dns/internet are
+            # all False, so the rest of this method's branches
+            # short-circuit.
+            ET.indent(net)
+            return ET.tostring(net, encoding="unicode", xml_declaration=False)
 
         ip_elem = ET.SubElement(
             net,
