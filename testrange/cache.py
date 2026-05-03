@@ -363,16 +363,21 @@ class CacheManager:
             tmp.rename(dest)
         return dest
 
-    def get_proxmox_prepared_iso(self, vanilla_iso: Path) -> Path:
+    def get_proxmox_prepared_iso(
+        self,
+        vanilla_iso: Path,
+        first_boot_script: str | None = None,
+    ) -> Path:
         """Return the local path to a prepared ProxMox installer ISO.
 
         The ProxMox VE installer only enters unattended (answer-file)
         mode when its initrd carries ``/auto-installer-mode.toml``.
         :func:`testrange.vms.builders._proxmox_prepare.prepare_iso_bytes`
         produces that modified ISO; we cache the output here keyed by
-        the SHA-256 of the vanilla ISO.  One base ISO version → one
-        prepared copy, reused across every ProxMox VM that builds
-        against that source.
+        the SHA-256 of the vanilla ISO **and** (when present) the
+        SHA-256 of *first_boot_script* — so editing the script
+        invalidates only the prepared-ISO cache without rebuilding
+        every cached qcow2 that points at the same vanilla ISO.
 
         Concurrent callers contend on a :class:`FileLock` sibling;
         whoever wins writes the prepared ISO atomically via a
@@ -382,8 +387,14 @@ class CacheManager:
         :param vanilla_iso: Local path to an unmodified PVE installer
             ISO (typically the result of :meth:`get_image` for a
             ProxMox VE release URL).
+        :param first_boot_script: Optional bash script body embedded
+            on the prepared ISO at ``/proxmox-first-boot`` for PVE's
+            ``[first-boot] source = "from-iso"`` mechanism.  When
+            non-``None``, its SHA-256 prefix is folded into the
+            cache key — script edits get a fresh prepared ISO without
+            forcing a full vanilla-ISO re-download.
         :returns: Path to the prepared ISO under
-            ``<cache_root>/images/proxmox-prepared-<sha>.iso``.
+            ``<cache_root>/images/proxmox-prepared-<sha>[-fb-<sha>].iso``.
         :raises CacheError: On filesystem errors during prep.
         :raises ~testrange.vms.builders._proxmox_prepare.ProxmoxPrepareError:
             If the ISO can't be prepared (xorriso missing, vanilla
@@ -392,21 +403,34 @@ class CacheManager:
         from testrange.vms.builders._proxmox_prepare import prepare_iso_bytes
 
         sha = _sha256_file(vanilla_iso)[:24]
-        dest = self.images_dir / f"proxmox-prepared-{sha}.iso"
-        lock_path = self.images_dir / f"proxmox-prepared-{sha}.lock"
+        if first_boot_script is not None:
+            fb_sha = hashlib.sha256(
+                first_boot_script.encode("utf-8"),
+            ).hexdigest()[:12]
+            dest = self.images_dir / f"proxmox-prepared-{sha}-fb-{fb_sha}.iso"
+            lock_path = self.images_dir / (
+                f"proxmox-prepared-{sha}-fb-{fb_sha}.lock"
+            )
+        else:
+            dest = self.images_dir / f"proxmox-prepared-{sha}.iso"
+            lock_path = self.images_dir / f"proxmox-prepared-{sha}.lock"
         with FileLock(str(lock_path), timeout=1800):
             if dest.exists():
-                _log.debug("proxmox prepared-ISO cache hit (%s)", sha)
+                _log.debug("proxmox prepared-ISO cache hit (%s)", dest.name)
                 return dest
             _log.info(
-                "preparing proxmox installer ISO (sha=%s) → %s", sha, dest,
+                "preparing proxmox installer ISO (%s) → %s",
+                dest.name, dest,
             )
             tmp = dest.with_suffix(".iso.part")
             try:
                 with log_duration(
                     _log, f"prepare proxmox ISO {vanilla_iso.name!r}"
                 ):
-                    prepare_iso_bytes(vanilla_iso, tmp)
+                    prepare_iso_bytes(
+                        vanilla_iso, tmp,
+                        first_boot_script=first_boot_script,
+                    )
                 os.chmod(tmp, 0o644)
                 tmp.rename(dest)
             except BaseException:

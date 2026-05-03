@@ -309,6 +309,42 @@ class Builder(ABC):
         """
         return "qcow2"
 
+    def first_boot_script(self, vm: VM) -> str | None:
+        """Return a bash script PVE-style installers run on first boot
+        of the installed system, or ``None`` to skip.
+
+        The script is embedded in the prepared installer ISO at
+        ``/proxmox-first-boot`` (or the equivalent for non-PVE
+        builders) and run by the installed system's first-boot
+        oneshot systemd unit.  Used to bake post-install state
+        (apt installs, repo swaps, persistent config files) into
+        the cached install artifact.
+
+        Default returns ``None`` — most builders don't need a
+        first-boot script (cloud-init's ``runcmd`` covers the
+        install-phase customisation case for cloud-init builders).
+        Override on builders whose installer can't run setup
+        commands directly (PVE answer.toml has no ``runcmd`` /
+        ``packages`` analog) so a first-boot script becomes the
+        only way to bake setup state into the cached qcow2.
+
+        :param vm: The VM spec being built.  Builders that vary
+            the script per-VM (uncommon) read fields from here.
+        :returns: Script body (UTF-8) or ``None``.
+
+        .. note::
+
+           Implementations that return a non-``None`` script must
+           also fold its content's digest into
+           :meth:`post_install_cache_key_extra` so cached install
+           artifacts invalidate when the script changes.  Without
+           it, an old cached artifact would silently survive a
+           script edit and the bug it was supposed to fix would
+           persist.
+        """
+        del vm
+        return None
+
     def adopt_prebuilt(
         self,
         vm: VM,

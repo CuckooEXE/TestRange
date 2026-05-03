@@ -648,7 +648,11 @@ class TestGetProxmoxPreparedIso:
 
         prep_calls: list[tuple[Path, Path]] = []
 
-        def _fake_prep(src, dst, *, partition_label="PROXMOX-AIS"):
+        def _fake_prep(
+            src, dst, *,
+            partition_label="PROXMOX-AIS",
+            first_boot_script=None,
+        ):
             prep_calls.append((Path(src), Path(dst)))
             Path(dst).write_bytes(b"prepared iso contents")
 

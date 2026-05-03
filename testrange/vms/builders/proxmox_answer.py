@@ -101,6 +101,85 @@ post-mortem when something does go wrong.
 """
 
 
+_PVE_FIRST_BOOT_PROLOGUE = """\
+#!/bin/bash
+# /proxmox-first-boot — runs once on first boot of the installed PVE.
+# PVE's auto-installer copies this script into the installed system
+# (because ``[first-boot] source = "from-iso"`` in answer.toml) and
+# wires it as a systemd oneshot via ``proxmox-first-boot.service``.
+#
+# At this point:
+#   - ``/etc/network/interfaces`` carries the answer.toml-installed
+#     run-network static IP on a Linux bridge ``vmbr0`` with the
+#     physical NIC ``enp1s0`` enslaved (e.g. ``vmbr0`` →
+#     10.0.0.10/24, gateway 10.0.0.1).
+#   - ``net0`` of the VM is on the bare-metal install vnet bridge
+#     (e.g. 192.168.240.0/24 with internet=True via libvirt's NAT).
+#   - The two don't match — the OS thinks it's on 10.0.0.x but the
+#     bridge is 192.168.240.x.  We need transient install-vnet DHCP
+#     to actually reach the internet for ``apt-get update``.
+#
+# Strategy: flush the static config FROM THE BRIDGE (not the
+# physical NIC — vmbr0 holds the L3 address; enp1s0 is enslaved and
+# has no IP), drop the default route, DHCP on vmbr0 from the install
+# vnet's dnsmasq, run the bootstrap, power off.  We don't restore
+# the static config — ``/etc/network/interfaces`` on disk is
+# untouched, so subsequent boots of the cached clone come up
+# correctly with the run-network static.
+set -euo pipefail
+exec > >(tee -a /var/log/testrange-first-boot.log) 2>&1
+echo "=== testrange first-boot starting at $(date -Is) ==="
+
+NIC="enp1s0"
+BR="vmbr0"
+# Flush IP and routes from the bridge (the L3 interface in PVE's
+# default config).  The physical NIC is enslaved and carries no
+# address; flushing it is a no-op but harmless.
+ip addr flush dev "$BR" 2>/dev/null || true
+ip addr flush dev "$NIC" 2>/dev/null || true
+ip route flush dev "$BR" 2>/dev/null || true
+# Drop default routes left over from the static config's gateway
+# (e.g. ``default via 10.0.0.1 dev vmbr0``).  Without this, even
+# after dhclient sets ``/etc/resolv.conf`` to the install-vnet DNS,
+# the kernel still tries to reach it via the unreachable run-net
+# gateway — DNS queries black-hole and ``apt-get update`` fails
+# with "Temporary failure resolving".
+while ip route show default 2>/dev/null | grep -q .; do
+  ip route del default 2>/dev/null || break
+done
+ip link set "$NIC" up
+ip link set "$BR" up
+# ``-1`` = one-shot (don't fork a daemon); ``-v`` = verbose to log.
+# DHCP on vmbr0, not enp1s0 — DHCP discover frames go out via the
+# bridge port either way, but the lease (IP + DNS + default route)
+# must land on the bridge interface so apt's traffic is routed
+# correctly.
+dhclient -1 -v "$BR" || { echo "DHCP on $BR failed"; exit 1; }
+
+"""
+"""Network-flip prefix prepended to the first-boot script body.
+
+Runs before the bootstrap so ``apt-get update`` reaches the install
+vnet's dnsmasq instead of the (unreachable) run-network static."""
+
+
+_PVE_FIRST_BOOT_EPILOGUE = """
+
+echo "=== testrange first-boot completed at $(date -Is) ==="
+
+# Power off — orchestrator's install-phase SHUTOFF wait keys on this.
+# The cached qcow2 carries dnsmasq + the no-subscription repo;
+# subsequent boots of clones run on the run-network static config
+# already on disk and never re-execute this script (PVE's first-boot
+# systemd unit is ``Type=oneshot`` and disables itself after success).
+systemctl poweroff
+"""
+"""Power-off suffix appended to the first-boot script body.
+
+Triggers the orchestrator's install-phase SHUTOFF wait, which then
+snapshots the disk into the qcow2 cache."""
+
+
 _PVE_BOOTSTRAP_TIMEOUT_S = 300
 """Maximum seconds for the bootstrap to complete.
 
@@ -335,6 +414,30 @@ class ProxmoxAnswerBuilder(Builder):
             disk_size=vm._primary_disk_size(),
         )
 
+    def first_boot_script(self, vm: VM) -> str | None:
+        """Return the rendered first-boot script body — network-flip +
+        bootstrap + poweroff — that runs INSIDE the VM on first boot.
+
+        The script lands on the prepared installer ISO at
+        ``/proxmox-first-boot`` (PVE's auto-installer convention),
+        and the answer.toml ``[first-boot] source = "from-iso"``
+        block tells PVE to copy + execute it via a oneshot systemd
+        service.  Replaces the broken
+        :meth:`post_install_hook` SSH-from-orchestrator attempt.
+
+        Composes :data:`_PVE_FIRST_BOOT_PROLOGUE` (network flip)
+        with :meth:`_build_bootstrap_script`'s output (which already
+        prepends :data:`_PVE_APT_INSECURE_PROLOGUE` when
+        :attr:`apt_insecure` is set) and
+        :data:`_PVE_FIRST_BOOT_EPILOGUE` (power-off).
+        """
+        del vm
+        return (
+            _PVE_FIRST_BOOT_PROLOGUE
+            + self._build_bootstrap_script()
+            + _PVE_FIRST_BOOT_EPILOGUE
+        )
+
     def has_post_install_hook(self) -> bool:
         """Always ``True`` — :meth:`post_install_hook` runs the PVE
         bootstrap (apt install dnsmasq, repo swap) and is required for
@@ -387,7 +490,7 @@ class ProxmoxAnswerBuilder(Builder):
 
     def post_install_cache_key_extra(self, vm: VM) -> str:
         """Return a deterministic 24-hex-char digest of the rendered
-        bootstrap script for this builder's config.
+        first-boot script for this builder's config.
 
         Matches the 24-char width of :func:`vm_config_hash`'s output so
         debug logs that print partial hashes line up.  Folded into
@@ -395,11 +498,21 @@ class ProxmoxAnswerBuilder(Builder):
         script-affecting state (the script body itself OR the
         :attr:`apt_insecure` toggle that prepends an apt.conf.d
         prologue) changes.
+
+        Note the script is the SAME body :meth:`first_boot_script`
+        returns (it's the actual content baked into the cached qcow2
+        via PVE's ``[first-boot]`` mechanism), so digesting it here
+        guarantees that an edit to the install-time bootstrap
+        invalidates the entire cached image.  The orchestrator-side
+        :meth:`~testrange.backends.proxmox.ProxmoxOrchestrator._bootstrap_pve_node`
+        path uses :data:`_PVE_BOOTSTRAP_SCRIPT` (a different body —
+        no network-flip + poweroff) but only as a fallback for
+        topologies where ``[first-boot]`` couldn't run; that script
+        doesn't get baked into the cache so we don't fold its digest
+        in here.
         """
-        del vm
-        return hashlib.sha256(
-            self._build_bootstrap_script().encode("utf-8"),
-        ).hexdigest()[:24]
+        script = self.first_boot_script(vm) or self._build_bootstrap_script()
+        return hashlib.sha256(script.encode("utf-8")).hexdigest()[:24]
 
     def _build_bootstrap_script(self) -> str:
         """Return the bootstrap script body for this builder's config.
@@ -423,7 +536,15 @@ class ProxmoxAnswerBuilder(Builder):
         #    then produce a prepared copy whose initrd drops into
         #    auto-install / fetch-from-partition mode.
         vanilla = resolve_image(vm.iso, cache)
-        prepared_local = cache.get_proxmox_prepared_iso(vanilla)
+        # Pass the first-boot script through so the prepared ISO
+        # carries it at ``/proxmox-first-boot``, where PVE's
+        # auto-installer picks it up via ``[first-boot] source =
+        # "from-iso"`` in answer.toml.  Cache key folds in the
+        # script digest so script edits get a fresh prepared ISO
+        # without re-downloading the vanilla.
+        prepared_local = cache.get_proxmox_prepared_iso(
+            vanilla, first_boot_script=self.first_boot_script(vm),
+        )
         prepared_ref = cache.stage_source(prepared_local, run.storage)
 
         # 2. Blank OS disk — the PVE installer partitions it itself
@@ -510,15 +631,13 @@ class ProxmoxAnswerBuilder(Builder):
         # proxmox-auto-installer/src/answer.rs and the upstream
         # minimal.toml test fixture.  Single-word fields stay as-is.
         #
-        # reboot-mode = "power-off" is critical: it tells the
-        # installer to POWER OFF (not reboot) after a successful
-        # install, so the install-phase wait loop sees the SHUTOFF
-        # edge it keys on.  Without it, the default ``reboot`` mode
-        # would kick the VM back into the installer ISO and loop
-        # forever until the build timeout — and a reboot-as-poweroff
-        # backend hook isn't a workaround because early-boot failures
-        # also issue sysrq reboots, which would silently cache a
-        # blank disk.
+        # reboot-mode default is ``"reboot"``.  We omit the field so
+        # PVE reboots the install VM into the installed system, where
+        # the ``[first-boot]`` script runs the bootstrap and then
+        # ``systemctl poweroff``s — which is what fires the
+        # orchestrator's install-phase SHUTOFF wait.  Boot order is
+        # ``order=scsi0`` (no CD), so the reboot lands on the
+        # installed bootloader, not the installer ISO.
         global_block = [
             f"country = {_toml_str(self.country)}",
             f"keyboard = {_toml_str(self.keyboard)}",
@@ -526,7 +645,6 @@ class ProxmoxAnswerBuilder(Builder):
             f"fqdn = {_toml_str(f'{vm.name}.{self.fqdn_domain}')}",
             f"mailto = {_toml_str(self.mailto)}",
             f"root-password = {_toml_str(root.password)}",
-            'reboot-mode = "power-off"',
         ]
         if ssh_keys:
             global_block.append(
@@ -542,8 +660,38 @@ class ProxmoxAnswerBuilder(Builder):
             f"disk-list = [{_toml_str(self.disk_device)}]",
         ]
 
+        # ``[first-boot] source = "from-iso"`` tells PVE's installer
+        # to look for ``/proxmox-first-boot`` on the prepared
+        # installer ISO and copy it into the installed system as a
+        # systemd oneshot.  We only emit the section when the builder
+        # actually has a script to run (the default ``Builder``
+        # contract returns ``None`` for non-PVE builders, but
+        # ProxmoxAnswerBuilder overrides to return
+        # ``_PVE_FIRST_BOOT_SCRIPT`` — see
+        # :meth:`first_boot_script`).  The script body itself isn't
+        # in the answer.toml; PVE finds it on the ISO at install time
+        # and the prepared-ISO cache key folds in its digest so
+        # script edits invalidate cached images.
         lines: list[str] = ["[global]", *global_block, "", "[network]",
                             *network_block, "", "[disk-setup]", *disk_block]
+        if self.first_boot_script(vm) is not None:
+            # ``ordering = "network-online"`` enables PVE's
+            # ``proxmox-first-boot-network-online.service`` (one of
+            # three oneshot services in the proxmox-first-boot deb on
+            # the installer ISO).  The service runs after
+            # ``network-online.target``, so the OS has already applied
+            # the answer.toml-baked static IP config — and our script
+            # flushes that and re-DHCPs from the install vnet.  Other
+            # ordering options (``"before-network"`` /
+            # ``"multi-user"``) exist; ``network-online`` is the
+            # earliest stage where the script can use the network at
+            # all, which is what we need for ``apt-get update``.
+            lines.extend([
+                "",
+                "[first-boot]",
+                'source = "from-iso"',
+                'ordering = "network-online"',
+            ])
         return "\n".join(lines) + "\n"
 
     def _network_block(self, vm: VM) -> list[str]:

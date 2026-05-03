@@ -42,13 +42,24 @@ def _hypervisor_with_communicator(host: str, password: str = "pw") -> MagicMock:
     comm._host = host
     hv._require_communicator.return_value = comm
 
-    # systemctl is-active pveproxy returns active immediately so the
-    # readiness wait short-circuits.
-    pveproxy = MagicMock()
-    pveproxy.exit_code = 0
-    pveproxy.stdout = b"active\n"
-    pveproxy.stderr = b""
-    hv.exec.return_value = pveproxy
+    # _wait_for_pveproxy is a two-stage gate: systemctl is-active
+    # (stage 1) AND a curl probe to /api2/json/version (stage 2).
+    # Both must short-circuit to "ready" so the readiness wait
+    # doesn't eat real wall-clock in tests.  Dispatch on argv:
+    # systemctl returns ``active``, curl returns ``200`` (any 2xx/4xx
+    # is accepted), every other exec defaults to a generic success.
+    def _exec(argv: list, **_kw):  # type: ignore[no-untyped-def]
+        result = MagicMock()
+        result.exit_code = 0
+        result.stderr = b""
+        if argv[:2] == ["systemctl", "is-active"]:
+            result.stdout = b"active\n"
+        elif argv[0] == "sh" and "curl" in (argv[2] if len(argv) > 2 else ""):
+            result.stdout = b"200"
+        else:
+            result.stdout = b""
+        return result
+    hv.exec.side_effect = _exec
     return hv
 
 
@@ -172,36 +183,55 @@ class TestRootOnVm:
         assert promoted.dhcp is True
         assert promoted.dns is True
 
-    def test_does_not_re_run_bootstrap_over_ssh(self) -> None:
-        """The dnsmasq + repo-swap bootstrap is now baked into the
-        cached PVE template by
-        :meth:`ProxmoxAnswerBuilder.post_install_hook`, fired in the
-        install phase on the bare-metal install network.  ``root_on_vm``
-        must NOT re-run the bootstrap over SSH — doing so would (a)
-        break airgapped run topologies (where the hypervisor's
-        run-phase network has ``internet=False`` and apt-get update
-        can't reach the public mirror) and (b) double-execute an
-        idempotent-but-slow operation.
+    def test_skips_pve_node_bootstrap(self) -> None:
+        """``root_on_vm`` does NOT SSH the dnsmasq + repo-swap
+        bootstrap onto the PVE node — that step is now baked into
+        the cached install qcow2 by the install-phase first-boot
+        script (see :meth:`ProxmoxAnswerBuilder.first_boot_script`).
+        Running it again over SSH at run time would fail in airgapped
+        run-phase networks (``internet=False``) where ``apt-get
+        update`` can't reach the public mirror; the cached image
+        already carries dnsmasq + the no-subscription repo so no
+        further apt traffic is needed.
 
-        The only exec call ``root_on_vm`` makes on the hypervisor is
-        the pveproxy readiness probe.
+        Pinning the absence here (no ``bash -c`` bootstrap exec)
+        guards against an accidental revival of the SSH bootstrap
+        path that would re-break airgap topologies.
         """
         hv = _hypervisor_with_communicator("10.0.0.10")
 
         ProxmoxOrchestrator.root_on_vm(hv, _outer_orchestrator())
 
-        # Every exec call must be the pveproxy probe — no ``bash -c
-        # <bootstrap script>`` invocation.
+        # No exec call should be the bootstrap bash -c '...'.  Every
+        # exec call should be a list whose first element is a
+        # systemctl command (``is-active pveproxy``) — the readiness
+        # wait, the only thing root_on_vm shells out for now.
         for call in hv.exec.call_args_list:
             argv = call.args[0]
-            assert argv == ["systemctl", "is-active", "pveproxy"], (
-                f"unexpected exec call: {argv!r}"
+            assert argv[0] != "bash", (
+                f"root_on_vm should not SSH-bootstrap PVE; saw "
+                f"bash exec: {argv!r}"
             )
-        # And there must be at least one — the readiness probe is
-        # mandatory.
-        assert hv.exec.call_args_list, (
-            "root_on_vm must still wait for pveproxy readiness"
-        )
+
+    def test_bootstrap_classmethod_failure_raises(self) -> None:
+        """``_bootstrap_pve_node`` is still callable as a manual
+        escape hatch for builders that don't bake dnsmasq into the
+        install image.  When invoked directly, a non-zero exit from
+        the script must still surface as an :class:`OrchestratorError`
+        with the bootstrap log path in the message.
+        """
+        hv = _hypervisor_with_communicator("10.0.0.10")
+
+        # _bootstrap_pve_node only does one ``hv.exec`` call (the
+        # bash-c bootstrap script).  Override the helper's argv-
+        # dispatching side_effect — for this test we want ALL execs
+        # to fail.
+        hv.exec.side_effect = None
+        bad = MagicMock(exit_code=42, stdout=b"", stderr=b"apt failed")
+        hv.exec.return_value = bad
+
+        with pytest.raises(OrchestratorError, match="bootstrap"):
+            ProxmoxOrchestrator._bootstrap_pve_node(hv)
 
     def test_pveproxy_failure_raises(
         self, monkeypatch: pytest.MonkeyPatch,
@@ -211,7 +241,12 @@ class TestRootOnVm:
         ExitStack unwinds cleanly instead of silently producing
         a half-baked inner orchestrator."""
         hv = _hypervisor_with_communicator("10.0.0.10")
-        # Always-failing systemctl response.
+        # Force EVERY exec to look like ``inactive`` so the
+        # readiness loop never short-circuits on either stage.  The
+        # helper's argv-dispatching side_effect would otherwise
+        # return ``active`` for systemctl and ``200`` for curl —
+        # masking the failure mode this test tries to pin.
+        hv.exec.side_effect = None
         bad = MagicMock()
         bad.exit_code = 3
         bad.stdout = b"inactive\n"

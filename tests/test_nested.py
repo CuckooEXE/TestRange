@@ -233,12 +233,25 @@ class TestRootOnVmProxmox:
         comm._host = "10.0.0.10"
         hv._communicator = comm
         # Short-circuit pveproxy readiness — the live VM is mocked.
-        ready = MagicMock()
-        ready.exit_code = 0
-        ready.stdout = b"active\n"
-        hv._communicator.exec.return_value = ready
+        # _wait_for_pveproxy is now a two-stage gate: systemctl
+        # is-active (expects ``active``) AND a curl probe (expects
+        # an HTTP status).  Dispatch on argv so both stages
+        # short-circuit instantly without sleeping.
+        def _exec(*a, **_kw):  # type: ignore[no-untyped-def]
+            argv = a[0] if a else []
+            r = MagicMock()
+            r.exit_code = 0
+            r.stderr = b""
+            if argv[:2] == ["systemctl", "is-active"]:
+                r.stdout = b"active\n"
+            elif argv[0] == "sh" and "curl" in (argv[2] if len(argv) > 2 else ""):
+                r.stdout = b"200"
+            else:
+                r.stdout = b""
+            return r
+        hv._communicator.exec.side_effect = _exec
         # AbstractVM.exec → self._communicator.exec; mock that too.
-        hv.exec = lambda *a, **kw: ready  # type: ignore[method-assign]
+        hv.exec = _exec  # type: ignore[method-assign]
 
         outer = LibvirtOrchestrator(host="localhost")
         inner = ProxmoxOrchestrator.root_on_vm(hv, outer)

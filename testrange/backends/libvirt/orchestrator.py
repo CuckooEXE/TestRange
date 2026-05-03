@@ -927,37 +927,12 @@ class Orchestrator(AbstractOrchestrator):
                     assert self._install_network is not None
                     install_net_name = self._install_network.backend_name()
                     install_mac = _mac_for_vm_network(vm.name, "__install__")
-                    # Only look up the install IP when the builder will
-                    # actually use it for a post-install hook over SSH.
-                    # Most builders (cloud-init, Windows, NoOp) don't
-                    # need it, and keeping the lookup conditional means
-                    # we don't poke at ``_vm_entries`` (a libvirt-
-                    # backend internal) for VMs that won't reach the
-                    # SSH dance.  The ledger's tuples are
-                    # ``(vm_name, mac, ip)``.
-                    # Strict bool comparison (``is True``) so the
-                    # IP lookup doesn't fire on Mock-spec'd builders
-                    # in tests, whose ``has_post_install_hook()``
-                    # returns a truthy ``MagicMock`` instance by
-                    # default rather than ``True``.  The contract
-                    # documents the return as ``bool``; treat
-                    # anything else as opt-out.
-                    if vm.builder.has_post_install_hook() is True:
-                        install_ip = next(
-                            (entry_ip for entry_name, _, entry_ip
-                             in self._install_network._vm_entries
-                             if entry_name == vm.name),
-                            "",
-                        )
-                    else:
-                        install_ip = ""
                 else:
                     # Install-free VMs (NoOp / BYOI) don't need a NIC on
                     # the install network; pass empty strings through to
                     # keep build()'s signature stable.
                     install_net_name = ""
                     install_mac = ""
-                    install_ip = ""
                 role = "top-level" if is_top_level else "descendant"
                 with log_duration(_log, f"build {role} VM {vm.name!r}"):
                     installed = vm.build(
@@ -966,7 +941,6 @@ class Orchestrator(AbstractOrchestrator):
                         run=run,
                         install_network_name=install_net_name,
                         install_network_mac=install_mac,
-                        install_network_ip=install_ip,
                     )
                 if is_top_level:
                     installed_disks[vm.name] = installed

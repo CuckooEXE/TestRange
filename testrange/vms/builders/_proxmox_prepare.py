@@ -51,6 +51,7 @@ network can be ``internet=False`` without breaking nested provisioning.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -93,14 +94,15 @@ def prepare_iso_bytes(
     out_path: Path,
     *,
     partition_label: str = _PARTITION_LABEL_DEFAULT,
+    first_boot_script: str | None = None,
 ) -> None:
     """Write an auto-install-enabled copy of *vanilla_iso_path* to *out_path*.
 
     Drives ``xorriso -indev VANILLA -outdev OUT -boot_image any keep
-    -map TOML /auto-installer-mode.toml -commit``: the
-    ``-boot_image any keep`` flag preserves the original El Torito +
-    hybrid GPT/MBR/HFS+ infrastructure so PVE's UEFI GRUB can still
-    find the EFI System Partition the way it expects.
+    -map TOML /auto-installer-mode.toml [-map SCRIPT /proxmox-first-boot]
+    -commit``: the ``-boot_image any keep`` flag preserves the original
+    El Torito + hybrid GPT/MBR/HFS+ infrastructure so PVE's UEFI GRUB
+    can still find the EFI System Partition the way it expects.
 
     :param vanilla_iso_path: Existing PVE installer ISO on disk.
     :param out_path: Where to write the prepared ISO.  Must not exist
@@ -108,6 +110,13 @@ def prepare_iso_bytes(
     :param partition_label: Volume label the prepared installer
         searches for at install time to read ``answer.toml``.
         Defaults to ``PROXMOX-AIS``.
+    :param first_boot_script: Optional bash script body.  When non-
+        ``None``, embedded at ``/proxmox-first-boot`` on the prepared
+        ISO so ``[first-boot] source = "from-iso"`` in ``answer.toml``
+        can pick it up.  PVE's installer copies the file into the
+        installed system and runs it as a oneshot systemd service on
+        first boot.  Marked ``+x`` via Rock-Ridge mode bits so PVE's
+        ``Type=oneshot`` execution path doesn't fail with EACCES.
     :raises ProxmoxPrepareError: When ``xorriso`` is missing on
         ``$PATH``, when the vanilla ISO can't be opened, or when
         ``xorriso`` itself returns non-zero.
@@ -144,6 +153,25 @@ def prepare_iso_bytes(
         tmp.write(toml_body.encode("utf-8"))
         toml_tmp_path = Path(tmp.name)
 
+    # Optional ``/proxmox-first-boot`` script.  PVE's auto-installer
+    # copies this from the prepared ISO into the installed system
+    # when ``[first-boot] source = "from-iso"`` is set in
+    # ``answer.toml``, then runs it as a oneshot systemd service on
+    # first boot.  Marked ``+x`` so PVE's ``ExecStart=`` doesn't fail
+    # with EACCES.
+    fb_tmp_path: Path | None = None
+    if first_boot_script is not None:
+        with tempfile.NamedTemporaryFile(
+            prefix="testrange-proxmox-first-boot-",
+            suffix=".sh",
+            delete=False,
+        ) as fb_tmp:
+            fb_tmp.write(first_boot_script.encode("utf-8"))
+            fb_tmp_path = Path(fb_tmp.name)
+        # 0o755 in Rock-Ridge mode bits — xorriso preserves source
+        # filesystem permissions when ``-map``-ing a real file in.
+        os.chmod(fb_tmp_path, 0o755)
+
     try:
         cmd = [
             xorriso_bin,
@@ -172,8 +200,10 @@ def prepare_iso_bytes(
             # locating its own ``grub.cfg``.
             "-boot_image", "any", "keep",
             "-map", str(toml_tmp_path), "/auto-installer-mode.toml",
-            "-commit",
         ]
+        if fb_tmp_path is not None:
+            cmd.extend(["-map", str(fb_tmp_path), "/proxmox-first-boot"])
+        cmd.append("-commit")
         with log_duration(_log, "write prepared PVE ISO"):
             try:
                 subprocess.run(
@@ -197,6 +227,11 @@ def prepare_iso_bytes(
             toml_tmp_path.unlink()
         except OSError:
             pass
+        if fb_tmp_path is not None:
+            try:
+                fb_tmp_path.unlink()
+            except OSError:
+                pass
 
 
 __all__ = [

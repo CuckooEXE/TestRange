@@ -380,6 +380,7 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         verify_ssl: bool = False,
         zone: str = DEFAULT_ZONE,
         token: object | None = None,
+        skip_dnsmasq_preflight: bool = False,
     ) -> None:
         # ``storage_backend`` is a generic abstraction the libvirt
         # backend uses to switch transports (local FS / SSH SFTP).
@@ -440,6 +441,25 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         self._token_name = token_name
         self._token_value = token_value
         self._verify_ssl = verify_ssl
+        # ``skip_dnsmasq_preflight=True`` short-circuits
+        # :meth:`_preflight_dnsmasq_installed`.  Set by
+        # :meth:`root_on_vm` because the install-phase first-boot
+        # script already baked ``dnsmasq`` into the cached qcow2 —
+        # the preflight would otherwise call PVE's
+        # ``GET /apt/changelog?name=dnsmasq`` which runs
+        # ``apt-get changelog -qq dnsmasq`` server-side, and that
+        # subprocess fetches the changelog from the Debian archive
+        # over the internet.  On airgapped run-phase networks
+        # (``internet=False``), the apt subprocess times out and
+        # the API returns ``500 Internal Server Error`` even though
+        # ``dnsmasq`` is locally installed — false-negative
+        # preflight failure that breaks the airgap topology this
+        # whole branch was built to support.  When TestRange built
+        # the node itself, the bake-in is by construction; trusting
+        # it is correct.  External (operator-supplied) PVE clusters
+        # leave the default ``False`` so the preflight still catches
+        # operator misconfig.
+        self._skip_dnsmasq_preflight = skip_dnsmasq_preflight
 
         # Translate legacy dict-shaped ``token=`` glue from the URL
         # handler.  The dict carries one of three credential shapes
@@ -518,12 +538,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
 
     # ``prepare_outer_vm`` deliberately not overridden: the PVE
     # installer ISO is self-contained for everything *except*
-    # dnsmasq, and dnsmasq gets installed via SSH bootstrap in
-    # :meth:`_bootstrap_pve_node` rather than through
-    # ``vm.pkgs`` / answer.toml ``[first-boot]``.  Inheriting the
-    # base no-op keeps the Hypervisor spec's cache hash clean of
-    # any payload that would otherwise rebuild every cached PVE
-    # qcow2 if the bootstrap script changed.
+    # dnsmasq, and dnsmasq gets installed via the answer.toml
+    # ``[first-boot]`` script — see
+    # :meth:`~testrange.vms.builders.proxmox_answer.ProxmoxAnswerBuilder.first_boot_script`.
+    # The first-boot script body is folded into the prepared-ISO
+    # cache key so script edits invalidate cached install ISOs (and
+    # the qcow2 cache key folds in
+    # :meth:`Builder.post_install_cache_key_extra` for the same
+    # reason on the install side).
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -570,7 +592,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
 
         self._resolve_node(nodes)
         self._resolve_storage()
-        self._preflight_dnsmasq_installed()
+        if self._skip_dnsmasq_preflight:
+            _log.debug(
+                "skipping dnsmasq preflight on %r — caller flagged "
+                "the node as bootstrapped by construction",
+                self._node,
+            )
+        else:
+            self._preflight_dnsmasq_installed()
         self._ensure_sdn_zone()
         _log.info(
             "PVE ready: node=%s storage=%s zone=%s",
@@ -1520,7 +1549,21 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         :raises OrchestratorError: If no credential combination works.
         """
         host = f"{self._host}:{self._port}"
-        common: dict[str, Any] = {"host": host, "verify_ssl": self._verify_ssl}
+        # ``timeout`` here is proxmoxer's per-request HTTP read
+        # timeout.  The default of 5s is too tight for cold-call
+        # endpoints on a freshly-booted PVE node — in particular
+        # ``/apt/changelog?name=...`` (used by
+        # :meth:`_preflight_dnsmasq_installed`) spawns
+        # ``apt-list-changelogs`` server-side and routinely takes
+        # 8-15s on first call.  30s is a generous cap that covers
+        # cold pvedaemon + cold pmxcfs without masking a true
+        # API hang.  Once the daemon is warm, normal calls return
+        # well under a second; the timeout never trips on hot paths.
+        common: dict[str, Any] = {
+            "host": host,
+            "verify_ssl": self._verify_ssl,
+            "timeout": 30,
+        }
 
         if self._user and self._token_name and self._token_value:
             return {
@@ -1789,24 +1832,27 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         if outer_cache is not None:
             outer_cache_root = outer_cache.root
 
+        # dnsmasq + repo-swap have already been baked into the cached
+        # PVE qcow2 by the install-phase first-boot script (see
+        # :meth:`ProxmoxAnswerBuilder.first_boot_script`).  The
+        # first-boot script runs while the install VM is still on
+        # the bare-metal install vnet (where ``internet=True`` is
+        # guaranteed by the install-network policy), so airgapped
+        # run topologies (``internet=False`` on the run network)
+        # work without any further bootstrap step here.
+        #
+        # If a future builder doesn't provide a first-boot script,
+        # :meth:`_bootstrap_pve_node` is still callable as a manual
+        # escape hatch — but it's the builder's job to ensure
+        # dnsmasq is in the cached image, otherwise the inner orch's
+        # ``_preflight_dnsmasq_installed`` will fail.
+
         # PVE's pveproxy.service depends on pve-cluster + pvedaemon
         # and reaches active state noticeably later than sshd on a
         # freshly-installed VM (see ``examples/nested_proxmox_*``'s
         # ``_wait_for_pveproxy`` helper).  Without this wait, the
         # inner orchestrator's ``__enter__`` races pveproxy startup
-        # and intermittently fails with "Connection refused".  Doing
-        # the wait here keeps ``__enter__`` simple — by the time
-        # the ExitStack enters the returned orchestrator, the API
-        # is ready.
-        #
-        # The dnsmasq install + repo-swap that used to run here is
-        # now baked into the cached PVE template by
-        # :meth:`ProxmoxAnswerBuilder.post_install_hook`, fired in
-        # the install phase on the bare-metal install network (always
-        # ``internet=True``).  The cache snapshot therefore contains
-        # everything the inner orchestrator needs — meaning the
-        # hypervisor's run-phase network can be ``internet=False``
-        # without breaking nested provisioning.
+        # and intermittently fails with "Connection refused".
         cls._wait_for_pveproxy(hypervisor)
 
         return cls(
@@ -1817,40 +1863,94 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             networks=hypervisor.networks,  # pyright: ignore[reportArgumentType]
             vms=hypervisor.vms,  # pyright: ignore[reportArgumentType]
             cache_root=outer_cache_root,
+            # The install-phase first-boot script baked ``dnsmasq``
+            # into the cached qcow2 by construction (see
+            # :meth:`ProxmoxAnswerBuilder.first_boot_script`), so the
+            # preflight's ``apt.changelog`` probe — which needs
+            # internet to fetch the changelog and breaks airgapped
+            # run topologies — is redundant.  Trust the bake-in.
+            skip_dnsmasq_preflight=True,
         )
 
-    # ``_PVE_BOOTSTRAP_SCRIPT`` and ``_bootstrap_pve_node`` previously
-    # lived here — the bootstrap (apt install dnsmasq, repo swap) was
-    # SSH-run from this orchestrator on a fresh PVE hypervisor *after*
-    # the VM had been swapped to its final user-declared run network.
-    # That broke any topology where the run network has
-    # ``internet=False``: apt-get update couldn't reach the public
-    # mirror.  The bootstrap now lives in
-    # :meth:`ProxmoxAnswerBuilder.post_install_hook` and runs in the
-    # install phase on the bare-metal install network (always
-    # ``internet=True``).  Result: the cached PVE template is fully
-    # bootstrapped, and run-phase network internet state becomes
-    # irrelevant to nested provisioning.
+    @classmethod
+    def _bootstrap_pve_node(
+        cls,
+        hypervisor: AbstractHypervisor,
+        timeout_s: int = 300,
+    ) -> None:
+        """SSH-run the dnsmasq install + repo-swap script on the
+        hypervisor VM.
+
+        The script body lives on
+        :class:`~testrange.vms.builders.ProxmoxAnswerBuilder` so the
+        ``answer.toml`` ``[first-boot]`` redesign can share it.
+
+        :raises OrchestratorError: If the bootstrap exits non-zero.
+            The log is captured to
+            ``/var/log/testrange-pve-bootstrap.log`` on the node for
+            post-mortem; the exception message includes the tail of
+            stderr to make the cause obvious without requiring the
+            operator to log in first.
+        """
+        from testrange.vms.builders.proxmox_answer import (
+            _PVE_BOOTSTRAP_SCRIPT,
+        )
+
+        _log.info(
+            "bootstrapping PVE node on %r (apt install dnsmasq + repo swap)",
+            hypervisor.name,
+        )
+        result = hypervisor.exec(
+            ["bash", "-c", _PVE_BOOTSTRAP_SCRIPT],
+            timeout=timeout_s,
+        )
+        if result.exit_code != 0:
+            stderr_tail = (result.stderr or b"").decode("utf-8", "replace")[-500:]
+            raise OrchestratorError(
+                f"PVE bootstrap on hypervisor {hypervisor.name!r} "
+                f"exited {result.exit_code}.  See "
+                "``/var/log/testrange-pve-bootstrap.log`` on the node "
+                "for full output.  stderr tail:\n"
+                f"{stderr_tail}"
+            )
+        _log.debug("PVE bootstrap on %r completed", hypervisor.name)
 
     @staticmethod
     def _wait_for_pveproxy(
         hypervisor: AbstractHypervisor,
         timeout_s: float = 120.0,
     ) -> None:
-        """Poll ``systemctl is-active pveproxy`` on the hypervisor
-        until active or *timeout_s* elapses.
+        """Wait for PVE's REST API to actually answer requests.
+
+        Two-stage gate:
+
+        1. ``systemctl is-active pveproxy`` reports ``active`` — the
+           service is up and listening on :8006.
+        2. ``curl https://localhost:8006/api2/json/version`` from the
+           hypervisor itself returns an HTTP status (any of 200, 401,
+           403 — all confirm the daemon is *answering*, not just
+           accepting TCP connections).  This second probe is what
+           actually matters to the outer orchestrator: pveproxy can
+           be ``active`` per systemd while still warming up its
+           internal state (pmxcfs mount, cluster join, cert load),
+           and the inner orchestrator's ``_preflight_dnsmasq_installed``
+           uses proxmoxer's default 5-second read timeout — too tight
+           for a pveproxy that's accepting sockets but not yet
+           responding.  Adding this stage closes that race.
 
         Used by :meth:`root_on_vm` to bridge the gap between sshd
         readiness (which the outer orchestrator's communicator wait
         already keys on) and PVE REST API readiness.
 
-        :raises OrchestratorError: If pveproxy doesn't reach active
-            within the timeout.
+        :raises OrchestratorError: If either stage doesn't converge
+            within *timeout_s*.
         """
         import time
 
         deadline = time.monotonic() + timeout_s
         last_stderr = b""
+
+        # Stage 1: systemctl is-active.
         while time.monotonic() < deadline:
             r = hypervisor.exec(["systemctl", "is-active", "pveproxy"])
             # ``systemctl is-active`` outputs one of ``active`` /
@@ -1860,11 +1960,45 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             # and would silently pass.  Compare against the trimmed
             # exact word.
             if r.exit_code == 0 and r.stdout.strip() == b"active":
-                return
+                break
             last_stderr = r.stderr
             time.sleep(2)
+        else:
+            raise OrchestratorError(
+                f"pveproxy on hypervisor {hypervisor.name!r} did not "
+                f"reach active within {timeout_s:.0f}s; last stderr: "
+                f"{last_stderr!r}"
+            )
+
+        # Stage 2: real API probe.  ``curl --max-time 8`` per attempt;
+        # we accept any HTTP status (the daemon answered).  Connection
+        # refused / read timeout / curl exits non-zero means the
+        # daemon's not ready yet — sleep + retry until the deadline.
+        # Using HTTPS-on-localhost with ``-k`` (skip cert check)
+        # because PVE's self-signed cert isn't yet in any trust store.
+        while time.monotonic() < deadline:
+            r = hypervisor.exec(
+                ["sh", "-c",
+                 "curl -sk --connect-timeout 4 --max-time 8 "
+                 "-o /dev/null -w '%{http_code}' "
+                 "https://localhost:8006/api2/json/version"],
+                timeout=15,
+            )
+            if r.exit_code == 0:
+                code = r.stdout.strip()
+                # 200 (older PVE), 401 (PVE 9.x ticket-required), 403
+                # all mean "daemon answered".  Any 5xx would mean the
+                # daemon's broken (different problem); any non-numeric
+                # output means curl failed somewhere unusual.
+                if code.isdigit() and 200 <= int(code) < 500:
+                    return
+            time.sleep(2)
         raise OrchestratorError(
-            f"pveproxy on hypervisor {hypervisor.name!r} did not "
-            f"reach active within {timeout_s:.0f}s; last stderr: "
-            f"{last_stderr!r}"
+            f"pveproxy on hypervisor {hypervisor.name!r} reached "
+            f"systemd-active but its REST API never answered "
+            f"``GET /api2/json/version`` within {timeout_s:.0f}s.  "
+            "Likely cause: the daemon is up but pmxcfs / pvedaemon / "
+            "pve-cluster haven't finished initialising.  Check the "
+            "node manually with ``journalctl -u pveproxy -u pvedaemon "
+            "-u pve-cluster``."
         )

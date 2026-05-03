@@ -233,7 +233,6 @@ class TestBuildAnswerTomlGlobalBlock:
             "fqdn = ",
             "mailto = ",
             "root-password = ",
-            'reboot-mode = "power-off"',
         ):
             assert required in toml, f"missing {required!r} in:\n{toml}"
 
@@ -271,15 +270,20 @@ class TestBuildAnswerTomlGlobalBlock:
         ).build_answer_toml(_proxmox_vm(name="pve1"))
         assert 'fqdn = "pve1.example.test"' in toml
 
-    def test_reboot_mode_is_power_off(self) -> None:
-        """``reboot-mode = "power-off"`` is non-negotiable: the
-        install-phase SHUTOFF wait-loop relies on the installer
-        cleanly powering off (not rebooting into the cached system),
-        and the default ``reboot`` mode would put the VM into a
-        loop that can only be broken by the build timeout.
+    def test_reboot_mode_omitted_so_pve_reboots(self) -> None:
+        """answer.toml omits ``reboot-mode``, so PVE uses its default
+        of ``reboot`` (not ``power-off``).  This is what lets the
+        ``[first-boot]`` script run — the installer reboots into the
+        installed system, the script flips the network and runs the
+        bootstrap, then ``systemctl poweroff``s.  The orchestrator's
+        SHUTOFF wait keys on that final poweroff.
+
+        Boot order is ``order=scsi0`` (no CD), so the reboot lands on
+        the installed bootloader instead of looping back to the
+        installer ISO.
         """
         toml = ProxmoxAnswerBuilder().build_answer_toml(_proxmox_vm())
-        assert 'reboot-mode = "power-off"' in toml
+        assert "reboot-mode" not in toml
 
 
 class TestBuildAnswerTomlNetworkBlock:
@@ -644,29 +648,33 @@ class TestBuildProxmoxSeedIsoBytes:
 # ----------------------------------------------------------------------
 
 
-class TestAnswerTomlOmitsFirstBoot:
-    """Pin that the answer.toml generator never emits a
-    ``[first-boot]`` section, regardless of ``vm.pkgs`` /
-    ``vm.post_install_cmds``.  An earlier slice tried to render a
-    first-boot script via answer.toml ``source = "from-iso"`` mode
-    — that needed a script embedded in the prepared installer ISO
-    via xorriso, plus cache-key invalidation across two layers, plus
-    a chmod-via-Rock-Ridge dance to make the embedded file
-    executable.  All ~300 lines deleted in favour of an SSH-side
-    bootstrap; this test guards against the section coming back."""
+class TestAnswerTomlFirstBootBlock:
+    """The answer.toml ``[first-boot]`` section drives PVE's
+    ``proxmox-first-boot.service`` oneshot, which runs the
+    network-flip + dnsmasq install + repo swap baked into the
+    cached qcow2.  The script body itself lives on the prepared
+    installer ISO at ``/proxmox-first-boot`` (PVE's auto-installer
+    convention) — this section just declares the source mode."""
 
-    def test_no_first_boot_with_no_pkgs(self) -> None:
+    def test_first_boot_section_emitted_with_from_iso(self) -> None:
         toml = ProxmoxAnswerBuilder().build_answer_toml(_proxmox_vm())
-        assert "[first-boot]" not in toml
+        assert "[first-boot]" in toml
+        assert 'source = "from-iso"' in toml
 
-    def test_no_first_boot_with_pkgs(self) -> None:
+    def test_no_packages_leak_into_answer_toml(self) -> None:
+        # The script body is NOT in answer.toml — it lives on the
+        # prepared ISO.  Package names from ``vm.pkgs`` shouldn't
+        # appear in the rendered answer.toml either, since PVE's
+        # answer.toml has no [packages] section equivalent.
         from testrange.packages import Apt
-        vm = _proxmox_vm(pkgs=[Apt("dnsmasq"), Apt("tmux")])
+        vm = _proxmox_vm(pkgs=[Apt("vim"), Apt("tmux")])
         toml = ProxmoxAnswerBuilder().build_answer_toml(vm)
-        assert "[first-boot]" not in toml
-        # And the package names don't accidentally leak into the
-        # answer-toml as some misguided `[packages]` section.
-        assert "dnsmasq" not in toml
+        # ``dnsmasq`` would falsely match content of the inline
+        # ``_PVE_FIRST_BOOT_SCRIPT`` if we ever embedded the body —
+        # we don't, the script lives separately.  Use a name that's
+        # nowhere in the generator's templates to avoid false
+        # positives.
+        assert "vim" not in toml
         assert "tmux" not in toml
 
 
@@ -745,20 +753,19 @@ class TestPrepareInstallDomain:
         assert spec.uefi is False
         run.cleanup()
 
-    def test_get_proxmox_prepared_iso_called_with_only_vanilla(
+    def test_get_proxmox_prepared_iso_called_with_first_boot_script(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The prepared-ISO call must NOT carry a first-boot script
-        kwarg.  Earlier slices threaded a rendered script through
-        ``cache.get_proxmox_prepared_iso(vanilla,
-        first_boot_script=...)`` to embed it on the prepared ISO via
-        xorriso ``--on-first-boot``; that machinery is gone (the
-        dnsmasq bootstrap runs over SSH from
-        ``ProxmoxAnswerBuilder.post_install_hook`` during the
-        install phase instead).  Regression guard against putting
-        the kwarg back."""
+        """The prepared-ISO call MUST carry the first-boot script body
+        as ``first_boot_script=...`` so xorriso embeds it at
+        ``/proxmox-first-boot`` on the prepared ISO.  PVE's auto-
+        installer copies that file into the installed system on the
+        strength of the answer.toml ``[first-boot] source = "from-iso"``
+        block.  Regression guard against losing the kwarg —
+        without it, the cached qcow2 wouldn't carry dnsmasq and
+        nested provisioning would fail with the original airgap bug."""
         from testrange._run import RunDir
         from testrange.backends.libvirt.storage import LocalStorageBackend
         from testrange.packages import Apt
@@ -781,7 +788,30 @@ class TestPrepareInstallDomain:
         ProxmoxAnswerBuilder().prepare_install_domain(vm, run, cache)
 
         call = cache.get_proxmox_prepared_iso.call_args
-        assert "first_boot_script" not in call.kwargs
+        assert "first_boot_script" in call.kwargs
+        script = call.kwargs["first_boot_script"]
+        # Pin the script's load-bearing pieces — network flip, repo
+        # swap, dnsmasq install, poweroff.  A future refactor that
+        # silently drops any of these reintroduces the airgap bug
+        # this whole branch was created to fix.
+        assert "ip addr flush" in script
+        assert "dhclient" in script
+        assert "pve-no-subscription" in script
+        assert "apt-get install -y dnsmasq" in script
+        assert "systemctl poweroff" in script
+        # PVE installs vmbr0 as a Linux bridge with the physical NIC
+        # enslaved.  The bridge holds the L3 address; running
+        # dhclient on the enslaved enp1s0 gets a lease but the
+        # kernel routes via vmbr0's static gateway and DNS
+        # black-holes.  Pin vmbr0 as the dhclient target so a future
+        # refactor doesn't accidentally regress to enp1s0.
+        assert "dhclient -1 -v \"$BR\"" in script or "dhclient -1 -v vmbr0" in script
+        assert 'BR="vmbr0"' in script
+        # Default routes from the static config (e.g. ``default via
+        # 10.0.0.1``) must be flushed before dhclient runs;
+        # otherwise the new lease's DNS server (192.168.240.1) is
+        # unreachable via the stale gateway.
+        assert "ip route del default" in script
         run.cleanup()
 
 
