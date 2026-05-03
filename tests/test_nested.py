@@ -368,3 +368,252 @@ class TestNestedEnterExit:
         assert entered == ["A"]
         assert exited == ["A"]
         assert orch._nested_stack is None
+
+
+# =====================================================================
+# recursive_vm_iter — Slice 2 plumbing.  Walks an outer ``_vm_list``
+# depth-first, descending into every Hypervisor's inner ``vms`` so the
+# bare-metal install loop sees descendant leaves too.  Backend-neutral
+# (lives on the ABC), so the helper applies to libvirt and proxmox
+# alike.
+# =====================================================================
+
+
+def _leaf_vm(name: str) -> VM:
+    """Minimal Linux VM spec — used as a stand-in for nested leaves."""
+    return VM(
+        name=name,
+        iso="https://example.com/debian.qcow2",
+        users=[Credential("root", "pw")],
+        devices=[vNIC("Inner", ip="10.42.0.5")],
+    )
+
+
+class TestRecursiveVmIter:
+    """``recursive_vm_iter`` walks every VM in a (possibly nested) tree
+    of Hypervisor specs.  Slice 2's bare-metal-builds-everything
+    refactor needs this so the outer orchestrator's install loop sees
+    descendant VMs, not just its own ``_vm_list``."""
+
+    def test_flat_list_passes_through_unchanged(self) -> None:
+        from testrange.orchestrator_base import recursive_vm_iter
+        a, b = _leaf_vm("a"), _leaf_vm("b")
+        assert list(recursive_vm_iter([a, b])) == [a, b]
+
+    def test_empty_list_yields_nothing(self) -> None:
+        from testrange.orchestrator_base import recursive_vm_iter
+        assert list(recursive_vm_iter([])) == []
+
+    def test_hypervisor_yields_itself_and_descendants(self) -> None:
+        # The Hypervisor *is* a VM (it boots like one), so it's
+        # emitted alongside its children — descendants don't replace
+        # the parent.
+        from testrange.orchestrator_base import recursive_vm_iter
+        leaf1 = _leaf_vm("leaf1")
+        leaf2 = _leaf_vm("leaf2")
+        hv = _hypervisor(vms=[leaf1, leaf2])
+
+        result = list(recursive_vm_iter([hv]))
+
+        assert hv in result
+        assert leaf1 in result
+        assert leaf2 in result
+        assert len(result) == 3
+
+    def test_nested_hypervisor_traverses_full_tree(self) -> None:
+        # Two-level nesting: outer Hypervisor → inner Hypervisor →
+        # innermost leaf.  No live runtime support for triple-nest yet,
+        # but the iter must descend the whole tree so a future slice
+        # can rely on it.
+        from testrange.orchestrator_base import recursive_vm_iter
+
+        deep_leaf = _leaf_vm("deep")
+        # Reuse the libvirt-friendly _hypervisor helper at both levels.
+        inner_hv = _hypervisor(vms=[deep_leaf])
+        inner_hv._name = "inner-hv"  # type: ignore[assignment]
+        outer_hv = _hypervisor(vms=[inner_hv])
+        outer_hv._name = "outer-hv"  # type: ignore[assignment]
+
+        result = list(recursive_vm_iter([outer_hv]))
+
+        assert outer_hv in result
+        assert inner_hv in result
+        assert deep_leaf in result
+        assert len(result) == 3
+
+    def test_pre_order_ancestor_before_descendants(self) -> None:
+        # Ordering matters for the install phase: the parent's IP
+        # allocation has to happen before its children compute their
+        # own slot in the install network.  Pre-order (parent before
+        # children) keeps that invariant.
+        from testrange.orchestrator_base import recursive_vm_iter
+
+        leaf = _leaf_vm("leaf")
+        hv = _hypervisor(vms=[leaf])
+        result = list(recursive_vm_iter([hv]))
+        assert result.index(hv) < result.index(leaf)
+
+    def test_mixed_flat_and_nested(self) -> None:
+        # The outer ``_vm_list`` typically mixes plain VMs and
+        # Hypervisors.  Both must be visited.
+        from testrange.orchestrator_base import recursive_vm_iter
+
+        flat = _leaf_vm("flat")
+        leaf = _leaf_vm("leaf")
+        hv = _hypervisor(vms=[leaf])
+        hv._name = "hv"  # type: ignore[assignment]
+
+        result = list(recursive_vm_iter([flat, hv]))
+
+        assert flat in result
+        assert hv in result
+        assert leaf in result
+
+    def test_does_not_treat_orchestrator_class_as_vm(self) -> None:
+        # Defensive: a hypervisor's ``orchestrator`` class reference
+        # must not be treated as a descendant.  Only objects that are
+        # also AbstractVM / AbstractHypervisor get descended.
+        from testrange.orchestrator_base import recursive_vm_iter
+        hv = _hypervisor()
+        result = list(recursive_vm_iter([hv]))
+        # ``LibvirtOrchestrator`` is a class, not a VM — type-check
+        # narrowing flags this comparison as "non-overlapping" but
+        # the runtime behaviour is exactly what we want to pin.
+        assert LibvirtOrchestrator not in result  # type: ignore[comparison-overlap]
+
+    def test_accepts_tuple(self) -> None:
+        from testrange.orchestrator_base import recursive_vm_iter
+        a, b = _leaf_vm("a"), _leaf_vm("b")
+        assert list(recursive_vm_iter((a, b))) == [a, b]
+
+    def test_accepts_generator(self) -> None:
+        from collections.abc import Iterator
+        from testrange.orchestrator_base import recursive_vm_iter
+
+        a, b = _leaf_vm("a"), _leaf_vm("b")
+
+        def _gen() -> Iterator[VM]:
+            yield a
+            yield b
+
+        assert list(recursive_vm_iter(_gen())) == [a, b]
+
+
+# =====================================================================
+# Slice 2 integration: the bare-metal install loop walks descendants
+# alongside their parent Hypervisor.  Both backends register descendant
+# install-network slots and call ``vm.build`` against the bare-metal
+# orchestrator for each one.
+# =====================================================================
+
+
+class TestLibvirtInstallNetworkIncludesDescendants:
+    """``_create_install_network`` must allocate IP slots for every VM
+    in the nested tree, not just the top-level ``_vm_list``.  Without
+    this, the bare-metal install loop would try to look up an IP for a
+    descendant VM that was never registered and the install seed would
+    miss its network-config block."""
+
+    def test_descendants_get_install_network_slots(self) -> None:
+        leaf1 = _leaf_vm("leaf1")
+        leaf2 = _leaf_vm("leaf2")
+        hv = _hypervisor(vms=[leaf1, leaf2])
+
+        orch = LibvirtOrchestrator(
+            host="localhost",
+            vms=[hv],
+            networks=[VirtualNetwork("OuterNet", "10.0.0.0/24")],
+        )
+        # ``_pick_install_subnet`` reaches into libvirt; short-circuit
+        # to a fixed /24 so we exercise the IPAM-loop logic without
+        # opening a connection.
+        orch._pick_install_subnet = lambda: "192.168.250.0/24"  # type: ignore[method-assign]
+        net = orch._create_install_network(run_id="cafedeadbeef")
+
+        registered_names = {entry[0] for entry in net._vm_entries}
+        # Hypervisor itself + both leaves all have install-network slots.
+        assert "hv" in registered_names
+        assert "leaf1" in registered_names
+        assert "leaf2" in registered_names
+
+    def test_pool_guard_counts_descendants(self) -> None:
+        """The IP-pool-too-small NetworkError must fire when the
+        recursive descendant count exceeds the subnet capacity, not
+        just the top-level count."""
+        # We don't realistically construct 253 VMs in a unit test;
+        # instead, short-circuit the subnet picker to a /30 (2 host
+        # slots, minus gateway = 1 slot) and confirm the guard fires
+        # for one Hypervisor + one descendant (= 2 install-phase VMs).
+        # No need to monkey-patch the module-level pool — patching
+        # the orchestrator's bound method to return a /30 directly
+        # avoids any test pollution risk if a subsequent test relied
+        # on the real pool.
+        leaf = _leaf_vm("leaf")
+        hv = _hypervisor(vms=[leaf])
+        orch = LibvirtOrchestrator(
+            host="localhost",
+            vms=[hv],
+            networks=[VirtualNetwork("OuterNet", "10.0.0.0/24")],
+        )
+        orch._pick_install_subnet = lambda: "192.168.250.0/30"  # type: ignore[method-assign]
+        with pytest.raises(NetworkError, match="install network subnet"):
+            orch._create_install_network(run_id="abcd")
+
+
+# Suppress unused-import noise — NetworkError used above.
+from testrange.exceptions import NetworkError  # noqa: E402
+
+
+class TestProxmoxInstallNetworkIncludesDescendants:
+    """Symmetric guarantee on the proxmox backend: its install vnet
+    pre-registers descendant slots too."""
+
+    def test_descendants_get_install_network_slots(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from testrange.backends.proxmox import ProxmoxOrchestrator
+        from testrange.backends.proxmox.network import ProxmoxVirtualNetwork
+
+        leaf = _leaf_vm("leaf")
+        hv = _hypervisor(vms=[leaf])
+
+        # Skip the proxmoxer-availability + zone-existence preflights
+        # so the orchestrator constructs.  We're only exercising
+        # ``_create_install_network``'s loop.
+        outer_net = ProxmoxVirtualNetwork("OuterNet", "10.0.0.0/24")
+        orch = ProxmoxOrchestrator(
+            host="localhost", vms=[hv], networks=[outer_net],
+        )
+        # Bind the run id and short-circuit subnet picking the same
+        # way the libvirt test does.
+        orch._run_id = "cafedeadbeef"
+        monkeypatch.setattr(
+            orch, "_pick_install_subnet", lambda: "192.168.240.0/24",
+        )
+        net = orch._create_install_network()
+
+        registered_names = {entry[0] for entry in net._vm_entries}
+        assert "hv" in registered_names
+        assert "leaf" in registered_names
+
+
+class TestNestedTreeBuildOrder:
+    """``_provision_vms``-shaped helpers that drive ``recursive_vm_iter``
+    must emit Hypervisor parents before their inner VMs.  IP allocation
+    in ``_create_install_network`` relies on this for deterministic
+    cross-run slot assignment."""
+
+    def test_libvirt_pool_assigns_parent_before_descendants(self) -> None:
+        leaf = _leaf_vm("leaf")
+        hv = _hypervisor(vms=[leaf])
+        orch = LibvirtOrchestrator(
+            host="localhost", vms=[hv],
+            networks=[VirtualNetwork("OuterNet", "10.0.0.0/24")],
+        )
+        orch._pick_install_subnet = lambda: "192.168.251.0/24"  # type: ignore[method-assign]
+        net = orch._create_install_network(run_id="abcd")
+        # Tuples are (vm_name, mac, ip) in registration order.  Parent
+        # is registered before child → parent gets a numerically-lower
+        # IP.
+        order = [entry[0] for entry in net._vm_entries]
+        assert order.index("hv") < order.index("leaf")

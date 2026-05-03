@@ -290,5 +290,50 @@ class Builder(ABC):
         del vm
         return ""
 
+    def adopt_prebuilt(
+        self,
+        vm: VM,
+        prebuilt_ref: str,
+        run: RunDir,
+        cache: CacheManager,
+    ) -> str:
+        """Take a *prebuilt_ref* (a disk built by an outer
+        orchestrator's install loop) and return a backend-local ref
+        the run phase can boot — without re-running the install.
+
+        Called by an inner orchestrator's ``vm.build()`` when a nested
+        topology has already produced the installed disk on the bare-
+        metal cache.  *prebuilt_ref* points at the outer-host artifact
+        (typically ``<outer_cache>/vms/<config_hash>/disk.qcow2``);
+        this method moves / imports / clones it into whatever shape
+        the inner backend needs to boot.
+
+        Default raises :class:`NotImplementedError` — mirrors
+        :meth:`ready_image`'s "you should have checked the phase
+        indicator first" pattern.  Builders that support the
+        nested-import path override this; backends that don't yet
+        support nested-import keep the default and the inner
+        orchestrator falls back to its own install path.
+
+        :param vm: The VM spec being adopted.  Used for naming and
+            cache-key derivation by overrides.
+        :param prebuilt_ref: Source-side reference to the bare-metal-
+            built disk.  Format depends on the outer orchestrator's
+            storage backend (typically a filesystem path).
+        :param run: Per-run scratch dir on the *inner* backend.
+            ``run.storage.transport`` is how to put bytes onto the
+            inner side.
+        :param cache: Inner-orchestrator's :class:`CacheManager` for
+            destination-side ref construction.
+        :returns: An inner-backend-local ref to the run-ready disk.
+        :raises NotImplementedError: Default — no override.
+        """
+        del vm, prebuilt_ref, run, cache
+        raise NotImplementedError(
+            f"{type(self).__name__}.adopt_prebuilt() is not implemented; "
+            "the inner orchestrator should fall back to its own "
+            "install-phase path or fail loud."
+        )
+
 
 __all__ = ["Builder", "InstallDomain", "RunDomain"]

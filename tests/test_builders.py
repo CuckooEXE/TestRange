@@ -137,6 +137,26 @@ class TestBuilderContract:
         # edits invalidate cached templates.
         assert builder.post_install_cache_key_extra(_linux_vm()) == ""
 
+    @pytest.mark.parametrize("builder", [
+        CloudInitBuilder(),
+        WindowsUnattendedBuilder(),
+        NoOpBuilder(),
+    ])
+    def test_adopt_prebuilt_default_raises(self, builder: Builder) -> None:
+        # Default ``adopt_prebuilt`` raises — mirrors the "you should
+        # have checked the phase indicator first" pattern that
+        # :meth:`ready_image` uses.  Builders that support the
+        # nested-import path (Slice 3 — inner orchestrator imports a
+        # bare-metal-built qcow2 instead of running its own ISO-boot
+        # install) override this.  Until those overrides land, every
+        # concrete builder hits the default raise.
+        run = MagicMock()
+        cache = MagicMock()
+        with pytest.raises(NotImplementedError, match="adopt_prebuilt"):
+            builder.adopt_prebuilt(
+                _linux_vm(), "/some/prebuilt/disk.qcow2", run, cache,
+            )
+
 
 # ----------------------------------------------------------------------
 # CloudInitBuilder

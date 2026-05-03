@@ -18,7 +18,7 @@ through a backend-specific module if the ABC lived there.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,6 +28,43 @@ if TYPE_CHECKING:
     from testrange.storage.base import StorageBackend
     from testrange.vms.base import AbstractVM
     from testrange.vms.hypervisor_base import AbstractHypervisor
+
+
+def recursive_vm_iter(vms: Iterable[AbstractVM]) -> Iterator[AbstractVM]:
+    """Yield every VM in *vms*, descending into each
+    :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`'s inner
+    :attr:`~AbstractHypervisor.vms` depth-first.
+
+    Pre-order: the parent Hypervisor is yielded *before* its children.
+    The bare-metal install-phase loop relies on this ordering — the
+    parent's IP slot in the install network has to be allocated before
+    its descendants compute their own slots.
+
+    Used by Slice 2's bare-metal-builds-everything refactor to flatten
+    a nested topology into a single iterable for the outer
+    orchestrator's install loop.  Cross-backend: lives on the ABC so
+    libvirt and proxmox share one implementation.
+
+    :param vms: Any iterable of :class:`AbstractVM` (and / or
+        :class:`AbstractHypervisor`) instances.  Tuples and generators
+        are accepted as-is — no list-conversion required at the call
+        site.
+    :returns: A depth-first iterator of every VM in the tree, parents
+        first.  Hypervisors are yielded both as themselves *and* have
+        their inner VMs descended — they're VMs that also host VMs,
+        and the outer orchestrator builds both layers on its install
+        network in Slice 2.
+    """
+    # Lazy import to avoid a hard dep on the hypervisor module at
+    # ABC-import time.  This file deliberately stays small / import-
+    # cheap so it can be imported from concrete backend modules
+    # without circular pain.
+    from testrange.vms.hypervisor_base import AbstractHypervisor
+
+    for vm in vms:
+        yield vm
+        if isinstance(vm, AbstractHypervisor):
+            yield from recursive_vm_iter(vm.vms)
 
 
 class AbstractOrchestrator(ABC):
@@ -315,4 +352,4 @@ class AbstractOrchestrator(ABC):
         )
 
 
-__all__ = ["AbstractOrchestrator"]
+__all__ = ["AbstractOrchestrator", "recursive_vm_iter"]

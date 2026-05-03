@@ -44,7 +44,7 @@ from testrange.backends.libvirt.network import (
 )
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
-from testrange.orchestrator_base import AbstractOrchestrator
+from testrange.orchestrator_base import AbstractOrchestrator, recursive_vm_iter
 from testrange.vms.generic import GenericVM
 from testrange.backends.libvirt.storage import (
     LocalStorageBackend,
@@ -886,9 +886,32 @@ class Orchestrator(AbstractOrchestrator):
         # Refs are backend-local strings — for LocalStorageBackend
         # these are outer-host paths identical to the pre-backend
         # behaviour; for SSH backends they're paths on the remote.
+        #
+        # Slice 2: walk the *whole* nested tree.  Hypervisor descendants
+        # are built on the bare-metal install network alongside their
+        # parents, so the cached install artifacts are available to
+        # the inner orchestrator's :meth:`Builder.adopt_prebuilt` path
+        # (Slice 3) at run-phase entry.  ``recursive_vm_iter`` yields
+        # parents before children, matching the IP allocation order in
+        # ``_create_install_network``.
         installed_disks: dict[str, str] = {}
-        with log_duration(_log, f"install phase for {len(self._vm_list)} VM(s)"):
-            for vm in self._vm_list:
+        # Identity-set of top-level VMs so we can split installed_disks
+        # tracking — only top-level VMs go through ``start_run`` on
+        # the bare metal; descendants are imported by their inner
+        # orchestrator.
+        top_level_ids = {id(v) for v in self._vm_list}
+        all_vms_to_build = list(recursive_vm_iter(self._vm_list))
+        with log_duration(
+            _log, f"install phase for {len(all_vms_to_build)} VM(s)",
+        ):
+            for raw_vm in all_vms_to_build:
+                # Top-level VMs were promoted to LibvirtVM in __init__;
+                # descendants come straight from a Hypervisor's ``vms``
+                # field and may still be ``GenericVM``.  Promote on the
+                # fly so ``vm.build()`` resolves to the libvirt path.
+                # Idempotent for already-libvirt instances.
+                is_top_level = id(raw_vm) in top_level_ids
+                vm = raw_vm if is_top_level else _promote_to_libvirt(raw_vm)  # type: ignore[arg-type]
                 if vm.builder.needs_install_phase():
                     assert self._install_network is not None
                     install_net_name = self._install_network.backend_name()
@@ -924,8 +947,9 @@ class Orchestrator(AbstractOrchestrator):
                     install_net_name = ""
                     install_mac = ""
                     install_ip = ""
-                with log_duration(_log, f"build VM {vm.name!r}"):
-                    installed_disks[vm.name] = vm.build(
+                role = "top-level" if is_top_level else "descendant"
+                with log_duration(_log, f"build {role} VM {vm.name!r}"):
+                    installed = vm.build(
                         context=self,
                         cache=self._cache,
                         run=run,
@@ -933,6 +957,12 @@ class Orchestrator(AbstractOrchestrator):
                         install_network_mac=install_mac,
                         install_network_ip=install_ip,
                     )
+                if is_top_level:
+                    installed_disks[vm.name] = installed
+                # Descendant builds live in the cache by config_hash;
+                # the inner orchestrator looks them up via
+                # :meth:`Builder.adopt_prebuilt` at run-phase entry
+                # (Slice 3).  No tracking needed here.
 
         # 4. Stop the install network (VMs are off at this point)
         if self._install_network is not None:
@@ -1118,10 +1148,17 @@ class Orchestrator(AbstractOrchestrator):
         # install-phase MAC is derived from (vm_name, "__install__") rather
         # than (vm_name, net.name), so bypass register_vm (which computes
         # its own MAC) and use register_vm_with_mac.
+        #
+        # Slice 2: walk the *whole* nested tree.  Hypervisor descendants
+        # are built on this same install network alongside their
+        # parents — every leaf in a multi-level Hypervisor topology
+        # gets a slot here.  ``recursive_vm_iter`` yields parents
+        # before children (pre-order) so IP allocation is deterministic
+        # across runs even with deeply-nested specs.
         net_obj = ipaddress.IPv4Network(subnet, strict=False)
         hosts = list(net_obj.hosts())
         install_phase_vms = [
-            vm for vm in self._vm_list
+            vm for vm in recursive_vm_iter(self._vm_list)
             if vm.builder.needs_install_phase()
         ]
         # Bound the host-index loop so a fleet larger than the

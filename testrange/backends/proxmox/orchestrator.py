@@ -92,7 +92,7 @@ from testrange.backends.proxmox.network import (
 from testrange.backends.proxmox.vm import ProxmoxVM
 from testrange.cache import CacheManager
 from testrange.exceptions import NetworkError, OrchestratorError
-from testrange.orchestrator_base import AbstractOrchestrator
+from testrange.orchestrator_base import AbstractOrchestrator, recursive_vm_iter
 
 if TYPE_CHECKING:
     from testrange.networks.base import AbstractSwitch, AbstractVirtualNetwork
@@ -1152,10 +1152,16 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         # ``__install__`` MAC so the install-phase cloud-init seed's
         # network-config matches the NIC the orchestrator actually
         # attaches.  Same convention as the libvirt backend.
+        #
+        # Slice 2: walk the *whole* nested tree so descendants of any
+        # Hypervisor in ``_vm_list`` also get install-network slots —
+        # the bare-metal install loop builds them on this network too.
+        # Pre-order traversal keeps allocations deterministic across
+        # runs.
         net_obj = ipaddress.IPv4Network(subnet, strict=False)
         hosts = list(net_obj.hosts())
         install_phase_vms = [
-            vm for vm in self._vm_list
+            vm for vm in recursive_vm_iter(self._vm_list)
             if vm.builder.needs_install_phase()
         ]
         # ``hosts[idx + 1]`` indexing skips the gateway (.1).  Bound
@@ -1350,6 +1356,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         per-run clone's NIC is swapped to the user's first declared
         network in :meth:`ProxmoxVM.start_run`.
 
+        Slice 2: walks the *whole* nested tree.  Descendants of any
+        Hypervisor in ``_vm_list`` also build on this orchestrator's
+        install vnet, so the inner orchestrator's
+        :meth:`Builder.adopt_prebuilt` (Slice 3) can pick them up by
+        ``cache_key`` at run-phase entry.  Only top-level VMs go
+        through ``start_run`` here — descendants are booted by their
+        inner orchestrator after the bare-metal Hypervisor is up.
+
         Tracks successfully-started VMs in ``_provisioned_vms`` so
         a partial failure rolls back only what got created.
         """
@@ -1359,19 +1373,31 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
         assert self._cache is not None, "cache must be initialised"
         cache = self._cache
         installed_disks: dict[str, str] = {}
-        for vm in self._vm_list:
+        top_level_ids = {id(v) for v in self._vm_list}
+        all_vms_to_build = list(recursive_vm_iter(self._vm_list))
+        for raw_vm in all_vms_to_build:
+            # Top-level VMs were promoted to ProxmoxVM in __init__;
+            # descendants come straight from a Hypervisor's ``vms``
+            # field and may still be ``GenericVM``.  Promote on the fly
+            # so ``vm.build()`` resolves to the proxmox path; idempotent
+            # for already-proxmox instances.
+            is_top_level = id(raw_vm) in top_level_ids
+            vm = raw_vm if is_top_level else _promote_to_proxmox(raw_vm)  # type: ignore[arg-type]
             assert isinstance(vm, ProxmoxVM)
-            # Validate the user's spec early — every VM must declare
-            # at least one vNIC, otherwise there's nowhere to attach
-            # the run-phase NIC after install.  (Run-phase
-            # ``start_run`` would also catch this; we surface it here
-            # to fail before the install runs.)
-            user_network_entries, _ = self._vm_network_refs(vm)
-            if not user_network_entries:
-                raise NetworkError(
-                    f"VM {vm.name!r}: no network refs — Proxmox VMs "
-                    "need at least one vNIC."
-                )
+
+            if is_top_level:
+                # Validate the user's spec early — every top-level VM
+                # must declare at least one vNIC, otherwise there's
+                # nowhere to attach the run-phase NIC after install.
+                # Descendants don't need this check: their run-phase
+                # network attaches inside their inner orchestrator,
+                # not here.
+                user_network_entries, _ = self._vm_network_refs(vm)
+                if not user_network_entries:
+                    raise NetworkError(
+                        f"VM {vm.name!r}: no network refs — Proxmox "
+                        "VMs need at least one vNIC."
+                    )
 
             # Build phase always uses the install vnet, never the
             # user's first NIC.  An ``internet=False`` user network
@@ -1389,15 +1415,22 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
                 install_mac = ""
 
             vm.set_client(self._client)
-            with log_duration(_log, f"build VM {vm.name!r}"):
-                installed_disks[vm.name] = vm.build(
+            role = "top-level" if is_top_level else "descendant"
+            with log_duration(_log, f"build {role} VM {vm.name!r}"):
+                installed = vm.build(
                     context=self,
                     cache=cache,
                     run=self._run,
                     install_network_name=install_net_name,
                     install_network_mac=install_mac,
                 )
-            self._provisioned_vms.append(vm)
+            if is_top_level:
+                installed_disks[vm.name] = installed
+                self._provisioned_vms.append(vm)
+            # Descendant builds live in the cache by config_hash; the
+            # inner orchestrator reaches them via
+            # :meth:`Builder.adopt_prebuilt` at run-phase entry
+            # (Slice 3).  No tracking needed here.
 
         for vm in self._vm_list:
             assert isinstance(vm, ProxmoxVM)
