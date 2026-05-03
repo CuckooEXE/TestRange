@@ -626,6 +626,17 @@ class Orchestrator(AbstractOrchestrator):
         with log_duration(_log, "memory preflight"):
             self._preflight_memory()
 
+        # Slice 5: warn (don't raise) on structurally-unreachable
+        # internet topologies — descendants on internet=True inner
+        # networks whose parent Hypervisor's run network has
+        # internet=False.  The bare-metal install loop will still
+        # complete (Slice 2 builds on the bare-metal install
+        # network), but the descendant's runtime apt/curl would
+        # silently fail.  Surface it now so the operator sees one
+        # warning at orchestrator-entry instead of cryptic failures
+        # mid-test.
+        self.validate_topology(self._vm_list, self._networks)
+
         self._run = RunDir(self._storage)
 
         try:

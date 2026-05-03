@@ -30,6 +30,21 @@ if TYPE_CHECKING:
     from testrange.vms.hypervisor_base import AbstractHypervisor
 
 
+def _vnic_refs(vm: AbstractVM) -> Iterator[str]:
+    """Yield each :class:`vNIC` device's ``ref`` (network name) on *vm*.
+
+    Used by :func:`AbstractOrchestrator.validate_topology` to check
+    descendant-network reachability without depending on a backend-
+    specific helper — the libvirt backend has ``_network_refs`` that
+    returns vNIC objects, but we want only names here.
+    """
+    from testrange.devices import vNIC as _vNIC
+
+    for device in vm.devices:
+        if isinstance(device, _vNIC):
+            yield device.ref
+
+
 def recursive_vm_iter(vms: Iterable[AbstractVM]) -> Iterator[AbstractVM]:
     """Yield every VM in *vms*, descending into each
     :class:`~testrange.vms.hypervisor_base.AbstractHypervisor`'s inner
@@ -307,6 +322,95 @@ class AbstractOrchestrator(ABC):
         :param hv: The Hypervisor being constructed.  Mutate fields
             directly.
         """
+
+    @classmethod
+    def validate_topology(
+        cls,
+        vms: "Sequence[AbstractVM]",
+        networks: "Sequence[AbstractVirtualNetwork]",
+    ) -> None:
+        """Walk the nested-VM tree and warn on structurally-unreachable
+        internet requirements.
+
+        For each :class:`AbstractHypervisor` in *vms*, look at every
+        descendant's vNIC declarations.  When a descendant's network
+        (looked up by name in the Hypervisor's
+        :attr:`AbstractHypervisor.networks`) has ``internet=True``
+        but the Hypervisor's *own* run-phase network (its first vNIC's
+        ref, looked up in *networks*) has ``internet=False``, that
+        descendant cannot reach the internet at runtime — the parent
+        Hypervisor has no upstream.  Emits a :class:`UserWarning`
+        identifying the offending VM and Hypervisor.
+
+        Slice 2's bare-metal install loop builds descendants on the
+        bare-metal install network (always ``internet=True``), so the
+        install itself succeeds.  This validator catches the *runtime*
+        gap that would otherwise manifest as cryptic ``apt`` / ``curl``
+        / ``pip`` failures mid-test.
+
+        :param vms: Top-level VM specs the orchestrator is about to
+            provision.  Hypervisors are descended; flat VMs are
+            ignored (no descendants to validate).
+        :param networks: Top-level networks the orchestrator owns.
+            Used to resolve the Hypervisor's own run-phase network
+            via the Hypervisor's first vNIC's ``ref``.
+
+        :returns: ``None``.  Issues are surfaced as :class:`UserWarning`
+            (one per offending descendant) and never raise — the
+            operator may have out-of-band routing the validator can't
+            see.
+        """
+        import warnings as _warnings
+        from testrange.vms.hypervisor_base import AbstractHypervisor
+
+        outer_by_name = {n.name: n for n in networks}
+        for hv in vms:
+            if not isinstance(hv, AbstractHypervisor):
+                continue
+            # Resolve the Hypervisor's own run-phase network: its
+            # first vNIC's ref, looked up in the *outer* networks.
+            hv_refs = list(_vnic_refs(hv))
+            if not hv_refs:
+                # Hypervisor without a vNIC won't even boot; the
+                # orchestrator's own validation will fail it later.
+                # Stay silent — not our job to duplicate that error.
+                continue
+            parent_run_net = outer_by_name.get(hv_refs[0])
+            if parent_run_net is None:
+                # Misconfigured ref; orchestrator will surface it at
+                # network-attach time with a clear error.  Stay silent.
+                continue
+            if parent_run_net.internet is True:
+                # Parent has internet — descendants get upstream
+                # transparently, no reachability concern.
+                continue
+
+            # Parent has no internet.  Walk descendants and flag any
+            # whose declared inner-network internet=True can't be
+            # satisfied.
+            inner_by_name = {n.name: n for n in hv.networks}
+            for descendant in recursive_vm_iter(hv.vms):
+                for ref in _vnic_refs(descendant):
+                    inner_net = inner_by_name.get(ref)
+                    if inner_net is None:
+                        continue
+                    if inner_net.internet is True:
+                        _warnings.warn(
+                            f"VM {descendant.name!r} is on inner "
+                            f"network {ref!r} with internet=True, "
+                            f"but its parent Hypervisor "
+                            f"{hv.name!r} runs on network "
+                            f"{hv_refs[0]!r} with internet=False — "
+                            "the descendant's runtime internet is "
+                            "unreachable through this topology.  "
+                            "Either flip the Hypervisor's run "
+                            "network to internet=True, or set the "
+                            "inner network's internet=False if the "
+                            "descendant doesn't need outbound "
+                            "connectivity.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
 
     @classmethod
     def root_on_vm(

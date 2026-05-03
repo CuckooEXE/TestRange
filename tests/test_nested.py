@@ -597,6 +597,212 @@ class TestProxmoxInstallNetworkIncludesDescendants:
         assert "leaf" in registered_names
 
 
+class TestValidateTopology:
+    """``AbstractOrchestrator.validate_topology`` walks the nested-VM
+    tree and warns on structurally-unreachable internet requirements.
+
+    A descendant declared on an ``internet=True`` network whose
+    parent Hypervisor's run-phase network has ``internet=False`` can
+    install (Slice 2 builds on the bare-metal install network with
+    internet) but cannot reach the internet at runtime — its parent
+    has no upstream.  The warning surfaces this at orchestrator-entry
+    so the operator hits a clear pytest message instead of cryptic
+    ``apt`` / ``curl`` failures mid-test.
+
+    User chose ``UserWarning`` (not ``raise``) at slice planning time
+    so out-of-band routing setups the validator can't see (manual
+    iptables, sidecar gateway containers, …) keep working when the
+    operator knows what they're doing.
+    """
+
+    def test_clean_topology_emits_no_warning(
+        self, recwarn: pytest.WarningsRecorder,
+    ) -> None:
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        # Outer net + inner net both internet=True — no problem.
+        outer_net = VirtualNetwork("OuterNet", "10.0.0.0/24", internet=True)
+        inner_net = VirtualNetwork("InnerNet", "10.42.0.0/24", internet=True)
+        leaf = VM(
+            name="leaf",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
+        )
+        hv = _hypervisor(vms=[leaf], networks=[inner_net])
+
+        AbstractOrchestrator.validate_topology(
+            vms=[hv], networks=[outer_net],
+        )
+        assert len(recwarn.list) == 0
+
+    def test_warns_when_descendant_needs_internet_but_parent_has_none(
+        self,
+    ) -> None:
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        # Hypervisor on an internet=False network; descendant on an
+        # internet=True inner network → unreachable.
+        outer_net = VirtualNetwork(
+            "OuterNet", "10.0.0.0/24", internet=False,
+        )
+        inner_net = VirtualNetwork(
+            "InnerNet", "10.42.0.0/24", internet=True,
+        )
+        leaf = VM(
+            name="leaf",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
+        )
+        hv = _hypervisor(vms=[leaf], networks=[inner_net])
+
+        with pytest.warns(UserWarning, match="unreachable"):
+            AbstractOrchestrator.validate_topology(
+                vms=[hv], networks=[outer_net],
+            )
+
+    def test_warning_names_descendant_and_hypervisor(
+        self,
+    ) -> None:
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        outer_net = VirtualNetwork(
+            "OuterNet", "10.0.0.0/24", internet=False,
+        )
+        inner_net = VirtualNetwork(
+            "InnerNet", "10.42.0.0/24", internet=True,
+        )
+        leaf = VM(
+            name="leaf",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
+        )
+        hv = _hypervisor(vms=[leaf], networks=[inner_net])
+
+        with pytest.warns(UserWarning) as record:
+            AbstractOrchestrator.validate_topology(
+                vms=[hv], networks=[outer_net],
+            )
+        # Operator-readable: must mention both VM and parent so the
+        # offending pair is identifiable from the warning alone.
+        msg = str(record[0].message)
+        assert "leaf" in msg
+        assert "hv" in msg
+
+    def test_no_warning_when_descendant_does_not_need_internet(
+        self, recwarn: pytest.WarningsRecorder,
+    ) -> None:
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        # Both outer and inner have internet=False — descendant is
+        # airgapped by design; that's a deliberate test topology, not
+        # an unreachable misconfiguration.  No warning.
+        outer_net = VirtualNetwork(
+            "OuterNet", "10.0.0.0/24", internet=False,
+        )
+        inner_net = VirtualNetwork(
+            "InnerNet", "10.42.0.0/24", internet=False,
+        )
+        leaf = VM(
+            name="leaf",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
+        )
+        hv = _hypervisor(vms=[leaf], networks=[inner_net])
+
+        AbstractOrchestrator.validate_topology(
+            vms=[hv], networks=[outer_net],
+        )
+        assert len(recwarn.list) == 0
+
+    def test_no_warning_when_no_hypervisors(
+        self, recwarn: pytest.WarningsRecorder,
+    ) -> None:
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        # Flat topology — no Hypervisors, no descendants, nothing to
+        # validate.  The check must short-circuit cleanly.
+        outer_net = VirtualNetwork(
+            "OuterNet", "10.0.0.0/24", internet=False,
+        )
+        flat = VM(
+            name="flat",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("OuterNet", ip="10.0.0.5")],
+        )
+        AbstractOrchestrator.validate_topology(
+            vms=[flat], networks=[outer_net],
+        )
+        assert len(recwarn.list) == 0
+
+    def test_no_warning_when_descendant_targets_unknown_network(
+        self, recwarn: pytest.WarningsRecorder,
+    ) -> None:
+        # If a descendant's vNIC.ref doesn't match any
+        # ``Hypervisor.networks`` entry, we can't reason about its
+        # reachability.  Stay silent rather than emit a possibly-
+        # confusing warning — the orchestrator's own attach loop will
+        # surface the misconfigured ref as a clear error later.
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        outer_net = VirtualNetwork(
+            "OuterNet", "10.0.0.0/24", internet=False,
+        )
+        leaf = VM(
+            name="leaf",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("MissingNet", ip="10.42.0.5")],
+        )
+        hv = _hypervisor(vms=[leaf], networks=[])
+
+        AbstractOrchestrator.validate_topology(
+            vms=[hv], networks=[outer_net],
+        )
+        assert len(recwarn.list) == 0
+
+    def test_warns_for_each_offending_descendant(
+        self,
+    ) -> None:
+        # Two descendants, both needing internet, parent has none —
+        # both should be flagged.
+        from testrange.orchestrator_base import AbstractOrchestrator
+
+        outer_net = VirtualNetwork(
+            "OuterNet", "10.0.0.0/24", internet=False,
+        )
+        inner_net = VirtualNetwork(
+            "InnerNet", "10.42.0.0/24", internet=True,
+        )
+        leaf1 = VM(
+            name="leaf1",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("InnerNet", ip="10.42.0.5")],
+        )
+        leaf2 = VM(
+            name="leaf2",
+            iso="https://example.com/debian.qcow2",
+            users=[Credential("root", "pw")],
+            devices=[vNIC("InnerNet", ip="10.42.0.6")],
+        )
+        hv = _hypervisor(vms=[leaf1, leaf2], networks=[inner_net])
+
+        with pytest.warns(UserWarning) as record:
+            AbstractOrchestrator.validate_topology(
+                vms=[hv], networks=[outer_net],
+            )
+        # One warning per offending descendant — operator can act on
+        # each independently without scanning a single mega-warning.
+        names = [str(w.message) for w in record]
+        assert any("leaf1" in m for m in names)
+        assert any("leaf2" in m for m in names)
+
+
 class TestNestedTreeBuildOrder:
     """``_provision_vms``-shaped helpers that drive ``recursive_vm_iter``
     must emit Hypervisor parents before their inner VMs.  IP allocation

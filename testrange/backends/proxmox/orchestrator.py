@@ -577,6 +577,14 @@ class ProxmoxOrchestrator(AbstractOrchestrator):
             self._node, self._storage, self._zone,
         )
 
+        # Slice 5: warn (don't raise) on structurally-unreachable
+        # internet topologies.  See the matching call in
+        # :class:`LibvirtOrchestrator.__enter__` for the rationale.
+        # Cheap walk over the spec — runs once per orchestrator entry,
+        # so a misconfigured topology surfaces before we burn time on
+        # provisioning.
+        self.validate_topology(self._vm_list, self._networks)
+
         # Run setup — every entry gets a fresh RunDir so concurrent
         # runs against the same PVE namespace partition cleanly.
         # Even though ProxmoxVM uploads disks via REST and never
