@@ -44,12 +44,14 @@ def _import_paramiko() -> Any:
 
 
 def _load_private_key(text: str, paramiko_mod: Any) -> Any:
-    """Try each key type until one parses."""
-    classes = (
-        paramiko_mod.Ed25519Key,
-        paramiko_mod.RSAKey,
-        paramiko_mod.ECDSAKey,
-        paramiko_mod.DSSKey,
+    """Try each key type until one parses.
+
+    Paramiko 4.x dropped DSSKey; resolve class names lazily so we don't
+    AttributeError on import-time-changing classes.
+    """
+    class_names = ("Ed25519Key", "RSAKey", "ECDSAKey", "DSSKey")
+    classes = tuple(
+        cls for cls in (getattr(paramiko_mod, n, None) for n in class_names) if cls is not None
     )
     last_exc: Exception | None = None
     for cls in classes:

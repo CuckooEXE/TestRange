@@ -167,7 +167,7 @@ class TestAuthSelection:
     def test_pkey_when_present(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         _, client = fake_paramiko
         kp = gen_ssh_key()
-        cred = PosixCred("u", password="pw", pubkey=kp.public, privkey=kp.private)
+        cred = PosixCred("u", password="pw", pubkey=kp.auth_line, privkey=kp.priv)
         c = SSHCommunicator("u")
         c.bind(host="10.0.0.1", credential=cred)
         c.execute(["true"])
