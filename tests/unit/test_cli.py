@@ -60,7 +60,7 @@ class TestDescribe:
 
 
 class TestStubSubcommands:
-    @pytest.mark.parametrize("sub", ["run", "cleanup"])
+    @pytest.mark.parametrize("sub", ["run"])
     def test_stub(self, sub: str, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main([sub])
         assert rc == 2

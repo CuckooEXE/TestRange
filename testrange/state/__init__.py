@@ -1,0 +1,35 @@
+"""State layer — durable record of each run's allocated backend resources."""
+
+from __future__ import annotations
+
+from testrange.state.cleanup import cleanup_run, find_run_dirs
+from testrange.state.schema import (
+    PHASE_CLEANUP,
+    PHASE_DONE,
+    PHASE_INSTALL,
+    PHASE_LEAKED,
+    PHASE_PREFLIGHT,
+    PHASE_RUN,
+    PHASE_TEST,
+    Resource,
+    State,
+)
+from testrange.state.store import StateStore, default_state_root, new_run_id, run_dir_for
+
+__all__ = [
+    "PHASE_CLEANUP",
+    "PHASE_DONE",
+    "PHASE_INSTALL",
+    "PHASE_LEAKED",
+    "PHASE_PREFLIGHT",
+    "PHASE_RUN",
+    "PHASE_TEST",
+    "Resource",
+    "State",
+    "StateStore",
+    "cleanup_run",
+    "default_state_root",
+    "find_run_dirs",
+    "new_run_id",
+    "run_dir_for",
+]
