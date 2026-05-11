@@ -60,13 +60,22 @@ def _run(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     mgr = _build_manager(args)
     try:
-        results = run_tests(tests, plan, cache_manager=mgr)
+        results = run_tests(
+            tests,
+            plan,
+            cache_manager=mgr,
+            fail_fast=args.fail_fast,
+            leak_on_failure=args.leak_on_failure,
+        )
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return 2
     except OrchestratorError as e:
         print(f"orchestrator failed: {e}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("interrupted; teardown attempted", file=sys.stderr)
+        return 130
     for r in results:
         print(r.report_line())
     return 0 if all(r.passed for r in results) else 1
@@ -314,6 +323,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="bring up the range, run tests, tear down")
     p_run.add_argument("plan", help="path to the plan file (.py)")
+    p_run.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop on the first test failure",
+    )
+    p_run.add_argument(
+        "--leak-on-failure",
+        action="store_true",
+        help="if any test fails, skip teardown so you can SSH in to debug",
+    )
     p_run.set_defaults(func=_run)
 
     return parser

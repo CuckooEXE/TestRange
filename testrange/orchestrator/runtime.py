@@ -12,12 +12,15 @@ VMRecipe and hands it over.
 
 from __future__ import annotations
 
+import signal
+import sys
 import time
 import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import TracebackType
+from types import FrameType, TracebackType
+from typing import Any
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
@@ -127,6 +130,7 @@ class Orchestrator:
     # ---- context manager ----------------------------------------------
 
     def __enter__(self) -> OrchestratorHandle:
+        self._install_signal_handlers()
         self.driver.connect()
         try:
             report = self.driver.preflight(self.plan, cache_manager=self.cache)
@@ -159,17 +163,47 @@ class Orchestrator:
         exc_tb: TracebackType | None,
     ) -> None:
         del exc_val, exc_tb
-        if exc_type is not None and self._leak:
-            _log.warning("leak-on-failure: skipping teardown")
-            self._store.set_phase(PHASE_LEAKED)
-            self._store.release()
-        else:
-            self._teardown()
-        self.driver.disconnect()
+        try:
+            if self._leak:
+                _log.warning("leak: skipping teardown; run state retained")
+                self._store.set_phase(PHASE_LEAKED)
+                self._store.release()
+            else:
+                if exc_type is not None:
+                    _log.info("tearing down after %s", exc_type.__name__)
+                self._teardown()
+        finally:
+            self._restore_signal_handlers()
+            self.driver.disconnect()
 
     def leak(self) -> None:
-        """Flip the leak flag; ``__exit__`` will skip teardown on failure."""
+        """Skip teardown on ``__exit__``. Use for live debugging."""
         self._leak = True
+
+    # ---- signal handlers ----------------------------------------------
+
+    def _install_signal_handlers(self) -> None:
+        self._prior_signal_handlers: dict[int, Any] = {}
+
+        def _handler(signum: int, _frame: FrameType | None) -> None:
+            _log.warning("received signal %d; raising KeyboardInterrupt for cleanup", signum)
+            raise KeyboardInterrupt(f"signal {signum}")
+
+        sigs: tuple[int, ...] = (signal.SIGTERM,)
+        if sys.platform != "win32":
+            sigs += (signal.SIGHUP,)
+        for sig in sigs:
+            try:
+                self._prior_signal_handlers[sig] = signal.signal(sig, _handler)
+            except (ValueError, OSError) as e:
+                _log.debug("could not install handler for signal %d: %s", sig, e)
+
+    def _restore_signal_handlers(self) -> None:
+        for sig, prior in getattr(self, "_prior_signal_handlers", {}).items():
+            try:
+                signal.signal(sig, prior)
+            except (ValueError, OSError):
+                pass
 
     # ---- install phase ------------------------------------------------
 
@@ -486,18 +520,23 @@ def run_tests(
     *,
     cache_manager: CacheManager | None = None,
     fail_fast: bool = False,
+    leak_on_failure: bool = False,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
-    Tests run sequentially in declaration order. Continue-on-failure is
-    the default (PLAN.md decision 14); ``fail_fast=True`` stops on the
-    first failure. A test that raises is recorded as FAIL with the
-    captured traceback in ``error``; the orchestrator continues
-    teardown either way.
+    Tests run sequentially. Continue-on-failure is the default;
+    ``fail_fast=True`` stops on the first failure. With
+    ``leak_on_failure=True``, if any test fails the orchestrator skips
+    teardown and the user can SSH in to debug; tear down later with
+    ``testrange cleanup <run_id>``.
     """
     results: list[TestResult] = []
-    with Orchestrator(plan, cache_manager=cache_manager) as orch:
+    o = Orchestrator(plan, cache_manager=cache_manager)
+    with o as orch:
         _execute_tests(orch, tests, results, fail_fast=fail_fast)
+        if leak_on_failure and any(not r.passed for r in results):
+            _log.warning("--leak-on-failure: skipping teardown; run_id=%s", o.run_id)
+            o.leak()
     return results
 
 

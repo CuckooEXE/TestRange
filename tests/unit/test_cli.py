@@ -65,3 +65,10 @@ class TestRunSubcommand:
             cli.main(["run"])
         err = capsys.readouterr().err
         assert "required" in err
+
+    def test_help_shows_flags(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["run", "--help"])
+        out = capsys.readouterr().out
+        assert "--fail-fast" in out
+        assert "--leak-on-failure" in out
