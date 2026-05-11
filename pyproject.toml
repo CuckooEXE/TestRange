@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testrange"
+version = "0.1.0"
+description = "Declarative Python plans → VM test-ranges → user test functions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = []
+dependencies = [
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+libvirt = ["libvirt-python>=10"]
+ssh = ["paramiko>=3"]
+cloudinit = ["pycdlib>=1.14"]
+http = ["requests>=2.31"]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-paramiko",
+    "types-requests",
+]
+all = [
+    "testrange[libvirt,ssh,cloudinit,http]",
+]
+
+[project.scripts]
+testrange = "testrange.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["testrange*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "UP",     # pyupgrade
+    "TID",    # flake8-tidy-imports (banned-api)
+    "RUF",    # ruff-specific
+]
+ignore = [
+    "E501",   # line length (let formatter handle)
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"subprocess".msg = "subprocess is banned project-wide (PLAN.md decision 15). Use a Python library instead. If you have a justified need, add an ADR and the sanctioned module."
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_any_unimported = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_configs = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = ["libvirt", "libvirt.*", "pycdlib", "pycdlib.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "libvirt: requires a working libvirt + KVM setup; skipped otherwise",
+]
+addopts = "-ra"
