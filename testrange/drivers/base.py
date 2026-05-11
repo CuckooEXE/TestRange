@@ -106,6 +106,10 @@ class HypervisorDriver(ABC):
     @abstractmethod
     def get_vm_power_state(self, backend_name: str) -> str: ...
 
+    @abstractmethod
+    def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
+        """Look up an IP leased to ``mac`` on ``network_backend_name``. ``None`` if not yet leased."""
+
     # ---- generic dispatch ---------------------------------------------
 
     def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
