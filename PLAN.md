@@ -485,3 +485,141 @@ tests/
 
 Stubs for proxmox / esxi / winrm are NOT exported until they work (no
 Hyrum's-law re-exports of `NotImplementedError` shims).
+
+## v0 Engineering Phases
+
+Goal: walk from empty repo to `examples/hello_world.py` passing
+end-to-end. Each phase ends with a green test suite (unit + the
+integration tests that phase enables); no half-finished state crosses
+a phase boundary. TDD per phase — tests land before/alongside the code
+they cover. Dependency chain is linear: 0 → 1 → 2 → 3 → 4 → 5 → 6.
+
+Risk-front-loading rationale: phases 2–4 are where libvirt-specific
+surprises live (pool semantics, disk snapshot APIs, MAC handling,
+cloud-init quirks). Knocking those out before SSH/test-runner means if
+libvirt blows up, we discover it early without having built a test
+runner against vapor.
+
+### Phase 0 — Skeleton & Plan-time data types
+
+- `pyproject.toml` with deps (`libvirt-python`, `paramiko`, `pycdlib`,
+  `requests`); `ruff` + `mypy --strict` config; custom ruff rule that
+  forbids `import subprocess`; `pytest` with a `libvirt` mark.
+- `_log.py` (stdlib `logging` + run-id `LoggerAdapter`),
+  `exceptions.py`, `cli.py` argparse skeleton (subcommands print
+  "not implemented").
+- All the pure-data classes `hello_world.py` imports: `Plan`,
+  `LibvirtHypervisor`, `Switch`, `Network`, `StoragePool`, `CPU`,
+  `Memory`, `OSDrive`, `HardDrive`, `LibvirtNetworkIface`, `VMSpec`,
+  `VMRecipe`, `CloudInitBuilder` (data only), `CacheEntry`, `PosixCred`,
+  `SSHCommunicator` (unbound), `Apt`, `gen_ssh_key`.
+- Singleton-device runtime checks (`VMSpec.__post_init__`).
+- Pretty-print `testrange describe examples/hello_world.py` walks
+  the tree.
+
+**Done**: `python examples/hello_world.py` imports cleanly; `testrange
+describe` prints topology (CacheEntry shows ⚠ since cache doesn't
+exist yet); 100% unit coverage of the data classes.
+
+### Phase 1 — Cache layer + cache CLI
+
+- `LocalCache` with `<sha>.bin` + `<sha>.json` sidecar layout, atomic
+  writes via `.partial` + `os.replace`.
+- `CacheManager` (local tier only; HTTP tier deferred).
+- CLI: `cache add <path-or-url> [--name <pretty>]`, `cache list`,
+  `cache del`, `cache rename`, `cache forget-name`.
+- `CacheEntry` resolves via the manager.
+- `describe` shows CacheEntry resolution status.
+
+**Done**: `testrange cache add https://cloud.debian.org/...qcow2 --name
+debian-13` followed by `testrange describe hello_world.py` shows the
+entry resolved with size + origin. Unit tests cover add/list/del/rename/
+forget-name + sha computation + sidecar round-trip.
+
+### Phase 2 — Libvirt driver foundation + state machinery
+
+- `HypervisorDriver` ABC: `connect`, `disconnect`,
+  `preflight(plan) → PreflightReport`, network/pool CRUD,
+  `compose_resource_name`, `compose_mac(plan, vm, nic_idx)`.
+- `LibvirtDriver`: `connect` via libvirt-python, `preflight` (read-only
+  checks: subnet overlap, pool writable, name uniqueness, CacheEntry
+  resolvable, etc.), network + pool create/destroy.
+- State layer: `state.json` + `state.pid`, atomic-rename writes,
+  record-before-create discipline, PID-checked cleanup.
+- CLI: `cleanup <run-id>`, `cleanup --all`, `cleanup --all --dry-run`.
+
+**Done**: an integration test (`-m libvirt`) creates a libvirt network
+and pool through the driver, asserts they exist via libvirt's API,
+then `testrange cleanup <run-id>` removes them and the state dir.
+Preflight returns clean for `hello_world.py`.
+
+### Phase 3 — VM CRUD + CloudInitBuilder seed
+
+- `LibvirtDriver`: VM define, attach disk, attach NIC, start, shutdown
+  (graceful → destroy on timeout), destroy. Stable MAC via
+  `compose_mac`.
+- `Builder` ABC.
+- `CloudInitBuilder`: render user-data + meta-data + network-config;
+  build seed ISO via `pycdlib`; `config_hash` (pure, deterministic).
+- Packages (`Apt`, `Pip`) and `post_install_commands` plumbed into the
+  cloud-init render.
+
+**Done**: an integration test boots a VM by hand (driver + builder, no
+orchestrator yet) with a known base disk and a seed ISO; asserts via
+libvirt's domain APIs that the VM reaches `running` and then `shutoff`
+after cloud-init's `poweroff`. `config_hash` is stable across two
+renders of the same recipe.
+
+### Phase 4 — Orchestrator: install + run phases
+
+- `Orchestrator` class: `__enter__` / `__exit__`, phase sequencing
+  (preflight → install → run → cleanup).
+- Install phase: build seed → define install VM on a transient
+  internet-NAT network → start → poll driver power-state until
+  `shutoff` → snapshot post-install disk into cache (keyed by
+  `config_hash`) → tear down install VM + transient network. All
+  resources recorded in `state.json` before each create-call.
+- Run phase: cache hit → clone overlay from cached base → define run
+  VM with no seed → start.
+- `LibvirtDriver`: disk snapshot (libvirt volume APIs), disk
+  clone-overlay.
+- Cleanup phase: LIFO teardown from `state.json`.
+
+**Done**: `testrange run examples/hello_world.py` brings the range up,
+lets cloud-init complete, tears it down (no tests executed yet — just
+the bring-up/teardown loop). Second run hits the cache and skips the
+install VM entirely.
+
+### Phase 5 — SSH communicator + test runner
+
+- `Communicator` ABC (`execute`, `read_file`, `write_file`, `close`;
+  no `bind` in ABC — per-type).
+- `SSHCommunicator.bind(host, credential)`: paramiko connect with
+  retry (sshd takes time after boot); `execute(argv, timeout)` returns
+  `ExecResult(exit_code, stdout, stderr, duration)`; `read_file` /
+  `write_file` via SFTP; single-use guard.
+- `VMHandle` runtime view (`.communicator`, convenience pass-throughs).
+- `OrchestratorHandle` (`.vms`, `.networks`, `.pools`, `.run_id`).
+- Test runner: import `plan.py`, discover `PLAN` + `TESTS`, run
+  preflight/install/run, execute tests sequentially with
+  continue-on-failure, return `list[TestResult]`. `run_tests` entry
+  point.
+
+**Done**: `testrange run examples/hello_world.py` brings up, runs all
+three tests, all three pass, tears down. `python examples/hello_world.py`
+exits 0.
+
+### Phase 6 — Polish, signal handling, docs
+
+- `--leak-on-failure`, `--fail-fast`, `--verbose`, `--log-level`.
+- SIGINT / SIGTERM handler that transitions through cleanup before
+  exit (vs `atexit`, which doesn't run on signals reliably).
+- `cleanup --dry-run` listing.
+- README with quickstart; `docs/user/install.md`,
+  `docs/user/writing-a-plan.md`; `docs/Architecture-and-Design.md`.
+- Minimal ADR set: subprocess ban, no asyncio, state-schema v1,
+  CacheEntry-only, OSDrive distinct, driver-level stable MAC.
+
+**Done**: README quickstart copy-pasteable on a clean machine works
+first try (libvirt + KVM prerequisites assumed). Ctrl-C mid-run leaves
+the host clean.
