@@ -21,7 +21,14 @@ class TestVersion:
 
 
 class TestDescribe:
-    def test_describe_hello_world(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_describe_hello_world(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Isolate the cache so the describe output is deterministic for tests.
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         rc = cli.main(["describe", str(EXAMPLES / "hello_world.py")])
         assert rc == 0
         out = capsys.readouterr().out
@@ -32,7 +39,7 @@ class TestDescribe:
         assert "pool1" in out
         assert "web" in out
         assert "debian-13" in out
-        assert "Phase 1" in out  # cache resolution warning
+        assert "⚠ not in cache" in out  # cache resolution attempted, miss surfaced
         assert "cloud_init_finished" in out
 
     def test_describe_missing_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -53,7 +60,7 @@ class TestDescribe:
 
 
 class TestStubSubcommands:
-    @pytest.mark.parametrize("sub", ["cache", "run", "cleanup"])
+    @pytest.mark.parametrize("sub", ["run", "cleanup"])
     def test_stub(self, sub: str, capsys: pytest.CaptureFixture[str]) -> None:
         rc = cli.main([sub])
         assert rc == 2
