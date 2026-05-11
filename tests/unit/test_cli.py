@@ -33,7 +33,7 @@ class TestDescribe:
         assert rc == 0
         out = capsys.readouterr().out
         assert "Plan (LibvirtHypervisor)" in out
-        assert "qemu:///session" in out
+        assert "qemu:///system" in out
         assert "switch1" in out
         assert "netA" in out
         assert "pool1" in out

@@ -183,6 +183,7 @@ class StateStore:
         kind: str,
         backend_name: str,
         plan_name: str | None = None,
+        **metadata: object,
     ) -> Resource:
         """Add a Resource with intent_at set but outcome_at=None.
 
@@ -190,12 +191,18 @@ class StateStore:
         record-before-create invariant: if the process dies between this
         call and the backend confirming the resource, cleanup still finds
         the deterministic backend_name and tries to destroy it.
+
+        ``**metadata`` is stored on the resource at intent time, so that
+        ``destroy`` can still dispatch correctly if the backend create
+        fails before ``confirm`` is reached (e.g., volume kinds need a
+        ``pool_backend`` to route through ``delete_volume``).
         """
         r = Resource(
             kind=kind,
             backend_name=backend_name,
             plan_name=plan_name,
             intent_at=_now_utc_iso(),
+            metadata=metadata,
         )
         self.update(lambda s: s.with_resource(r))
         return r

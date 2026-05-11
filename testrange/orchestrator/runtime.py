@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import signal
 import sys
+import tempfile
 import time
 import traceback
 from collections.abc import Callable, Mapping
@@ -118,6 +119,7 @@ class Orchestrator:
         self._pool_backends: dict[str, str] = {}      # plan_name -> backend_name
         self._network_backends: dict[str, str] = {}   # plan_name -> backend_name
         self._post_install_paths: dict[str, Path] = {}  # vm_name -> cached disk path
+        self._uploaded_bases: set[tuple[str, str]] = set()  # (pool_backend, vol_name)
 
     # ---- driver inference ---------------------------------------------
 
@@ -241,6 +243,28 @@ class Orchestrator:
         self.driver.destroy_network(install_net_backend)
         self._store.forget(install_net_backend)
 
+    def _ensure_base_in_pool(self, pool_backend: str, source_path: Path) -> Path:
+        """Upload a host-side base image into the pool, idempotent per run.
+
+        Returns the in-pool path. Cache files are named ``<sha>.bin``; the
+        ``.bin`` stem gives content-addressed dedup across VMs in the same
+        plan that share a base.
+        """
+        vol_name = f"tr_base_{source_path.stem}.qcow2"
+        key = (pool_backend, vol_name)
+        if key in self._uploaded_bases:
+            return self.driver.upload_to_pool(pool_backend, vol_name, source_path)
+        self._store.record_intent(
+            kind="base_image",
+            backend_name=vol_name,
+            plan_name=None,
+            pool_backend=pool_backend,
+        )
+        in_pool_path = self.driver.upload_to_pool(pool_backend, vol_name, source_path)
+        self._store.confirm(vol_name, pool_backend=pool_backend)
+        self._uploaded_bases.add(key)
+        return in_pool_path
+
     def _install_one_vm(self, vm: VMRecipe, install_net_backend: str) -> None:
         if not vm.spec.nics:
             raise OrchestratorError(
@@ -280,9 +304,11 @@ class Orchestrator:
             kind="install_disk",
             backend_name=install_disk_name,
             plan_name=vm.name,
+            pool_backend=pool_backend,
         )
+        base_in_pool = self._ensure_base_in_pool(pool_backend, base_info.path)
         install_disk_path = self.driver.create_overlay_disk(
-            pool_backend, install_disk_name, base_info.path
+            pool_backend, install_disk_name, base_in_pool
         )
         self._store.confirm(install_disk_name, pool_backend=pool_backend)
 
@@ -292,6 +318,7 @@ class Orchestrator:
             kind="install_seed",
             backend_name=install_seed_name,
             plan_name=vm.name,
+            pool_backend=pool_backend,
         )
         seed_path = self.driver.write_to_pool(pool_backend, install_seed_name, seed_bytes)
         self._store.confirm(install_seed_name, pool_backend=pool_backend)
@@ -317,8 +344,21 @@ class Orchestrator:
         # Poll for shutoff (the install runcmd ends with `poweroff`).
         self._wait_for_shutoff(install_vm_backend, vm.name)
 
-        # Snapshot the post-install disk into the cache.
-        info = self.cache.local.add(install_disk_path, name=post_install_name)
+        # Snapshot the post-install disk into the cache. The on-disk file is
+        # owned by the hypervisor's service account (libvirt-qemu in system
+        # mode), so stream it back to a user-readable temp file first, then
+        # ingest from there.
+        with tempfile.NamedTemporaryFile(
+            prefix=f"tr_post_install_{vm.name}_",
+            suffix=".qcow2",
+            delete=False,
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            self.driver.download_from_pool(pool_backend, install_disk_name, tmp_path)
+            info = self.cache.local.add(tmp_path, name=post_install_name)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         self._post_install_paths[vm.name] = info.path
         _log.info(
             "vm %s: cached post-install disk as %s (%s)",
@@ -375,11 +415,15 @@ class Orchestrator:
                 kind="run_disk",
                 backend_name=run_disk_name,
                 plan_name=vm.name,
+                pool_backend=pool_backend,
+            )
+            base_in_pool = self._ensure_base_in_pool(
+                pool_backend, self._post_install_paths[vm.name]
             )
             run_disk_path = self.driver.create_overlay_disk(
                 pool_backend,
                 run_disk_name,
-                self._post_install_paths[vm.name],
+                base_in_pool,
             )
             self._store.confirm(run_disk_name, pool_backend=pool_backend)
 
@@ -495,12 +539,30 @@ class Orchestrator:
         except Exception as e:
             _log.warning("could not read state for teardown: %s", e)
             return
-        for r in reversed(state.resources):
+        resources = list(reversed(state.resources))
+        total = len(resources)
+        if total == 0:
+            _log.info("teardown: nothing to do (state has no resources)")
+        else:
+            _log.info("teardown: %d resource(s) to destroy (LIFO)", total)
+        ok = 0
+        failed = 0
+        for idx, r in enumerate(resources, start=1):
+            _log.info(
+                "teardown [%d/%d] destroy %s %s", idx, total, r.kind, r.backend_name
+            )
             try:
                 self.driver.destroy(r.kind, r.backend_name, **dict(r.metadata))
                 self._store.forget(r.backend_name)
+                ok += 1
             except Exception as e:
-                _log.warning("teardown destroy %s/%s failed: %s", r.kind, r.backend_name, e)
+                failed += 1
+                _log.warning(
+                    "teardown [%d/%d] %s %s failed: %s",
+                    idx, total, r.kind, r.backend_name, e,
+                )
+        if total > 0:
+            _log.info("teardown summary: %d ok, %d failed", ok, failed)
         try:
             remaining = self._store.read().resources
         except Exception:
@@ -509,6 +571,11 @@ class Orchestrator:
             self._store.set_phase(PHASE_DONE)
             self._store.release()
             self._store.remove()
+        else:
+            _log.warning(
+                "teardown: %d resource(s) still recorded in state; run id=%s",
+                len(remaining), self.run_id,
+            )
 
 
 # ---- run_tests entry point ---------------------------------------------

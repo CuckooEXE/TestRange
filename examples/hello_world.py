@@ -36,7 +36,7 @@ _KEY = gen_ssh_key(comment="testrange-hello")
 
 PLAN = Plan(
     LibvirtHypervisor(
-        connection="qemu:///session",
+        connection="qemu:///system",
         networks=[
             Switch(
                 "switch1",
