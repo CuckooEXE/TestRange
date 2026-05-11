@@ -65,8 +65,8 @@ PLAN = Plan(
                         PosixCred(
                             "myuser",
                             password="mypass",
-                            pubkey=_KEY.public,
-                            privkey=_KEY.private,
+                            pubkey=_KEY.auth_line,
+                            privkey=_KEY.priv,
                             sudo=True,
                         ),
                     ],

@@ -7,6 +7,7 @@ returned object and is handed to PosixCred / SSHCommunicator as bytes/text.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from cryptography.hazmat.primitives import serialization
@@ -14,30 +15,55 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 @dataclass(frozen=True)
-class SSHKeyPair:
-    """Ephemeral SSH keypair, in OpenSSH text form."""
+class SSHKey:
+    """Ephemeral SSH keypair, in text form.
 
-    public: str
-    private: str
+    Three views of the same Ed25519 key:
 
-
-def gen_ssh_key(comment: str = "testrange") -> SSHKeyPair:
-    """Generate a fresh Ed25519 SSH keypair.
-
-    Returns OpenSSH-format public and private keys as text strings. The
-    private key is unencrypted (no passphrase) — fine for an ephemeral,
-    in-memory keypair scoped to a single run.
+    - ``pub``: multi-line PEM ``-----BEGIN PUBLIC KEY-----`` block
+      (SubjectPublicKeyInfo). The interoperable public-key encoding for
+      non-SSH crypto consumers.
+    - ``priv``: multi-line ``-----BEGIN OPENSSH PRIVATE KEY-----`` block.
+      Unencrypted (ephemeral keypair, in-memory, single run).
+    - ``auth_line``: the single-line OpenSSH public-key wire format,
+      ``ssh-ed25519 AAA... comment`` — the literal string for
+      ``authorized_keys``.
     """
-    private = Ed25519PrivateKey.generate()
-    pub_bytes = private.public_key().public_bytes(
+
+    pub: str
+    priv: str
+    auth_line: str
+
+
+def gen_ssh_key(comment: str = "testrange") -> SSHKey:
+    """Generate a deterministic Ed25519 SSH keypair seeded from ``comment``.
+
+    The 32-byte Ed25519 seed is ``sha256(comment)``. Calling twice with the
+    same comment produces the same keypair — that's intentional, so the
+    rendered cloud-init seed (which embeds the public key into
+    ``authorized_keys``) hashes the same across runs and the post-install
+    cache hits.
+
+    INSECURE BY DESIGN. The private key is fully derivable from the comment.
+    Only safe for ephemeral test environments where the guest VMs are
+    isolated and short-lived. Do not use this function for any real
+    authentication.
+    """
+    seed = hashlib.sha256(comment.encode("utf-8")).digest()
+    private = Ed25519PrivateKey.from_private_bytes(seed)
+    public = private.public_key()
+    pub_pem = public.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("ascii")
+    auth_bytes = public.public_bytes(
         encoding=serialization.Encoding.OpenSSH,
         format=serialization.PublicFormat.OpenSSH,
     )
-    priv_bytes = private.private_bytes(
+    auth_line = auth_bytes.decode("ascii") + f" {comment}"
+    priv_pem = private.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.OpenSSH,
         encryption_algorithm=serialization.NoEncryption(),
-    )
-    public_text = pub_bytes.decode("ascii") + f" {comment}"
-    private_text = priv_bytes.decode("ascii")
-    return SSHKeyPair(public=public_text, private=private_text)
+    ).decode("ascii")
+    return SSHKey(pub=pub_pem, priv=priv_pem, auth_line=auth_line)
