@@ -108,13 +108,25 @@ class HypervisorDriver(ABC):
 
     # ---- generic dispatch ---------------------------------------------
 
-    def destroy(self, kind: str, backend_name: str) -> None:
-        """Destroy a resource by kind (default dispatch)."""
+    def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
+        """Destroy a resource by kind (default dispatch).
+
+        Volume kinds (``install_disk``, ``install_seed``, ``run_disk``)
+        require a ``pool_backend`` in ``metadata`` so the driver knows
+        which pool to remove the volume from.
+        """
         if kind in ("network", "install_network"):
             self.destroy_network(backend_name)
         elif kind == "pool":
             self.destroy_pool(backend_name)
         elif kind in ("vm", "install_vm"):
             self.destroy_vm(backend_name)
+        elif kind in ("install_disk", "install_seed", "run_disk", "volume"):
+            pool_backend = metadata.get("pool_backend")
+            if not pool_backend:
+                raise ValueError(
+                    f"destroy({kind!r}): missing pool_backend metadata for volume kind"
+                )
+            self.delete_volume(pool_backend, backend_name)
         else:
             raise NotImplementedError(f"destroy({kind!r}) not implemented")

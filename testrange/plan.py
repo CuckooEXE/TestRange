@@ -20,8 +20,9 @@ class Plan:
     """
 
     hypervisors: tuple[Any, ...] = field(default_factory=tuple)
+    name: str = ""
 
-    def __init__(self, *hypervisors: Any) -> None:
+    def __init__(self, *hypervisors: Any, name: str = "") -> None:
         if len(hypervisors) == 0:
             raise ValueError("Plan() requires at least one hypervisor")
         if len(hypervisors) > 1:
@@ -30,6 +31,7 @@ class Plan:
                 "Multi-hypervisor is a long-term TODO (TODO.md)."
             )
         object.__setattr__(self, "hypervisors", tuple(hypervisors))
+        object.__setattr__(self, "name", name)
 
     @property
     def hypervisor(self) -> Any:
