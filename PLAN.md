@@ -230,11 +230,23 @@ If a future feature requires a subprocess (`qemu-img` for cross-format
 disk conversion, etc.), it gets its own ADR and a single sanctioned
 module at that time.
 
-### 16. No asyncio; threads with locks
+### 16. Sync, single-threaded v0
 
-Every dependency is blocking. Per-driver `RLock`. State mutations
-through `filelock.FileLock`. Atomic cache writes via `.partial` +
-`os.replace`. Public API is sync only.
+Every dependency (libvirt-python, paramiko, requests, pycdlib) is
+blocking. v0 runs single-threaded — install brings up one VM at a
+time, tests run sequentially. No `asyncio`, no `ThreadPoolExecutor`.
+Public API is sync.
+
+State-file safety:
+- Each `state.json` write is `.tmp` + `os.replace` (atomic on every
+  modern filesystem). Protects against torn writes within a process.
+- A sibling `state.pid` file records the owning process PID.
+  `testrange cleanup <run-id>` reads it and refuses to act on a run
+  whose PID is still alive (clear error: "PID <X> still alive; kill
+  it first or wait for it"). Simpler than a FileLock and produces a
+  meaningful error message.
+
+Parallel install pass and cross-process locking are long-term TODOs.
 
 ### 17. Cleanup-on-failure CLI flag: `--leak-on-failure`
 
@@ -456,9 +468,9 @@ testrange/
         apt.py
         pip.py
     state/
-        store.py                # state.json read/write under FileLock
+        store.py                # state.json + state.pid; atomic-rename writes
         schema.py               # version 1 dataclasses
-        cleanup.py              # state-file-driven teardown
+        cleanup.py              # state-file-driven teardown (PID-checked)
     vms/
         spec.py                 # VMSpec
         recipe.py               # VMRecipe

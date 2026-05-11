@@ -41,5 +41,9 @@ with a date stamp.
 - Cache eviction (LRU + size cap).
 - `Switch(gateway=True)` — implicit router VM for cross-subnet routing
   on the same Switch.
+- Parallel install pass (`ThreadPoolExecutor`); will require per-driver
+  `RLock` since `libvirt-python` isn't fully thread-safe.
+- Cross-process locking on `state.json` (FileLock) if multiple processes
+  ever legitimately need to mutate the same run's state.
 
 ## Done / Superseded
