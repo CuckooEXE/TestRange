@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import os
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,7 @@ from testrange.exceptions import DriverError
 from testrange.networks.base import Network, Switch
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms.recipe import VMRecipe
+from testrange.vms.spec import VMSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
@@ -307,6 +310,139 @@ class LibvirtDriver(HypervisorDriver):
         except Exception as e:
             _log.warning("pool %s undefine failed: %s", backend_name, e)
 
+    # ---- volume operations --------------------------------------------
+
+    def _pool_dir(self, pool_backend_name: str) -> Path:
+        return self.pool_root / pool_backend_name
+
+    def write_to_pool(self, pool_backend_name: str, filename: str, data: bytes) -> Path:
+        """Write raw bytes as a file inside the pool dir; refresh libvirt's view."""
+        pool_dir = self._pool_dir(pool_backend_name)
+        if not pool_dir.exists():
+            raise DriverError(f"pool dir does not exist: {pool_dir}")
+        path = pool_dir / filename
+        tmp = path.with_suffix(path.suffix + ".partial")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+        try:
+            sp = self.conn.storagePoolLookupByName(pool_backend_name)
+            sp.refresh(0)
+        except Exception as e:
+            _log.debug("pool refresh failed (ok if pool not defined yet): %s", e)
+        return path
+
+    def create_overlay_disk(
+        self,
+        pool_backend_name: str,
+        vol_name: str,
+        source_path: Path,
+    ) -> Path:
+        """Create a qcow2 overlay volume backed by ``source_path``."""
+        sp = self.conn.storagePoolLookupByName(pool_backend_name)
+        xml = _render_overlay_volume_xml(vol_name, source_path)
+        _log.info("create overlay %s backed by %s", vol_name, source_path)
+        sp.createXML(xml, 0)
+        return self._pool_dir(pool_backend_name) / vol_name
+
+    def delete_volume(self, pool_backend_name: str, vol_name: str) -> None:
+        libvirt = _import_libvirt()
+        try:
+            sp = self.conn.storagePoolLookupByName(pool_backend_name)
+            vol = sp.storageVolLookupByName(vol_name)
+            vol.delete(0)
+        except libvirt.libvirtError as e:
+            if "not found" in str(e).lower():
+                return
+            raise
+
+    # ---- VM CRUD -------------------------------------------------------
+
+    def create_vm(
+        self,
+        backend_name: str,
+        spec: VMSpec,
+        plan_name: str,
+        *,
+        os_disk_path: Path,
+        seed_iso_path: Path | None,
+        network_refs: dict[str, str],
+    ) -> Any:
+        macs = [self.compose_mac(plan_name, spec.name, i) for i in range(len(spec.nics))]
+        xml = _render_domain_xml(
+            backend_name,
+            spec,
+            os_disk_path=os_disk_path,
+            seed_iso_path=seed_iso_path,
+            network_refs=network_refs,
+            macs=macs,
+        )
+        _log.info("define vm %s", backend_name)
+        return self.conn.defineXML(xml)
+
+    def start_vm(self, backend_name: str) -> None:
+        _log.info("start vm %s", backend_name)
+        dom = self.conn.lookupByName(backend_name)
+        dom.create()
+
+    def get_vm_power_state(self, backend_name: str) -> str:
+        libvirt = _import_libvirt()
+        dom = self.conn.lookupByName(backend_name)
+        state, _ = dom.state()
+        names = {
+            libvirt.VIR_DOMAIN_NOSTATE: "nostate",
+            libvirt.VIR_DOMAIN_RUNNING: "running",
+            libvirt.VIR_DOMAIN_BLOCKED: "blocked",
+            libvirt.VIR_DOMAIN_PAUSED: "paused",
+            libvirt.VIR_DOMAIN_SHUTDOWN: "shutdown",
+            libvirt.VIR_DOMAIN_SHUTOFF: "shutoff",
+            libvirt.VIR_DOMAIN_CRASHED: "crashed",
+        }
+        return names.get(state, f"unknown-{state}")
+
+    def shutdown_vm(self, backend_name: str, *, timeout: float = 120.0) -> None:
+        libvirt = _import_libvirt()
+        try:
+            dom = self.conn.lookupByName(backend_name)
+        except libvirt.libvirtError as e:
+            if "not found" in str(e).lower() or "no domain" in str(e).lower():
+                _log.info("vm %s already absent", backend_name)
+                return
+            raise
+        try:
+            dom.shutdown()
+        except Exception as e:
+            _log.warning("ACPI shutdown failed for %s: %s", backend_name, e)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.get_vm_power_state(backend_name) == "shutoff":
+                return
+            time.sleep(2.0)
+        # Force destroy
+        _log.warning("shutdown timeout for %s, forcing destroy", backend_name)
+        try:
+            dom.destroy()
+        except Exception as e:
+            _log.warning("force destroy failed: %s", e)
+
+    def destroy_vm(self, backend_name: str) -> None:
+        libvirt = _import_libvirt()
+        try:
+            dom = self.conn.lookupByName(backend_name)
+        except libvirt.libvirtError as e:
+            if "not found" in str(e).lower() or "no domain" in str(e).lower():
+                _log.info("vm %s already absent", backend_name)
+                return
+            raise
+        try:
+            if dom.isActive():
+                dom.destroy()
+        except Exception as e:
+            _log.warning("vm %s destroy failed: %s", backend_name, e)
+        try:
+            dom.undefine()
+        except Exception as e:
+            _log.warning("vm %s undefine failed: %s", backend_name, e)
+
 
 # ---- helpers (preflight + XML rendering) ------------------------------
 
@@ -414,4 +550,84 @@ def _render_pool_xml(backend_name: str, path: Path) -> str:
         f"<name>{backend_name}</name>"
         f"<target><path>{path}</path></target>"
         f"</pool>"
+    )
+
+
+def _render_overlay_volume_xml(vol_name: str, source_path: Path) -> str:
+    """Render a libvirt volume XML for a qcow2 overlay over ``source_path``."""
+    return (
+        f"<volume>"
+        f"<name>{vol_name}</name>"
+        f"<capacity unit='G'>0</capacity>"
+        f"<target><format type='qcow2'/></target>"
+        f"<backingStore>"
+        f"<path>{source_path}</path>"
+        f"<format type='qcow2'/>"
+        f"</backingStore>"
+        f"</volume>"
+    )
+
+
+def _render_domain_xml(
+    backend_name: str,
+    spec: VMSpec,
+    *,
+    os_disk_path: Path,
+    seed_iso_path: Path | None,
+    network_refs: dict[str, str],
+    macs: list[str],
+) -> str:
+    """Render a libvirt domain XML for ``defineXML``."""
+    nic_xmls = []
+    for idx, nic in enumerate(spec.nics):
+        if nic.network not in network_refs:
+            raise DriverError(
+                f"create_vm: no backend network for {nic.network!r}; "
+                f"known: {sorted(network_refs)}"
+            )
+        net_backend = network_refs[nic.network]
+        mac = macs[idx]
+        model = getattr(nic, "driver", "virtio")
+        nic_xmls.append(
+            f"<interface type='network'>"
+            f"<source network='{net_backend}'/>"
+            f"<mac address='{mac}'/>"
+            f"<model type='{model}'/>"
+            f"</interface>"
+        )
+
+    seed_xml = ""
+    if seed_iso_path is not None:
+        seed_xml = (
+            f"<disk type='file' device='cdrom'>"
+            f"<source file='{seed_iso_path}'/>"
+            f"<target dev='sdc' bus='sata'/>"
+            f"<readonly/>"
+            f"<driver name='qemu' type='raw'/>"
+            f"</disk>"
+        )
+
+    return (
+        f"<domain type='kvm'>"
+        f"<name>{backend_name}</name>"
+        f"<memory unit='MiB'>{spec.memory.size_mb}</memory>"
+        f"<vcpu>{spec.cpu.count}</vcpu>"
+        f"<os>"
+        f"<type arch='x86_64' machine='pc'>hvm</type>"
+        f"<boot dev='hd'/>"
+        f"</os>"
+        f"<features><acpi/><apic/></features>"
+        f"<cpu mode='host-passthrough'/>"
+        f"<devices>"
+        f"<disk type='file' device='disk'>"
+        f"<source file='{os_disk_path}'/>"
+        f"<target dev='vda' bus='virtio'/>"
+        f"<driver name='qemu' type='qcow2'/>"
+        f"</disk>"
+        f"{seed_xml}"
+        f"{''.join(nic_xmls)}"
+        f"<serial type='pty'><target port='0'/></serial>"
+        f"<console type='pty'><target type='serial' port='0'/></console>"
+        f"</devices>"
+        f"</domain>"
     )
