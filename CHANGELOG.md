@@ -7,6 +7,33 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+### Phase 6 — Polish, signal handling, docs (2026-05-11)
+
+CLI flag wiring, SIGTERM/SIGHUP cleanup, README + user guides +
+architecture overview + initial ADR set. v0 complete.
+
+- ``testrange run --fail-fast``: stop on first test failure.
+- ``testrange run --leak-on-failure``: if any test fails, skip
+  teardown so the user can SSH in to debug; ``testrange cleanup
+  <run_id>`` tears down later.
+- ``Orchestrator.leak()`` semantics tightened: now skips teardown
+  unconditionally (no longer requires an exception). Aligns with
+  the CLI flag and with live-debugging use.
+- ``Orchestrator.__enter__`` installs SIGTERM + SIGHUP handlers that
+  raise ``KeyboardInterrupt``, routing through ``__exit__``'s
+  cleanup path. CTRL-C already worked (Python's default behavior);
+  this completes the picture for ``systemd`` and shell timeouts.
+- Handlers restored on ``__exit__`` so the orchestrator doesn't
+  leak global state into surrounding code.
+- README quickstart, ``docs/user/install.md``,
+  ``docs/user/writing-a-plan.md``, ``docs/Architecture-and-Design.md``,
+  ``docs/dev/contributing.md``.
+- ADR-0001 (subprocess ban), 0002 (no asyncio), 0003 (state schema
+  v1), 0004 (CacheEntry only), 0005 (OSDrive distinct), 0006
+  (driver-level stable MAC).
+- One new CLI test for the new flags. Total: 211 passed; ruff +
+  mypy --strict clean.
+
 ### Phase 5 — SSH communicator + test runner (2026-05-11)
 
 Test code can now talk to brought-up VMs. ``run_tests(tests, plan)``
