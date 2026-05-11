@@ -1,31 +1,33 @@
-"""testrange CLI entry point.
-
-Phase 0 ships:
-  - ``testrange --version``
-  - ``testrange describe <plan.py>`` — passive pretty-print
-  - all other subcommands stubbed; print "not implemented yet — Phase N"
-
-Phase 1 implements ``cache``; Phase 2 implements ``cleanup``; Phase 4 implements ``run``.
-"""
+"""testrange CLI entry point."""
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from testrange import __version__
 from testrange._log import configure as configure_logging
 from testrange.cache.entry import CacheEntry
+from testrange.cache.local import CacheEntryInfo
+from testrange.cache.manager import CacheManager
+from testrange.exceptions import CacheError, CacheMissError, TestRangeError
 from testrange.networks.base import Network, Switch
 from testrange.plan import Plan
 from testrange.vms.recipe import VMRecipe
 
 
+def _build_manager(args: argparse.Namespace) -> CacheManager:
+    mgr = CacheManager()
+    if getattr(args, "cache", None):
+        mgr.attach_http(args.cache)
+    return mgr
+
+
 def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
-    """Import a user plan module by file path and pull PLAN + TESTS off it."""
     p = Path(path).resolve()
     if not p.exists():
         print(f"error: plan file not found: {path}", file=sys.stderr)
@@ -44,49 +46,52 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     return plan, list(tests)
 
 
+def _collect_cache_entries(plan: Plan) -> list[CacheEntry]:
+    refs: list[CacheEntry] = []
+    hyp = plan.hypervisor
+    for vm in getattr(hyp, "vms", ()):
+        if not isinstance(vm, VMRecipe):
+            continue
+        base = getattr(vm.builder, "base", None)
+        if isinstance(base, CacheEntry):
+            refs.append(base)
+    return refs
+
+
+# ---- describe ----------------------------------------------------------
+
+
 def _describe(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
+    mgr = _build_manager(args)
     hyp = plan.hypervisor
-    hyp_kind = type(hyp).__name__
-    print(f"Plan ({hyp_kind})")
-    connection = getattr(hyp, "connection", None)
-    if connection:
+    print(f"Plan ({type(hyp).__name__})")
+    if connection := getattr(hyp, "connection", None):
         print(f"  connection: {connection}")
     print()
 
-    switches = getattr(hyp, "networks", ())
-    if switches:
+    if switches := getattr(hyp, "networks", ()):
         print("Switches:")
         for sw in switches:
             assert isinstance(sw, Switch)
-            attrs = []
-            if sw.mgmt:
-                attrs.append("mgmt")
-            if sw.internet:
-                attrs.append("internet")
+            attrs = [n for n, on in [("mgmt", sw.mgmt), ("internet", sw.internet)] if on]
             attr_str = f" [{', '.join(attrs)}]" if attrs else ""
             print(f"  {sw.name}{attr_str}")
             for n in sw.networks:
                 assert isinstance(n, Network)
-                flags = []
-                if n.dhcp:
-                    flags.append("dhcp")
-                if n.dns:
-                    flags.append("dns")
+                flags = [f for f, on in [("dhcp", n.dhcp), ("dns", n.dns)] if on]
                 flag_str = f" [{', '.join(flags)}]" if flags else ""
                 print(f"    - {n.name}: {n.cidr}{flag_str}")
         print()
 
-    pools = getattr(hyp, "pools", ())
-    if pools:
+    if pools := getattr(hyp, "pools", ()):
         print("Storage pools:")
         for pool in pools:
             print(f"  {pool.name}: {pool.size_gb} GB")
         print()
 
     cache_refs: list[CacheEntry] = []
-    vms = getattr(hyp, "vms", ())
-    if vms:
+    if vms := getattr(hyp, "vms", ()):
         print("VMs:")
         for vm in vms:
             assert isinstance(vm, VMRecipe)
@@ -101,18 +106,22 @@ def _describe(args: argparse.Namespace) -> int:
                 print(f"    disk:   {d.pool!r}, {d.size_gb} GB")
             for nic in vm.spec.nics:
                 extra = []
-                drv = getattr(nic, "driver", None)
-                if drv:
+                if drv := getattr(nic, "driver", None):
                     extra.append(f"driver={drv}")
                 extra_str = f" ({', '.join(extra)})" if extra else ""
                 print(f"    nic:    {nic.network}{extra_str}")
             builder = vm.builder
-            base = getattr(builder, "base", None)
-            if isinstance(base, CacheEntry):
+            if isinstance(base := getattr(builder, "base", None), CacheEntry):
                 cache_refs.append(base)
-                print(f"    base:   {base!r}  ⚠ cache resolution lands in Phase 1")
-            creds = getattr(builder, "credentials", ())
-            if creds:
+                try:
+                    info = mgr.resolve(base)
+                    print(
+                        f"    base:   {base!r}  -> {info.short_sha} "
+                        f"({_format_size(info.size)})"
+                    )
+                except CacheMissError:
+                    print(f"    base:   {base!r}  ⚠ not in cache")
+            if creds := getattr(builder, "credentials", ()):
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
                 print(f"    creds:  {names}")
             comm = vm.communicator
@@ -126,26 +135,95 @@ def _describe(args: argparse.Namespace) -> int:
         print()
 
     if cache_refs:
-        print(f"CacheEntry references: {len(cache_refs)} (resolution wired in Phase 1)")
+        unique = {e.identifier for e in cache_refs}
+        print(f"CacheEntry references: {len(unique)} unique")
     return 0
 
 
-def _not_implemented(phase: int) -> argparse.Action:
+# ---- cache subcommand --------------------------------------------------
+
+
+def _cache(args: argparse.Namespace) -> int:
+    mgr = _build_manager(args)
+    sub = args.cache_subcommand
+    try:
+        if sub == "add":
+            info = mgr.local.add(
+                args.source,
+                name=args.name,
+                description=args.description,
+            )
+            print(info.sha256)
+            return 0
+        if sub == "list":
+            _print_list(mgr.local.list_entries())
+            return 0
+        if sub == "del":
+            info = mgr.local.delete(args.identifier)
+            print(f"deleted {info.short_sha}")
+            return 0
+        if sub == "rename":
+            info = mgr.local.add_name(args.identifier, args.new_name)
+            print(f"{info.short_sha}: names now {list(info.names)}")
+            return 0
+        if sub == "forget-name":
+            info = mgr.local.forget_name(args.name)
+            print(f"{info.short_sha}: names now {list(info.names)}")
+            return 0
+    except CacheMissError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except CacheError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except TestRangeError as e:  # pragma: no cover (broad safety net)
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"error: unknown cache subcommand {sub!r}", file=sys.stderr)
+    return 2
+
+
+def _print_list(entries: Iterable[CacheEntryInfo]) -> None:
+    rows = list(entries)
+    if not rows:
+        print("(empty)")
+        return
+    width_sha = 18
+    width_size = 12
+    print(f"{'SHA':<{width_sha}}  {'SIZE':>{width_size}}  NAMES / ORIGIN")
+    for info in rows:
+        names = ", ".join(info.names) if info.names else "-"
+        print(
+            f"{info.short_sha:<{width_sha}}  "
+            f"{_format_size(info.size):>{width_size}}  {names}"
+        )
+        if info.origin:
+            print(f"{'':<{width_sha}}  {'':>{width_size}}  origin: {info.origin}")
+
+
+def _format_size(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n //= 1024
+    return f"{n} TiB"
+
+
+def _not_implemented(phase: int) -> Any:
     def _handler(args: argparse.Namespace) -> int:
         print(
             f"testrange {args.subcommand}: not implemented yet — lands in Phase {phase}.",
             file=sys.stderr,
         )
         return 2
-    return _handler  # type: ignore[return-value]
+
+    return _handler
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="testrange")
     parser.add_argument("--version", action="version", version=f"testrange {__version__}")
-    parser.add_argument(
-        "--verbose", action="store_true", help="enable DEBUG-level logging"
-    )
+    parser.add_argument("--verbose", action="store_true", help="enable DEBUG-level logging")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -156,7 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--cache",
         metavar="URL",
         default=None,
-        help="HTTP cache URL (lands in a later phase)",
+        help="HTTP cache URL (Phase 1: stored on the manager; HTTP I/O lands later)",
     )
 
     sub = parser.add_subparsers(dest="subcommand", required=True)
@@ -165,11 +243,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_describe.add_argument("plan", help="path to the plan file (.py)")
     p_describe.set_defaults(func=_describe)
 
-    for name, phase in [
-        ("cache", 1),
-        ("run", 4),
-        ("cleanup", 2),
-    ]:
+    p_cache = sub.add_parser("cache", help="manage the local cache")
+    cache_sub = p_cache.add_subparsers(dest="cache_subcommand", required=True)
+
+    p_add = cache_sub.add_parser("add", help="add a path or URL to the cache")
+    p_add.add_argument("source", help="local path or http(s):// URL")
+    p_add.add_argument("--name", default=None, help="optional pretty-name alias")
+    p_add.add_argument("--description", default=None, help="optional description")
+
+    cache_sub.add_parser("list", help="list cached entries")
+
+    p_del = cache_sub.add_parser("del", help="delete an entry by sha or name")
+    p_del.add_argument("identifier", help="content sha (or prefix >= 16 hex) or pretty-name")
+
+    p_rename = cache_sub.add_parser("rename", help="add a pretty-name alias to an entry")
+    p_rename.add_argument("identifier", help="content sha or existing name")
+    p_rename.add_argument("new_name", help="new alias to attach")
+
+    p_forget = cache_sub.add_parser("forget-name", help="remove a single alias")
+    p_forget.add_argument("name", help="alias to remove")
+
+    p_cache.set_defaults(func=_cache)
+
+    for name, phase in [("run", 4), ("cleanup", 2)]:
         p = sub.add_parser(name, help=f"(stub — Phase {phase})")
         p.add_argument("rest", nargs=argparse.REMAINDER)
         p.set_defaults(func=_not_implemented(phase), subcommand=name)
