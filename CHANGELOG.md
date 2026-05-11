@@ -7,6 +7,31 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+### Phase 5 — SSH communicator + test runner (2026-05-11)
+
+Test code can now talk to brought-up VMs. ``run_tests(tests, plan)``
+executes the user's test functions sequentially against an
+``OrchestratorHandle`` whose VMs have bound SSH communicators with
+discovered IPs.
+
+- ``SSHCommunicator`` real implementation: paramiko-backed, lazy
+  connect with retry loop, ``execute(argv, *, timeout, cwd)`` via
+  shlex-joined command, ``read_file`` / ``write_file`` via SFTP.
+  Auth precedence pkey-if-present-else-password (PLAN.md decision 7).
+  Tries Ed25519 / RSA / ECDSA / DSS when loading private keys.
+- ``HypervisorDriver.get_lease_ip(network_backend, mac)`` on the ABC;
+  LibvirtDriver walks ``network.DHCPLeases()`` and matches by MAC.
+- ``Orchestrator._bind_communicators`` runs after the run phase,
+  discovers each VM's IP via ``get_lease_ip`` keyed on the stable
+  MAC, and dispatches by communicator type to call its per-type
+  ``bind()`` with the right inputs.
+- ``run_tests(tests, plan, *, fail_fast=False)`` actually executes
+  tests now. Continue-on-failure default; ``fail_fast=True`` stops
+  on the first failure. Tracebacks captured into ``TestResult.error``.
+- 27 new unit tests (paramiko mocked end-to-end, test runner,
+  communicator bind during enter). Total: 210 passed; ruff +
+  mypy --strict clean.
+
 ### Phase 4 — Orchestrator install + run phases (2026-05-11)
 
 End-to-end bring-up + teardown. ``with Orchestrator(plan) as orch:``
