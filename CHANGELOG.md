@@ -7,6 +7,80 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+## [0.0.1] — 2026-05-11
+
+First tagged snapshot. Phases 0–6 brought v0 to feature completeness;
+this tag also includes the post-v0 follow-ups that make the example
+plan run end-to-end against a real ``qemu:///system`` libvirtd.
+
+### qemu:///system bring-up + SSHKey reshape (2026-05-11)
+
+Post-Phase-6 fixes from running ``examples/hello_world.py`` against a
+real libvirtd. System-mode runs qemu as the ``libvirt-qemu`` service
+account, so the orchestrator UID can't write to ``/var/lib/libvirt/
+images`` or read the files inside it — everything needs to go through
+the libvirt stream API.
+
+- ``LibvirtDriver`` ``pool_root`` default is URI-aware:
+  ``/var/lib/libvirt/images/testrange`` for any URI ending in
+  ``/system`` (local and ``qemu+ssh://.../system``);
+  ``~/.local/share/testrange/pools`` for ``/session``.
+- Volume traffic now flows through libvirt streams in both directions.
+  ``upload_to_pool`` (idempotent) and ``write_to_pool`` (replace-if-
+  exists, raw format for cloud-init seed bytes) use
+  ``vol.upload(stream)`` + ``stream.sendAll``. ``download_from_pool``
+  uses ``vol.download(stream, 0, 0, 0)`` + ``stream.recvAll``.
+  ``_stream_upload_to_vol`` is the shared inner loop.
+- ``download_from_pool`` flattens first: clones into a no-
+  ``<backingStore>`` qcow2 inside the pool via ``createXMLFrom``
+  (which under the dir-pool driver invokes ``qemu-img convert`` and
+  reads through the backing chain), streams the clone back, deletes
+  the clone in a ``finally``. Cached qcow2 are now self-contained
+  instead of carrying a baked-in ``backing_file`` pointer to the
+  previous run's pool path.
+- ``create_pool`` no longer mkdirs the target directory from Python;
+  ``sp.build(0)`` owns directory creation under libvirtd's user.
+  Preflight skips the user-side mkdir attempt on ``/system`` URIs.
+- ``destroy_pool`` now calls ``sp.delete(0)`` between ``destroy()``
+  and ``undefine()`` so the per-run target directory is removed too.
+  The LIFO state walker deletes contained volumes first.
+- Every VM gets ``<graphics type='vnc' port='-1' autoport='yes'
+  listen='127.0.0.1'/>`` + ``<video><model type='virtio'/></video>``.
+  VNC + virtio-gpu are universally compiled into modern qemu; SPICE
+  and QXL are commonly stripped from distro builds. ``virt-viewer
+  <domain>`` connects via the autoport VNC.
+- ``Store.record_intent(..., **metadata)`` stamps initial metadata
+  at intent time, so a backend create() failure between intent and
+  confirm still leaves enough info for the ``destroy()`` dispatcher
+  to route correctly. Orchestrator passes ``pool_backend=`` for all
+  volume kinds (``base_image``, ``install_disk``, ``install_seed``,
+  ``run_disk``).
+- ``_teardown`` logs LIFO per-resource progress, an "X ok, Y failed"
+  summary, and a tail warning if anything is left in state.
+- New ``_ensure_base_in_pool`` helper funnels both install and run
+  phases through a single in-pool base image (content-addressed by
+  cache stem), recorded with intent-then-confirm. ``_install_one_vm``
+  ingests the post-install disk through a user-side temp file
+  (``NamedTemporaryFile`` under ``/tmp``) since libvirt-qemu owns
+  the pool file.
+
+### SSHKey reshape + deterministic generation (2026-05-11)
+
+- ``SSHKey`` now has three fields: ``pub`` (PEM
+  ``SubjectPublicKeyInfo``), ``priv`` (OpenSSH PEM, unencrypted),
+  and ``auth_line`` (single-line ``ssh-ed25519 AAA... comment``
+  for ``authorized_keys``).
+- ``gen_ssh_key(comment=...)`` derives the 32-byte Ed25519 seed from
+  ``sha256(comment)``. Same comment yields the same keypair across
+  runs. **Insecure by design** — only safe for ephemeral, isolated
+  test VMs. Makes the rendered cloud-init seed byte-stable, which
+  is what ``config_hash`` hashes over, which is what lets the
+  post-install cache hit on subsequent runs.
+- ``_load_private_key`` resolves paramiko key classes lazily via
+  ``getattr(paramiko_mod, name, None)`` instead of in a tuple
+  literal — paramiko 4.x dropped ``DSSKey``, which previously
+  AttributeError'd at the tuple-construction site.
+
 ### Phase 6 — Polish, signal handling, docs (2026-05-11)
 
 CLI flag wiring, SIGTERM/SIGHUP cleanup, README + user guides +
