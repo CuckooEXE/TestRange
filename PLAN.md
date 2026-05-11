@@ -1,311 +1,475 @@
-I want to build a Python project that will allow users to write declarative Python scripts to create VMs on hypervisors in specific configurations (i.e. network configurations, disk configurations, etc.). Then, a user-specified testing function(s) will run with access to these VMs. It's for things like CI/CD where you want to run your software against specific versions of operating systems networked in different ways.
+# TestRange — Design Plan
 
-The objective is to provide as much functionality to the user with _sane defaults_ while exposing a simple, easy to use API. There are multiple long-term goals that need to be kept in-mind while developing so we don't develop something that ends up being incompatible with future versions, but don't need to actually write code for them yet (all maintained in a detailed TODO.md that gets updated (things don't get deleted, just moved to the bottom)).
+Living design document for `testrange`, a Python framework for declarative VM
+test-ranges. Iterate here until we're ready to start coding.
 
-Example Plan script:
+## Background
+
+Users write declarative Python scripts that describe VMs on a hypervisor in
+specific configurations (networking, disks, etc.). User-supplied test
+functions then run against those VMs with handles into the orchestrator.
+Use cases: CI/CD against specific OS versions and varied network
+topologies; authorized pentest test-ranges.
+
+Goals: maximum functionality from sane defaults, simple discoverable API,
+no leaky abstractions, stovepiped components (the orchestrator is the only
+component allowed to know multiple stovepipes and broker between them).
+
+The predecessor at `.bak/` is a failed refactor; it serves as a
+lessons-learned repository (anti-patterns to avoid, a small set of
+high-level concepts that proved valuable). No code or structural design
+ports from `.bak`.
+
+## Design Decisions
+
+### 1. VM type: split into `VMSpec` + `VMRecipe`
+
+`VMSpec` is hardware (name, devices). `VMRecipe` is provisioning (spec,
+builder, communicator, packages). `VMHandle` is the runtime view exposed
+to test code. No god-class.
 
 ```python
-
-_key = gen_ssh_key()
-
-def hello(orch: OrchestratorHandle):
-    # Tests raise on error - they don't return a truthy value
-    vm = orch.vms["webserver"] # Gets a VMHandle by name
-    p = vm.communicator.exec("uname -a")
-    p.wait()
-    assert p.stdout == "" # whatever it's supposed to be
-    assert "trixie" in vm.communicator.read_file("/etc/hosts").decode().lower()
-
-TESTS = [hello] # `TESTS` var is auto discovered by the runner
-PLAN = Plan( # `PLAN` var is auto discovered by the runner
-    LibvirtHypervisor(
-        connection="qemu://session",
-        networks=[
-            Switch(
-                "switch1",
-                Network("networka", "127.31.0.0/24"), Network("networkb", "10.10.10.0/24"),
-            ),
-            Switch(
-                "switch2",
-                Network("networkc", "10.1.4.0/24"), Network("networkd", "10.10.11.0/24"),
-            ),
+VMRecipe(
+    spec=VMSpec(
+        name="webserver",
+        devices=[
+            CPU(2),
+            Memory(4096),                       # MB
+            OSDrive("pool1", 64),               # GB; exactly one per spec
+            HardDrive("pool2", 128),            # data disk; many allowed
+            LibvirtNetworkIface("netB", driver="e1000"),
         ],
-        pools=[
-            StoragePool("pool1", 32), # 32 GB, creates these pools on the hypervisor
-            StoragePool("pool2", 128), # 128 GB 
+    ),
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[
+            PosixCred("root", password="..."),
+            PosixCred("myuser", pubkey=key.public, sudo=True),
         ],
-        vms=[
-            VM(
-                name="webserver",
-                devices=[
-                    CPU(2), # runtime check only one call to CPU per VM
-                    Memory(4096), # runtime check only one call to Memory per VM
-                    HardDrive("pool1", 64),
-                    LibvirtNetworkIface("networkb", driver="e1000"), # Because we specified the concrete rather than the generic, we can utilize the specific `driver` kwarg that LibvirtNetworkIface exposes
-                ]
-                builder=CloudInitBuilder(
-                    "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2",
-                    insecure_apt=True,
-                    credentials=[
-                        PosixCredential("root", "password"),
-                        PosixCredential("myotheruser", "password", sudo=True, pubkey=_key.public),
-                    ]
-                    packages=[
-                        Apt("nginx")
-                    ],
-                    post_install_commands=(
-                        "echo whatever > /whatever",
-                    ),
-                ),
-                communicator=SSHCommunicatorFactory("myotheruser"), # Orchestrator will create an SSHCommunicator for the myotheruser
-            )
-        ]
-    )
+        packages=[Apt("nginx")],
+        post_install_commands=("echo hi > /tmp/hi",),
+    ),
+    communicator=SSHCommunicator("myuser"),
 )
-
-if __name__ == '__main__':
-    sys.exit(0 if all(run_test(t, PLAN) for t in TESTS) else 1)
 ```
 
-CLI:
+### 2. `Plan(*hypervisors)`
 
-```
-testrange --verbose --log-level <info/debug/error/warn>
-testrange cache list # Lists cache entries
-testrange cache add <url> # Add a URL or filepath to the cache
-testrange cache del <sha> # Delete an item from the cache
-testrange cleanup --all # Cleanup all orphaned resources from all existing statefiles
-testrange cleanup <run id> # Cleanup all orphaned resources from a specific run
-testrange run examples/hello_world.py
-testrange run --leak-on-failure examples/hello_world.py # Don't clean up any resources if there is ANY exception/failure
-testrange describe examples/hello_World.py # Completely passive run that pretty-prints the networks, pools, VMs, etc. of a plan
-```
+Variadic from day 1; v0 enforces exactly one at runtime. Multi-hypervisor
+is a long-term TODO that does not break the call shape.
 
-File layout:
+### 3. Top-level Hypervisor is its own class, NOT a VM
 
-```
-docs/
-    user/
-    dev/
-examples/
-    hello_world.py # Simple create Debian VM and prove that we can communicate it
-testrange/
-    builders/ # Build ISOs of various operating systems
-        base.py
-        cloudinit.py
-    cache/ # Writes to the XDG directories that keep state and local run ISOs and stuff
-        http.py
-        local.py
-    communicators/ # Communicators are objects that allow remote execution to systems. The ABC can be referenced from `.bak/testrange/communicators/base.py`
-        base.py
-        ssh.py
-    credentials/ 
-        base.py
-    devices/ # Each device type has an ABC and the concretes for specific hypervisors. Each specific hypervisor has special attributes. Generic device for sane defaults per-driver
-        cpu/
-            base.py
-            generic.py
-            libvirt.py
-        disk/
-            base.py
-            generic.py
-            libvirt.py
-        memory/
-            base.py
-            generic.py
-            libvirt.py
-        network/
-            base.py
-            generic.py
-            libvirt.py
-        pool/
-            base.py
-            generic.py
-            libvirt.py
-    drivers/ # Exposes the API to the hypervisors (libvirt api, etc.)
-        base.py # <provision/destroy>(resource), etc. Create things, destroy things, start/stop/reset VMs, etc.
-        libvirt.py     
-    orchestrator/ # Orchestrate the program run: update state, communicate with the driver what needs to be created, etc.
-    packages/
-        base.py
-        apt.py
-        pip.py
-    state/ # State management
-    types/ # Global types
-    _log.py # logging
-    cli.py # Argparse
-    exceptions.py
-tests/
-    integration/
-    unit/
-```
+For v0, `LibvirtHypervisor(connection=..., networks=..., pools=..., vms=...)`
+is the top-level Plan entry. It is the *host*, not a VM. The driver is
+inferred from the Hypervisor type (`LibvirtHypervisor` → `LibvirtDriver`).
+Nested hypervisors are explicitly **out of scope for v0**. When nesting
+lands, it lands as a separate class shape — designed fresh.
 
-Design notes:
-    - Things should be built into stovepipes
-        - Credentials should have no idea about packages should have no idea about drivers, etc.
-        - Orchestrator should be the one reaching into the various types with knowledge of their internals
-    - Phases (each phase has detailed state transitions so if a test is interrupted cleanup can go through and destroy orphaned resources)
-        - Pre-Flight
-            - Orchestrator checks if the hypervisor has enough resources for the plan (through the driver)
-        - Install
-            - Network (connected to the internet) is created for VMs to be attached
-            - VMs are created one-by-one and they go through the builder process (orchestrator orchestrates it)
-            - After VMs finish building their disks are exported and sent through the cache
-            - VMs are torn down
-        - Run
-            - Networks are created
-            - Storage pools are created
-            - VMs are created and attached to where they need to be (with their post-install disks)
-        - Test
-            - User test functions are created
-        - Cleanup
-            - If skip cleanup then abort
-            - Power off all VMs
-            - Teardown vms, networks, storage pools
-    - HTTP and local filesystem cache
-        - `$XDG_CACHE_HOME` for local cache
-        - Reads go through local cache, then HTTP cache on misses
-        - Writes go through local cache, then HTTP cache to ensure it's global
-        - `--cache <url>` is a global flag to specify the HTTP cache, no cache by default
-    - Orchestration is the driver
-        - Orchestrator takes a driver
+### 4. State schema future-proofs for resume + nested; feature deferred
 
-Short-term TODOs:
-- DHCP on networks
-- DNS on networks
-    - VMs are addressable via `<vm name>.<network name>`
-- KWARG on Switches to place a management interface on them
-    - Allows a VM to communicate to the hypervisor's api for example
-- KWARG on switches to allow air-gapped network
-    - No internet access on these switches
-- Intelligent Cleanup
-    - Tear down of old tests via a statefile
-    - *ALL* exceptions (raised Python errors from the testrange or other package), CTRL-C, etc. trigger a cleanup (`unless --skip-on-failure` is specified) tearing down all resources
-- Detailed statefile
-    - A state file in `$XDG_STATE_HOME` per-run
-    - Statefile contains all resources and their state (created, destroyed, etc.)
-    - Statefile always contains the exact state the orchestration is at
+State schema is versioned and includes intent_at/outcome_at timestamps and
+a `metadata` dict per resource so resume can be added without schema
+migration. No `--resume` flag in v0 — fields exist, runtime ignores them.
+Schema version 1 from day one.
 
-Long-term TODOs:
+### 5. Communicator: direct construction + per-type `bind(...)`
 
-- Multiple top-level Hypervisors in a plan
-    - Create VMs on two different hypervisors for a single plan
-- Idempotency and run continuations
-    - Interrupted runs can be continued from the CLI with the state file
-- Different builders
-    - Proxmox
-    - ESXi
-    - Windows
-- Different drivers
-    - Proxmox
-    - ESXi
-    - HyperV
-- Nested virtualization
-    - Expose some sort of `AbstractVM` specialization that holds a Hypervisor and can host other VMs
-    - Orchestration is passed onto these nested Hypervisors so they can stand up everything they need to do
-
-
-
-
+Plan declares a Communicator instance; orchestrator binds it at run-phase
+bring-up. **Communicator never holds a driver or backend ref**. There is
+no uniform "handle" — different communicators need different inputs.
 
 ```python
-#!/usr/bin/env python3
+class SSHCommunicator(Communicator):
+    def __init__(self, username: str): ...
+    def bind(self, *, host: str, credential: PosixCred) -> None: ...
+
+class QGACommunicator(Communicator):
+    def __init__(self): ...
+    def bind(self, *, exec_fn: Callable[..., ExecResult]) -> None: ...
+```
+
+The orchestrator dispatches by communicator type (it's the broker per the
+stovepipe rule):
+
+- For `SSHCommunicator`: orchestrator passes the resolved IP + the
+  credential looked up from `builder.credentials` by `username=`.
+- For `QGACommunicator`: orchestrator passes a driver-supplied `exec_fn`
+  callable that wraps the libvirt domain ref in a closure. QGA itself
+  never sees a libvirt type.
+
+Single-use guard on each concrete so a Communicator reused across two VMs
+fails loud. No `clone()`, no install-phase binding — install is
+builder-driven.
+
+### 6. Credentials live on `Builder`; orchestrator brokers to Communicator
+
+Builder doesn't know about Communicator, and vice versa. Credentials are
+declared on the Builder (it bakes them into the disk). At Communicator
+bind time, the orchestrator pulls `builder.credentials`, resolves the
+username, and hands the matched credential into the Communicator's bind.
+
+Builder concretes (e.g., `CloudInitBuilder`) MAY isinstance-check
+Credential subtypes inside their own implementation — that's
+intra-stovepipe dispatch, not cross-stovepipe reach.
+
+### 7. Auth precedence: pkey if present, else password
+
+`PosixCred("user", password="p", pubkey=k)` carrying both is legal data,
+but `SSHCommunicator` presents **exactly one** auth method to paramiko
+per attempt: `pkey=` when present, else `password=`. Deterministic.
+
+### 8. `OSDrive` is a distinct class
+
+```python
+devices=[CPU(2), Memory(4096), OSDrive("pool1", 64),
+         HardDrive("pool2", 128), LibvirtNetworkIface("netB")]
+```
+
+Exactly one `OSDrive` per `VMSpec` (runtime check). `HardDrive` is a data
+disk.
+
+### 9. Singleton-device runtime check
+
+`VMSpec.__post_init__` enforces: exactly one CPU, exactly one Memory,
+exactly one OSDrive, ≥ zero HardDrives, ≥ zero NetworkIfaces.
+
+### 10. Switch is an L2 broadcast domain (vSwitch model)
+
+Switch maps to ESXi's vSwitch (and analogous primitives on other drivers).
+Networks on the same Switch share one L2 broadcast domain. Cross-Switch
+traffic is dropped.
+
+**Libvirt implementation**: each Switch is one OpenvSwitch (or Linux)
+bridge; each Network within is a port-group with a VLAN tag (OVS-backed)
+or a sub-network on the shared bridge. The OVS-backed model requires
+`openvswitch-switch` on the host; surfaced via preflight.
+
+Different subnets on the same Switch do not naturally route between each
+other — they're on the same wire but distinct IP spaces. A gateway VM or
+user-side routing is required. Long-term TODO: a `Switch(gateway=True)`
+kwarg that brings up an implicit router VM.
+
+### 11. ISOs / base disks referenced ONLY via `CacheEntry`
+
+URLs and filepaths are dropped from Plan-time entirely. The only way to
+use a base disk is to first `testrange cache add` it.
+
+**`testrange cache add <path-or-url> [--name <pretty>]`**: ingests the
+source, computes content sha, stores at
+`$XDG_CACHE_HOME/testrange/isos/<sha>.bin`, writes a sidecar
+`<sha>.json` with metadata. Prints the sha to stdout.
+
+**`CacheEntry("identifier")`**: single positional string. Auto-detect:
+matches `^[0-9a-f]{16,64}$` → content hash; otherwise pretty-name.
+Resolution scans sidecars to map name → sha.
+
+**Multiple aliases per entry**: rename adds to `names[]`.
+`cache forget-name <name>` removes one alias. Names are globally unique
+within the cache.
+
+**HTTP cache**: `--cache https://…` injects an HTTP tier. Reads:
+local → HTTP → miss. Writes (during `cache add`): local always; HTTP
+best-effort. Plans never reference HTTP URLs directly.
+
+**Sidecar schema (`<sha>.json`)**:
+```json
+{
+  "sha256": "abc123def...",
+  "size": 419430400,
+  "names": ["debian-13", "debian-trixie"],
+  "origin": "https://cloud.debian.org/.../debian-13-...qcow2",
+  "added_at": "2026-05-10T18:30:00Z",
+  "description": null
+}
+```
+
+Format detection (qcow2 vs raw vs vmdk) is a driver concern, not a cache
+concern. The libvirt driver inspects the resolved path when it needs to;
+the cache layer treats every entry as opaque bytes.
+
+### 12. CacheEntry miss fails at preflight, not bring-up
+
+`driver.preflight(plan)` is read-only and called after `connect()` but
+before any `state.json` write. The plan-level preflight helper collects
+all `CacheEntry` references and verifies each resolves; misses go in the
+report as errors with a `fix_hint`:
+`testrange cache add <…> --name <…>`. `describe` is best-effort —
+missing entries print "⚠ not in cache" but do not error.
+
+### 13. `execute(argv)` returns `ExecResult`
+
+```python
+result = vm.communicator.execute(["systemctl", "is-active", "nginx"],
+                                  timeout=10.0)
+# ExecResult(exit_code: int, stdout: bytes, stderr: bytes, duration: float)
+```
+
+Argv-list only; no shell. Read-modify symmetric:
+- `read_file(path) -> bytes`
+- `write_file(path, data: bytes) -> None`
+
+Streaming variant (`execute_streaming`) deferred.
+
+### 14. Test execution: sequential, continue-on-failure default
+
+All tests run in declaration order. Failure → log and continue. CLI flag
+`--fail-fast` opts in to stop-on-first-failure. Tests share the
+brought-up range (mutations bleed between tests). Long-term TODO:
+per-test snapshot/revert.
+
+### 15. No `subprocess` in v0
+
+`subprocess` is forbidden project-wide in v0. Every v0 operation has a
+Python library option: `libvirt-python` for the hypervisor, `paramiko`
+for SSH, `pycdlib` for cloud-init seed ISO authoring, `requests` for
+HTTP. Day-1: ruff rule + CI gate that rejects `import subprocess`
+anywhere in the package.
+
+If a future feature requires a subprocess (`qemu-img` for cross-format
+disk conversion, etc.), it gets its own ADR and a single sanctioned
+module at that time.
+
+### 16. No asyncio; threads with locks
+
+Every dependency is blocking. Per-driver `RLock`. State mutations
+through `filelock.FileLock`. Atomic cache writes via `.partial` +
+`os.replace`. Public API is sync only.
+
+### 17. Cleanup-on-failure CLI flag: `--leak-on-failure`
+
+Mutually exclusive with the future `--resume`.
+
+### 18. Storage locations follow XDG semantics
+
+- `$XDG_STATE_HOME/testrange/runs/<run_id>/state.json` — run state.
+- `$XDG_CACHE_HOME/testrange/isos/<sha>.bin` + `<sha>.json` —
+  content-addressed cache.
+
+State and cache are independently disposable.
+
+## v0 example (target shape)
+
+```python
 """hello_world: one libvirt VM, cloud-init bootstraps SSH + nginx, smoke-test it.
 
-Usage:
-    testrange run examples/hello_world.py
-    python  examples/hello_world.py        # exits 0/1 on aggregate result
-
 Prerequisites:
-- libvirt + KVM at qemu:///system (user in `libvirt` and `kvm` groups)
-- A working dnsmasq config (see docs/user-guide/install.md)
-
-The example generates an ephemeral SSH keypair in-process; nothing is
-read from `~/.ssh/` or environment variables, and the keypair never
-touches the orchestrator host's filesystem.
+  testrange cache add https://cloud.debian.org/.../debian-13-generic-amd64.qcow2 \
+      --name debian-13
 """
-
 from __future__ import annotations
-
 import sys
 
-from testrange import (
-    Orchestrator,
-    Plan,
-    SSHCommunicatorFactory,
-    VMRecipe,
-    VMSpec,
-    run_tests,
+from testrange import Plan, OrchestratorHandle, run_tests
+from testrange.cache import CacheEntry
+from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.networks import Switch, Network
+from testrange.devices import (
+    CPU, Memory, OSDrive, HardDrive, StoragePool,
+    LibvirtNetworkIface,
 )
-from testrange.builders import CloudInitBuilder, CloudInitBuildSpec
-from testrange.credentials import PosixCredentials, gen_ssh_key
-from testrange.devices import CPU, HardDrive, Memory, VirtualNetwork, VNic
-from testrange.drivers.libvirt import LibvirtDriver
+from testrange.vms import VMSpec, VMRecipe
+from testrange.builders import CloudInitBuilder
+from testrange.credentials import PosixCred, gen_ssh_key
+from testrange.communicators import SSHCommunicator
 from testrange.packages import Apt
 
 
-
-# Ephemeral keypair: pubkey goes into the guest's authorized_keys via
-# cloud-init; privkey is handed to paramiko in-memory via the credential.
 _KEY = gen_ssh_key(comment="testrange-hello")
 
 PLAN = Plan(
-    name="hello",
-    networks=[
-        VirtualNetwork(
-            "net0",
-            "172.31.130.0/24",
-            dhcp=True,
-            dns=True,
-            internet=True,
-            mgmt=True,
-        ),
-    ],
-    vms=[
-        VMRecipe(
-            spec=VMSpec(
-                name="web",
-                devices=[CPU(2), Memory(1024), HardDrive(8), VNic("net0")],
+    LibvirtHypervisor(
+        connection="qemu:///session",
+        networks=[
+            Switch("switch1", mgmt=True, internet=True,
+                Network("netA", "172.31.0.0/24", dhcp=True, dns=True),
+                Network("netB", "10.10.10.0/24"),
             ),
-            builder=CloudInitBuilder(CloudInitBuildSpec(base_disk=UBUNTU_CLOUD)),
-            packages=[Apt("nginx")],
-            accounts=[
-                PosixCredentials(
-                    "ubuntu",
-                    authorized_keys=_KEY.public_openssh,
-                    ssh_private_key=_KEY.private_openssh,
-                    admin=True,
+        ],
+        pools=[StoragePool("pool1", 32)],
+        vms=[
+            VMRecipe(
+                spec=VMSpec(
+                    name="web",
+                    devices=[
+                        CPU(2),
+                        Memory(1024),
+                        OSDrive("pool1", 8),
+                        LibvirtNetworkIface("netA", driver="virtio"),
+                    ],
                 ),
-            ],
-            communicator_factory=SSHCommunicatorFactory(),
-        ),
-    ],
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[
+                        PosixCred("root", password="root"),
+                        PosixCred(
+                            "myuser",
+                            password="mypass",
+                            pubkey=_KEY.public,
+                            sudo=True,
+                        ),
+                    ],
+                    packages=[Apt("nginx")],
+                    post_install_commands=("echo hi > /tmp/hi",),
+                ),
+                communicator=SSHCommunicator("myuser"),
+            ),
+        ],
+    ),
 )
 
 
-def cloud_init_finished(orch: Orchestrator) -> None:
-    # Cloud-init runs on first boot; subsequent tests may race the package
-    # install if we don't gate on its completion.
-    orch.vms["web"].execute(["cloud-init", "status", "--wait"], timeout=300.0)
+def cloud_init_finished(orch: OrchestratorHandle) -> None:
+    r = orch.vms["web"].communicator.execute(
+        ["cloud-init", "status", "--wait"], timeout=300.0
+    )
+    assert r.exit_code == 0, r
 
 
-def nginx_is_installed(orch: Orchestrator) -> None:
-    result = orch.vms["web"].execute(["dpkg", "-l", "nginx"])
-    assert result.exit_code == 0, "nginx package missing"  # type: ignore[attr-defined]
+def nginx_is_installed(orch: OrchestratorHandle) -> None:
+    r = orch.vms["web"].communicator.execute(["dpkg", "-l", "nginx"])
+    assert r.exit_code == 0, "nginx missing"
 
 
-def hostname_matches(orch: Orchestrator) -> None:
-    result = orch.vms["web"].execute(["hostname"])
-    assert result.stdout_text.strip() == "web", result  # type: ignore[attr-defined]
+def hostname_matches(orch: OrchestratorHandle) -> None:
+    r = orch.vms["web"].communicator.execute(["hostname"])
+    assert r.stdout.strip() == b"web", r
 
 
 TESTS = [cloud_init_finished, nginx_is_installed, hostname_matches]
 
-
 if __name__ == "__main__":
-    backend = LibvirtDriver(uri="qemu:///system")
-    results = run_tests(TESTS, PLAN, driver=backend)
-    for r in results:
-        print(r.report_line())
+    results = run_tests(TESTS, PLAN)
     sys.exit(0 if all(r.passed for r in results) else 1)
 ```
+
+## v0 phases
+
+Each phase has explicit state transitions so that an interrupted run can
+be cleaned up via state-file-driven `testrange cleanup`.
+
+1. **Pre-Flight** — read-only. Driver-side host checks (libvirt-python
+   reachable, pool writable, disk capacity). Plan-side checks (subnet
+   overlap, static-IP-out-of-CIDR, name uniqueness, singleton-device
+   counts, CacheEntry resolvable). Returns
+   `PreflightReport(errors, warnings)`. Errors abort; warnings advisory.
+
+2. **Install** — per-VM, builder-driven, cache-aware:
+   - Compute `builder.config_hash(spec, recipe)` — deterministic 16-char
+     hex. Pure (no I/O, no `run_id`).
+   - Cache hit on `config_hash` → skip to phase 3.
+   - Cache miss: builder produces a **self-terminating install payload**
+     (cloud-init seed whose final `runcmd` is `poweroff`). Orchestrator
+     creates a transient install VM on a transient internet-connected
+     install network, boots it, and **polls driver-level power-state** —
+     no communicator — until the VM signals install-done by shutting
+     down. On done: snapshot the post-install disk into the cache; tear
+     down the install VM and network.
+   - **All install resources recorded in state.json BEFORE create-call.**
+
+   Communicators are not used during install. The builder owns the
+   install lifecycle end-to-end via its own seed configuration plus
+   driver-level probes (power state).
+
+3. **Run**:
+   - User-declared networks and pools come up.
+   - For each VM: clone the cached post-install disk into the run pool;
+     define + start the run VM (no seed ISO attached); communicator
+     binds.
+
+4. **Test** — sequential, continue-on-failure default. Each test gets an
+   `OrchestratorHandle` exposing `.vms[name]`, `.networks[name]`,
+   `.pools[name]`, `.run_id`.
+
+5. **Cleanup** — unless `--leak-on-failure` and any test failed:
+   - Power off all VMs (graceful, then destroy on timeout).
+   - Tear down VMs, networks, pools, in LIFO order from state.json.
+   - Remove state.json on success.
+
+## CLI surface (v0)
+
+```
+testrange --verbose --log-level {debug,info,warn,error}
+testrange --cache https://… <subcommand>          # HTTP cache injection
+
+testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
+testrange cache list
+testrange cache del <hash-or-name>
+testrange cache rename <hash-or-name> <new-name>
+testrange cache forget-name <name>
+
+testrange describe <plan.py>                       # passive; cache warnings only
+testrange run <plan.py>                            # bring up + tests + cleanup
+testrange run --leak-on-failure <plan.py>
+testrange run --fail-fast <plan.py>
+
+testrange cleanup <run_id>
+testrange cleanup --all
+testrange cleanup --all --dry-run
+```
+
+Exit codes: 0 = success; 1 = test failure; 2 = preflight failure;
+3 = cleanup failure; ≥ 64 = unexpected internal error.
+
+## File layout (v0)
+
+```
+docs/
+    user/                       # user-facing guides
+    dev/                        # contributor docs
+    adr/                        # architecture decision records
+    Architecture-and-Design.md
+examples/
+    hello_world.py
+testrange/
+    builders/
+        base.py                 # Builder ABC
+        cloudinit.py            # CloudInitBuilder
+    cache/
+        __init__.py             # CacheEntry exposed here
+        local.py                # LocalCache (file-based, sidecar JSON)
+        http.py                 # HttpCache (best-effort)
+        manager.py              # CacheManager (local + http tiers)
+    communicators/
+        base.py                 # Communicator ABC: execute / read_file / write_file
+        ssh.py                  # SSHCommunicator (paramiko)
+    credentials/
+        base.py                 # Credential ABC (pure data)
+        posix.py                # PosixCred
+    devices/
+        cpu/{base.py, generic.py, libvirt.py}
+        memory/{base.py, generic.py, libvirt.py}
+        disk/{base.py, generic.py, libvirt.py}    # OSDrive + HardDrive
+        network/{base.py, generic.py, libvirt.py} # iface, network, switch
+        pool/{base.py, generic.py, libvirt.py}    # StoragePool
+    drivers/
+        base.py                 # HypervisorDriver ABC
+        libvirt.py              # LibvirtDriver + LibvirtHypervisor
+    networks/
+        base.py                 # Network, Switch ABC
+        libvirt.py              # libvirt concretes
+    orchestrator/
+        runtime.py              # Orchestrator, OrchestratorHandle, VMHandle
+        phases.py               # preflight / install / run / test / cleanup
+    packages/
+        base.py
+        apt.py
+        pip.py
+    state/
+        store.py                # state.json read/write under FileLock
+        schema.py               # version 1 dataclasses
+        cleanup.py              # state-file-driven teardown
+    vms/
+        spec.py                 # VMSpec
+        recipe.py               # VMRecipe
+        handle.py               # VMHandle (runtime view)
+    _log.py                     # stdlib logging w/ run_id LoggerAdapter
+    cli.py                      # argparse → subcommands
+    exceptions.py
+tests/
+    unit/
+    integration/                # gated by pytest -m libvirt
+```
+
+Stubs for proxmox / esxi / winrm are NOT exported until they work (no
+Hyrum's-law re-exports of `NotImplementedError` shims).
