@@ -7,6 +7,41 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+### Phase 3 — VM CRUD + CloudInitBuilder seed (2026-05-11)
+
+VM/volume primitives on the libvirt driver, full cloud-init seed
+rendering (user-data + meta-data + network-config) into a pycdlib-built
+``cidata`` ISO, and a deterministic ``config_hash`` ready for the
+two-phase install cache key.
+
+- `HypervisorDriver` ABC: added VM CRUD (`create_vm`, `start_vm`,
+  `shutdown_vm` with graceful→force escalation, `destroy_vm`,
+  `get_vm_power_state`) and volume ops (`write_to_pool`,
+  `create_overlay_disk`, `delete_volume`).
+- `LibvirtDriver`: domain XML rendering for spec→libvirt (CPU, memory,
+  qcow2 OS disk, optional seed CD-ROM, NICs with stable MAC + driver
+  model). Overlay volumes via libvirt's `<backingStore>` (no
+  `qemu-img` subprocess). `shutdown_vm` polls power state with a
+  configurable timeout, escalates to destroy on timeout.
+- `destroy(kind, name)` now routes vm/install_vm and
+  network/install_network kinds.
+- `CloudInitBuilder.render_seed`: builds an ISO9660+Joliet+RockRidge
+  seed image labeled ``cidata`` with three files. user-data is
+  ``#cloud-config`` YAML (PyYAML); always includes a self-terminating
+  ``poweroff`` at the end of runcmd so install VMs power off on
+  completion. Apt + Pip packages, post_install_commands, sudo, SSH
+  pubkeys, plaintext passwords (via chpasswd) all plumbed.
+- `network-config` matches interfaces by **name**, not MAC — sidesteps
+  the MAC-baked-into-cached-disk failure mode independent of the
+  driver's stable-MAC work.
+- `CloudInitBuilder.config_hash(spec, recipe, *, base_sha)`:
+  deterministic 16-char hex of rendered user-data + meta-data +
+  network-config + the resolved base disk sha. Pure, no I/O, no
+  run_id.
+- 21 new unit tests (cloud-init render + ISO read-back + VM/volume
+  XML rendering + dispatch). Total: 183 passed; ruff + mypy --strict
+  clean.
+
 ### Phase 2 — Libvirt driver foundation + state machinery (2026-05-11)
 
 `HypervisorDriver` ABC, `LibvirtDriver` lazy-imported runtime (preflight

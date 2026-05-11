@@ -17,7 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 libvirt = ["libvirt-python>=10"]
 ssh = ["paramiko>=3"]
-cloudinit = ["pycdlib>=1.14"]
+cloudinit = ["pycdlib>=1.14", "pyyaml>=6"]
 http = ["requests>=2.31"]
 dev = [
     "pytest>=8",
@@ -26,6 +26,9 @@ dev = [
     "mypy>=1.10",
     "types-paramiko",
     "types-requests",
+    "types-pyyaml",
+    "pycdlib>=1.14",
+    "pyyaml>=6",
 ]
 all = [
     "testrange[libvirt,ssh,cloudinit,http]",
