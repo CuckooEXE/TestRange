@@ -60,6 +60,10 @@ class TestDomainXML:
         assert "52:54:00:dd:ee:ff" in xml
         assert "model type='virtio'" in xml
         assert "model type='e1000'" in xml
+        # graphics for virt-viewer
+        assert "<graphics type='vnc'" in xml
+        assert "listen='127.0.0.1'" in xml
+        assert "<video><model type='virtio'/></video>" in xml
 
     def test_no_seed(self, tmp_path: Path) -> None:
         xml = _render_domain_xml(

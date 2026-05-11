@@ -78,6 +78,38 @@ class HypervisorDriver(ABC):
         """Create a qcow2 overlay backed by ``source_path``. Returns the new disk path."""
 
     @abstractmethod
+    def upload_to_pool(
+        self,
+        pool_backend_name: str,
+        vol_name: str,
+        source_path: Path,
+    ) -> Path:
+        """Upload bytes from ``source_path`` into the pool as a new volume.
+
+        Idempotent: if a volume with ``vol_name`` already exists in the pool,
+        returns its path without re-uploading. Generalizes to remote
+        hypervisors (ESXi/Proxmox) where the orchestrator host and the
+        hypervisor host differ.
+        """
+
+    @abstractmethod
+    def download_from_pool(
+        self,
+        pool_backend_name: str,
+        vol_name: str,
+        dest_path: Path,
+    ) -> Path:
+        """Download a pool volume's bytes to ``dest_path`` on the orchestrator host.
+
+        Symmetric inverse of ``upload_to_pool``. Used after the install phase
+        to ingest the post-install OS disk back into the user-space cache —
+        the on-disk file is owned by the hypervisor's service account
+        (``libvirt-qemu`` in system mode) and not directly readable by the
+        orchestrator. ``dest_path``'s parent must already exist; the file is
+        overwritten if present.
+        """
+
+    @abstractmethod
     def delete_volume(self, pool_backend_name: str, vol_name: str) -> None: ...
 
     # ---- VM CRUD -------------------------------------------------------
@@ -125,7 +157,7 @@ class HypervisorDriver(ABC):
             self.destroy_pool(backend_name)
         elif kind in ("vm", "install_vm"):
             self.destroy_vm(backend_name)
-        elif kind in ("install_disk", "install_seed", "run_disk", "volume"):
+        elif kind in ("install_disk", "install_seed", "run_disk", "base_image", "volume"):
             pool_backend = metadata.get("pool_backend")
             if not pool_backend:
                 raise ValueError(

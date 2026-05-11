@@ -19,7 +19,7 @@ def _libvirt_available() -> bool:
     try:
         import libvirt
 
-        conn = libvirt.open("qemu:///session")
+        conn = libvirt.open("qemu:///system")
         if conn is None:
             return False
         conn.close()
@@ -30,7 +30,7 @@ def _libvirt_available() -> bool:
 
 if not _libvirt_available():
     pytest.skip(
-        "libvirt-python not installed or qemu:///session unreachable",
+        "libvirt-python not installed or qemu:///system unreachable",
         allow_module_level=True,
     )
 
@@ -43,7 +43,7 @@ from testrange.networks import Network, Switch  # noqa: E402
 
 
 def test_create_destroy_network(tmp_path: Path) -> None:
-    driver = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path / "pools")
+    driver = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
     driver.connect()
     try:
         backend_name = driver.compose_resource_name("integ-1", "network", "netA")
@@ -56,7 +56,7 @@ def test_create_destroy_network(tmp_path: Path) -> None:
 
 
 def test_create_destroy_pool(tmp_path: Path) -> None:
-    driver = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path / "pools")
+    driver = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
     driver.connect()
     try:
         backend_name = driver.compose_resource_name("integ-1", "pool", "pool1")

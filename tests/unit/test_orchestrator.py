@@ -113,6 +113,30 @@ class _FakeDriver:
         path.write_bytes(b"FAKE-OVERLAY:" + source_path.name.encode())
         return path
 
+    def upload_to_pool(
+        self,
+        pool_backend: str,
+        vol_name: str,
+        source_path: Path,
+    ) -> Path:
+        self._record("upload_to_pool", pool_backend, vol_name, str(source_path))
+        path = self.pool_root / pool_backend / vol_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(source_path.read_bytes())
+        return path
+
+    def download_from_pool(
+        self,
+        pool_backend: str,
+        vol_name: str,
+        dest_path: Path,
+    ) -> Path:
+        self._record("download_from_pool", pool_backend, vol_name, str(dest_path))
+        src = self.pool_root / pool_backend / vol_name
+        dest_path.write_bytes(src.read_bytes())
+        return dest_path
+
     def delete_volume(self, pool_backend: str, vol_name: str) -> None:
         self._record("delete_volume", pool_backend, vol_name)
         path = self.pool_root / pool_backend / vol_name
@@ -164,7 +188,7 @@ class _FakeDriver:
             self.destroy_pool(backend_name)
         elif kind in ("vm", "install_vm"):
             self.destroy_vm(backend_name)
-        elif kind in ("install_disk", "install_seed", "run_disk"):
+        elif kind in ("install_disk", "install_seed", "run_disk", "base_image"):
             self.delete_volume(metadata["pool_backend"], backend_name)
 
 
