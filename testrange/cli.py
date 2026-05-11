@@ -17,11 +17,14 @@ from testrange.cache.manager import CacheManager
 from testrange.exceptions import (
     CacheError,
     CacheMissError,
+    OrchestratorError,
+    PreflightError,
     StateError,
     StateLockedError,
     TestRangeError,
 )
 from testrange.networks.base import Network, Switch
+from testrange.orchestrator.runtime import run_tests
 from testrange.plan import Plan
 from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
 from testrange.vms.recipe import VMRecipe
@@ -51,6 +54,22 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
         sys.exit(2)
     tests = getattr(module, "TESTS", [])
     return plan, list(tests)
+
+
+def _run(args: argparse.Namespace) -> int:
+    plan, tests = _load_plan_module(args.plan)
+    mgr = _build_manager(args)
+    try:
+        results = run_tests(tests, plan, cache_manager=mgr)
+    except PreflightError as e:
+        print(f"preflight failed:\n{e}", file=sys.stderr)
+        return 2
+    except OrchestratorError as e:
+        print(f"orchestrator failed: {e}", file=sys.stderr)
+        return 1
+    for r in results:
+        print(r.report_line())
+    return 0 if all(r.passed for r in results) else 1
 
 
 def _cleanup(args: argparse.Namespace) -> int:
@@ -293,9 +312,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_cleanup.set_defaults(func=_cleanup)
 
-    p = sub.add_parser("run", help="(stub — Phase 4)")
-    p.add_argument("rest", nargs=argparse.REMAINDER)
-    p.set_defaults(func=_not_implemented(4), subcommand="run")
+    p_run = sub.add_parser("run", help="bring up the range, run tests, tear down")
+    p_run.add_argument("plan", help="path to the plan file (.py)")
+    p_run.set_defaults(func=_run)
 
     return parser
 

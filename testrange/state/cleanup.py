@@ -77,7 +77,9 @@ def cleanup_run(
         store.set_phase(PHASE_CLEANUP)
         for r in reversed(state.resources):
             try:
-                driver.destroy(r.kind, r.backend_name)  # type: ignore[attr-defined]
+                driver.destroy(  # type: ignore[attr-defined]
+                    r.kind, r.backend_name, **dict(r.metadata)
+                )
                 store.forget(r.backend_name)
                 destroyed.append(r.backend_name)
             except Exception as e:

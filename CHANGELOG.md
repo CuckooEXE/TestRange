@@ -7,6 +7,45 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+### Phase 4 — Orchestrator install + run phases (2026-05-11)
+
+End-to-end bring-up + teardown. ``with Orchestrator(plan) as orch:``
+takes the plan through preflight, install (cache-aware, builder-driven),
+run, and cleanup. ``testrange run plan.py`` is wired but executes a
+test-runner placeholder until Phase 5.
+
+- ``testrange.orchestrator.Orchestrator``: context manager that drives
+  the full phase sequence. Driver is inferred from the hypervisor type
+  (LibvirtHypervisor -> LibvirtDriver). State recorded BEFORE each
+  backend create-call (PLAN.md decision 4); state dir cleaned up after
+  successful teardown.
+- **Install phase**: per-VM `config_hash` lookup against the local
+  cache; cache hit skips the install VM build entirely. Cache miss
+  brings up a transient install VM on a transient internet-NAT network
+  with the cloud-init seed attached, polls driver power-state until
+  the VM self-terminates via `runcmd: [..., poweroff]`, then ingests
+  the post-install disk into the cache via `LocalCache.add`. Install
+  resources are recorded in state.json then forgotten as they're
+  cleaned up.
+- **Run phase**: user networks created, run VM gets a fresh overlay
+  off the cached post-install disk, defined + started with no seed.
+- **Teardown**: LIFO over state.json resources, tolerates per-resource
+  failures, removes the state dir on a clean run.
+- ``Plan(name="hello")`` kwarg for naming a plan (used in stable-MAC
+  derivation and state.json).
+- ``InstallTimeoutError`` / ``OrchestratorError`` exception types.
+- ``HypervisorDriver.destroy(kind, name, **metadata)`` now accepts
+  metadata to route volume-kind cleanups to the right pool.
+- ``run_tests(tests, plan)`` enters the orchestrator and returns a list
+  of placeholder ``TestResult``s — Phase 5 will replace with real
+  execution.
+- CLI: ``testrange run plan.py`` brings up + tears down. Exit codes:
+  0 ok, 1 failure, 2 preflight failure.
+- ``testrange.orchestrator`` re-exports ``Orchestrator``.
+- 10 new unit tests using a fully-mocked driver to exercise the entire
+  lifecycle without libvirt. Total: 192 passed; ruff + mypy --strict
+  clean.
+
 ### Phase 3 — VM CRUD + CloudInitBuilder seed (2026-05-11)
 
 VM/volume primitives on the libvirt driver, full cloud-init seed

@@ -59,10 +59,9 @@ class TestDescribe:
         assert exc.value.code == 2
 
 
-class TestStubSubcommands:
-    @pytest.mark.parametrize("sub", ["run"])
-    def test_stub(self, sub: str, capsys: pytest.CaptureFixture[str]) -> None:
-        rc = cli.main([sub])
-        assert rc == 2
+class TestRunSubcommand:
+    def test_requires_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["run"])
         err = capsys.readouterr().err
-        assert "not implemented" in err
+        assert "required" in err

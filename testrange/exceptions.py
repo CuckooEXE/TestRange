@@ -49,3 +49,11 @@ class CommunicatorAlreadyBoundError(CommunicatorError):
 
 class BuilderError(TestRangeError):
     """Builder-side failure (render, seed authoring, etc.)."""
+
+
+class OrchestratorError(TestRangeError):
+    """Orchestrator-level failure (phase sequencing, lifecycle)."""
+
+
+class InstallTimeoutError(OrchestratorError):
+    """Install VM did not power off within the configured timeout."""
