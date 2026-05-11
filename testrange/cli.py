@@ -14,9 +14,16 @@ from testrange._log import configure as configure_logging
 from testrange.cache.entry import CacheEntry
 from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
-from testrange.exceptions import CacheError, CacheMissError, TestRangeError
+from testrange.exceptions import (
+    CacheError,
+    CacheMissError,
+    StateError,
+    StateLockedError,
+    TestRangeError,
+)
 from testrange.networks.base import Network, Switch
 from testrange.plan import Plan
+from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
 from testrange.vms.recipe import VMRecipe
 
 
@@ -46,16 +53,27 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     return plan, list(tests)
 
 
-def _collect_cache_entries(plan: Plan) -> list[CacheEntry]:
-    refs: list[CacheEntry] = []
-    hyp = plan.hypervisor
-    for vm in getattr(hyp, "vms", ()):
-        if not isinstance(vm, VMRecipe):
-            continue
-        base = getattr(vm.builder, "base", None)
-        if isinstance(base, CacheEntry):
-            refs.append(base)
-    return refs
+def _cleanup(args: argparse.Namespace) -> int:
+    try:
+        if args.all:
+            results = list(cleanup_all(dry_run=args.dry_run))
+            if not results:
+                print("(no runs)")
+                return 0
+            print(format_cleanup_results(results))
+            return 3 if any(r.errors for r in results) else 0
+        if not args.run_id:
+            print("error: cleanup requires <run-id> or --all", file=sys.stderr)
+            return 2
+        r = cleanup_run(args.run_id, dry_run=args.dry_run)
+        print(format_cleanup_results([r]))
+        return 3 if r.errors else 0
+    except StateLockedError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except StateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
 
 # ---- describe ----------------------------------------------------------
@@ -265,10 +283,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_cache.set_defaults(func=_cache)
 
-    for name, phase in [("run", 4), ("cleanup", 2)]:
-        p = sub.add_parser(name, help=f"(stub — Phase {phase})")
-        p.add_argument("rest", nargs=argparse.REMAINDER)
-        p.set_defaults(func=_not_implemented(phase), subcommand=name)
+    p_cleanup = sub.add_parser("cleanup", help="tear down resources from a previous run")
+    p_cleanup.add_argument("run_id", nargs="?", default=None, help="run id to clean up")
+    p_cleanup.add_argument("--all", action="store_true", help="clean up every run dir")
+    p_cleanup.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be destroyed without touching the backend",
+    )
+    p_cleanup.set_defaults(func=_cleanup)
+
+    p = sub.add_parser("run", help="(stub — Phase 4)")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(func=_not_implemented(4), subcommand="run")
 
     return parser
 

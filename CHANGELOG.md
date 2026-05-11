@@ -7,6 +7,44 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+### Phase 2 — Libvirt driver foundation + state machinery (2026-05-11)
+
+`HypervisorDriver` ABC, `LibvirtDriver` lazy-imported runtime (preflight
++ network/pool CRUD), state machinery (`state.json` + `state.pid`),
+PID-checked `testrange cleanup`. Libvirt integration tests skip when
+`libvirt-python` isn't installed.
+
+- `testrange.drivers.base.HypervisorDriver` ABC: `connect`, `disconnect`,
+  `preflight`, `compose_resource_name`, `compose_mac`, network+pool
+  CRUD, `destroy(kind, name)` dispatch.
+- `testrange.drivers.libvirt.LibvirtDriver`:
+  - `compose_resource_name` produces deterministic libvirt-safe names.
+  - `compose_mac` derives stable per-NIC MACs under the KVM OUI
+    (`52:54:00:…`) — a driver concern, not shared utility.
+  - `preflight` collects cache-resolvability + subnet-overlap +
+    pool-writable findings (read-only, side-effect-free invariant
+    intact apart from a `mkdir` of the pool root).
+  - Network/pool CRUD via libvirt XML rendering + libvirt-python.
+  - `libvirt` import is lazy so the package is usable on hosts without
+    libvirt-dev installed; integration tests behind `-m libvirt`.
+- `testrange.preflight`: `PreflightFinding` / `PreflightReport` with
+  error/warning severities and `render()`.
+- `testrange.state`:
+  - `Resource` (kind, backend_name, plan_name, intent_at/outcome_at,
+    metadata dict) — schema-flexible per PLAN.md decision 4.
+  - `State` envelope, schema-version 1.
+  - `StateStore`: atomic `state.json` writes (.partial + os.replace);
+    sibling `state.pid` file with `is_pid_alive()` check.
+    `require_dead()` raises `StateLockedError` if the owning PID is
+    alive — replaces FileLock per PLAN.md decision 16.
+  - `cleanup_run` / `cleanup_all` walk resources in reverse, dispatch
+    `driver.destroy(kind, backend_name)`, tolerate per-resource
+    failures, leave state in a self-consistent state.
+- CLI: `testrange cleanup <run-id>`, `--all`, `--dry-run`. Exit codes:
+  0 ok, 1 PID-locked, 2 missing/bad state, 3 partial-failure.
+- 59 new unit tests + 2 integration tests (skipped here). Total: 162
+  passed; ruff + mypy --strict clean.
+
 ### Phase 1 — Cache layer + cache CLI (2026-05-11)
 
 Local content-addressed cache works end-to-end. URLs and filepaths drop
