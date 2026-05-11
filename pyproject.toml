@@ -29,6 +29,7 @@ dev = [
     "types-pyyaml",
     "pycdlib>=1.14",
     "pyyaml>=6",
+    "paramiko>=3",
 ]
 all = [
     "testrange[libvirt,ssh,cloudinit,http]",

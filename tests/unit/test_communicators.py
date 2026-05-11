@@ -38,7 +38,29 @@ class TestSSHCommunicator:
         with pytest.raises(ValueError, match="does not match"):
             c.bind(host="10.0.0.1", credential=cred)
 
-    def test_execute_not_implemented(self) -> None:
+    def test_execute_unbound_raises(self) -> None:
+        from testrange.exceptions import CommunicatorError
+
         c = SSHCommunicator("u")
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(CommunicatorError, match="not bound"):
             c.execute(["uname"])
+
+    def test_execute_empty_argv(self) -> None:
+        c = SSHCommunicator("u")
+        cred = PosixCred("u", password="p")
+        c.bind(host="10.0.0.1", credential=cred)
+        with pytest.raises(ValueError):
+            c.execute([])
+
+    def test_execute_non_str_argv(self) -> None:
+        c = SSHCommunicator("u")
+        cred = PosixCred("u", password="p")
+        c.bind(host="10.0.0.1", credential=cred)
+        with pytest.raises(TypeError):
+            c.execute(["uname", 5])  # type: ignore[list-item]
+
+    def test_bind_port_validation(self) -> None:
+        c = SSHCommunicator("u")
+        cred = PosixCred("u", password="p")
+        with pytest.raises(ValueError):
+            c.bind(host="10.0.0.1", credential=cred, port=0)

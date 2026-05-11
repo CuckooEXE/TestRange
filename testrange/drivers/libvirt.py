@@ -384,6 +384,25 @@ class LibvirtDriver(HypervisorDriver):
         dom = self.conn.lookupByName(backend_name)
         dom.create()
 
+    def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
+        """Look up an IP leased to ``mac`` on a libvirt network's dnsmasq."""
+        try:
+            net = self.conn.networkLookupByName(network_backend_name)
+        except Exception as e:
+            _log.warning("lease lookup: network %s not found: %s", network_backend_name, e)
+            return None
+        try:
+            leases = net.DHCPLeases()
+        except Exception as e:
+            _log.debug("DHCPLeases failed: %s", e)
+            return None
+        mac_lc = mac.lower()
+        for lease in leases:
+            if lease.get("mac", "").lower() == mac_lc:
+                ip = lease.get("ipaddr")
+                return str(ip) if ip else None
+        return None
+
     def get_vm_power_state(self, backend_name: str) -> str:
         libvirt = _import_libvirt()
         dom = self.conn.lookupByName(backend_name)

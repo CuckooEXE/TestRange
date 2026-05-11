@@ -143,6 +143,12 @@ class _FakeDriver:
             return "shutoff"
         return "running"
 
+    def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
+        del network_backend_name
+        # Deterministic fake IP keyed on the MAC; always succeeds.
+        last_octet = int(mac.split(":")[-1], 16) % 254 + 1
+        return f"10.97.99.{last_octet}"
+
     def shutdown_vm(self, backend_name: str, *, timeout: float = 120.0) -> None:
         del timeout
         self._record("shutdown_vm", backend_name)
@@ -406,5 +412,4 @@ class TestRunTests:
         results = run_tests([my_test], _plan(), cache_manager=mgr)
         assert len(results) == 1
         assert results[0].name == "my_test"
-        # Phase 5 will replace the placeholder
-        assert "Phase 5" in (results[0].error or "")
+        assert results[0].passed

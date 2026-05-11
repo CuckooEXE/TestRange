@@ -13,6 +13,7 @@ VMRecipe and hands it over.
 from __future__ import annotations
 
 import time
+import traceback
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,8 @@ from types import TracebackType
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.cache.manager import CacheManager
+from testrange.communicators.ssh import SSHCommunicator
+from testrange.credentials.posix import PosixCred
 from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.libvirt import LibvirtDriver, LibvirtHypervisor
 from testrange.exceptions import (
@@ -46,6 +49,9 @@ _log = get_logger(__name__)
 
 # Per-VM install timeout. Cloud-init + apt install can be slow.
 _DEFAULT_INSTALL_TIMEOUT_S = 600.0
+
+# Per-VM DHCP-lease timeout after the run VM starts.
+_DEFAULT_LEASE_TIMEOUT_S = 120.0
 
 # Transient install network — see PLAN.md note. Hardcoded subnet for v0;
 # we'll move to a hashed-from-run-id derivation when conflict ever shows up.
@@ -94,11 +100,13 @@ class Orchestrator:
         state_root: Path | None = None,
         run_id: str | None = None,
         install_timeout_s: float = _DEFAULT_INSTALL_TIMEOUT_S,
+        lease_timeout_s: float = _DEFAULT_LEASE_TIMEOUT_S,
     ) -> None:
         self.plan = plan
         self.cache = cache_manager or CacheManager()
         self.run_id = run_id or new_run_id()
         self.install_timeout_s = install_timeout_s
+        self.lease_timeout_s = lease_timeout_s
         self.driver: HypervisorDriver = self._build_driver()
         self._store = StateStore(run_dir_for(self.run_id, root=state_root))
         self._handle: OrchestratorHandle | None = None
@@ -134,6 +142,7 @@ class Orchestrator:
                 self._install_phase()
                 self._run_phase()
                 self._handle = self._build_handle()
+                self._bind_communicators()
             except Exception:
                 _log.exception("bring-up failed; tearing down")
                 self._teardown(force=True)
@@ -362,14 +371,80 @@ class Orchestrator:
     def _build_handle(self) -> OrchestratorHandle:
         vms_map: dict[str, VMHandle] = {}
         for vm in self.plan.hypervisor.vms:
-            # IP discovery + communicator bind land in Phase 5; for Phase 4
-            # the handle is constructed but IPs are empty strings.
             vms_map[vm.name] = VMHandle(
                 name=vm.name,
                 ip="",
                 communicator=vm.communicator,
             )
         return OrchestratorHandle(run_id=self.run_id, vms=vms_map)
+
+    # ---- communicator bind --------------------------------------------
+
+    def _bind_communicators(self) -> None:
+        """Discover each VM's IP and bind its communicator.
+
+        Each Communicator's bind signature is its own (PLAN.md decision
+        5); the orchestrator dispatches by type and hands each the
+        inputs it needs.
+        """
+        assert self._handle is not None
+        for vm in self.plan.hypervisor.vms:
+            if not isinstance(vm.communicator, SSHCommunicator):
+                _log.debug(
+                    "vm %s: no SSHCommunicator (%s); skipping bind",
+                    vm.name,
+                    type(vm.communicator).__name__,
+                )
+                continue
+            ip = self._discover_ip(vm)
+            cred = self._lookup_credential(vm)
+            vm.communicator.bind(host=ip, credential=cred)
+            self._handle.vms[vm.name].ip = ip
+            _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
+
+    def _discover_ip(self, vm: VMRecipe) -> str:
+        if not vm.spec.nics:
+            raise OrchestratorError(
+                f"vm {vm.name!r}: no NICs; cannot bind a network communicator"
+            )
+        first_nic = vm.spec.nics[0]
+        net_backend = self._network_backends[first_nic.network]
+        mac = self.driver.compose_mac(self._plan_name, vm.name, 0)
+        deadline = time.monotonic() + self.lease_timeout_s
+        while time.monotonic() < deadline:
+            ip = self.driver.get_lease_ip(net_backend, mac)
+            if ip:
+                return ip
+            time.sleep(2.0)
+        raise OrchestratorError(
+            f"vm {vm.name!r} did not acquire a DHCP lease on "
+            f"{first_nic.network!r} within {self.lease_timeout_s:.0f}s"
+        )
+
+    def _lookup_credential(self, vm: VMRecipe) -> PosixCred:
+        builder = vm.builder
+        if not isinstance(builder, CloudInitBuilder):
+            raise OrchestratorError(
+                f"vm {vm.name!r}: only CloudInitBuilder is supported in v0"
+            )
+        if not isinstance(vm.communicator, SSHCommunicator):
+            raise OrchestratorError(
+                f"vm {vm.name!r}: communicator is not SSHCommunicator"
+            )
+        cred = builder.find_credential(vm.communicator.username)
+        if cred is None:
+            usernames = [c.username for c in builder.credentials]
+            raise OrchestratorError(
+                f"vm {vm.name!r}: SSHCommunicator({vm.communicator.username!r}) "
+                f"has no matching credential in builder.credentials; "
+                f"declared: {usernames}"
+            )
+        if not isinstance(cred, PosixCred):
+            raise OrchestratorError(
+                f"vm {vm.name!r}: credential for {vm.communicator.username!r} "
+                f"is not a PosixCred (got {type(cred).__name__})"
+            )
+        return cred
 
     # ---- teardown ------------------------------------------------------
 
@@ -410,24 +485,52 @@ def run_tests(
     plan: Plan,
     *,
     cache_manager: CacheManager | None = None,
+    fail_fast: bool = False,
 ) -> list[TestResult]:
-    """Bring the range up, run the tests, tear it down.
+    """Bring the range up, execute the tests, tear it down.
 
-    Phase 4 wires the lifecycle. Phase 5 wires the test execution loop;
-    until then, tests are reported with a clear placeholder note.
+    Tests run sequentially in declaration order. Continue-on-failure is
+    the default (PLAN.md decision 14); ``fail_fast=True`` stops on the
+    first failure. A test that raises is recorded as FAIL with the
+    captured traceback in ``error``; the orchestrator continues
+    teardown either way.
     """
     results: list[TestResult] = []
-    with Orchestrator(plan, cache_manager=cache_manager) as _orch:
-        for t in tests:
-            name = getattr(t, "__name__", repr(t))
+    with Orchestrator(plan, cache_manager=cache_manager) as orch:
+        _execute_tests(orch, tests, results, fail_fast=fail_fast)
+    return results
+
+
+def _execute_tests(
+    orch: OrchestratorHandle,
+    tests: list[Callable[[OrchestratorHandle], None]],
+    results: list[TestResult],
+    *,
+    fail_fast: bool,
+) -> None:
+    """Run tests sequentially, capture failures, append to ``results``."""
+    for t in tests:
+        name = getattr(t, "__name__", repr(t))
+        start = time.monotonic()
+        try:
+            t(orch)
+        except Exception as e:
+            tb = traceback.format_exc()
             results.append(
                 TestResult(
                     name=name,
-                    passed=True,
-                    error="(Phase 5: test execution not wired yet)",
+                    passed=False,
+                    error=tb if tb.strip() else str(e),
+                    duration=time.monotonic() - start,
                 )
             )
-    return results
+            if fail_fast:
+                _log.warning("--fail-fast: stopping on %s", name)
+                return
+            continue
+        results.append(
+            TestResult(name=name, passed=True, duration=time.monotonic() - start)
+        )
 
 
 __all__ = [
