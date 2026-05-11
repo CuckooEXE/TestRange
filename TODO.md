@@ -18,8 +18,16 @@ with a date stamp.
   recoverable only via state-file-driven `testrange cleanup`.
 - `Builder.config_hash`: deterministic password-salt seed to keep cache
   hits across runs.
-- Stable MACs across runs of the same plan (cloud-init network-config
-  keys by MAC). Salt MAC from VM name + run-stable seed, not `run_id`.
+- **Driver-level stable MAC assignment.** Each driver derives a NIC's
+  MAC deterministically from `(plan_name, vm_name, nic_index)` so the
+  install VM and run VM (and any re-run of the same plan) get the same
+  MAC. Required because cloud-init's rendered network-config on the
+  cached disk can match interfaces by MAC — letting the backend
+  auto-generate would silently break networking on every cache-hit run.
+  This belongs in the driver, not in shared utility code: each backend
+  has its own OUI and MAC-format conventions (libvirt/KVM `52:54:00:…`,
+  VMware `00:50:56:…`, Hyper-V `00:15:5D:…`). The driver ABC exposes
+  the contract; concretes own the hash + prefix.
 
 ## Long-term
 
