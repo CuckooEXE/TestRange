@@ -2,17 +2,74 @@
 
 Declarative Python plans → VM test-ranges → user test functions.
 
-Status: pre-1.0, under active construction. See `PLAN.md` for the design
-and `TODO.md` for in-scope and long-term work.
+Write a plan that declares networks, storage pools, and VMs against a
+libvirt host; declare test functions; run them. Use case: CI/CD
+against specific OS versions and varied network topologies; authorized
+pentest test-ranges.
 
-## Quickstart (when v0 ships)
+## Quickstart
 
 ```sh
-pip install -e '.[dev,libvirt,ssh,cloudinit,http]'
-testrange cache add https://cloud.debian.org/.../debian-13-generic-amd64.qcow2 \
+# Prereqs: libvirt + KVM + group membership (see docs/user/install.md)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev,libvirt,ssh,cloudinit]'
+
+# Populate the cache with a base disk
+testrange cache add \
+    https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
     --name debian-13
+
+# Inspect a plan without touching the backend
 testrange describe examples/hello_world.py
+
+# Bring up the range, run the tests, tear down
 testrange run examples/hello_world.py
 ```
 
-See `examples/hello_world.py` for the target API shape.
+## Plan shape
+
+```python
+PLAN = Plan(
+    LibvirtHypervisor(
+        connection="qemu:///session",
+        networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
+        pools=[StoragePool("pool1", 32)],
+        vms=[
+            VMRecipe(
+                spec=VMSpec(name="web", devices=[...]),
+                builder=CloudInitBuilder(base=CacheEntry("debian-13"), ...),
+                communicator=SSHCommunicator("myuser"),
+            ),
+        ],
+    ),
+)
+
+def my_test(orch: OrchestratorHandle) -> None:
+    r = orch.vms["web"].communicator.execute(["systemctl", "is-active", "nginx"])
+    assert r.exit_code == 0
+
+TESTS = [my_test]
+```
+
+## CLI
+
+```
+testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
+testrange cache list / del / rename / forget-name
+testrange describe <plan.py>
+testrange run <plan.py> [--fail-fast] [--leak-on-failure]
+testrange cleanup <run_id>
+testrange cleanup --all [--dry-run]
+```
+
+## Docs
+
+- `docs/user/install.md` — prerequisites and install.
+- `docs/user/writing-a-plan.md` — plan API + examples.
+- `docs/Architecture-and-Design.md` — component overview.
+- `docs/adr/` — load-bearing decisions.
+
+## Status
+
+Pre-1.0. See `PLAN.md` for the full design and `TODO.md` for in-scope
+and long-term work.
