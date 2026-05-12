@@ -7,6 +7,56 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-05-12
+
+HTTP cache tier — an optional second tier behind the local
+content-addressed store, served by a dumb nginx WebDAV server (see
+``cache-server/``). On a local miss the broker falls through to HTTP
+and materializes into local on a hit; on a local write it mirrors back.
+Local stays the source of truth; HTTP failures log a warning and never
+abort the local op.
+
+### Added
+
+- ``testrange/cache/http.py`` — ``HttpCache``: ``resolve`` / ``fetch`` /
+  ``push`` / ``delete`` / ``add_name`` / ``forget_name`` over
+  ``/isos/<sha>.{bin,json}`` + ``/names/<n>``. Write order is bin →
+  sidecar → names so a half-uploaded entry stays invisible; delete is
+  the inverse. TLS is never verified — the server is expected to sit
+  behind a private network gate.
+- ``testrange/cache/_names.py`` — shared name validator
+  (``[A-Za-z0-9._-]{1,255}``). Prevents path-traversal on
+  ``/names/<n>`` and tightens the local tier to match.
+- Global ``--cache <URL>`` CLI flag. No env var — every invocation is
+  self-describing.
+- New ``cache push`` / ``cache pull`` subcommands for manual
+  reconciliation when the HTTP tier was unreachable during the original
+  add or you want to warm local before going offline.
+- ``[http]`` install extra pulling ``requests>=2.31``.
+- ``cache-server/README.md`` — quickstart, cert generation, storage
+  layout, security caveats.
+- 39 new unit tests covering wire-level ``HttpCache`` behavior, broker
+  policy (fallthrough, mirror, mirror-failure-tolerance), and CLI
+  push/pull paths.
+
+### Changed
+
+- ``CacheManager`` refactored from a thin wrapper into a real broker.
+  ``resolve(ref, fetch=True)`` (default) materializes from HTTP into
+  local on a hit; ``fetch=False`` returns the HTTP info without
+  downloading and is what passive callers (``describe``, preflight)
+  use.
+- ``CacheEntryInfo.path`` widened to ``Path | None`` — HTTP-tier
+  entries resolved without ``fetch`` carry no local path.
+- ``testrange cache add/del/rename/forget-name`` now route through the
+  broker so each operation mirrors to HTTP when configured.
+- Orchestrator install-phase ``resolve`` goes through the broker
+  (HTTP fallthrough); post-install snapshot mirrors to HTTP via
+  ``cache.add`` so multi-host setups share the cooked disks.
+- Libvirt driver preflight ``resolve`` switched to ``fetch=False`` so
+  cache findings don't pull a multi-GB base image just to print a
+  checklist line.
+
 ## [0.0.1] — 2026-05-11
 
 First tagged snapshot. Phases 0–6 brought v0 to feature completeness;
