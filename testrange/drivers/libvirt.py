@@ -776,7 +776,10 @@ def _collect_cache_findings(
         if not isinstance(base, CacheEntry):
             continue
         try:
-            cache_manager.resolve(base)
+            # Preflight existence check — don't pull a multi-GB base
+            # over HTTP just to satisfy a check. The install-phase
+            # resolve (fetch=True) will materialize it for real.
+            cache_manager.resolve(base, fetch=False)
         except CacheMissError as e:
             findings.append(
                 PreflightFinding(

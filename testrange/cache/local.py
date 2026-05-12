@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from testrange._log import get_logger
+from testrange.cache._names import validate_name
 from testrange.exceptions import CacheError, CacheMissError
 
 _log = get_logger(__name__)
@@ -29,7 +30,12 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class CacheEntryInfo:
-    """Metadata for one cache entry, deserialized from its ``<sha>.json``."""
+    """Metadata for one cache entry, deserialized from its ``<sha>.json``.
+
+    ``path`` is the local ``.bin`` path on the host when the entry is
+    materialized locally; ``None`` for entries resolved against the HTTP
+    tier without ``fetch``.
+    """
 
     sha256: str
     size: int
@@ -37,7 +43,7 @@ class CacheEntryInfo:
     origin: str | None
     added_at: str
     description: str | None
-    path: Path  # The .bin path on the host
+    path: Path | None
 
     @property
     def short_sha(self) -> str:
@@ -74,6 +80,8 @@ class LocalCache:
         the same content sha already exists, the new name (if any) is
         added to its alias list and the existing entry is returned.
         """
+        if name is not None:
+            validate_name(name)
         src = str(source)
         if src.startswith(("http://", "https://")):
             tmp, origin = self._download_url(src)
@@ -176,6 +184,7 @@ class LocalCache:
         new_name: str,
     ) -> CacheEntryInfo:
         """Add a new pretty-name alias to an existing entry."""
+        validate_name(new_name)
         info = self.resolve(identifier)
         if new_name in info.names:
             return info
