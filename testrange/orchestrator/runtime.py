@@ -16,7 +16,7 @@ import tempfile
 import time
 import traceback
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType, TracebackType
 from typing import Any
@@ -27,7 +27,7 @@ from testrange.cache.manager import CacheManager
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
 from testrange.drivers import driver_for
-from testrange.drivers.base import HypervisorDriver
+from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import (
     InstallTimeoutError,
     OrchestratorError,
@@ -78,12 +78,19 @@ class TestResult:
         return line
 
 
-@dataclass
+@dataclass(frozen=True)
 class OrchestratorHandle:
-    """Test-code-facing handle. Carries the run id and per-VM bound handles."""
+    """Test-code-facing handle.
+
+    Exposes the run id, the live hypervisor driver, and the per-VM bound
+    handles. Test code can reach the driver via ``orch.driver`` for
+    backend-level operations not surfaced through a VM's communicator
+    (e.g., snapshot, power-state queries).
+    """
 
     run_id: str
-    vms: Mapping[str, VMHandle] = field(default_factory=dict)
+    driver: HypervisorDriver
+    vms: Mapping[str, VMHandle]
 
 
 class Orchestrator:
@@ -229,7 +236,7 @@ class Orchestrator:
         self.driver.destroy_network(install_net_backend)
         self._store.forget(install_net_backend)
 
-    def _ensure_base_in_pool(self, pool_backend: str, source_path: Path) -> Path:
+    def _ensure_base_in_pool(self, pool_backend: str, source_path: Path) -> VolumeRef:
         """Upload a host-side base image into the pool, idempotent per run.
 
         Returns the in-pool path. The volume name is derived from the cache
@@ -237,19 +244,20 @@ class Orchestrator:
         the in-pool upload too.
         """
         vol_name = f"tr_base_{source_path.stem}{self.driver.volume_suffix('base_image')}"
+        target_ref = self.driver.compose_volume_ref(pool_backend, vol_name)
         key = (pool_backend, vol_name)
         if key in self._uploaded_bases:
-            return self.driver.upload_to_pool(pool_backend, vol_name, source_path)
+            return self.driver.upload_to_pool(target_ref, source_path)
         self._store.record_intent(
             kind="base_image",
             backend_name=vol_name,
             plan_name=None,
             pool_backend=pool_backend,
         )
-        in_pool_path = self.driver.upload_to_pool(pool_backend, vol_name, source_path)
+        self.driver.upload_to_pool(target_ref, source_path)
         self._store.confirm(vol_name, pool_backend=pool_backend)
         self._uploaded_bases.add(key)
-        return in_pool_path
+        return target_ref
 
     def _install_one_vm(self, vm: VMRecipe, install_net_backend: str) -> None:
         if not vm.spec.nics:
@@ -282,6 +290,8 @@ class Orchestrator:
         install_vm_backend = self.driver.compose_resource_name(self.run_id, "install_vm", vm.name)
         install_disk_name = f"{install_vm_backend}{self.driver.volume_suffix('install_disk')}"
         install_seed_name = f"{install_vm_backend}-seed{self.driver.volume_suffix('install_seed')}"
+        install_disk_ref = self.driver.compose_volume_ref(pool_backend, install_disk_name)
+        install_seed_ref = self.driver.compose_volume_ref(pool_backend, install_seed_name)
 
         # Create install overlay
         self._store.record_intent(
@@ -290,10 +300,8 @@ class Orchestrator:
             plan_name=vm.name,
             pool_backend=pool_backend,
         )
-        base_in_pool = self._ensure_base_in_pool(pool_backend, base_info.path)
-        install_disk_path = self.driver.create_overlay_disk(
-            pool_backend, install_disk_name, base_in_pool
-        )
+        base_ref = self._ensure_base_in_pool(pool_backend, base_info.path)
+        self.driver.create_disk_from_base(install_disk_ref, base_ref)
         self._store.confirm(install_disk_name, pool_backend=pool_backend)
 
         # Render + write seed
@@ -304,7 +312,7 @@ class Orchestrator:
             plan_name=vm.name,
             pool_backend=pool_backend,
         )
-        seed_path = self.driver.write_to_pool(pool_backend, install_seed_name, seed_bytes)
+        self.driver.write_to_pool(install_seed_ref, seed_bytes)
         self._store.confirm(install_seed_name, pool_backend=pool_backend)
 
         # Define + start install VM with ALL NICs on the install network
@@ -318,8 +326,8 @@ class Orchestrator:
             install_vm_backend,
             vm.spec,
             self._plan_name,
-            os_disk_path=install_disk_path,
-            seed_iso_path=seed_path,
+            os_disk_ref=install_disk_ref,
+            seed_iso_ref=install_seed_ref,
             network_refs=install_network_refs,
         )
         self._store.confirm(install_vm_backend)
@@ -340,7 +348,7 @@ class Orchestrator:
         ) as tmp:
             tmp_path = Path(tmp.name)
         try:
-            self.driver.download_from_pool(pool_backend, install_disk_name, tmp_path)
+            self.driver.download_from_pool(install_disk_ref, tmp_path)
             info = self.cache.local.add(tmp_path, name=post_install_name)
         finally:
             tmp_path.unlink(missing_ok=True)
@@ -355,9 +363,9 @@ class Orchestrator:
         # Tear down install resources (transient; remove from state.json).
         self.driver.destroy_vm(install_vm_backend)
         self._store.forget(install_vm_backend)
-        self.driver.delete_volume(pool_backend, install_seed_name)
+        self.driver.delete_volume(install_seed_ref)
         self._store.forget(install_seed_name)
-        self.driver.delete_volume(pool_backend, install_disk_name)
+        self.driver.delete_volume(install_disk_ref)
         self._store.forget(install_disk_name)
 
     def _wait_for_shutoff(self, backend_name: str, vm_name: str) -> None:
@@ -394,20 +402,17 @@ class Orchestrator:
         for vm in hyp.vms:
             pool_backend = self._pool_backends[vm.spec.os_drive.pool]
             run_disk_name = f"{vm.name}{self.driver.volume_suffix('run_disk')}"
+            run_disk_ref = self.driver.compose_volume_ref(pool_backend, run_disk_name)
             self._store.record_intent(
                 kind="run_disk",
                 backend_name=run_disk_name,
                 plan_name=vm.name,
                 pool_backend=pool_backend,
             )
-            base_in_pool = self._ensure_base_in_pool(
+            base_ref = self._ensure_base_in_pool(
                 pool_backend, self._post_install_paths[vm.name]
             )
-            run_disk_path = self.driver.create_overlay_disk(
-                pool_backend,
-                run_disk_name,
-                base_in_pool,
-            )
+            self.driver.create_disk_from_base(run_disk_ref, base_ref)
             self._store.confirm(run_disk_name, pool_backend=pool_backend)
 
             vm_backend = self.driver.compose_resource_name(self.run_id, "vm", vm.name)
@@ -420,28 +425,31 @@ class Orchestrator:
                 vm_backend,
                 vm.spec,
                 self._plan_name,
-                os_disk_path=run_disk_path,
-                seed_iso_path=None,
+                os_disk_ref=run_disk_ref,
+                seed_iso_ref=None,
                 network_refs=self._network_backends,
             )
             self._store.confirm(vm_backend)
             self.driver.start_vm(vm_backend)
 
     def _build_handle(self) -> OrchestratorHandle:
-        vms_map: dict[str, VMHandle] = {}
-        for vm in self.plan.hypervisor.vms:
-            vms_map[vm.name] = VMHandle(
+        vms_map: dict[str, VMHandle] = {
+            vm.name: VMHandle(
                 name=vm.name,
-                ip="",
+                backend_name=self.driver.compose_resource_name(self.run_id, "vm", vm.name),
                 communicator=vm.communicator,
             )
-        return OrchestratorHandle(run_id=self.run_id, vms=vms_map)
+            for vm in self.plan.hypervisor.vms
+        }
+        return OrchestratorHandle(run_id=self.run_id, driver=self.driver, vms=vms_map)
 
     def _bind_communicators(self) -> None:
-        """Discover each VM's IP and bind its communicator.
+        """Bind each VM's communicator at run-phase bring-up.
 
         Each Communicator declares its own ``bind`` signature; the orchestrator
         dispatches by communicator type and hands each one the inputs it needs.
+        Transport-specific addressing (IPs, sockets, etc.) lives on the bound
+        communicator, not on VMHandle.
         """
         assert self._handle is not None
         for vm in self.plan.hypervisor.vms:
@@ -455,7 +463,6 @@ class Orchestrator:
             ip = self._discover_ip(vm)
             cred = self._lookup_credential(vm)
             vm.communicator.bind(host=ip, credential=cred)
-            self._handle.vms[vm.name].ip = ip
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
 
     def _discover_ip(self, vm: VMRecipe) -> str:

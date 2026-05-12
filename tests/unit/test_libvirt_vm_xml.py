@@ -6,12 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive
-from testrange.drivers.libvirt import (
-    LibvirtDriver,
-    _render_domain_xml,
-    _render_overlay_volume_xml,
-)
+from testrange.devices import CPU, Memory, OSDrive
+from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.drivers.libvirt import LibvirtDriver, _render_domain_xml
 from testrange.exceptions import DriverError
 from testrange.vms import VMSpec
 
@@ -27,14 +24,6 @@ def _spec() -> VMSpec:
             LibvirtNetworkIface("netB", driver="e1000"),
         ],
     )
-
-
-class TestOverlayVolumeXML:
-    def test_renders(self, tmp_path: Path) -> None:
-        xml = _render_overlay_volume_xml("web.qcow2", tmp_path / "base.qcow2")
-        assert "<name>web.qcow2</name>" in xml
-        assert "backingStore" in xml
-        assert "<format type='qcow2'/>" in xml
 
 
 class TestDomainXML:

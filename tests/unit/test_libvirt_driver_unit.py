@@ -323,6 +323,9 @@ class _FakePool:
             raise _libvirt.libvirtError(f"no volume {name}")
         return self.volumes[name]
 
+    def listVolumes(self) -> list[str]:
+        return [v.name for v in self.volumes.values() if not v.deleted]
+
     def createXML(self, xml: str, flags: int) -> _FakeStorageVol:
         self.create_xmls.append(xml)
         name = re.search(r"<name>([^<]+)</name>", xml).group(1)  # type: ignore[union-attr]
@@ -353,11 +356,67 @@ class _FakePool:
         self.started = True
 
 
+class _FakeSnapshot:
+    def __init__(self, name: str, parent: _FakeDomain) -> None:
+        self.name = name
+        self._parent = parent
+        self.deleted = False
+
+    def delete(self, flags: int) -> None:
+        self.deleted = True
+        self._parent._snapshots = [
+            s for s in self._parent._snapshots if s.name != self.name
+        ]
+
+
+class _FakeDomain:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._snapshots: list[_FakeSnapshot] = []
+        self.snapshot_xmls: list[tuple[str, int]] = []  # (xml, flags)
+        self.reverted_to: _FakeSnapshot | None = None
+        self._active = True
+        self.undefined = False
+
+    def snapshotCreateXML(self, xml: str, flags: int) -> _FakeSnapshot:
+        self.snapshot_xmls.append((xml, flags))
+        name_match = re.search(r"<name>([^<]+)</name>", xml)
+        assert name_match is not None
+        snap = _FakeSnapshot(name_match.group(1), self)
+        self._snapshots.append(snap)
+        return snap
+
+    def snapshotListNames(self) -> list[str]:
+        return [s.name for s in self._snapshots]
+
+    def snapshotLookupByName(self, name: str) -> _FakeSnapshot:
+        import libvirt as _libvirt
+
+        for s in self._snapshots:
+            if s.name == name:
+                return s
+        raise _libvirt.libvirtError(f"no domain snapshot {name}")
+
+    def revertToSnapshot(self, snap: _FakeSnapshot, flags: int) -> None:
+        del flags
+        self.reverted_to = snap
+
+    def isActive(self) -> bool:
+        return self._active
+
+    def destroy(self) -> None:
+        self._active = False
+
+    def undefine(self) -> None:
+        self.undefined = True
+
+
 class _FakeConn:
     def __init__(self) -> None:
         self.pool = _FakePool()
         self.streams: list[_FakeStream] = []
         self.defined_pool_xmls: list[str] = []
+        self.domains: dict[str, _FakeDomain] = {}
 
     def storagePoolLookupByName(self, name: str) -> _FakePool:
         return self.pool
@@ -371,6 +430,11 @@ class _FakeConn:
         self.streams.append(s)
         return s
 
+    def lookupByName(self, name: str) -> _FakeDomain:
+        if name not in self.domains:
+            self.domains[name] = _FakeDomain(name)
+        return self.domains[name]
+
 
 class TestUploadToPool:
     def test_streams_source_bytes_to_new_volume(self, tmp_path: Path) -> None:
@@ -381,9 +445,10 @@ class TestUploadToPool:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         d._conn = _FakeConn()  # type: ignore[assignment]
 
-        out = d.upload_to_pool("p1", "tr_base_abc.qcow2", src)
+        target = d.compose_volume_ref("p1", "tr_base_abc.qcow2")
+        out = d.upload_to_pool(target, src)
 
-        assert out == tmp_path / "pools" / "p1" / "tr_base_abc.qcow2"
+        assert out == target
         conn: _FakeConn = d._conn  # type: ignore[assignment]
         assert "tr_base_abc.qcow2" in conn.pool.volumes
         vol = conn.pool.volumes["tr_base_abc.qcow2"]
@@ -406,8 +471,9 @@ class TestUploadToPool:
         conn.pool.volumes["already-here.qcow2"] = _FakeStorageVol("already-here.qcow2")
         d._conn = conn  # type: ignore[assignment]
 
-        out = d.upload_to_pool("p1", "already-here.qcow2", src)
-        assert out == tmp_path / "pools" / "p1" / "already-here.qcow2"
+        target = d.compose_volume_ref("p1", "already-here.qcow2")
+        out = d.upload_to_pool(target, src)
+        assert out == target
         assert conn.streams == []
         assert conn.pool.create_xmls == []
 
@@ -425,9 +491,10 @@ class TestUploadToPool:
             raise RuntimeError("simulated network failure")
 
         _FakeStream.sendAll = patched_send_all  # type: ignore[method-assign]
+        target = d.compose_volume_ref("p1", "broken.qcow2")
         try:
             with pytest.raises(RuntimeError, match="simulated"):
-                d.upload_to_pool("p1", "broken.qcow2", src)
+                d.upload_to_pool(target, src)
         finally:
             _FakeStream.sendAll = original_send_all  # type: ignore[method-assign]
 
@@ -487,9 +554,10 @@ class TestWriteToPool:
         d._conn = conn  # type: ignore[assignment]
 
         data = b"cidata-iso-bytes\x00\x01\x02" * 256
-        out = d.write_to_pool("p1", "seed.iso", data)
+        target = d.compose_volume_ref("p1", "seed.iso")
+        out = d.write_to_pool(target, data)
 
-        assert out == tmp_path / "pools" / "p1" / "seed.iso"
+        assert out == target
         assert "seed.iso" in conn.pool.volumes
         assert len(conn.streams) == 1
         assert bytes(conn.streams[0].sent) == data
@@ -506,7 +574,7 @@ class TestWriteToPool:
         conn.pool.volumes["seed.iso"] = old
         d._conn = conn  # type: ignore[assignment]
 
-        d.write_to_pool("p1", "seed.iso", b"fresh-bytes")
+        d.write_to_pool(d.compose_volume_ref("p1", "seed.iso"), b"fresh-bytes")
 
         # Old vol was deleted; a new one created with the fresh data.
         assert old.deleted is True
@@ -515,7 +583,7 @@ class TestWriteToPool:
 
 
 class TestDownloadFromPool:
-    def test_flattens_then_streams_to_dest(self, tmp_path: Path) -> None:
+    def test_streams_volume_bytes_to_dest(self, tmp_path: Path) -> None:
         payload = b"post-install-disk-bytes\x00\xff" * 1024
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
@@ -523,28 +591,20 @@ class TestDownloadFromPool:
         d._conn = conn  # type: ignore[assignment]
 
         dest = tmp_path / "out.qcow2"
-        out = d.download_from_pool("p1", "disk.qcow2", dest)
+        vol_ref = d.compose_volume_ref("p1", "disk.qcow2")
+        out = d.download_from_pool(vol_ref, dest)
 
         assert out == dest
         assert dest.read_bytes() == payload
-        # Flat clone was created in-pool with no backingStore and then deleted.
-        clone_name = "disk.qcow2.flat.tmp"
-        assert clone_name in conn.pool.volumes
-        clone = conn.pool.volumes[clone_name]
-        assert clone.deleted is True
-        # The XML used for the clone is qcow2 with no <backingStore>.
-        clone_xmls = [x for x in conn.pool.create_xmls if clone_name in x]
-        assert clone_xmls, "expected createXMLFrom call for flat clone"
-        assert "<backingStore>" not in clone_xmls[0]
-        assert "<format type='qcow2'/>" in clone_xmls[0]
-        # Download was driven against the clone, length=0 → stream-until-EOF.
-        assert clone.download_called_with is not None
-        _, offset, length, _ = clone.download_called_with
+        # No intermediate clone is created — the in-pool volume is streamed directly.
+        vol = conn.pool.volumes["disk.qcow2"]
+        assert vol.download_called_with is not None
+        _, offset, length, _ = vol.download_called_with
         assert offset == 0
-        assert length == 0
+        assert length == 0  # libvirt's "stream until EOF" sentinel
         assert conn.streams[0].finished is True
 
-    def test_failure_unlinks_partial_dest_and_deletes_clone(self, tmp_path: Path) -> None:
+    def test_failure_unlinks_partial_dest(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
         conn.pool.volumes["disk.qcow2"] = _FakeStorageVol("disk.qcow2", contents=b"x" * 100)
@@ -557,13 +617,129 @@ class TestDownloadFromPool:
 
         _FakeStream.recvAll = patched  # type: ignore[method-assign]
         dest = tmp_path / "out.qcow2"
+        vol_ref = d.compose_volume_ref("p1", "disk.qcow2")
         try:
             with pytest.raises(RuntimeError, match="simulated"):
-                d.download_from_pool("p1", "disk.qcow2", dest)
+                d.download_from_pool(vol_ref, dest)
         finally:
             _FakeStream.recvAll = original_recv  # type: ignore[method-assign]
 
         assert not dest.exists()
         assert conn.streams[0].aborted is True
-        # Flat clone is cleaned up even on failure.
-        assert conn.pool.volumes["disk.qcow2.flat.tmp"].deleted is True
+
+
+class TestCreateDiskFromBase:
+    def test_full_copy_via_createxmlfrom(self, tmp_path: Path) -> None:
+        # The in-pool source vol with a known capacity; the new disk should
+        # be created via createXMLFrom (full copy, no backingStore) with that
+        # capacity inherited.
+        d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
+        conn = _FakeConn()
+        source = _FakeStorageVol("base.qcow2", contents=b"BASE-BYTES" * 1024)
+        conn.pool.volumes["base.qcow2"] = source
+        d._conn = conn  # type: ignore[assignment]
+
+        source_ref = d.compose_volume_ref("p1", "base.qcow2")
+        target_ref = d.compose_volume_ref("p1", "web.qcow2")
+        out = d.create_disk_from_base(target_ref, source_ref)
+
+        assert out == target_ref
+        # New vol exists and was cloned from the source (fake clone copies contents).
+        assert "web.qcow2" in conn.pool.volumes
+        assert conn.pool.volumes["web.qcow2"].contents == source.contents
+        # XML used has no <backingStore> and capacity matches source.
+        clone_xmls = [x for x in conn.pool.create_xmls if "web.qcow2" in x]
+        assert clone_xmls, "expected createXMLFrom call"
+        assert "<backingStore>" not in clone_xmls[0]
+        assert f"<capacity unit='bytes'>{len(source.contents)}</capacity>" in clone_xmls[0]
+
+
+class TestSnapshots:
+    def _driver_with_vm(self, tmp_path: Path, vm: str = "tr_vm_abc_web") -> LibvirtDriver:
+        d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
+        conn = _FakeConn()
+        conn.domains[vm] = _FakeDomain(vm)
+        d._conn = conn  # type: ignore[assignment]
+        return d
+
+    def test_create_disk_only_passes_disk_only_flag(self, tmp_path: Path) -> None:
+        import libvirt as _libvirt
+
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "pre-test", "before nginx", mem=False)
+        dom = d._conn.domains["tr_vm_abc_web"]  # type: ignore[union-attr]
+        xml, flags = dom.snapshot_xmls[0]
+        assert "<name>pre-test</name>" in xml
+        assert "<description>before nginx</description>" in xml
+        assert flags == _libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY
+
+    def test_create_with_mem_passes_default_flags(self, tmp_path: Path) -> None:
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "pre-test", mem=True)
+        dom = d._conn.domains["tr_vm_abc_web"]  # type: ignore[union-attr]
+        _, flags = dom.snapshot_xmls[0]
+        assert flags == 0  # no DISK_ONLY → memory included when running
+
+    def test_create_without_description_omits_description_element(self, tmp_path: Path) -> None:
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "just-a-name")
+        dom = d._conn.domains["tr_vm_abc_web"]  # type: ignore[union-attr]
+        xml, _ = dom.snapshot_xmls[0]
+        assert "<description>" not in xml
+
+    def test_list_returns_names_oldest_first(self, tmp_path: Path) -> None:
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "first")
+        d.create_snapshot("tr_vm_abc_web", "second")
+        d.create_snapshot("tr_vm_abc_web", "third")
+        assert d.list_snapshots("tr_vm_abc_web") == ["first", "second", "third"]
+
+    def test_delete_removes_named_snapshot(self, tmp_path: Path) -> None:
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "keep")
+        d.create_snapshot("tr_vm_abc_web", "drop")
+        d.delete_snapshot("tr_vm_abc_web", "drop")
+        assert d.list_snapshots("tr_vm_abc_web") == ["keep"]
+
+    def test_delete_missing_is_a_noop(self, tmp_path: Path) -> None:
+        d = self._driver_with_vm(tmp_path)
+        # No snapshots; deleting one that doesn't exist must not raise.
+        d.delete_snapshot("tr_vm_abc_web", "never-existed")
+        assert d.list_snapshots("tr_vm_abc_web") == []
+
+    def test_create_duplicate_name_raises(self, tmp_path: Path) -> None:
+        from testrange.exceptions import DriverError
+
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "snap")
+        with pytest.raises(DriverError, match="already exists"):
+            d.create_snapshot("tr_vm_abc_web", "snap")
+        # The first snapshot is still there; no duplicate added.
+        assert d.list_snapshots("tr_vm_abc_web") == ["snap"]
+
+    def test_restore_reverts_to_named_snapshot(self, tmp_path: Path) -> None:
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "pre-test")
+        d.restore_snapshot("tr_vm_abc_web", "pre-test")
+        # The fake domain records the revert; verify it happened.
+        dom = d._conn.domains["tr_vm_abc_web"]  # type: ignore[union-attr]
+        assert dom.reverted_to is not None
+        assert dom.reverted_to.name == "pre-test"
+
+    def test_restore_missing_raises(self, tmp_path: Path) -> None:
+        from testrange.exceptions import DriverError
+
+        d = self._driver_with_vm(tmp_path)
+        with pytest.raises(DriverError, match="not found"):
+            d.restore_snapshot("tr_vm_abc_web", "never-existed")
+
+    def test_destroy_vm_clears_snapshots_first(self, tmp_path: Path) -> None:
+        # libvirt won't undefine a domain that still has snapshots — the
+        # driver must clean them up before undefine. (Without this, the
+        # smoke run's snapshot_lifecycle test left a snapshot behind that
+        # blocked teardown.)
+        d = self._driver_with_vm(tmp_path)
+        d.create_snapshot("tr_vm_abc_web", "lingering")
+        assert d.list_snapshots("tr_vm_abc_web") == ["lingering"]
+        d.destroy_vm("tr_vm_abc_web")
+        assert d.list_snapshots("tr_vm_abc_web") == []

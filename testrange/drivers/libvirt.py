@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from testrange._log import get_logger
 from testrange.devices.pool.base import StoragePool
-from testrange.drivers.base import HypervisorDriver
+from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError
 from testrange.networks.base import Network, Switch
 from testrange.preflight import PreflightFinding, PreflightReport
@@ -200,6 +200,10 @@ class LibvirtDriver(HypervisorDriver):
         h = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         return f"{_KVM_OUI}:{h[0:2]}:{h[2:4]}:{h[4:6]}"
 
+    def compose_volume_ref(self, pool_backend_name: str, vol_name: str) -> VolumeRef:
+        """A libvirt VolumeRef is the volume's full filesystem path on libvirtd's host."""
+        return VolumeRef(str(self._pool_dir(pool_backend_name) / vol_name))
+
     def preflight(
         self,
         plan: Plan,
@@ -296,15 +300,30 @@ class LibvirtDriver(HypervisorDriver):
                 _log.info("pool %s already absent", backend_name)
                 return
             raise
+        # Sweep any leftover volumes before the dir-rmdir. The LIFO state
+        # walker deletes orchestrator-tracked volumes already, but external
+        # snapshots and similar can drop files into the pool dir that
+        # libvirt's volume index doesn't know about. refresh() re-scans the
+        # dir so listVolumes() picks them up.
+        try:
+            sp.refresh(0)
+        except Exception as e:
+            _log.debug("pool %s refresh (non-fatal): %s", backend_name, e)
+        try:
+            for vol_name in sp.listVolumes():
+                try:
+                    sp.storageVolLookupByName(vol_name).delete(0)
+                except Exception as e:
+                    _log.warning(
+                        "pool %s: leftover vol %s delete failed: %s", backend_name, vol_name, e
+                    )
+        except Exception as e:
+            _log.warning("pool %s: vol enumeration failed: %s", backend_name, e)
         try:
             if sp.isActive():
                 sp.destroy()
         except Exception as e:
             _log.warning("pool %s stop failed: %s", backend_name, e)
-        # delete() removes the on-disk target directory. Pool must be inactive
-        # (destroy() above handles that) and the directory must be empty —
-        # the LIFO state walker deletes contained volumes before reaching the
-        # pool, so by this point it is.
         try:
             sp.delete(0)
         except Exception as e:
@@ -331,16 +350,18 @@ class LibvirtDriver(HypervisorDriver):
     def _pool_dir(self, pool_backend_name: str) -> Path:
         return self.pool_root / pool_backend_name
 
-    def write_to_pool(self, pool_backend_name: str, filename: str, data: bytes) -> Path:
+    def write_to_pool(self, target_ref: VolumeRef, data: bytes) -> VolumeRef:
         """Upload raw bytes as a new volume in the pool via libvirt's stream API.
 
-        Replace-if-exists: any pre-existing volume with the same name is deleted
-        first, matching the old ``os.replace`` semantics so a stale blob from a
-        partial prior run can't bleed through.
+        Replace-if-exists: any pre-existing volume at ``target_ref`` is
+        deleted first, matching the old ``os.replace`` semantics so a stale
+        blob from a partial prior run can't bleed through.
         """
         libvirt = _import_libvirt()
+        ref_path = Path(target_ref)
+        pool_backend_name = ref_path.parent.name
+        filename = ref_path.name
         sp = self.conn.storagePoolLookupByName(pool_backend_name)
-        in_pool_path = self._pool_dir(pool_backend_name) / filename
         try:
             old_vol = sp.storageVolLookupByName(filename)
         except libvirt.libvirtError:
@@ -361,7 +382,7 @@ class LibvirtDriver(HypervisorDriver):
             sp.refresh(0)
         except Exception as e:
             _log.debug("pool refresh after write_to_pool failed (non-fatal): %s", e)
-        return in_pool_path
+        return target_ref
 
     def _stream_upload_to_vol(
         self,
@@ -408,38 +429,48 @@ class LibvirtDriver(HypervisorDriver):
                 pass
             raise
 
-    def create_overlay_disk(
+    def create_disk_from_base(
         self,
-        pool_backend_name: str,
-        vol_name: str,
-        source_path: Path,
-    ) -> Path:
-        """Create a qcow2 overlay volume backed by ``source_path``."""
+        target_ref: VolumeRef,
+        source_ref: VolumeRef,
+    ) -> VolumeRef:
+        """Create a self-contained qcow2 by full-copy of an in-pool source volume.
+
+        Under the dir-pool driver, libvirt's ``createXMLFrom`` invokes
+        ``qemu-img convert``, so the new volume contains all data from the
+        source and has no backing reference.
+        """
+        target_path = Path(target_ref)
+        source_path = Path(source_ref)
+        # The libvirt VolumeRef is a full filesystem path; the parent dir
+        # IS the pool directory, and pool & source live in the same pool.
+        pool_backend_name = target_path.parent.name
+        target_name = target_path.name
+        source_name = source_path.name
         sp = self.conn.storagePoolLookupByName(pool_backend_name)
-        xml = _render_overlay_volume_xml(vol_name, source_path)
-        _log.info("create overlay %s backed by %s", vol_name, source_path)
-        sp.createXML(xml, 0)
-        return self._pool_dir(pool_backend_name) / vol_name
+        source_vol = sp.storageVolLookupByName(source_name)
+        capacity = int(source_vol.info()[1])
+        xml = _render_uploaded_volume_xml(target_name, capacity)
+        _log.info("clone %s → %s in pool %s", source_name, target_name, pool_backend_name)
+        sp.createXMLFrom(xml, source_vol, 0)
+        return target_ref
 
-    def upload_to_pool(
-        self,
-        pool_backend_name: str,
-        vol_name: str,
-        source_path: Path,
-    ) -> Path:
-        """Stream ``source_path`` into the pool as a new qcow2 volume.
+    def upload_to_pool(self, target_ref: VolumeRef, source_path: Path) -> VolumeRef:
+        """Stream ``source_path`` into the pool as a new qcow2 volume at ``target_ref``.
 
-        Idempotent: if the named volume already exists, returns its path
-        without re-uploading.
+        Idempotent: if the volume already exists at the target, returns the
+        ref without re-uploading.
         """
         libvirt = _import_libvirt()
+        target_path = Path(target_ref)
+        pool_backend_name = target_path.parent.name
+        vol_name = target_path.name
         sp = self.conn.storagePoolLookupByName(pool_backend_name)
-        in_pool_path = self._pool_dir(pool_backend_name) / vol_name
 
         try:
             sp.storageVolLookupByName(vol_name)
             _log.info("upload skipped (volume exists): %s", vol_name)
-            return in_pool_path
+            return target_ref
         except libvirt.libvirtError:
             pass
 
@@ -456,88 +487,52 @@ class LibvirtDriver(HypervisorDriver):
             sp.refresh(0)
         except Exception as e:
             _log.debug("pool refresh after upload failed (non-fatal): %s", e)
-        return in_pool_path
+        return target_ref
 
-    def download_from_pool(
-        self,
-        pool_backend_name: str,
-        vol_name: str,
-        dest_path: Path,
-    ) -> Path:
+    def download_from_pool(self, vol_ref: VolumeRef, dest_path: Path) -> Path:
         """Stream a pool volume's bytes back to the orchestrator filesystem.
 
-        The source volume may be a qcow2 overlay with a baked-in
-        ``backing_file`` reference in its header. Returning those bytes
-        directly would yield a file that's only usable while the original
-        backing chain is still resolvable at that path. To avoid that, we
-        first flatten the volume into a no-backing-store qcow2 clone inside
-        the pool (libvirt's ``createXMLFrom`` calls ``qemu-img convert``
-        under the dir-pool driver, which reads through the backing chain),
-        then stream the clone back, then delete the clone.
+        Source volume must be self-contained (no backing chain). The
+        orchestrator always uses ``create_disk_from_base`` for in-pool
+        clones, which produces a flat qcow2, so this invariant holds.
         """
-        libvirt = _import_libvirt()
+        # libvirt VolumeRef = full filesystem path; parent is the pool dir,
+        # filename is the in-pool volume name.
+        ref_path = Path(vol_ref)
+        pool_backend_name = ref_path.parent.name
+        vol_name = ref_path.name
         sp = self.conn.storagePoolLookupByName(pool_backend_name)
-        source_vol = sp.storageVolLookupByName(vol_name)
-        # vol.info() -> [type, capacity, allocation]
-        capacity = int(source_vol.info()[1])
-
-        clone_name = f"{vol_name}.flat.tmp"
-        # Drop any stale clone left behind by a prior failed download.
+        vol = sp.storageVolLookupByName(vol_name)
+        _log.info("download %s ← pool %s → %s", vol_name, pool_backend_name, dest_path)
+        stream = self.conn.newStream(0)
         try:
-            stale = sp.storageVolLookupByName(clone_name)
+            # length=0 → libvirt streams until end of volume.
+            vol.download(stream, 0, 0, 0)
+
+            def _recv(_stream: Any, data: bytes, f: Any) -> int:
+                f.write(data)
+                return len(data)
+
+            with dest_path.open("wb") as f:
+                stream.recvAll(_recv, f)
+            stream.finish()
+        except Exception:
             try:
-                stale.delete(0)
-            except Exception as e:
-                _log.warning("download: failed to delete stale clone %s: %s", clone_name, e)
-        except libvirt.libvirtError:
-            pass
-
-        clone_xml = _render_uploaded_volume_xml(clone_name, capacity)
-        _log.info(
-            "flatten %s → %s in pool %s (qcow2, no backing chain)",
-            vol_name,
-            clone_name,
-            pool_backend_name,
-        )
-        clone_vol = sp.createXMLFrom(clone_xml, source_vol, 0)
-        try:
-            _log.info(
-                "download %s ← pool %s → %s",
-                vol_name,
-                pool_backend_name,
-                dest_path,
-            )
-            stream = self.conn.newStream(0)
-            try:
-                # length=0 → libvirt streams until end of volume.
-                clone_vol.download(stream, 0, 0, 0)
-
-                def _recv(_stream: Any, data: bytes, f: Any) -> int:
-                    f.write(data)
-                    return len(data)
-
-                with dest_path.open("wb") as f:
-                    stream.recvAll(_recv, f)
-                stream.finish()
+                stream.abort()
             except Exception:
-                try:
-                    stream.abort()
-                except Exception:
-                    pass
-                try:
-                    dest_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                raise
-        finally:
+                pass
             try:
-                clone_vol.delete(0)
-            except Exception as e:
-                _log.warning("download: failed to delete flat clone %s: %s", clone_name, e)
+                dest_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
         return dest_path
 
-    def delete_volume(self, pool_backend_name: str, vol_name: str) -> None:
+    def delete_volume(self, vol_ref: VolumeRef) -> None:
         libvirt = _import_libvirt()
+        ref_path = Path(vol_ref)
+        pool_backend_name = ref_path.parent.name
+        vol_name = ref_path.name
         try:
             sp = self.conn.storagePoolLookupByName(pool_backend_name)
             vol = sp.storageVolLookupByName(vol_name)
@@ -553,10 +548,15 @@ class LibvirtDriver(HypervisorDriver):
         spec: VMSpec,
         plan_name: str,
         *,
-        os_disk_path: Path,
-        seed_iso_path: Path | None,
+        os_disk_ref: VolumeRef,
+        seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
     ) -> Any:
+        # For libvirt, a VolumeRef is a filesystem path on libvirtd's host;
+        # convert to Path for the domain-XML renderer which embeds it as
+        # <source file='...'/>.
+        os_disk_path = Path(os_disk_ref)
+        seed_iso_path = Path(seed_iso_ref) if seed_iso_ref is not None else None
         macs = [self.compose_mac(plan_name, spec.name, i) for i in range(len(spec.nics))]
         xml = _render_domain_xml(
             backend_name,
@@ -642,6 +642,24 @@ class LibvirtDriver(HypervisorDriver):
                 _log.info("vm %s already absent", backend_name)
                 return
             raise
+        # libvirt refuses to undefine a domain that still has snapshots.
+        # Use METADATA_ONLY: we're tearing down the whole pool, so we
+        # don't need the disk-chain to be merged back. (Default-flag
+        # delete tries a live block-commit, which on a forced-off or
+        # mid-revert VM fails with "Permission denied".) The pool sweep
+        # in destroy_pool below handles any stray snapshot disk files.
+        try:
+            for snap_name in dom.snapshotListNames():
+                try:
+                    dom.snapshotLookupByName(snap_name).delete(
+                        libvirt.VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY
+                    )
+                except Exception as e:
+                    _log.warning(
+                        "vm %s: snapshot %s delete failed: %s", backend_name, snap_name, e
+                    )
+        except Exception as e:
+            _log.warning("vm %s: snapshot enumeration failed: %s", backend_name, e)
         try:
             if dom.isActive():
                 dom.destroy()
@@ -651,6 +669,69 @@ class LibvirtDriver(HypervisorDriver):
             dom.undefine()
         except Exception as e:
             _log.warning("vm %s undefine failed: %s", backend_name, e)
+
+    def create_snapshot(
+        self,
+        vm_backend_name: str,
+        name: str,
+        description: str = "",
+        *,
+        mem: bool = False,
+    ) -> None:
+        libvirt = _import_libvirt()
+        dom = self.conn.lookupByName(vm_backend_name)
+        # Reject duplicates up-front for a clear error; otherwise libvirt
+        # would emit a less-readable internal-error message.
+        try:
+            dom.snapshotLookupByName(name)
+        except libvirt.libvirtError as e:
+            msg = str(e).lower()
+            if "not found" not in msg and "no domain snapshot" not in msg:
+                raise
+        else:
+            raise DriverError(
+                f"snapshot {name!r} already exists on vm {vm_backend_name!r}"
+            )
+        # mem=False → DISK_ONLY flag (no RAM capture, VM can be running or
+        # shut off); mem=True → default (memory included when running, must
+        # be running to mean anything).
+        flags = 0 if mem else libvirt.VIR_DOMAIN_SNAPSHOT_CREATE_DISK_ONLY
+        xml = _render_snapshot_xml(name, description)
+        _log.info("snapshot %s on vm %s (mem=%s)", name, vm_backend_name, mem)
+        dom.snapshotCreateXML(xml, flags)
+
+    def list_snapshots(self, vm_backend_name: str) -> list[str]:
+        dom = self.conn.lookupByName(vm_backend_name)
+        names: list[str] = list(dom.snapshotListNames())
+        return names
+
+    def delete_snapshot(self, vm_backend_name: str, name: str) -> None:
+        libvirt = _import_libvirt()
+        dom = self.conn.lookupByName(vm_backend_name)
+        try:
+            snap = dom.snapshotLookupByName(name)
+        except libvirt.libvirtError as e:
+            if "not found" in str(e).lower() or "no domain snapshot" in str(e).lower():
+                _log.info("snapshot %s on %s already absent", name, vm_backend_name)
+                return
+            raise
+        _log.info("delete snapshot %s on vm %s", name, vm_backend_name)
+        snap.delete(0)
+
+    def restore_snapshot(self, vm_backend_name: str, name: str) -> None:
+        libvirt = _import_libvirt()
+        dom = self.conn.lookupByName(vm_backend_name)
+        try:
+            snap = dom.snapshotLookupByName(name)
+        except libvirt.libvirtError as e:
+            msg = str(e).lower()
+            if "not found" in msg or "no domain snapshot" in msg:
+                raise DriverError(
+                    f"snapshot {name!r} not found on vm {vm_backend_name!r}"
+                ) from e
+            raise
+        _log.info("revert vm %s to snapshot %s", vm_backend_name, name)
+        dom.revertToSnapshot(snap, 0)
 
 
 def _collect_subnet_findings(hyp: LibvirtHypervisor) -> list[PreflightFinding]:
@@ -755,21 +836,6 @@ def _render_pool_xml(backend_name: str, path: Path) -> str:
     )
 
 
-def _render_overlay_volume_xml(vol_name: str, source_path: Path) -> str:
-    """Render a libvirt volume XML for a qcow2 overlay over ``source_path``."""
-    return (
-        f"<volume>"
-        f"<name>{vol_name}</name>"
-        f"<capacity unit='G'>0</capacity>"
-        f"<target><format type='qcow2'/></target>"
-        f"<backingStore>"
-        f"<path>{source_path}</path>"
-        f"<format type='qcow2'/>"
-        f"</backingStore>"
-        f"</volume>"
-    )
-
-
 def _render_uploaded_volume_xml(vol_name: str, capacity_bytes: int, fmt: str = "qcow2") -> str:
     """Render a libvirt volume XML for an uploaded file (no backing).
 
@@ -783,6 +849,12 @@ def _render_uploaded_volume_xml(vol_name: str, capacity_bytes: int, fmt: str = "
         f"<target><format type='{fmt}'/></target>"
         f"</volume>"
     )
+
+
+def _render_snapshot_xml(name: str, description: str) -> str:
+    """Render a libvirt domain-snapshot XML doc."""
+    desc_block = f"<description>{description}</description>" if description else ""
+    return f"<domainsnapshot><name>{name}</name>{desc_block}</domainsnapshot>"
 
 
 def _render_domain_xml(
