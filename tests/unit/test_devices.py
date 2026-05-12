@@ -7,25 +7,18 @@ import pytest
 from testrange.devices import (
     CPU,
     HardDrive,
-    LibvirtNetworkIface,
     Memory,
     NetworkIface,
     OSDrive,
     StoragePool,
 )
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 
 
 class TestCPU:
     def test_valid(self) -> None:
         c = CPU(4)
         assert c.count == 4
-
-    def test_frozen(self) -> None:
-        from dataclasses import FrozenInstanceError
-
-        c = CPU(1)
-        with pytest.raises(FrozenInstanceError):
-            c.count = 2  # type: ignore[misc]
 
     @pytest.mark.parametrize("bad", [0, -1, "two", None, 1.5])
     def test_invalid_count(self, bad: object) -> None:

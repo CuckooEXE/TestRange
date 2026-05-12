@@ -102,19 +102,14 @@ class SSHCommunicator(Communicator):
                 f"SSHCommunicator({self._username!r}) already bound; "
                 "construct a fresh instance per VM"
             )
-        if not isinstance(host, str) or not host:
-            raise ValueError("SSHCommunicator.bind(host=...) must be a non-empty string")
-        if not isinstance(credential, PosixCred):
-            raise TypeError(
-                f"SSHCommunicator.bind(credential=...) must be a PosixCred, "
-                f"got {type(credential).__name__}"
-            )
+        if not host:
+            raise ValueError("SSHCommunicator.bind(host=...) must be non-empty")
         if credential.username != self._username:
             raise ValueError(
                 f"credential.username={credential.username!r} does not match "
                 f"SSHCommunicator username={self._username!r}"
             )
-        if not isinstance(port, int) or not (1 <= port <= 65535):
+        if not (1 <= port <= 65535):
             raise ValueError(f"SSHCommunicator port must be 1..65535, got {port}")
         self._host = host
         self._port = port
@@ -139,7 +134,7 @@ class SSHCommunicator(Communicator):
             "look_for_keys": False,
             "allow_agent": False,
         }
-        # Auth precedence per PLAN.md decision 7: pkey if present, else password.
+        # Auth precedence: pkey if present, else password.
         if self._credential.privkey:
             kwargs["pkey"] = _load_private_key(self._credential.privkey, paramiko)
         elif self._credential.password:
@@ -180,9 +175,7 @@ class SSHCommunicator(Communicator):
             raise ValueError("execute(argv) requires a non-empty list")
         for a in argv:
             if not isinstance(a, str):
-                raise TypeError(
-                    f"execute(argv) entries must be str, got {type(a).__name__}"
-                )
+                raise TypeError(f"execute(argv) entries must be str, got {type(a).__name__}")
         client = self._ensure_connected()
         cmd = shlex.join(argv)
         if cwd:

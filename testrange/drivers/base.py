@@ -1,4 +1,4 @@
-"""HypervisorDriver ABC — v0 driver surface."""
+"""HypervisorDriver — abstract base for hypervisor backends."""
 
 from __future__ import annotations
 
@@ -46,15 +46,11 @@ class HypervisorDriver(ABC):
     @abstractmethod
     def compose_mac(self, plan_name: str, vm_name: str, nic_idx: int) -> str: ...
 
-    # ---- network CRUD --------------------------------------------------
-
     @abstractmethod
     def create_network(self, network: Network, switch: Switch, backend_name: str) -> Any: ...
 
     @abstractmethod
     def destroy_network(self, backend_name: str) -> None: ...
-
-    # ---- pool CRUD -----------------------------------------------------
 
     @abstractmethod
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any: ...
@@ -62,7 +58,15 @@ class HypervisorDriver(ABC):
     @abstractmethod
     def destroy_pool(self, backend_name: str) -> None: ...
 
-    # ---- volume operations --------------------------------------------
+    @abstractmethod
+    def volume_suffix(self, kind: str) -> str:
+        """File-extension suffix for a volume of ``kind`` on this backend.
+
+        ``kind`` is one of the orchestrator's logical volume kinds
+        (``install_disk``, ``run_disk``, ``base_image``, ``install_seed``).
+        Drivers return the right extension for their on-disk format
+        (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for cloud-init seeds).
+        """
 
     @abstractmethod
     def write_to_pool(self, pool_backend_name: str, filename: str, data: bytes) -> Path:
@@ -75,7 +79,11 @@ class HypervisorDriver(ABC):
         vol_name: str,
         source_path: Path,
     ) -> Path:
-        """Create a qcow2 overlay backed by ``source_path``. Returns the new disk path."""
+        """Create a copy-on-write disk whose reads fall through to ``source_path``.
+
+        The driver picks the on-disk format and clone mechanism appropriate
+        for its backend. Returns the new disk's path.
+        """
 
     @abstractmethod
     def upload_to_pool(
@@ -102,17 +110,16 @@ class HypervisorDriver(ABC):
         """Download a pool volume's bytes to ``dest_path`` on the orchestrator host.
 
         Symmetric inverse of ``upload_to_pool``. Used after the install phase
-        to ingest the post-install OS disk back into the user-space cache —
-        the on-disk file is owned by the hypervisor's service account
-        (``libvirt-qemu`` in system mode) and not directly readable by the
-        orchestrator. ``dest_path``'s parent must already exist; the file is
-        overwritten if present.
+        to ingest the post-install OS disk back into the host-side cache —
+        the on-disk file may not be readable by the orchestrator process
+        (different uid, remote hypervisor, ...), and the driver handles any
+        format-level work (e.g., flattening a backing chain) so the returned
+        file is self-contained. ``dest_path``'s parent must already exist;
+        the file is overwritten if present.
         """
 
     @abstractmethod
     def delete_volume(self, pool_backend_name: str, vol_name: str) -> None: ...
-
-    # ---- VM CRUD -------------------------------------------------------
 
     @abstractmethod
     def create_vm(
@@ -141,8 +148,6 @@ class HypervisorDriver(ABC):
     @abstractmethod
     def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
         """Look up an IP leased to ``mac`` on ``network_backend_name``. ``None`` if not yet leased."""
-
-    # ---- generic dispatch ---------------------------------------------
 
     def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
         """Destroy a resource by kind (default dispatch).

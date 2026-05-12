@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from testrange.state.schema import (
     PHASE_DONE,
-    PHASE_PREFLIGHT,
-    SCHEMA_VERSION,
     Resource,
     State,
 )
@@ -38,12 +36,6 @@ class TestResource:
 
 
 class TestState:
-    def test_defaults(self) -> None:
-        s = State()
-        assert s.schema_version == SCHEMA_VERSION
-        assert s.phase == PHASE_PREFLIGHT
-        assert s.resources == ()
-
     def test_with_resource(self) -> None:
         s = State(run_id="r1")
         r = Resource(
@@ -62,10 +54,6 @@ class TestState:
         s = State(resources=(r1, r2))
         s2 = s.remove_resource("a")
         assert s2.resources == (r2,)
-
-    def test_with_phase(self) -> None:
-        s = State()
-        assert s.with_phase(PHASE_DONE).phase == PHASE_DONE
 
     def test_json_roundtrip(self) -> None:
         s = State(

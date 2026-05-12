@@ -1,7 +1,8 @@
 """The top-level ``Plan`` declaration.
 
-v0 enforces exactly one hypervisor (variadic call shape is in place for
-the multi-hypervisor long-term TODO).
+A Plan currently wraps exactly one Hypervisor. The variadic constructor
+shape ``Plan(*hypervisors)`` is fixed so future multi-hypervisor support
+doesn't change the public call shape.
 """
 
 from __future__ import annotations
@@ -12,12 +13,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Plan:
-    """The top-level declaration: one or more Hypervisor entries.
-
-    v0 enforces exactly one hypervisor at runtime; the variadic call
-    shape ``Plan(*hypervisors)`` is fixed so multi-hypervisor doesn't
-    break the API.
-    """
+    """The top-level declaration: one or more Hypervisor entries."""
 
     hypervisors: tuple[Any, ...] = field(default_factory=tuple)
     name: str = ""
@@ -27,13 +23,12 @@ class Plan:
             raise ValueError("Plan() requires at least one hypervisor")
         if len(hypervisors) > 1:
             raise NotImplementedError(
-                f"Plan() v0 supports exactly one hypervisor; got {len(hypervisors)}. "
-                "Multi-hypervisor is a long-term TODO (TODO.md)."
+                f"Plan() currently supports exactly one hypervisor; got {len(hypervisors)}."
             )
         object.__setattr__(self, "hypervisors", tuple(hypervisors))
         object.__setattr__(self, "name", name)
 
     @property
     def hypervisor(self) -> Any:
-        """The single hypervisor (v0 invariant)."""
+        """The single hypervisor."""
         return self.hypervisors[0]

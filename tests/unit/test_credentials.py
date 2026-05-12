@@ -1,10 +1,10 @@
-"""Tests for credentials + gen_ssh_key."""
+"""Tests for credentials + SSHKey.generate."""
 
 from __future__ import annotations
 
 import pytest
 
-from testrange.credentials import PosixCred, gen_ssh_key
+from testrange.credentials import PosixCred, SSHKey
 
 
 class TestPosixCred:
@@ -36,9 +36,9 @@ class TestPosixCred:
             PosixCred("", password="x")
 
 
-class TestGenSSHKey:
-    def test_returns_pair(self) -> None:
-        kp = gen_ssh_key(comment="t")
+class TestSSHKeyGenerate:
+    def test_returns_three_views(self) -> None:
+        kp = SSHKey.generate(comment="t")
         # pub is PEM SubjectPublicKeyInfo, priv is OpenSSH PEM, auth_line is wire format.
         assert "-----BEGIN PUBLIC KEY-----" in kp.pub
         assert "-----END PUBLIC KEY-----" in kp.pub
@@ -46,9 +46,9 @@ class TestGenSSHKey:
         assert "ssh-ed25519" in kp.auth_line
 
     def test_comment_in_auth_line(self) -> None:
-        kp = gen_ssh_key(comment="my-test-key")
+        kp = SSHKey.generate(comment="my-test-key")
         assert "my-test-key" in kp.auth_line
-        # comment is OpenSSH-line metadata; it does not appear in the PEM block.
+        # Comment is OpenSSH-line metadata; it does not appear in the PEM block.
         assert "my-test-key" not in kp.pub
 
     def test_deterministic_for_same_comment(self) -> None:
@@ -56,12 +56,12 @@ class TestGenSSHKey:
         # views (used in the cloud-init seed) are byte-equal across calls.
         # The OpenSSH private-key PEM includes a random "checkint" field,
         # so its raw text may differ even when the underlying key is the same.
-        a, b = gen_ssh_key(comment="same"), gen_ssh_key(comment="same")
+        a, b = SSHKey.generate(comment="same"), SSHKey.generate(comment="same")
         assert a.pub == b.pub
         assert a.auth_line == b.auth_line
 
     def test_different_comment_yields_different_key(self) -> None:
-        a, b = gen_ssh_key(comment="one"), gen_ssh_key(comment="two")
+        a, b = SSHKey.generate(comment="one"), SSHKey.generate(comment="two")
         assert a.priv != b.priv
         assert a.pub != b.pub
         assert a.auth_line != b.auth_line

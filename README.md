@@ -12,7 +12,7 @@ pentest test-ranges.
 ```sh
 # Prereqs: libvirt + KVM + group membership (see docs/user/install.md)
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev,libvirt,ssh,cloudinit]'
+pip install -e '.[all,dev]'
 
 # Populate the cache with a base disk
 testrange cache add \
@@ -31,7 +31,7 @@ testrange run examples/hello_world.py
 ```python
 PLAN = Plan(
     LibvirtHypervisor(
-        connection="qemu:///session",
+        connection="qemu:///system",
         networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
         pools=[StoragePool("pool1", 32)],
         vms=[
@@ -71,5 +71,5 @@ testrange cleanup --all [--dry-run]
 
 ## Status
 
-Pre-1.0. See `PLAN.md` for the full design and `TODO.md` for in-scope
-and long-term work.
+Pre-1.0. See `docs/Architecture-and-Design.md` for the component overview
+and `TODO.md` for in-scope and long-term work.

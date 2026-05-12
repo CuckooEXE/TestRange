@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from testrange.devices import CPU, HardDrive, LibvirtNetworkIface, Memory, OSDrive
+from testrange.devices import CPU, HardDrive, Memory, OSDrive
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.vms import VMSpec
 
 

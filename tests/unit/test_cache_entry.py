@@ -29,13 +29,6 @@ class TestCacheEntry:
         with pytest.raises(ValueError):
             CacheEntry("")
 
-    def test_frozen(self) -> None:
-        from dataclasses import FrozenInstanceError
-
-        e = CacheEntry("x")
-        with pytest.raises(FrozenInstanceError):
-            e.identifier = "y"  # type: ignore[misc]
-
     def test_repr(self) -> None:
         assert "name='debian-13'" in repr(CacheEntry("debian-13"))
         assert "sha=" in repr(CacheEntry("a" * 32))

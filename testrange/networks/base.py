@@ -1,7 +1,7 @@
 """Network and Switch — Plan-level network declarations on a Hypervisor.
 
-A Switch is an L2 broadcast domain (PLAN.md decision 10): Networks on the
-same Switch share L2. Different Switches do not communicate.
+A Switch is an L2 broadcast domain: Networks on the same Switch share L2,
+different Switches do not communicate.
 """
 
 from __future__ import annotations

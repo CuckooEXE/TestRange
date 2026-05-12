@@ -22,9 +22,7 @@ class _RunIdAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
     ) -> tuple[Any, MutableMapping[str, Any]]:
         extra_raw = kwargs.get("extra")
         extra: dict[str, Any] = dict(extra_raw) if extra_raw else {}
-        default_rid = (
-            self.extra.get("run_id", "-") if self.extra else "-"
-        )
+        default_rid = self.extra.get("run_id", "-") if self.extra else "-"
         extra.setdefault("run_id", default_rid)
         kwargs["extra"] = extra
         return msg, kwargs

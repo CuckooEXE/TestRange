@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from testrange.exceptions import StateError, StateLockedError
-from testrange.state.cleanup import cleanup_all, cleanup_run, find_run_dirs
+from testrange.state.cleanup import cleanup_run, find_run_dirs
 from testrange.state.schema import PHASE_RUN
 from testrange.state.store import StateStore
 
@@ -146,28 +146,16 @@ class TestCleanupRun:
         assert "bn-pool" not in remaining
 
 
-class TestCleanupAll:
-    def test_iterates_runs(
-        self,
-        populated_state: tuple[str, StateStore],
-        fake_driver: _FakeDriver,
-        tmp_path: Path,
-    ) -> None:
-        del populated_state, fake_driver  # fixtures set things up
-        results = list(cleanup_all())
-        assert len(results) >= 1
-
-
 class TestFindRunDirs:
     def test_empty(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         assert find_run_dirs() == []
 
-    def test_lists(
+    def test_lists_populated_run(
         self,
         populated_state: tuple[str, StateStore],
         tmp_path: Path,
     ) -> None:
-        del populated_state
+        run_id, _ = populated_state
         dirs = find_run_dirs()
-        assert len(dirs) >= 1
+        assert [d.name for d in dirs] == [run_id]

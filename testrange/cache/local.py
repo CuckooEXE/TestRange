@@ -24,7 +24,6 @@ from typing import Any
 from testrange._log import get_logger
 from testrange.exceptions import CacheError, CacheMissError
 
-_CHUNK = 1024 * 1024  # 1 MiB
 _log = get_logger(__name__)
 
 
@@ -47,10 +46,7 @@ class CacheEntryInfo:
 
 def default_root() -> Path:
     """Resolve the default cache root from ``$XDG_CACHE_HOME`` / ``~/.cache``."""
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    if xdg:
-        return Path(xdg) / "testrange"
-    return Path.home() / ".cache" / "testrange"
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "testrange"
 
 
 class LocalCache:
@@ -64,8 +60,6 @@ class LocalCache:
         self.root = (root or default_root()).resolve()
         self.isos = self.root / "isos"
         self.isos.mkdir(parents=True, exist_ok=True)
-
-    # ---- ingestion -----------------------------------------------------
 
     def add(
         self,
@@ -97,7 +91,7 @@ class LocalCache:
         if bin_path.exists() and sidecar.exists():
             info = self._read_sidecar(sidecar)
             if origin != info.origin and tmp != bin_path:
-                _log.info("entry already in cache: %s (origin matches existing)", sha[:16])
+                _log.info("entry already in cache: %s (origin differs from existing)", sha[:16])
             if name and name not in info.names:
                 info = self._append_alias(sidecar, info, name, description=description)
             if src.startswith(("http://", "https://")) and tmp.parent != self.isos:
@@ -130,10 +124,8 @@ class LocalCache:
         _log.info("fetching %s", url)
         # urlopen verifies TLS via the system CA store by default in Python 3.6+.
         with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:
-            shutil.copyfileobj(resp, out, length=_CHUNK)
+            shutil.copyfileobj(resp, out)
         return tmp, url
-
-    # ---- resolution ----------------------------------------------------
 
     def resolve(self, identifier: str) -> CacheEntryInfo:
         """Resolve a sha or pretty-name to a :class:`CacheEntryInfo`.
@@ -167,8 +159,6 @@ class LocalCache:
 
     def list_entries(self) -> list[CacheEntryInfo]:
         return list(self.iter_entries())
-
-    # ---- mutation ------------------------------------------------------
 
     def delete(self, identifier: str) -> CacheEntryInfo:
         """Remove the entry's .bin and .json. Returns the removed info."""
@@ -216,8 +206,6 @@ class LocalCache:
         sidecar = self.isos / f"{info.sha256}.json"
         self._write_sidecar(sidecar, new_info)
         return new_info
-
-    # ---- helpers -------------------------------------------------------
 
     def _find_by_name(self, name: str) -> CacheEntryInfo | None:
         for info in self.iter_entries():
@@ -273,23 +261,17 @@ class LocalCache:
         return new_info
 
 
-# ---- module-level utilities --------------------------------------------
-
-
 def _sha256_of(path: Path) -> str:
     """Stream-hash a file with SHA-256. Returns lowercase hex digest."""
-    h = hashlib.sha256()
     with path.open("rb") as f:
-        while chunk := f.read(_CHUNK):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
 
 
 def _atomic_copy(src: Path, dst: Path) -> None:
     """Copy ``src`` to ``dst`` via ``<dst>.partial`` + ``os.replace``."""
     tmp = dst.with_suffix(dst.suffix + ".partial")
     with src.open("rb") as r, tmp.open("wb") as w:
-        shutil.copyfileobj(r, w, length=_CHUNK)
+        shutil.copyfileobj(r, w)
     os.replace(tmp, dst)
 
 

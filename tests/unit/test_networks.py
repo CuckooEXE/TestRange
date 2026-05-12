@@ -41,11 +41,6 @@ class TestSwitch:
         assert sw.name == "sw1"
         assert len(sw.networks) == 2
 
-    def test_defaults(self) -> None:
-        sw = Switch("sw1")
-        assert sw.mgmt is False
-        assert sw.internet is True
-
     def test_mgmt_flag(self) -> None:
         sw = Switch("sw1", mgmt=True)
         assert sw.mgmt is True

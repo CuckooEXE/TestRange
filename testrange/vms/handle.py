@@ -1,7 +1,4 @@
-"""VMHandle — runtime view of a brought-up VM, exposed to test code.
-
-Phase 0 declares the shape. Phase 5 wires it through the orchestrator.
-"""
+"""VMHandle — runtime view of a brought-up VM, exposed to test code."""
 
 from __future__ import annotations
 
@@ -12,10 +9,15 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.communicators.base import Communicator
 
 
-@dataclass
+@dataclass(frozen=True)
 class VMHandle:
-    """Test-code-facing view of a running VM."""
+    """Test-code-facing view of a running VM.
+
+    Transport-specific addressing (IPs, sockets, serial paths, guest-agent
+    channels) lives on the bound ``communicator`` — different communicator
+    types have different addressing needs. Read e.g. ``vm.communicator.host``
+    when the communicator is an ``SSHCommunicator``.
+    """
 
     name: str
-    ip: str
     communicator: Communicator

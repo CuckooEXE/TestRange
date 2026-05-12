@@ -10,7 +10,6 @@ from testrange.state.schema import (
     PHASE_LEAKED,
     PHASE_PREFLIGHT,
     PHASE_RUN,
-    PHASE_TEST,
     Resource,
     State,
 )
@@ -23,7 +22,6 @@ __all__ = [
     "PHASE_LEAKED",
     "PHASE_PREFLIGHT",
     "PHASE_RUN",
-    "PHASE_TEST",
     "Resource",
     "State",
     "StateStore",

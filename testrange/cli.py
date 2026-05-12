@@ -31,10 +31,8 @@ from testrange.vms.recipe import VMRecipe
 
 
 def _build_manager(args: argparse.Namespace) -> CacheManager:
-    mgr = CacheManager()
-    if getattr(args, "cache", None):
-        mgr.attach_http(args.cache)
-    return mgr
+    del args
+    return CacheManager()
 
 
 def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
@@ -104,9 +102,6 @@ def _cleanup(args: argparse.Namespace) -> int:
         return 2
 
 
-# ---- describe ----------------------------------------------------------
-
-
 def _describe(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     mgr = _build_manager(args)
@@ -161,10 +156,7 @@ def _describe(args: argparse.Namespace) -> int:
                 cache_refs.append(base)
                 try:
                     info = mgr.resolve(base)
-                    print(
-                        f"    base:   {base!r}  -> {info.short_sha} "
-                        f"({_format_size(info.size)})"
-                    )
+                    print(f"    base:   {base!r}  -> {info.short_sha} ({_format_size(info.size)})")
                 except CacheMissError:
                     print(f"    base:   {base!r}  ⚠ not in cache")
             if creds := getattr(builder, "credentials", ()):
@@ -184,9 +176,6 @@ def _describe(args: argparse.Namespace) -> int:
         unique = {e.identifier for e in cache_refs}
         print(f"CacheEntry references: {len(unique)} unique")
     return 0
-
-
-# ---- cache subcommand --------------------------------------------------
 
 
 def _cache(args: argparse.Namespace) -> int:
@@ -239,10 +228,7 @@ def _print_list(entries: Iterable[CacheEntryInfo]) -> None:
     print(f"{'SHA':<{width_sha}}  {'SIZE':>{width_size}}  NAMES / ORIGIN")
     for info in rows:
         names = ", ".join(info.names) if info.names else "-"
-        print(
-            f"{info.short_sha:<{width_sha}}  "
-            f"{_format_size(info.size):>{width_size}}  {names}"
-        )
+        print(f"{info.short_sha:<{width_sha}}  {_format_size(info.size):>{width_size}}  {names}")
         if info.origin:
             print(f"{'':<{width_sha}}  {'':>{width_size}}  origin: {info.origin}")
 
@@ -255,17 +241,6 @@ def _format_size(n: int) -> str:
     return f"{n} TiB"
 
 
-def _not_implemented(phase: int) -> Any:
-    def _handler(args: argparse.Namespace) -> int:
-        print(
-            f"testrange {args.subcommand}: not implemented yet — lands in Phase {phase}.",
-            file=sys.stderr,
-        )
-        return 2
-
-    return _handler
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="testrange")
     parser.add_argument("--version", action="version", version=f"testrange {__version__}")
@@ -275,12 +250,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=("DEBUG", "INFO", "WARN", "WARNING", "ERROR"),
         help="set log level (default INFO)",
-    )
-    parser.add_argument(
-        "--cache",
-        metavar="URL",
-        default=None,
-        help="HTTP cache URL (Phase 1: stored on the manager; HTTP I/O lands later)",
     )
 
     sub = parser.add_subparsers(dest="subcommand", required=True)

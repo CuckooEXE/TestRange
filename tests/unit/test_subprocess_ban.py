@@ -21,6 +21,5 @@ def test_no_subprocess_imports() -> None:
         if _SUBPROCESS_PAT.search(text):
             offenders.append(str(f.relative_to(pkg.parent)))
     assert not offenders, (
-        "subprocess imports are forbidden in v0 (PLAN.md decision 15). "
-        f"Offenders: {offenders}"
+        f"subprocess imports are forbidden in v0 (PLAN.md decision 15). Offenders: {offenders}"
     )

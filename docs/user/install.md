@@ -24,8 +24,12 @@ sudo usermod -a -G libvirt,kvm "$USER"
 Verify libvirt is reachable:
 
 ```sh
-virsh -c qemu:///session list --all
+virsh -c qemu:///system list --all
 ```
+
+`testrange` works with both `qemu:///session` (unprivileged, user-owned) and
+`qemu:///system` (privileged, libvirt-qemu-owned). The default example uses
+`qemu:///system`; either works once the user is in the `libvirt` group.
 
 ## Install testrange
 
@@ -33,7 +37,7 @@ virsh -c qemu:///session list --all
 git clone <repo-url> testrange && cd testrange
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev,libvirt,ssh,cloudinit]'
+pip install -e '.[all,dev]'
 ```
 
 ## Verify
@@ -53,5 +57,8 @@ expected until you ``testrange cache add`` them.
   `~/.cache/testrange/isos/`).
 - `$XDG_STATE_HOME/testrange/runs/<run_id>/` — per-run state (default:
   `~/.local/state/testrange/runs/`).
-- `~/.local/share/testrange/pools/` — libvirt storage pool root (one
-  subdirectory per pool per run).
+- Libvirt storage pool root — picked by the connection URI:
+  - `qemu:///system` (or any remote `/system` URI): `/var/lib/libvirt/images/testrange/`
+    (owned by libvirtd; the driver builds the per-pool subdirectory at pool-create time).
+  - `qemu:///session`: `~/.local/share/testrange/pools/`.
+  One subdirectory per pool per run.

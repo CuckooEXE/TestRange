@@ -1,8 +1,4 @@
-"""Orchestrator runtime.
-
-Phase 4: brings the range up via the install + run phases and tears it
-down on exit. Phase 5 will wire the test execution loop.
-"""
+"""Lifecycle orchestration for a Plan: preflight, install, run, test, cleanup."""
 
 from __future__ import annotations
 

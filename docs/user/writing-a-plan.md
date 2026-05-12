@@ -11,18 +11,22 @@ from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
-from testrange.credentials import PosixCred, gen_ssh_key
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive, StoragePool
+from testrange.credentials import PosixCred, SSHKey
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
-_KEY = gen_ssh_key()
+# Deterministic from `comment`; same comment -> same keypair across runs,
+# which keeps the rendered cloud-init seed byte-stable so the post-install
+# cache hits on subsequent invocations. Insecure by design; test-only.
+_KEY = SSHKey.generate(comment="hello")
 
 PLAN = Plan(
     LibvirtHypervisor(
-        connection="qemu:///session",
+        connection="qemu:///system",
         networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
         pools=[StoragePool("pool1", 32)],
         vms=[
@@ -41,8 +45,8 @@ PLAN = Plan(
                     credentials=[
                         PosixCred(
                             "alice",
-                            pubkey=_KEY.public,
-                            privkey=_KEY.private,
+                            pubkey=_KEY.auth_line,
+                            privkey=_KEY.priv,
                             sudo=True,
                         ),
                     ],

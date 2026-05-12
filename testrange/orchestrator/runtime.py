@@ -1,13 +1,11 @@
 """Orchestrator runtime.
 
-Phase 4 wires the full lifecycle:
-  preflight -> install -> run -> (test, Phase 5) -> cleanup
-
-The Orchestrator brokers between Plan-time data and the driver/cache,
-respecting the stovepipe rule: nothing in `testrange.builders`,
+Drives the lifecycle: preflight -> install -> run -> test -> cleanup. The
+Orchestrator brokers between Plan-time data and the driver/cache, respecting
+the stovepipe rule — nothing in `testrange.builders`,
 `testrange.communicators`, or `testrange.credentials` reaches into the
-others — the Orchestrator pulls what each consumer needs from the
-VMRecipe and hands it over.
+others. The Orchestrator pulls what each consumer needs from the VMRecipe
+and hands it over.
 """
 
 from __future__ import annotations
@@ -28,10 +26,9 @@ from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.cache.manager import CacheManager
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
+from testrange.drivers import driver_for
 from testrange.drivers.base import HypervisorDriver
-from testrange.drivers.libvirt import LibvirtDriver, LibvirtHypervisor
 from testrange.exceptions import (
-    DriverError,
     InstallTimeoutError,
     OrchestratorError,
     PreflightError,
@@ -57,14 +54,16 @@ _DEFAULT_INSTALL_TIMEOUT_S = 600.0
 # Per-VM DHCP-lease timeout after the run VM starts.
 _DEFAULT_LEASE_TIMEOUT_S = 120.0
 
-# Transient install network — see PLAN.md note. Hardcoded subnet for v0;
-# we'll move to a hashed-from-run-id derivation when conflict ever shows up.
+# Transient install network. Subnet must not collide with any user-declared
+# network in the Plan; preflight validates that. A single hardcoded subnet is
+# fine for the single-run-per-host case; a hashed-from-run-id derivation
+# would be needed for concurrent runs sharing a libvirtd.
 _INSTALL_CIDR = "10.97.99.0/24"
 
 
 @dataclass(frozen=True)
 class TestResult:
-    """Outcome of one test function. Phase 5 fills the test runtime."""
+    """Outcome of one test function."""
 
     name: str
     passed: bool
@@ -81,19 +80,18 @@ class TestResult:
 
 @dataclass
 class OrchestratorHandle:
-    """Test-code-facing handle. Phase 5 wires per-VM IPs + communicators."""
+    """Test-code-facing handle. Carries the run id and per-VM bound handles."""
 
     run_id: str
     vms: Mapping[str, VMHandle] = field(default_factory=dict)
 
 
 class Orchestrator:
-    """Phase-sequencing context manager.
+    """Lifecycle context manager.
 
     ``with Orchestrator(plan) as orch:`` brings the range up
-    (preflight -> install -> run) and tears it down on `__exit__`.
-    Per PLAN.md, every exception path goes through cleanup unless
-    ``leak()`` has been called.
+    (preflight -> install -> run) and tears it down on `__exit__`. Every
+    exception path goes through cleanup unless ``leak()`` has been called.
     """
 
     def __init__(
@@ -101,7 +99,6 @@ class Orchestrator:
         plan: Plan,
         *,
         cache_manager: CacheManager | None = None,
-        state_root: Path | None = None,
         run_id: str | None = None,
         install_timeout_s: float = _DEFAULT_INSTALL_TIMEOUT_S,
         lease_timeout_s: float = _DEFAULT_LEASE_TIMEOUT_S,
@@ -112,24 +109,17 @@ class Orchestrator:
         self.install_timeout_s = install_timeout_s
         self.lease_timeout_s = lease_timeout_s
         self.driver: HypervisorDriver = self._build_driver()
-        self._store = StateStore(run_dir_for(self.run_id, root=state_root))
+        self._store = StateStore(run_dir_for(self.run_id))
         self._handle: OrchestratorHandle | None = None
         self._leak = False
         self._plan_name = plan.name or "plan"
-        self._pool_backends: dict[str, str] = {}      # plan_name -> backend_name
-        self._network_backends: dict[str, str] = {}   # plan_name -> backend_name
+        self._pool_backends: dict[str, str] = {}  # plan_name -> backend_name
+        self._network_backends: dict[str, str] = {}  # plan_name -> backend_name
         self._post_install_paths: dict[str, Path] = {}  # vm_name -> cached disk path
         self._uploaded_bases: set[tuple[str, str]] = set()  # (pool_backend, vol_name)
 
-    # ---- driver inference ---------------------------------------------
-
     def _build_driver(self) -> HypervisorDriver:
-        hyp = self.plan.hypervisor
-        if isinstance(hyp, LibvirtHypervisor):
-            return LibvirtDriver(uri=hyp.connection)
-        raise DriverError(f"unsupported hypervisor type: {type(hyp).__name__}")
-
-    # ---- context manager ----------------------------------------------
+        return driver_for(self.plan.hypervisor)
 
     def __enter__(self) -> OrchestratorHandle:
         self._install_signal_handlers()
@@ -151,7 +141,7 @@ class Orchestrator:
                 self._bind_communicators()
             except Exception:
                 _log.exception("bring-up failed; tearing down")
-                self._teardown(force=True)
+                self._teardown()
                 raise
             return self._handle
         except Exception:
@@ -182,8 +172,6 @@ class Orchestrator:
         """Skip teardown on ``__exit__``. Use for live debugging."""
         self._leak = True
 
-    # ---- signal handlers ----------------------------------------------
-
     def _install_signal_handlers(self) -> None:
         self._prior_signal_handlers: dict[int, Any] = {}
 
@@ -206,8 +194,6 @@ class Orchestrator:
                 signal.signal(sig, prior)
             except (ValueError, OSError):
                 pass
-
-    # ---- install phase ------------------------------------------------
 
     def _install_phase(self) -> None:
         self._store.set_phase(PHASE_INSTALL)
@@ -246,11 +232,11 @@ class Orchestrator:
     def _ensure_base_in_pool(self, pool_backend: str, source_path: Path) -> Path:
         """Upload a host-side base image into the pool, idempotent per run.
 
-        Returns the in-pool path. Cache files are named ``<sha>.bin``; the
-        ``.bin`` stem gives content-addressed dedup across VMs in the same
-        plan that share a base.
+        Returns the in-pool path. The volume name is derived from the cache
+        file's stem (a content sha), so multiple VMs sharing a base share
+        the in-pool upload too.
         """
-        vol_name = f"tr_base_{source_path.stem}.qcow2"
+        vol_name = f"tr_base_{source_path.stem}{self.driver.volume_suffix('base_image')}"
         key = (pool_backend, vol_name)
         if key in self._uploaded_bases:
             return self.driver.upload_to_pool(pool_backend, vol_name, source_path)
@@ -293,11 +279,9 @@ class Orchestrator:
             _log.info("vm %s: cache miss on %s; building install VM", vm.name, config_hash)
 
         pool_backend = self._pool_backends[vm.spec.os_drive.pool]
-        install_vm_backend = self.driver.compose_resource_name(
-            self.run_id, "install_vm", vm.name
-        )
-        install_disk_name = f"{install_vm_backend}.qcow2"
-        install_seed_name = f"{install_vm_backend}-seed.iso"
+        install_vm_backend = self.driver.compose_resource_name(self.run_id, "install_vm", vm.name)
+        install_disk_name = f"{install_vm_backend}{self.driver.volume_suffix('install_disk')}"
+        install_seed_name = f"{install_vm_backend}-seed{self.driver.volume_suffix('install_seed')}"
 
         # Create install overlay
         self._store.record_intent(
@@ -344,13 +328,14 @@ class Orchestrator:
         # Poll for shutoff (the install runcmd ends with `poweroff`).
         self._wait_for_shutoff(install_vm_backend, vm.name)
 
-        # Snapshot the post-install disk into the cache. The on-disk file is
-        # owned by the hypervisor's service account (libvirt-qemu in system
-        # mode), so stream it back to a user-readable temp file first, then
-        # ingest from there.
+        # Snapshot the post-install disk into the cache. The pool volume is
+        # not necessarily readable by the orchestrator process — drivers may
+        # run the hypervisor under their own service account or on a remote
+        # host — so we stream it back via the driver, into a local temp
+        # file, then ingest from there.
         with tempfile.NamedTemporaryFile(
             prefix=f"tr_post_install_{vm.name}_",
-            suffix=".qcow2",
+            suffix=self.driver.volume_suffix("install_disk"),
             delete=False,
         ) as tmp:
             tmp_path = Path(tmp.name)
@@ -390,8 +375,6 @@ class Orchestrator:
             f"vm {vm_name!r} did not power off within {self.install_timeout_s:.0f}s"
         )
 
-    # ---- run phase ----------------------------------------------------
-
     def _run_phase(self) -> None:
         self._store.set_phase(PHASE_RUN)
         hyp = self.plan.hypervisor
@@ -410,7 +393,7 @@ class Orchestrator:
 
         for vm in hyp.vms:
             pool_backend = self._pool_backends[vm.spec.os_drive.pool]
-            run_disk_name = f"{vm.name}.qcow2"
+            run_disk_name = f"{vm.name}{self.driver.volume_suffix('run_disk')}"
             self._store.record_intent(
                 kind="run_disk",
                 backend_name=run_disk_name,
@@ -444,8 +427,6 @@ class Orchestrator:
             self._store.confirm(vm_backend)
             self.driver.start_vm(vm_backend)
 
-    # ---- handle for tests --------------------------------------------
-
     def _build_handle(self) -> OrchestratorHandle:
         vms_map: dict[str, VMHandle] = {}
         for vm in self.plan.hypervisor.vms:
@@ -456,14 +437,11 @@ class Orchestrator:
             )
         return OrchestratorHandle(run_id=self.run_id, vms=vms_map)
 
-    # ---- communicator bind --------------------------------------------
-
     def _bind_communicators(self) -> None:
         """Discover each VM's IP and bind its communicator.
 
-        Each Communicator's bind signature is its own (PLAN.md decision
-        5); the orchestrator dispatches by type and hands each the
-        inputs it needs.
+        Each Communicator declares its own ``bind`` signature; the orchestrator
+        dispatches by communicator type and hands each one the inputs it needs.
         """
         assert self._handle is not None
         for vm in self.plan.hypervisor.vms:
@@ -482,9 +460,7 @@ class Orchestrator:
 
     def _discover_ip(self, vm: VMRecipe) -> str:
         if not vm.spec.nics:
-            raise OrchestratorError(
-                f"vm {vm.name!r}: no NICs; cannot bind a network communicator"
-            )
+            raise OrchestratorError(f"vm {vm.name!r}: no NICs; cannot bind a network communicator")
         first_nic = vm.spec.nics[0]
         net_backend = self._network_backends[first_nic.network]
         mac = self.driver.compose_mac(self._plan_name, vm.name, 0)
@@ -502,13 +478,9 @@ class Orchestrator:
     def _lookup_credential(self, vm: VMRecipe) -> PosixCred:
         builder = vm.builder
         if not isinstance(builder, CloudInitBuilder):
-            raise OrchestratorError(
-                f"vm {vm.name!r}: only CloudInitBuilder is supported in v0"
-            )
+            raise OrchestratorError(f"vm {vm.name!r}: only CloudInitBuilder is supported in v0")
         if not isinstance(vm.communicator, SSHCommunicator):
-            raise OrchestratorError(
-                f"vm {vm.name!r}: communicator is not SSHCommunicator"
-            )
+            raise OrchestratorError(f"vm {vm.name!r}: communicator is not SSHCommunicator")
         cred = builder.find_credential(vm.communicator.username)
         if cred is None:
             usernames = [c.username for c in builder.credentials]
@@ -524,11 +496,8 @@ class Orchestrator:
             )
         return cred
 
-    # ---- teardown ------------------------------------------------------
-
-    def _teardown(self, *, force: bool = False) -> None:
+    def _teardown(self) -> None:
         """LIFO teardown using state.json as the source of truth."""
-        del force
         try:
             self._store.set_phase(PHASE_CLEANUP)
         except Exception as e:
@@ -548,9 +517,7 @@ class Orchestrator:
         ok = 0
         failed = 0
         for idx, r in enumerate(resources, start=1):
-            _log.info(
-                "teardown [%d/%d] destroy %s %s", idx, total, r.kind, r.backend_name
-            )
+            _log.info("teardown [%d/%d] destroy %s %s", idx, total, r.kind, r.backend_name)
             try:
                 self.driver.destroy(r.kind, r.backend_name, **dict(r.metadata))
                 self._store.forget(r.backend_name)
@@ -559,7 +526,11 @@ class Orchestrator:
                 failed += 1
                 _log.warning(
                     "teardown [%d/%d] %s %s failed: %s",
-                    idx, total, r.kind, r.backend_name, e,
+                    idx,
+                    total,
+                    r.kind,
+                    r.backend_name,
+                    e,
                 )
         if total > 0:
             _log.info("teardown summary: %d ok, %d failed", ok, failed)
@@ -574,11 +545,9 @@ class Orchestrator:
         else:
             _log.warning(
                 "teardown: %d resource(s) still recorded in state; run id=%s",
-                len(remaining), self.run_id,
+                len(remaining),
+                self.run_id,
             )
-
-
-# ---- run_tests entry point ---------------------------------------------
 
 
 def run_tests(
@@ -634,9 +603,7 @@ def _execute_tests(
                 _log.warning("--fail-fast: stopping on %s", name)
                 return
             continue
-        results.append(
-            TestResult(name=name, passed=True, duration=time.monotonic() - start)
-        )
+        results.append(TestResult(name=name, passed=True, duration=time.monotonic() - start))
 
 
 __all__ = [
