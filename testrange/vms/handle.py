@@ -13,11 +13,17 @@ if TYPE_CHECKING:  # pragma: no cover
 class VMHandle:
     """Test-code-facing view of a running VM.
 
-    Transport-specific addressing (IPs, sockets, serial paths, guest-agent
-    channels) lives on the bound ``communicator`` — different communicator
-    types have different addressing needs. Read e.g. ``vm.communicator.host``
-    when the communicator is an ``SSHCommunicator``.
+    - ``name`` is the user-facing Plan name (e.g., ``"web"``).
+    - ``backend_name`` is the driver-side handle (e.g., ``"tr_vm_abc_web"``)
+      — pass it to ``orch.driver.create_snapshot(...)`` / ``destroy_vm(...)``
+      / etc. for host-side VM control.
+    - ``communicator`` is for guest-side I/O. Transport-specific addressing
+      (IPs, sockets, serial paths, guest-agent channels) lives on it —
+      different communicator types have different addressing needs. Read
+      e.g. ``vm.communicator.host`` when the communicator is an
+      ``SSHCommunicator``.
     """
 
     name: str
+    backend_name: str
     communicator: Communicator

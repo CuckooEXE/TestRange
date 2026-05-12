@@ -20,6 +20,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.drivers.base import VolumeRef
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import (
     InstallTimeoutError,
@@ -48,6 +49,7 @@ class _FakeDriver:
         self.preflight_report = PreflightReport()
         self.fail_create_vm = False
         self._pool_dirs: set[Path] = set()
+        self._snapshots: dict[str, list[str]] = {}
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -70,6 +72,9 @@ class _FakeDriver:
 
     def compose_mac(self, plan_name: str, vm_name: str, nic_idx: int) -> str:
         return f"52:54:00:00:{nic_idx:02d}:{abs(hash(vm_name)) % 256:02x}"
+
+    def compose_volume_ref(self, pool_backend: str, vol_name: str) -> VolumeRef:
+        return VolumeRef(str(self.pool_root / pool_backend / vol_name))
 
     def create_network(self, network: Any, switch: Any, backend_name: str) -> Any:
         self._record("create_network", backend_name, network.name, switch.name)
@@ -96,54 +101,41 @@ class _FakeDriver:
     def destroy_pool(self, backend_name: str) -> None:
         self._record("destroy_pool", backend_name)
 
-    def write_to_pool(self, pool_backend: str, filename: str, data: bytes) -> Path:
-        self._record("write_to_pool", pool_backend, filename, len(data))
-        path = self.pool_root / pool_backend / filename
+    def write_to_pool(self, target_ref: VolumeRef, data: bytes) -> VolumeRef:
+        self._record("write_to_pool", str(target_ref), len(data))
+        path = Path(target_ref)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
-        return path
+        return target_ref
 
-    def create_overlay_disk(
+    def create_disk_from_base(
         self,
-        pool_backend: str,
-        vol_name: str,
-        source_path: Path,
-    ) -> Path:
-        self._record("create_overlay_disk", pool_backend, vol_name, str(source_path))
-        path = self.pool_root / pool_backend / vol_name
+        target_ref: VolumeRef,
+        source_ref: VolumeRef,
+    ) -> VolumeRef:
+        self._record("create_disk_from_base", str(target_ref), str(source_ref))
+        path = Path(target_ref)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write a marker; the cache happily ingests any bytes.
-        path.write_bytes(b"FAKE-OVERLAY:" + source_path.name.encode())
-        return path
+        # Full-copy semantics: the fake just copies the source bytes.
+        path.write_bytes(Path(source_ref).read_bytes())
+        return target_ref
 
-    def upload_to_pool(
-        self,
-        pool_backend: str,
-        vol_name: str,
-        source_path: Path,
-    ) -> Path:
-        self._record("upload_to_pool", pool_backend, vol_name, str(source_path))
-        path = self.pool_root / pool_backend / vol_name
+    def upload_to_pool(self, target_ref: VolumeRef, source_path: Path) -> VolumeRef:
+        self._record("upload_to_pool", str(target_ref), str(source_path))
+        path = Path(target_ref)
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
             path.write_bytes(source_path.read_bytes())
-        return path
+        return target_ref
 
-    def download_from_pool(
-        self,
-        pool_backend: str,
-        vol_name: str,
-        dest_path: Path,
-    ) -> Path:
-        self._record("download_from_pool", pool_backend, vol_name, str(dest_path))
-        src = self.pool_root / pool_backend / vol_name
-        dest_path.write_bytes(src.read_bytes())
+    def download_from_pool(self, vol_ref: VolumeRef, dest_path: Path) -> Path:
+        self._record("download_from_pool", str(vol_ref), str(dest_path))
+        dest_path.write_bytes(Path(vol_ref).read_bytes())
         return dest_path
 
-    def delete_volume(self, pool_backend: str, vol_name: str) -> None:
-        self._record("delete_volume", pool_backend, vol_name)
-        path = self.pool_root / pool_backend / vol_name
-        path.unlink(missing_ok=True)
+    def delete_volume(self, vol_ref: VolumeRef) -> None:
+        self._record("delete_volume", str(vol_ref))
+        Path(vol_ref).unlink(missing_ok=True)
 
     def create_vm(
         self,
@@ -151,11 +143,11 @@ class _FakeDriver:
         spec: Any,
         plan_name: str,
         *,
-        os_disk_path: Path,
-        seed_iso_path: Path | None,
+        os_disk_ref: VolumeRef,
+        seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
     ) -> Any:
-        del plan_name, os_disk_path, seed_iso_path, network_refs
+        del plan_name, os_disk_ref, seed_iso_ref, network_refs
         if self.fail_create_vm:
             raise RuntimeError("simulated create_vm failure")
         self._record("create_vm", backend_name, spec.name)
@@ -192,7 +184,43 @@ class _FakeDriver:
         elif kind in ("vm", "install_vm"):
             self.destroy_vm(backend_name)
         elif kind in ("install_disk", "install_seed", "run_disk", "base_image"):
-            self.delete_volume(metadata["pool_backend"], backend_name)
+            self.delete_volume(self.compose_volume_ref(metadata["pool_backend"], backend_name))
+
+    def create_snapshot(
+        self,
+        vm_backend_name: str,
+        name: str,
+        description: str = "",
+        *,
+        mem: bool = False,
+    ) -> None:
+        from testrange.exceptions import DriverError
+
+        self._record("create_snapshot", vm_backend_name, name, description, mem)
+        snaps = self._snapshots.setdefault(vm_backend_name, [])
+        if name in snaps:
+            raise DriverError(
+                f"snapshot {name!r} already exists on vm {vm_backend_name!r}"
+            )
+        snaps.append(name)
+
+    def list_snapshots(self, vm_backend_name: str) -> list[str]:
+        return list(self._snapshots.get(vm_backend_name, []))
+
+    def delete_snapshot(self, vm_backend_name: str, name: str) -> None:
+        self._record("delete_snapshot", vm_backend_name, name)
+        snaps = self._snapshots.get(vm_backend_name, [])
+        if name in snaps:
+            snaps.remove(name)
+
+    def restore_snapshot(self, vm_backend_name: str, name: str) -> None:
+        from testrange.exceptions import DriverError
+
+        self._record("restore_snapshot", vm_backend_name, name)
+        if name not in self._snapshots.get(vm_backend_name, []):
+            raise DriverError(
+                f"snapshot {name!r} not found on vm {vm_backend_name!r}"
+            )
 
 
 def _plan(name: str = "hello") -> Plan:
