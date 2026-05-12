@@ -1,14 +1,13 @@
 """CloudInitBuilder — cloud-init seed renderer for Linux guests.
 
-The seed is an ISO9660 image labeled ``cidata`` containing
-``user-data``, ``meta-data``, and ``network-config``. The install VM
-mounts it on first boot and applies it. Our seeds end with
-``poweroff`` in ``runcmd`` so the install VM self-terminates and the
-orchestrator (Phase 4) snapshots the disk as the cached post-install
-artifact.
+The seed is an ISO9660 image labeled ``cidata`` containing ``user-data``,
+``meta-data``, and ``network-config``. The install VM mounts it on first
+boot and applies it. Seeds end with ``poweroff`` in ``runcmd`` so the
+install VM self-terminates and the orchestrator snapshots the disk as the
+cached post-install artifact.
 
 Network rendering uses **interface-name matching** (``match: name: ...``)
-to sidestep MAC-based matches in the cached disk — see PLAN.md TODO.
+so the cached disk doesn't bake in the install VM's MAC.
 """
 
 from __future__ import annotations
@@ -34,6 +33,17 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.vms.spec import VMSpec
 
 
+def _import_pycdlib() -> Any:
+    """Lazy import. Raises BuilderError with a useful hint if pycdlib is missing."""
+    try:
+        import pycdlib
+    except ImportError as e:
+        raise BuilderError(
+            "pycdlib is not installed; install with `pip install -e .[cloudinit]`"
+        ) from e
+    return pycdlib
+
+
 class CloudInitBuilder(Builder):
     """Cloud-init seed builder.
 
@@ -49,7 +59,34 @@ class CloudInitBuilder(Builder):
         credentials: Sequence[Credential] = (),
         packages: Sequence[Package] = (),
         post_install_commands: Sequence[str] = (),
+        insecure_apt: bool = False,
+        insecure_dnf: bool = False,
     ) -> None:
+        creds, pkgs, cmds = self._validate_init_params(
+            base=base,
+            credentials=credentials,
+            packages=packages,
+            post_install_commands=post_install_commands,
+            insecure_apt=insecure_apt,
+            insecure_dnf=insecure_dnf,
+        )
+        self.base = base
+        self._credentials = creds
+        self.packages = pkgs
+        self.post_install_commands = cmds
+        self.insecure_apt = insecure_apt
+        self.insecure_dnf = insecure_dnf
+
+    @staticmethod
+    def _validate_init_params(
+        *,
+        base: CacheEntry,
+        credentials: Sequence[Credential],
+        packages: Sequence[Package],
+        post_install_commands: Sequence[str],
+        insecure_apt: bool,
+        insecure_dnf: bool,
+    ) -> tuple[tuple[Credential, ...], tuple[Package, ...], tuple[str, ...]]:
         if not isinstance(base, CacheEntry):
             raise TypeError(
                 f"CloudInitBuilder.base must be a CacheEntry, got {type(base).__name__}"
@@ -78,10 +115,15 @@ class CloudInitBuilder(Builder):
             raise ValueError(
                 f"CloudInitBuilder.credentials has duplicate usernames: {sorted(dupes)}"
             )
-        self.base = base
-        self._credentials = creds
-        self.packages = pkgs
-        self.post_install_commands = cmds
+        if not isinstance(insecure_apt, bool):
+            raise TypeError(
+                f"CloudInitBuilder.insecure_apt must be bool, got {type(insecure_apt).__name__}"
+            )
+        if not isinstance(insecure_dnf, bool):
+            raise TypeError(
+                f"CloudInitBuilder.insecure_dnf must be bool, got {type(insecure_dnf).__name__}"
+            )
+        return creds, pkgs, cmds
 
     @property
     def credentials(self) -> tuple[Credential, ...]:
@@ -93,8 +135,6 @@ class CloudInitBuilder(Builder):
             if c.username == username:
                 return c
         return None
-
-    # ---- rendering -----------------------------------------------------
 
     def render_user_data(self, spec: VMSpec, recipe: VMRecipe) -> str:
         """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header)."""
@@ -119,11 +159,10 @@ class CloudInitBuilder(Builder):
                 chpasswd_lines.append(f"{c.username}:{c.password}")
 
         apt_pkgs = [p.name for p in self.packages if isinstance(p, Apt)]
-        pip_pkgs = [p.name for p in self.packages if isinstance(p, Pip)]
+        pips = [p for p in self.packages if isinstance(p, Pip)]
 
         runcmd: list[str] = []
-        if pip_pkgs:
-            runcmd.append("pip3 install --break-system-packages " + " ".join(pip_pkgs))
+        runcmd.extend(_render_pip_install_lines(pips))
         runcmd.extend(self.post_install_commands)
         runcmd.append("poweroff")  # self-terminating install
 
@@ -131,6 +170,11 @@ class CloudInitBuilder(Builder):
             "ssh_pwauth": True,
             "users": users or [{"name": "root", "lock_passwd": False}],
         }
+        write_files = _render_insecure_write_files(
+            insecure_apt=self.insecure_apt, insecure_dnf=self.insecure_dnf
+        )
+        if write_files:
+            body["write_files"] = write_files
         if chpasswd_lines:
             body["chpasswd"] = {
                 "list": "\n".join(chpasswd_lines),
@@ -168,9 +212,9 @@ class CloudInitBuilder(Builder):
         stable-MAC TODO is belt-and-suspenders).
         """
         del recipe
-        # NIC ordering on libvirt: PCI slot order = attach order. Map to
-        # predictable interface names (en* in kernel 3.x+ are pcie-based).
-        # In practice with virtio, names are ens3, ens4, ... Use a glob.
+        # Match NICs by kernel interface name pattern. Index 0 takes any en*
+        # (the first PCI-attached NIC); subsequent NICs use a per-index prefix
+        # so order is stable regardless of how the backend numbers slots.
         ethernets: dict[str, Any] = {}
         for idx, _nic in enumerate(spec.nics):
             iface_name = f"id{idx}"
@@ -203,12 +247,7 @@ class CloudInitBuilder(Builder):
 
     def render_seed(self, spec: VMSpec, recipe: VMRecipe) -> bytes:
         """Build the ISO9660 ``cidata`` seed image as bytes."""
-        try:
-            import pycdlib
-        except ImportError as e:
-            raise BuilderError(
-                "pycdlib is not installed; install with `pip install -e .[cloudinit]`"
-            ) from e
+        pycdlib = _import_pycdlib()
 
         user_data = self.render_user_data(spec, recipe).encode("utf-8")
         meta_data = self.render_meta_data(spec, recipe).encode("utf-8")
@@ -247,3 +286,67 @@ def _joliet_name_for(path: str) -> str:
         "/METADATA.;1": "/meta-data",
         "/NETWORKC.;1": "/network-config",
     }[path]
+
+
+# Apt config drop-in that disables signature verification. Written into
+# /etc/apt/apt.conf.d/ as the last-loaded file so it wins against distro
+# defaults.
+_INSECURE_APT_CONFIG = (
+    'Acquire::AllowInsecureRepositories "true";\n'
+    'Acquire::AllowDowngradeToInsecureRepositories "true";\n'
+    'APT::Get::AllowUnauthenticated "true";\n'
+)
+
+# dnf has no /etc/dnf/dnf.conf.d/ drop-in; append into the [main] section of
+# /etc/dnf/dnf.conf instead (cloud-init's write_files supports append=true).
+_INSECURE_DNF_CONFIG = "sslverify=False\ngpgcheck=0\n"
+
+
+def _render_insecure_write_files(
+    *, insecure_apt: bool, insecure_dnf: bool
+) -> list[dict[str, Any]]:
+    """Build cloud-init ``write_files`` entries for the insecure apt/dnf flags."""
+    entries: list[dict[str, Any]] = []
+    if insecure_apt:
+        entries.append(
+            {
+                "path": "/etc/apt/apt.conf.d/99-testrange-insecure",
+                "content": _INSECURE_APT_CONFIG,
+                "owner": "root:root",
+                "permissions": "0644",
+            }
+        )
+    if insecure_dnf:
+        entries.append(
+            {
+                "path": "/etc/dnf/dnf.conf",
+                "content": _INSECURE_DNF_CONFIG,
+                "owner": "root:root",
+                "permissions": "0644",
+                "append": True,
+            }
+        )
+    return entries
+
+
+def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
+    """Render ``pip3 install`` runcmd lines.
+
+    Secure pips batch into one install; insecure pips batch into a second
+    install that passes ``--trusted-host`` for pypi.org + files.pythonhosted.org
+    so they can install from a misconfigured / proxied / air-gapped index.
+    """
+    if not pips:
+        return []
+    secure = [p.name for p in pips if not p.insecure]
+    insecure = [p.name for p in pips if p.insecure]
+    lines: list[str] = []
+    base_cmd = "pip3 install --break-system-packages"
+    if secure:
+        lines.append(f"{base_cmd} {' '.join(secure)}")
+    if insecure:
+        lines.append(
+            f"{base_cmd} --trusted-host pypi.org --trusted-host files.pythonhosted.org "
+            f"{' '.join(insecure)}"
+        )
+    return lines

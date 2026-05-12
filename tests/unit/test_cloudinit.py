@@ -11,7 +11,8 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive
+from testrange.devices import CPU, Memory, OSDrive
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.packages import Apt, Pip
 from testrange.vms import VMRecipe, VMSpec
 
@@ -111,6 +112,102 @@ class TestRenderUserData:
         recipe = _recipe(b, spec)
         body = yaml.safe_load(b.render_user_data(spec, recipe))
         assert "chpasswd" not in body
+
+
+class TestInsecureFlags:
+    def test_default_no_write_files(self) -> None:
+        b = _basic_builder()
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        assert "write_files" not in body
+
+    def test_insecure_apt_drops_conf_d_file(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            packages=[Apt("nginx")],
+            insecure_apt=True,
+        )
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        wf = {entry["path"]: entry for entry in body["write_files"]}
+        assert "/etc/apt/apt.conf.d/99-testrange-insecure" in wf
+        content = wf["/etc/apt/apt.conf.d/99-testrange-insecure"]["content"]
+        assert "Acquire::AllowInsecureRepositories" in content
+        assert "APT::Get::AllowUnauthenticated" in content
+
+    def test_insecure_dnf_appends_to_dnf_conf(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("rocky-9"),
+            insecure_dnf=True,
+        )
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        wf = {entry["path"]: entry for entry in body["write_files"]}
+        assert wf["/etc/dnf/dnf.conf"]["append"] is True
+        content = wf["/etc/dnf/dnf.conf"]["content"]
+        assert "sslverify=False" in content
+        assert "gpgcheck=0" in content
+
+    def test_both_flags_together(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("x"),
+            insecure_apt=True,
+            insecure_dnf=True,
+        )
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        paths = {entry["path"] for entry in body["write_files"]}
+        assert "/etc/apt/apt.conf.d/99-testrange-insecure" in paths
+        assert "/etc/dnf/dnf.conf" in paths
+
+    def test_non_bool_raises(self) -> None:
+        with pytest.raises(TypeError, match="insecure_apt must be bool"):
+            CloudInitBuilder(base=CacheEntry("x"), insecure_apt="yes")  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match="insecure_dnf must be bool"):
+            CloudInitBuilder(base=CacheEntry("x"), insecure_dnf=1)  # type: ignore[arg-type]
+
+
+class TestPipInsecure:
+    def test_default_secure_pip_one_install_line(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("x"),
+            packages=[Pip("requests"), Pip("rich")],
+        )
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        assert len(pip_lines) == 1
+        assert "--trusted-host" not in pip_lines[0]
+        assert "requests" in pip_lines[0] and "rich" in pip_lines[0]
+
+    def test_insecure_pip_gets_trusted_host_in_separate_line(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("x"),
+            packages=[
+                Pip("requests"),
+                Pip("internal-pkg", insecure=True),
+            ],
+        )
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        assert len(pip_lines) == 2
+        secure_line = next(line for line in pip_lines if "--trusted-host" not in line)
+        insecure_line = next(line for line in pip_lines if "--trusted-host" in line)
+        assert "requests" in secure_line
+        assert "internal-pkg" in insecure_line
+        assert "pypi.org" in insecure_line
+        assert "files.pythonhosted.org" in insecure_line
+        # Secure packages must NOT leak into the insecure install line.
+        assert "requests" not in insecure_line
+
+    def test_insecure_only_no_secure_line(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("x"),
+            packages=[Pip("internal-pkg", insecure=True)],
+        )
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        assert len(pip_lines) == 1
+        assert "--trusted-host" in pip_lines[0]
+
+    def test_insecure_non_bool_raises(self) -> None:
+        with pytest.raises(TypeError, match=r"Pip\.insecure must be bool"):
+            Pip("x", insecure="yes")  # type: ignore[arg-type]
 
 
 class TestRenderMetaData:
