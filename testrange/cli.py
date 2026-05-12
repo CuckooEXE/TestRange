@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import code
 import importlib.util
 import sys
 from collections.abc import Iterable
@@ -84,6 +85,40 @@ def _run(args: argparse.Namespace) -> int:
     return 0 if all(r.passed for r in results) else 1
 
 
+def _repl(args: argparse.Namespace) -> int:
+    plan, tests = _load_plan_module(args.plan)
+    mgr = _build_manager(args)
+    _print_describe(plan, tests, mgr)
+    print()
+
+    from testrange.orchestrator.runtime import Orchestrator
+
+    o = Orchestrator(plan, cache_manager=mgr)
+    try:
+        with o as orch:
+            banner = (
+                f"testrange repl — run_id={orch.run_id}\n"
+                f"  vms: {sorted(orch.vms)}\n"
+                f"  orch.leak() — skip teardown on exit\n"
+                f"  Ctrl-D / exit() — exit the REPL"
+            )
+            code.interact(
+                banner=banner,
+                local={"orch": orch, "plan": plan, "tests": tests},
+                exitmsg="",
+            )
+    except PreflightError as e:
+        print(f"preflight failed:\n{e}", file=sys.stderr)
+        return 2
+    except OrchestratorError as e:
+        print(f"orchestrator failed: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("interrupted; teardown attempted", file=sys.stderr)
+        return 130
+    return 0
+
+
 def _cleanup(args: argparse.Namespace) -> int:
     try:
         if args.all:
@@ -110,6 +145,12 @@ def _cleanup(args: argparse.Namespace) -> int:
 def _describe(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     mgr = _build_manager(args)
+    _print_describe(plan, tests, mgr)
+    return 0
+
+
+def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
+    """Pretty-print a Plan + its tests. Shared by `describe` and `repl`."""
     hyp = plan.hypervisor
     print(f"Plan ({type(hyp).__name__})")
     if connection := getattr(hyp, "connection", None):
@@ -183,7 +224,6 @@ def _describe(args: argparse.Namespace) -> int:
     if cache_refs:
         unique = {e.identifier for e in cache_refs}
         print(f"CacheEntry references: {len(unique)} unique")
-    return 0
 
 
 def _cache(args: argparse.Namespace) -> int:
@@ -341,6 +381,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="if any test fails, skip teardown so you can SSH in to debug",
     )
     p_run.set_defaults(func=_run)
+
+    p_repl = sub.add_parser(
+        "repl",
+        help="bring the range up and drop into a Python REPL (no tests)",
+        description=(
+            "Bring the range up, print the `describe` output, then drop "
+            "into a stdlib Python REPL with `orch`, `plan`, and `tests` "
+            "pre-bound. Call orch.leak() to skip teardown on exit; "
+            "Ctrl-D / exit() leaves and tears the range down."
+        ),
+    )
+    p_repl.add_argument("plan", help="path to the plan file (.py)")
+    p_repl.set_defaults(func=_repl)
 
     return parser
 

@@ -438,3 +438,24 @@ class TestStateFileRecord:
             state_dir = tmp / "s" / "testrange" / "runs" / run_id
             assert (state_dir / "state.json").exists()
         assert not (tmp / "s" / "testrange" / "runs" / run_id).exists()
+
+
+class TestHandleLeak:
+    """``orch.leak()`` on the handle must flip the parent's flag."""
+
+    def test_leak_method_skips_teardown(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        mgr, _ = populated_cache
+        o = Orchestrator(_plan(), cache_manager=mgr)
+        with o as orch:
+            assert o._leak is False
+            orch.leak()
+            assert o._leak is True
+        # destroy_pool only runs at teardown — leak() must short-circuit it.
+        # (destroy_vm and destroy_network both fire mid-install for the
+        # transient install resources, so they aren't clean sentinels.)
+        names = [c[0] for c in fake_driver.calls]
+        assert "destroy_pool" not in names

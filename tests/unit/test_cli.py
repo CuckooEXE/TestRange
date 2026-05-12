@@ -72,3 +72,25 @@ class TestRunSubcommand:
         out = capsys.readouterr().out
         assert "--fail-fast" in out
         assert "--leak-on-failure" in out
+
+
+class TestReplSubcommand:
+    def test_requires_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["repl"])
+        err = capsys.readouterr().err
+        assert "required" in err
+
+    def test_help_mentions_orch_and_leak(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["repl", "--help"])
+        out = capsys.readouterr().out
+        assert "orch" in out
+        assert "leak" in out
+
+    def test_missing_plan_exits_2(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # Same contract as `describe` and `run`: a nonexistent plan file
+        # produces exit 2 from _load_plan_module before any bring-up.
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["repl", "/nonexistent/plan.py"])
+        assert exc.value.code == 2

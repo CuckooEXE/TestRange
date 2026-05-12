@@ -88,11 +88,16 @@ class OrchestratorHandle:
     handles. Test code can reach the driver via ``orch.driver`` for
     backend-level operations not surfaced through a VM's communicator
     (e.g., snapshot, power-state queries).
+
+    ``leak`` is a bound method on the parent :class:`Orchestrator`; call
+    it to skip teardown on ``__exit__`` (useful for live debugging and
+    for the ``testrange repl`` subcommand).
     """
 
     run_id: str
     driver: HypervisorDriver
     vms: Mapping[str, VMHandle]
+    leak: Callable[[], None]
 
 
 class Orchestrator:
@@ -455,7 +460,12 @@ class Orchestrator:
             )
             for vm in self.plan.hypervisor.vms
         }
-        return OrchestratorHandle(run_id=self.run_id, driver=self.driver, vms=vms_map)
+        return OrchestratorHandle(
+            run_id=self.run_id,
+            driver=self.driver,
+            vms=vms_map,
+            leak=self.leak,
+        )
 
     def _bind_communicators(self) -> None:
         """Bind each VM's communicator at run-phase bring-up.

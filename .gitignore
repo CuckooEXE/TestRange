@@ -35,3 +35,8 @@ Thumbs.db
 
 # Sphinx build output
 docs/_build/
+
+# Cache server runtime state — TLS material and on-disk cache, never
+# commit either. The README documents how to regenerate certs locally.
+cache-server/certs/
+cache-server/storage/
