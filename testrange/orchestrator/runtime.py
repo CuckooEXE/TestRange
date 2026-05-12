@@ -29,6 +29,8 @@ from testrange.credentials.posix import PosixCred
 from testrange.drivers import driver_for
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import (
+    CacheError,
+    CacheMissError,
     InstallTimeoutError,
     OrchestratorError,
     PreflightError,
@@ -277,14 +279,24 @@ class Orchestrator:
         config_hash = builder.config_hash(vm.spec, vm, base_sha=base_info.sha256)
         post_install_name = f"_post_install_{config_hash}"
 
-        # Cache hit?
+        # Cache hit? Manager checks local then HTTP (if configured); a hit
+        # on the HTTP tier triggers a fetch into local before returning.
         try:
-            cached = self.cache.local.resolve(post_install_name)
+            cached = self.cache.resolve(post_install_name)
+            assert cached.path is not None  # fetch=True guarantees this
             self._post_install_paths[vm.name] = cached.path
             _log.info("vm %s: cache hit on %s", vm.name, config_hash)
             return
-        except Exception:
+        except CacheMissError:
             _log.info("vm %s: cache miss on %s; building install VM", vm.name, config_hash)
+        except CacheError as e:
+            # HTTP tier reachable but reported a non-404 error (e.g. 5xx).
+            # Treat as a miss for resilience — local is source of truth —
+            # but log loud enough to be noticed in CI.
+            _log.warning(
+                "vm %s: cache lookup error on %s (%s); building install VM",
+                vm.name, config_hash, e,
+            )
 
         pool_backend = self._pool_backends[vm.spec.os_drive.pool]
         install_vm_backend = self.driver.compose_resource_name(self.run_id, "install_vm", vm.name)
@@ -300,6 +312,7 @@ class Orchestrator:
             plan_name=vm.name,
             pool_backend=pool_backend,
         )
+        assert base_info.path is not None  # cache.resolve(fetch=True) materializes locally
         base_ref = self._ensure_base_in_pool(pool_backend, base_info.path)
         self.driver.create_disk_from_base(install_disk_ref, base_ref)
         self._store.confirm(install_disk_name, pool_backend=pool_backend)
@@ -349,9 +362,10 @@ class Orchestrator:
             tmp_path = Path(tmp.name)
         try:
             self.driver.download_from_pool(install_disk_ref, tmp_path)
-            info = self.cache.local.add(tmp_path, name=post_install_name)
+            info = self.cache.add(tmp_path, name=post_install_name)
         finally:
             tmp_path.unlink(missing_ok=True)
+        assert info.path is not None  # manager.add returns local-flavored info
         self._post_install_paths[vm.name] = info.path
         _log.info(
             "vm %s: cached post-install disk as %s (%s)",

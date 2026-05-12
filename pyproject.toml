@@ -18,6 +18,7 @@ dependencies = [
 libvirt = ["libvirt-python>=10"]
 ssh = ["paramiko>=3"]
 cloudinit = ["pycdlib>=1.14", "pyyaml>=6"]
+http = ["requests>=2.31"]
 docs = [
     "sphinx>=8",
     "furo>=2024.8",
@@ -31,12 +32,14 @@ dev = [
     "mypy>=1.10",
     "types-paramiko",
     "types-pyyaml",
+    "types-requests",
     "pycdlib>=1.14",
     "pyyaml>=6",
     "paramiko>=3",
+    "requests>=2.31",
 ]
 all = [
-    "testrange[libvirt,ssh,cloudinit]",
+    "testrange[libvirt,ssh,cloudinit,http]",
 ]
 
 [project.scripts]

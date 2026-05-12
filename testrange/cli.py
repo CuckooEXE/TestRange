@@ -12,6 +12,7 @@ from typing import Any
 from testrange import __version__
 from testrange._log import configure as configure_logging
 from testrange.cache.entry import CacheEntry
+from testrange.cache.http import HttpCache
 from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
 from testrange.exceptions import (
@@ -31,8 +32,12 @@ from testrange.vms.recipe import VMRecipe
 
 
 def _build_manager(args: argparse.Namespace) -> CacheManager:
-    del args
-    return CacheManager()
+    # Resolve the HTTP cache base URL from --cache. If unset, manager.http
+    # stays None and behavior matches v0.0.1. The flag is the only knob —
+    # no env var — so a `testrange` invocation is fully self-describing.
+    url = getattr(args, "cache", None)
+    http = HttpCache(url) if url else None
+    return CacheManager(http=http)
 
 
 def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
@@ -155,7 +160,10 @@ def _describe(args: argparse.Namespace) -> int:
             if isinstance(base := getattr(builder, "base", None), CacheEntry):
                 cache_refs.append(base)
                 try:
-                    info = mgr.resolve(base)
+                    # Passive describe — don't pull a multi-GB base over HTTP
+                    # just to print one line. fetch=False is the rule for
+                    # any non-install-phase resolve.
+                    info = mgr.resolve(base, fetch=False)
                     print(f"    base:   {base!r}  -> {info.short_sha} ({_format_size(info.size)})")
                 except CacheMissError:
                     print(f"    base:   {base!r}  ⚠ not in cache")
@@ -183,7 +191,8 @@ def _cache(args: argparse.Namespace) -> int:
     sub = args.cache_subcommand
     try:
         if sub == "add":
-            info = mgr.local.add(
+            # Goes through the broker so HTTP gets a mirror.
+            info = mgr.add(
                 args.source,
                 name=args.name,
                 description=args.description,
@@ -191,19 +200,28 @@ def _cache(args: argparse.Namespace) -> int:
             print(info.sha256)
             return 0
         if sub == "list":
+            # Local-only; HTTP has no listing protocol.
             _print_list(mgr.local.list_entries())
             return 0
         if sub == "del":
-            info = mgr.local.delete(args.identifier)
+            info = mgr.delete(args.identifier)
             print(f"deleted {info.short_sha}")
             return 0
         if sub == "rename":
-            info = mgr.local.add_name(args.identifier, args.new_name)
+            info = mgr.add_name(args.identifier, args.new_name)
             print(f"{info.short_sha}: names now {list(info.names)}")
             return 0
         if sub == "forget-name":
-            info = mgr.local.forget_name(args.name)
+            info = mgr.forget_name(args.name)
             print(f"{info.short_sha}: names now {list(info.names)}")
+            return 0
+        if sub == "push":
+            info = mgr.push(args.identifier)
+            print(f"pushed {info.short_sha} → http cache")
+            return 0
+        if sub == "pull":
+            info = mgr.pull(args.identifier)
+            print(f"pulled {info.short_sha} ← http cache")
             return 0
     except CacheMissError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -251,6 +269,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("DEBUG", "INFO", "WARN", "WARNING", "ERROR"),
         help="set log level (default INFO)",
     )
+    parser.add_argument(
+        "--cache",
+        default=None,
+        metavar="URL",
+        help=(
+            "shared HTTP cache base URL (e.g. https://cache.local:8443). "
+            "TLS is never verified — the server is expected to sit behind "
+            "a private network gate."
+        ),
+    )
 
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
@@ -277,6 +305,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_forget = cache_sub.add_parser("forget-name", help="remove a single alias")
     p_forget.add_argument("name", help="alias to remove")
+
+    p_push = cache_sub.add_parser(
+        "push", help="copy a local entry to the HTTP cache (requires --cache)"
+    )
+    p_push.add_argument("identifier", help="content sha or pretty-name")
+
+    p_pull = cache_sub.add_parser(
+        "pull", help="fetch an entry from the HTTP cache into local (requires --cache)"
+    )
+    p_pull.add_argument("identifier", help="content sha or pretty-name")
 
     p_cache.set_defaults(func=_cache)
 
