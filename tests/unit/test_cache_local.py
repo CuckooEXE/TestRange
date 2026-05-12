@@ -160,15 +160,3 @@ class TestCacheManager:
         mgr = CacheManager(local=cache)
         assert mgr.resolve(CacheEntry("debian-13")).sha256 == info.sha256
         assert mgr.resolve_path(CacheEntry("debian-13")) == info.path
-
-    def test_attach_http(self, tmp_path: Path) -> None:
-        mgr = CacheManager(local=LocalCache(root=tmp_path / "c"))
-        assert mgr.http is None
-        mgr.attach_http("https://example.com/cache")
-        assert mgr.http is not None
-        assert mgr.http.base_url == "https://example.com/cache"
-
-    def test_bad_http_url(self, tmp_path: Path) -> None:
-        mgr = CacheManager(local=LocalCache(root=tmp_path / "c"))
-        with pytest.raises(CacheError):
-            mgr.attach_http("ftp://no")

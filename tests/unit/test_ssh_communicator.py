@@ -10,7 +10,7 @@ import pytest
 
 from testrange.communicators import SSHCommunicator
 from testrange.communicators.base import ExecResult
-from testrange.credentials import PosixCred, gen_ssh_key
+from testrange.credentials import PosixCred, SSHKey
 from testrange.exceptions import CommunicatorError
 
 
@@ -166,7 +166,7 @@ class TestExecute:
 class TestAuthSelection:
     def test_pkey_when_present(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         _, client = fake_paramiko
-        kp = gen_ssh_key()
+        kp = SSHKey.generate()
         cred = PosixCred("u", password="pw", pubkey=kp.auth_line, privkey=kp.priv)
         c = SSHCommunicator("u")
         c.bind(host="10.0.0.1", credential=cred)

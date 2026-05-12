@@ -17,22 +17,21 @@ from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
-from testrange.credentials import PosixCred, gen_ssh_key
+from testrange.credentials import PosixCred, SSHKey
 from testrange.devices import (
     CPU,
-    HardDrive,  # noqa: F401  (illustrative; not used in hello_world)
-    LibvirtNetworkIface,
     Memory,
     OSDrive,
     StoragePool,
 )
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 
-_KEY = gen_ssh_key(comment="testrange-hello")
+_KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
     LibvirtHypervisor(

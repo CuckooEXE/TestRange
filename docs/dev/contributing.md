@@ -8,10 +8,10 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 ```
 
-For libvirt integration tests, also install:
+For libvirt integration tests, install the full set of extras:
 
 ```sh
-pip install -e '.[libvirt,ssh,cloudinit,http]'
+pip install -e '.[all,dev]'
 ```
 
 ## Standard gate (run before every commit)
@@ -41,5 +41,5 @@ skip on machines without ``libvirt-python``.
 
 ## Layout
 
-See ``PLAN.md`` for the file-layout spec; ``docs/Architecture-and-Design.md``
-for component overview; ``docs/adr/`` for load-bearing decisions.
+See ``docs/Architecture-and-Design.md`` for component overview and
+``docs/adr/`` for load-bearing decisions.

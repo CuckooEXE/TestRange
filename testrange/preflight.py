@@ -1,8 +1,7 @@
 """Preflight findings + report.
 
-Preflight is read-only (PLAN.md decision: side-effect-free invariant).
-Findings have two severities — error and warning, no info; informational
-state belongs in logs.
+Preflight is read-only by design — no backend writes. Findings have two
+severities (error, warning); informational state belongs in logs.
 """
 
 from __future__ import annotations

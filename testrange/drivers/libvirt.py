@@ -1,15 +1,9 @@
-"""Libvirt driver: ``LibvirtHypervisor`` Plan-time entry + ``LibvirtDriver`` runtime.
+"""Libvirt driver.
 
-Phase 2 scope:
-  - connect / disconnect
-  - preflight (read-only checks)
-  - deterministic backend names + stable MACs
-  - libvirt network CRUD + storage pool CRUD
-
-Phase 3+ adds VM CRUD and disk operations.
-
-``libvirt-python`` is imported lazily inside methods so the rest of the
-package is importable on hosts without libvirt-dev installed.
+Exports the ``LibvirtHypervisor`` Plan-time data type and the
+``LibvirtDriver`` runtime. ``libvirt-python`` is imported lazily inside
+methods so the rest of the package is importable on hosts without
+``libvirt-dev`` installed.
 """
 
 from __future__ import annotations
@@ -21,7 +15,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from testrange._log import get_logger
 from testrange.devices.pool.base import StoragePool
@@ -93,9 +87,7 @@ class LibvirtHypervisor:
         all_nets = [n.name for s in switches for n in s.networks]
         dup_nets = {n for n in all_nets if all_nets.count(n) > 1}
         if dup_nets:
-            raise ValueError(
-                f"LibvirtHypervisor networks have duplicate names: {sorted(dup_nets)}"
-            )
+            raise ValueError(f"LibvirtHypervisor networks have duplicate names: {sorted(dup_nets)}")
 
         for r in rs:
             for nic in r.spec.nics:
@@ -124,9 +116,6 @@ class LibvirtHypervisor:
     @property
     def all_networks(self) -> tuple[Network, ...]:
         return tuple(n for s in self.networks for n in s.networks)
-
-
-# ---- driver runtime ---------------------------------------------------
 
 
 def _import_libvirt() -> Any:
@@ -171,8 +160,6 @@ class LibvirtDriver(HypervisorDriver):
         self._conn: Any | None = None
         self.pool_root = pool_root or _default_pool_root(uri)
 
-    # ---- connection ---------------------------------------------------
-
     def connect(self) -> None:
         if self._conn is not None:
             return
@@ -197,8 +184,6 @@ class LibvirtDriver(HypervisorDriver):
             raise DriverError("LibvirtDriver not connected; call connect() first")
         return self._conn
 
-    # ---- naming + mac --------------------------------------------------
-
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str:
         """Deterministic libvirt-safe name.
 
@@ -215,8 +200,6 @@ class LibvirtDriver(HypervisorDriver):
         h = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         return f"{_KVM_OUI}:{h[0:2]}:{h[2:4]}:{h[4:6]}"
 
-    # ---- preflight (READ-ONLY) ----------------------------------------
-
     def preflight(
         self,
         plan: Plan,
@@ -232,8 +215,7 @@ class LibvirtDriver(HypervisorDriver):
                     severity="error",
                     code="bad_hypervisor",
                     message=(
-                        f"LibvirtDriver expects a LibvirtHypervisor, "
-                        f"got {type(hyp).__name__}"
+                        f"LibvirtDriver expects a LibvirtHypervisor, got {type(hyp).__name__}"
                     ),
                 )
             )
@@ -265,8 +247,6 @@ class LibvirtDriver(HypervisorDriver):
             ]
         return []
 
-    # ---- network CRUD --------------------------------------------------
-
     def create_network(self, network: Network, switch: Switch, backend_name: str) -> Any:
         _import_libvirt()
         xml = _render_network_xml(network, switch, backend_name)
@@ -293,8 +273,6 @@ class LibvirtDriver(HypervisorDriver):
             net.undefine()
         except Exception as e:
             _log.warning("network %s undefine failed: %s", backend_name, e)
-
-    # ---- pool CRUD -----------------------------------------------------
 
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any:
         path = self.pool_root / backend_name
@@ -336,7 +314,19 @@ class LibvirtDriver(HypervisorDriver):
         except Exception as e:
             _log.warning("pool %s undefine failed: %s", backend_name, e)
 
-    # ---- volume operations --------------------------------------------
+    # qcow2 for disks (overlay support); raw for the cloud-init seed ISO.
+    _VOLUME_SUFFIX: ClassVar[dict[str, str]] = {
+        "install_disk": ".qcow2",
+        "run_disk": ".qcow2",
+        "base_image": ".qcow2",
+        "install_seed": ".iso",
+    }
+
+    def volume_suffix(self, kind: str) -> str:
+        try:
+            return self._VOLUME_SUFFIX[kind]
+        except KeyError as e:
+            raise DriverError(f"LibvirtDriver: unknown volume kind {kind!r}") from e
 
     def _pool_dir(self, pool_backend_name: str) -> Path:
         return self.pool_root / pool_backend_name
@@ -395,7 +385,8 @@ class LibvirtDriver(HypervisorDriver):
             vol.upload(stream, 0, size, 0)
 
             def _send(_stream: Any, nbytes: int, f: Any) -> bytes:
-                return f.read(nbytes)
+                buf: bytes = f.read(nbytes)
+                return buf
 
             f = reader_factory()
             try:
@@ -497,22 +488,24 @@ class LibvirtDriver(HypervisorDriver):
             try:
                 stale.delete(0)
             except Exception as e:
-                _log.warning(
-                    "download: failed to delete stale clone %s: %s", clone_name, e
-                )
+                _log.warning("download: failed to delete stale clone %s: %s", clone_name, e)
         except libvirt.libvirtError:
             pass
 
         clone_xml = _render_uploaded_volume_xml(clone_name, capacity)
         _log.info(
             "flatten %s → %s in pool %s (qcow2, no backing chain)",
-            vol_name, clone_name, pool_backend_name,
+            vol_name,
+            clone_name,
+            pool_backend_name,
         )
         clone_vol = sp.createXMLFrom(clone_xml, source_vol, 0)
         try:
             _log.info(
                 "download %s ← pool %s → %s",
-                vol_name, pool_backend_name, dest_path,
+                vol_name,
+                pool_backend_name,
+                dest_path,
             )
             stream = self.conn.newStream(0)
             try:
@@ -540,9 +533,7 @@ class LibvirtDriver(HypervisorDriver):
             try:
                 clone_vol.delete(0)
             except Exception as e:
-                _log.warning(
-                    "download: failed to delete flat clone %s: %s", clone_name, e
-                )
+                _log.warning("download: failed to delete flat clone %s: %s", clone_name, e)
         return dest_path
 
     def delete_volume(self, pool_backend_name: str, vol_name: str) -> None:
@@ -555,8 +546,6 @@ class LibvirtDriver(HypervisorDriver):
             if "not found" in str(e).lower():
                 return
             raise
-
-    # ---- VM CRUD -------------------------------------------------------
 
     def create_vm(
         self,
@@ -664,9 +653,6 @@ class LibvirtDriver(HypervisorDriver):
             _log.warning("vm %s undefine failed: %s", backend_name, e)
 
 
-# ---- helpers (preflight + XML rendering) ------------------------------
-
-
 def _collect_subnet_findings(hyp: LibvirtHypervisor) -> list[PreflightFinding]:
     findings: list[PreflightFinding] = []
     nets = list(hyp.all_networks)
@@ -690,8 +676,7 @@ def _collect_subnet_findings(hyp: LibvirtHypervisor) -> list[PreflightFinding]:
                     PreflightFinding(
                         severity="error",
                         code="subnet_overlap",
-                        message=f"networks {a.name!r} and {_b.name!r} overlap "
-                        f"({an} vs {bn})",
+                        message=f"networks {a.name!r} and {_b.name!r} overlap ({an} vs {bn})",
                     )
                 )
     return findings
@@ -766,10 +751,7 @@ def _render_network_xml(network: Network, switch: Switch, backend_name: str) -> 
 def _render_pool_xml(backend_name: str, path: Path) -> str:
     """Render a libvirt `<pool type='dir'>` XML doc."""
     return (
-        f"<pool type='dir'>"
-        f"<name>{backend_name}</name>"
-        f"<target><path>{path}</path></target>"
-        f"</pool>"
+        f"<pool type='dir'><name>{backend_name}</name><target><path>{path}</path></target></pool>"
     )
 
 
@@ -788,9 +770,7 @@ def _render_overlay_volume_xml(vol_name: str, source_path: Path) -> str:
     )
 
 
-def _render_uploaded_volume_xml(
-    vol_name: str, capacity_bytes: int, fmt: str = "qcow2"
-) -> str:
+def _render_uploaded_volume_xml(vol_name: str, capacity_bytes: int, fmt: str = "qcow2") -> str:
     """Render a libvirt volume XML for an uploaded file (no backing).
 
     ``fmt`` selects the on-disk format: ``qcow2`` for base/overlay disk images,
@@ -819,8 +799,7 @@ def _render_domain_xml(
     for idx, nic in enumerate(spec.nics):
         if nic.network not in network_refs:
             raise DriverError(
-                f"create_vm: no backend network for {nic.network!r}; "
-                f"known: {sorted(network_refs)}"
+                f"create_vm: no backend network for {nic.network!r}; known: {sorted(network_refs)}"
             )
         net_backend = network_refs[nic.network]
         mac = macs[idx]
@@ -874,3 +853,13 @@ def _render_domain_xml(
         f"</devices>"
         f"</domain>"
     )
+
+
+from testrange.drivers._registry import register as _register  # noqa: E402
+
+_register(
+    hypervisor_cls=LibvirtHypervisor,
+    driver_name=LibvirtDriver.DRIVER_NAME,
+    from_hypervisor=lambda hyp: LibvirtDriver(uri=hyp.connection),
+    from_uri=lambda uri: LibvirtDriver(uri=uri),
+)

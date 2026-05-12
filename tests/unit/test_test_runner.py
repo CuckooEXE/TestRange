@@ -12,7 +12,8 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
 from testrange.orchestrator import Orchestrator, run_tests
@@ -154,6 +155,6 @@ class TestCommunicatorBindDuringEnter:
         with Orchestrator(_plan(), cache_manager=setup_env) as orch:
             assert "web" in orch.vms
             handle = orch.vms["web"]
-            assert handle.ip.startswith("10.97.99.")
             assert isinstance(handle.communicator, SSHCommunicator)
             assert handle.communicator.is_bound
+            assert (handle.communicator.host or "").startswith("10.97.99.")

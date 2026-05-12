@@ -1,12 +1,9 @@
 """Builder ABC.
 
-Phase 0 declares the contract; Phase 3 wires it to cloud-init.
-
-The Builder is the only component that talks to the install lifecycle —
-no Communicator is involved during install (PLAN.md phase 2). The
-Builder produces a self-terminating install payload (e.g., cloud-init
-seed with ``poweroff`` at the end), and the orchestrator polls
-driver-level power state.
+The Builder is the only component that drives the install lifecycle — no
+Communicator is involved during install. The Builder produces a
+self-terminating install payload (e.g., cloud-init seed that ends with
+``poweroff``), and the orchestrator polls driver-level power state.
 """
 
 from __future__ import annotations

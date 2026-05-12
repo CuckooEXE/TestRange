@@ -1,9 +1,8 @@
 """StateStore — atomic read/write of state.json + state.pid.
 
-PID-checked: every state-mutation method refuses to operate against a
-state file whose owning PID is still alive (clear error). Per PLAN.md
-decision 16, this replaces a FileLock — simpler and produces a more
-meaningful diagnostic.
+The owning process records its PID in ``state.pid``. Callers that need
+exclusive access (the cleanup path) call ``require_dead()`` to refuse
+against a still-running owner with a meaningful error.
 """
 
 from __future__ import annotations
@@ -19,7 +18,6 @@ from pathlib import Path
 from testrange._log import get_logger
 from testrange.exceptions import StateError, StateLockedError
 from testrange.state.schema import (
-    PHASE_DONE,
     PHASE_PREFLIGHT,
     SCHEMA_VERSION,
     Resource,
@@ -84,8 +82,6 @@ class StateStore:
         self.state_path = run_dir / "state.json"
         self.pid_path = run_dir / "state.pid"
 
-    # ---- lifecycle -----------------------------------------------------
-
     def initialize(
         self,
         *,
@@ -130,8 +126,6 @@ class StateStore:
         except OSError:
             pass  # non-empty (foreign files) — leave it
 
-    # ---- access --------------------------------------------------------
-
     def exists(self) -> bool:
         return self.state_path.exists()
 
@@ -168,8 +162,6 @@ class StateStore:
                 "kill it first or wait for it to exit, then re-run cleanup."
             )
 
-    # ---- mutation ------------------------------------------------------
-
     def update(self, mutator: Callable[[State], State]) -> State:
         """Read, apply mutator, write atomically. Returns the new state."""
         current = self.read()
@@ -187,14 +179,14 @@ class StateStore:
     ) -> Resource:
         """Add a Resource with intent_at set but outcome_at=None.
 
-        Call this BEFORE the backend create-call. Per PLAN.md, this is the
-        record-before-create invariant: if the process dies between this
-        call and the backend confirming the resource, cleanup still finds
-        the deterministic backend_name and tries to destroy it.
+        Call this BEFORE the backend create-call. Record-before-create
+        invariant: if the process dies between this call and the backend
+        confirming the resource, cleanup still finds the deterministic
+        backend_name and tries to destroy it.
 
-        ``**metadata`` is stored on the resource at intent time, so that
-        ``destroy`` can still dispatch correctly if the backend create
-        fails before ``confirm`` is reached (e.g., volume kinds need a
+        ``**metadata`` is stored on the resource at intent time so that
+        ``destroy`` can dispatch correctly even if the backend create fails
+        before ``confirm`` is reached (e.g., volume kinds need a
         ``pool_backend`` to route through ``delete_volume``).
         """
         r = Resource(
@@ -228,11 +220,6 @@ class StateStore:
 
     def set_phase(self, phase: str) -> None:
         self.update(lambda s: replace(s, phase=phase))
-
-    def mark_done(self) -> None:
-        self.update(lambda s: s.with_phase(PHASE_DONE))
-
-    # ---- atomic write helpers -----------------------------------------
 
     def _write_state_atomic(self, state: State) -> None:
         text = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"

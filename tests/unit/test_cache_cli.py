@@ -30,6 +30,7 @@ class TestCacheAdd:
         out = capsys.readouterr().out.strip()
         # sha256 of "payload\n"
         import hashlib
+
         assert out == hashlib.sha256(b"payload\n").hexdigest()
         assert (cache_env / f"{out}.bin").exists()
         assert (cache_env / f"{out}.json").exists()

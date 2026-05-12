@@ -6,10 +6,6 @@ from dataclasses import dataclass
 
 from testrange.devices.network.base import NetworkIface
 
-# Recognized libvirt virtio drivers; not exhaustive (libvirt accepts more)
-# but the common cases. Validated lazily — pass-through to libvirt XML.
-LIBVIRT_NIC_DRIVERS = ("virtio", "e1000", "e1000e", "rtl8139", "ne2k_pci")
-
 
 @dataclass(frozen=True)
 class LibvirtNetworkIface(NetworkIface):

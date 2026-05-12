@@ -1,8 +1,8 @@
 """Communicator ABC and the shared ExecResult type.
 
-Phase 0: the ABC + the result dataclass. Phase 5 wires SSHCommunicator
-to paramiko. Per PLAN.md decision 5 there is **no** ``bind()`` on the ABC —
-each concrete declares its own per-type bind signature.
+By design the ABC has no ``bind()`` — each concrete declares its own
+per-type bind signature so the orchestrator can dispatch with type-specific
+arguments.
 """
 
 from __future__ import annotations

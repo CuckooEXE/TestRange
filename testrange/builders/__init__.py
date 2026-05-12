@@ -1,8 +1,4 @@
-"""Builders — produce install payloads + drive the install lifecycle.
-
-Plan-time API exposes ``CloudInitBuilder``. The runtime guts (rendering,
-seed-ISO authoring) land in Phase 3.
-"""
+"""Builders — produce install payloads (e.g., cloud-init seeds) consumed during install."""
 
 from __future__ import annotations
 

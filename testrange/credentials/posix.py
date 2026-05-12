@@ -11,8 +11,8 @@ from testrange.credentials.base import Credential
 class PosixCred(Credential):
     """POSIX user with optional password and/or SSH public key.
 
-    Auth precedence at use-time (PLAN.md decision 7): SSH pubkey if present,
-    else password. Carrying both is legal — the credential is just data.
+    Auth precedence at use-time: SSH pubkey if present, else password.
+    Carrying both is legal — the credential is just data.
 
     Fields:
       username: POSIX username.

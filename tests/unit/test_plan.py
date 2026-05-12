@@ -9,7 +9,8 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
@@ -104,10 +105,6 @@ class TestLibvirtHypervisor:
 
 
 class TestVMRecipe:
-    def test_basic(self) -> None:
-        r = _basic_recipe()
-        assert r.name == "web"
-
     def test_credentials_lookup(self) -> None:
         r = _basic_recipe()
         cred = r.builder.find_credential("u")

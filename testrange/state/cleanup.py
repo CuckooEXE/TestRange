@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from testrange._log import get_logger
-from testrange.exceptions import DriverError, StateError, StateLockedError
+from testrange.drivers import driver_for_name
+from testrange.drivers.base import HypervisorDriver
+from testrange.exceptions import StateError, StateLockedError
 from testrange.state.schema import PHASE_CLEANUP, PHASE_DONE
 from testrange.state.store import StateStore, default_state_root
 
@@ -30,12 +32,9 @@ def find_run_dirs(root: Path | None = None) -> list[Path]:
     return sorted(p for p in base.iterdir() if p.is_dir())
 
 
-def _instantiate_driver(state_driver_class: str, state_driver_uri: str) -> object:
-    """Re-instantiate the driver named in state.json."""
-    if state_driver_class == "LibvirtDriver":
-        from testrange.drivers.libvirt import LibvirtDriver
-        return LibvirtDriver(uri=state_driver_uri)
-    raise DriverError(f"unknown driver class in state: {state_driver_class!r}")
+def _instantiate_driver(state_driver_class: str, state_driver_uri: str) -> HypervisorDriver:
+    """Re-instantiate the driver named in state.json via the driver registry."""
+    return driver_for_name(state_driver_class, state_driver_uri)
 
 
 def cleanup_run(
@@ -71,30 +70,27 @@ def cleanup_run(
         )
 
     driver = _instantiate_driver(state.driver_class, state.driver_uri)
-    # connect / disconnect are on HypervisorDriver
-    driver.connect()  # type: ignore[attr-defined]
+    driver.connect()
     try:
         store.set_phase(PHASE_CLEANUP)
         for r in reversed(state.resources):
             try:
-                driver.destroy(  # type: ignore[attr-defined]
-                    r.kind, r.backend_name, **dict(r.metadata)
-                )
+                driver.destroy(r.kind, r.backend_name, **dict(r.metadata))
                 store.forget(r.backend_name)
                 destroyed.append(r.backend_name)
             except Exception as e:
                 _log.warning("destroy %s/%s failed: %s", r.kind, r.backend_name, e)
                 errors.append((r.backend_name, str(e)))
     finally:
-        driver.disconnect()  # type: ignore[attr-defined]
+        driver.disconnect()
 
     # If we cleaned everything, mark done + remove the dir
     final_state = store.read()
     if not final_state.resources and not errors:
-        store.mark_done()
+        store.set_phase(PHASE_DONE)
         store.remove()
-    else:
-        store.set_phase(PHASE_DONE if not final_state.resources else PHASE_CLEANUP)
+    elif not final_state.resources:
+        store.set_phase(PHASE_DONE)
     return CleanupResult(
         run_id=run_id,
         destroyed=tuple(destroyed),

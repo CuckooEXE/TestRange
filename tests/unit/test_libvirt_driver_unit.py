@@ -16,7 +16,8 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import (
     LibvirtDriver,
     LibvirtHypervisor,
@@ -106,9 +107,10 @@ class TestComposeMac:
 
 
 class TestPreflight:
-    def test_clean(self, tmp_path: Path) -> None:
-        d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
-        # Cache must resolve for clean preflight:
+    def test_clean_creates_pool_root(self, tmp_path: Path) -> None:
+        # Clean preflight must (a) report no errors and (b) leave pool_root
+        # on disk for /session URIs (system URIs let libvirtd build it).
+        d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path / "pools")
         cache = LocalCache(root=tmp_path / "c")
         src = tmp_path / "fake.qcow2"
         src.write_bytes(b"x")
@@ -117,6 +119,7 @@ class TestPreflight:
         report = d.preflight(_plan(), cache_manager=mgr)
         assert bool(report), report.render()
         assert report.errors == ()
+        assert (tmp_path / "pools").exists()
 
     def test_cache_miss(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
@@ -149,17 +152,6 @@ class TestPreflight:
         report = d.preflight(plan, cache_manager=mgr)
         codes = {f.code for f in report.errors}
         assert "subnet_overlap" in codes
-
-    def test_pool_root_writable(self, tmp_path: Path) -> None:
-        d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path / "pools")
-        cache = LocalCache(root=tmp_path / "c")
-        src = tmp_path / "fake.qcow2"
-        src.write_bytes(b"x")
-        cache.add(src, name="debian-13")
-        mgr = CacheManager(local=cache)
-        report = d.preflight(_plan(), cache_manager=mgr)
-        assert (tmp_path / "pools").exists()
-        assert bool(report)
 
     def test_system_uri_skips_user_side_pool_root_mkdir(self, tmp_path: Path) -> None:
         # Even when pool_root points at an unwritable location, system-mode
@@ -258,7 +250,7 @@ class _FakeStorageVol:
     def upload(self, stream: Any, offset: int, length: int, flags: int) -> None:
         self.upload_called_with = (stream, offset, length, flags)
 
-    def download(self, stream: "_FakeStream", offset: int, length: int, flags: int) -> None:
+    def download(self, stream: _FakeStream, offset: int, length: int, flags: int) -> None:
         self.download_called_with = (stream, offset, length, flags)
         # Seed the stream with the volume's bytes so recvAll has data to deliver.
         stream.to_deliver = self.contents
@@ -267,7 +259,7 @@ class _FakeStorageVol:
         # libvirt returns [type, capacity, allocation]; we only use capacity.
         return [0, len(self.contents), len(self.contents)]
 
-    def delete(self, flags: int) -> None:  # noqa: ARG002
+    def delete(self, flags: int) -> None:
         self.deleted = True
 
 
@@ -278,23 +270,20 @@ class _FakeStream:
         self.finished = False
         self.aborted = False
 
-    def sendAll(self, handler: Any, opaque: Any) -> None:  # noqa: N802
+    def sendAll(self, handler: Any, opaque: Any) -> None:
         # Mirror libvirt's contract: pump bytes from handler until empty.
+        # Pass -1 (Python's "read everything") so the handler returns whatever
+        # remains in one shot.
         while True:
-            chunk = handler(self, 64 * 1024, opaque)
+            chunk = handler(self, -1, opaque)
             if not chunk:
                 return
             self.sent.extend(chunk)
 
-    def recvAll(self, handler: Any, opaque: Any) -> None:  # noqa: N802
-        # Deliver to_deliver bytes to the handler in 64K chunks.
-        chunk_size = 64 * 1024
-        view = memoryview(self.to_deliver)
-        i = 0
-        while i < len(view):
-            chunk = bytes(view[i : i + chunk_size])
-            handler(self, chunk, opaque)
-            i += len(chunk)
+    def recvAll(self, handler: Any, opaque: Any) -> None:
+        # Deliver to_deliver bytes to the handler in a single shot.
+        if self.to_deliver:
+            handler(self, self.to_deliver, opaque)
 
     def finish(self) -> None:
         self.finished = True
@@ -315,35 +304,33 @@ class _FakePool:
         self.deleted = False
         self.undefined = False
 
-    def isActive(self) -> bool:  # noqa: N802
+    def isActive(self) -> bool:
         return self.active
 
     def destroy(self) -> None:
         self.active = False
 
-    def delete(self, flags: int) -> None:  # noqa: ARG002
+    def delete(self, flags: int) -> None:
         self.deleted = True
 
     def undefine(self) -> None:
         self.undefined = True
 
-    def storageVolLookupByName(self, name: str) -> _FakeStorageVol:  # noqa: N802
+    def storageVolLookupByName(self, name: str) -> _FakeStorageVol:
         import libvirt as _libvirt  # real module for libvirtError
 
         if name not in self.volumes:
             raise _libvirt.libvirtError(f"no volume {name}")
         return self.volumes[name]
 
-    def createXML(self, xml: str, flags: int) -> _FakeStorageVol:  # noqa: N802,ARG002
+    def createXML(self, xml: str, flags: int) -> _FakeStorageVol:
         self.create_xmls.append(xml)
         name = re.search(r"<name>([^<]+)</name>", xml).group(1)  # type: ignore[union-attr]
         v = _FakeStorageVol(name)
         self.volumes[name] = v
         return v
 
-    def createXMLFrom(  # noqa: N802
-        self, xml: str, source_vol: _FakeStorageVol, flags: int
-    ) -> _FakeStorageVol:
+    def createXMLFrom(self, xml: str, source_vol: _FakeStorageVol, flags: int) -> _FakeStorageVol:
         del flags
         self.create_xmls.append(xml)
         name = re.search(r"<name>([^<]+)</name>", xml).group(1)  # type: ignore[union-attr]
@@ -353,13 +340,13 @@ class _FakePool:
         self.volumes[name] = v
         return v
 
-    def refresh(self, flags: int) -> None:  # noqa: ARG002
+    def refresh(self, flags: int) -> None:
         self.refresh_calls += 1
 
-    def setAutostart(self, flag: bool) -> None:  # noqa: N802
+    def setAutostart(self, flag: bool) -> None:
         self.autostart = flag
 
-    def build(self, flags: int) -> None:  # noqa: ARG002
+    def build(self, flags: int) -> None:
         self.built = True
 
     def create(self) -> None:
@@ -372,14 +359,14 @@ class _FakeConn:
         self.streams: list[_FakeStream] = []
         self.defined_pool_xmls: list[str] = []
 
-    def storagePoolLookupByName(self, name: str) -> _FakePool:  # noqa: N802,ARG002
+    def storagePoolLookupByName(self, name: str) -> _FakePool:
         return self.pool
 
-    def storagePoolDefineXML(self, xml: str) -> _FakePool:  # noqa: N802
+    def storagePoolDefineXML(self, xml: str) -> _FakePool:
         self.defined_pool_xmls.append(xml)
         return self.pool
 
-    def newStream(self, flags: int) -> _FakeStream:  # noqa: N802,ARG002
+    def newStream(self, flags: int) -> _FakeStream:
         s = _FakeStream()
         self.streams.append(s)
         return s

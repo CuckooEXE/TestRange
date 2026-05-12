@@ -18,7 +18,8 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, LibvirtNetworkIface, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import (
     InstallTimeoutError,
@@ -30,8 +31,6 @@ from testrange.orchestrator import Orchestrator
 from testrange.packages import Apt
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms import VMRecipe, VMSpec
-
-# ---- fakes -----------------------------------------------------------------
 
 
 class _FakeDriver:
@@ -50,12 +49,8 @@ class _FakeDriver:
         self.fail_create_vm = False
         self._pool_dirs: set[Path] = set()
 
-    # ---- bookkeeping ---------------------------------------------------
-
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
-
-    # ---- ABC surface --------------------------------------------------
 
     def connect(self) -> None:
         self.connected = True
@@ -82,6 +77,14 @@ class _FakeDriver:
 
     def destroy_network(self, backend_name: str) -> None:
         self._record("destroy_network", backend_name)
+
+    def volume_suffix(self, kind: str) -> str:
+        return {
+            "install_disk": ".qcow2",
+            "run_disk": ".qcow2",
+            "base_image": ".qcow2",
+            "install_seed": ".iso",
+        }[kind]
 
     def create_pool(self, pool: Any, backend_name: str) -> Any:
         self._record("create_pool", backend_name, pool.name)
@@ -192,9 +195,6 @@ class _FakeDriver:
             self.delete_volume(metadata["pool_backend"], backend_name)
 
 
-# ---- fixtures --------------------------------------------------------------
-
-
 def _plan(name: str = "hello") -> Plan:
     return Plan(
         LibvirtHypervisor(
@@ -258,9 +258,6 @@ def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("testrange.orchestrator.runtime.time.sleep", lambda _s: None)
 
 
-# ---- tests -----------------------------------------------------------------
-
-
 class TestEnterAndExit:
     def test_full_lifecycle(
         self,
@@ -293,8 +290,7 @@ class TestEnterAndExit:
             pass
         # An install_vm was created (cache miss) and destroyed
         install_creates = [
-            c for c in fake_driver.calls
-            if c[0] == "create_vm" and "install_vm" in c[1][0]
+            c for c in fake_driver.calls if c[0] == "create_vm" and "install_vm" in c[1][0]
         ]
         assert len(install_creates) == 1
 
@@ -308,8 +304,7 @@ class TestEnterAndExit:
         with Orchestrator(_plan(), cache_manager=mgr):
             pass
         first_install_creates = sum(
-            1 for c in fake_driver.calls
-            if c[0] == "create_vm" and "install_vm" in c[1][0]
+            1 for c in fake_driver.calls if c[0] == "create_vm" and "install_vm" in c[1][0]
         )
         assert first_install_creates == 1
 
@@ -318,8 +313,7 @@ class TestEnterAndExit:
         with Orchestrator(_plan(), cache_manager=mgr):
             pass
         second_install_creates = sum(
-            1 for c in fake_driver.calls
-            if c[0] == "create_vm" and "install_vm" in c[1][0]
+            1 for c in fake_driver.calls if c[0] == "create_vm" and "install_vm" in c[1][0]
         )
         assert second_install_creates == 0
 
@@ -330,9 +324,7 @@ class TestEnterAndExit:
     ) -> None:
         mgr, _ = populated_cache
         fake_driver.preflight_report = PreflightReport(
-            findings=(
-                PreflightFinding(severity="error", code="x", message="nope"),
-            )
+            findings=(PreflightFinding(severity="error", code="x", message="nope"),)
         )
         with pytest.raises(PreflightError):
             with Orchestrator(_plan(), cache_manager=mgr):
@@ -418,22 +410,3 @@ class TestStateFileRecord:
             state_dir = tmp / "s" / "testrange" / "runs" / run_id
             assert (state_dir / "state.json").exists()
         assert not (tmp / "s" / "testrange" / "runs" / run_id).exists()
-
-
-class TestRunTests:
-    def test_run_tests_brings_up_and_tears_down(
-        self,
-        fake_driver: _FakeDriver,
-        populated_cache: tuple[CacheManager, Path],
-    ) -> None:
-        del fake_driver
-        mgr, _ = populated_cache
-        from testrange.orchestrator import run_tests
-
-        def my_test(orch):  # type: ignore[no-untyped-def]
-            pass
-
-        results = run_tests([my_test], _plan(), cache_manager=mgr)
-        assert len(results) == 1
-        assert results[0].name == "my_test"
-        assert results[0].passed

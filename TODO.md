@@ -4,30 +4,16 @@ Convention: items don't get deleted. When something is done or
 superseded, it moves to the **Done / Superseded** section at the bottom
 with a date stamp.
 
-## Short-term (in scope for v0)
+## Short-term
 
-- DHCP-on-by-default per Network.
-- DNS via per-network dnsmasq; `<vm>.<network>` resolution.
-- `mgmt=True` on Switch/Network: places a management interface so guests
-  can reach the host's libvirt API. Document the security implication
-  (guests can reach the host).
-- `internet=True` (default) / `air_gapped=True` on Switch/Network:
-  NAT-to-host vs internal-only.
-- Intelligent cleanup on ALL exceptions, including CTRL-C (via signal
-  handler that transitions to cleanup, not via `atexit`). `kill -9` is
-  recoverable only via state-file-driven `testrange cleanup`.
-- `Builder.config_hash`: deterministic password-salt seed to keep cache
-  hits across runs.
-- **Driver-level stable MAC assignment.** Each driver derives a NIC's
-  MAC deterministically from `(plan_name, vm_name, nic_index)` so the
-  install VM and run VM (and any re-run of the same plan) get the same
-  MAC. Required because cloud-init's rendered network-config on the
-  cached disk can match interfaces by MAC — letting the backend
-  auto-generate would silently break networking on every cache-hit run.
-  This belongs in the driver, not in shared utility code: each backend
-  has its own OUI and MAC-format conventions (libvirt/KVM `52:54:00:…`,
-  VMware `00:50:56:…`, Hyper-V `00:15:5D:…`). The driver ABC exposes
-  the contract; concretes own the hash + prefix.
+- `repl`.
+- DNS via per-network dnsmasq with `<vm>.<network>` resolution. The
+  `Network.dns` flag is honored at the libvirt XML level (forward DNS),
+  but the `<vm>.<network>` short-name resolution piece isn't wired.
+- `mgmt=True` on Switch is accepted at Plan time but is **not currently
+  honored by `LibvirtDriver`** — fix is to render a management
+  interface so guests can reach the host's libvirt API. Document the
+  security implication (guests can reach the host) when wiring.
 
 ## Long-term
 
@@ -55,3 +41,21 @@ with a date stamp.
   ever legitimately need to mutate the same run's state.
 
 ## Done / Superseded
+
+- **DHCP-on-by-default per Network.** `Network.dhcp` defaults to `True`;
+  `LibvirtDriver` renders DHCP in the network XML. (2026-05-11)
+- **`internet=True` (default) / `internet=False` on Switch.** Switch's
+  `internet` flag is honored at the libvirt XML level: `True` renders
+  `<forward mode='nat'/>`; `False` renders no forward (air-gapped).
+  (2026-05-11)
+- **Intelligent cleanup on ALL exceptions, including CTRL-C.**
+  `Orchestrator._install_signal_handlers` raises `KeyboardInterrupt` on
+  SIGTERM/SIGHUP, routing through `__exit__`'s cleanup path. `kill -9`
+  is recoverable via state-file-driven `testrange cleanup`. (2026-05-11)
+- **`Builder.config_hash` deterministic across runs.** Superseded by
+  deterministic Ed25519 keypair derivation: `gen_ssh_key(comment=...)`
+  seeds from `sha256(comment)`, so the rendered seed (and thus
+  `config_hash`) is byte-stable. (v0.0.1)
+- **Driver-level stable MAC assignment.** `LibvirtDriver.compose_mac`
+  derives a stable MAC from `(plan_name, vm_name, nic_index)` under
+  the KVM `52:54:00:` OUI. See ADR-0006. (2026-05-11)

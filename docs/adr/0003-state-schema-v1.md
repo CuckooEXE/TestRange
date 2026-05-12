@@ -20,17 +20,17 @@ State file format (``schema_version: 1``):
   "run_id": "...",
   "plan_name": "...",
   "driver_class": "LibvirtDriver",
-  "driver_uri": "qemu:///session",
+  "driver_uri": "qemu:///system",
   "phase": "install",
   "created_at": "2026-05-11T...",
   "resources": [
     {
-      "kind": "network",
-      "backend_name": "tr_network_abc12345_netA",
-      "plan_name": "netA",
+      "kind": "install_disk",
+      "backend_name": "tr_install_vm_abc12345_web.qcow2",
+      "plan_name": "web",
       "intent_at": "2026-05-11T...",
       "outcome_at": "2026-05-11T...",
-      "metadata": {"ip": "10.0.1.5"}
+      "metadata": {"pool_backend": "tr_pool_abc12345_pool1"}
     }
   ]
 }
@@ -39,9 +39,10 @@ State file format (``schema_version: 1``):
 - ``intent_at`` / ``outcome_at`` separate "we asked the backend to
   create this" from "the backend confirmed it." A SIGKILL between
   the two still lets cleanup walk by deterministic backend name.
-- ``metadata`` is a per-resource dict — schema-flexible. v0 stores
-  ``pool_backend`` for volume kinds; future schema-version-1 readers
-  can ignore unknown keys.
+- ``metadata`` is a per-resource dict — schema-flexible. Volume kinds
+  carry ``pool_backend`` so cleanup can route through ``delete_volume``;
+  metadata is stamped at intent time AS WELL AS merged at confirm time,
+  so a crash between the two leaves cleanup enough info to dispatch.
 
 ## Consequences
 

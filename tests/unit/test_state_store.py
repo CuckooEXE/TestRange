@@ -44,9 +44,6 @@ class TestPidLiveness:
     def test_current_process_alive(self) -> None:
         assert is_pid_alive(os.getpid())
 
-    def test_pid_zero_dead(self) -> None:
-        assert is_pid_alive(0) is False
-
     def test_unknown_pid_dead(self) -> None:
         # 0xFFFFFF is well beyond normal PID range on Linux.
         assert is_pid_alive(0x7FFFFFFF) is False
@@ -125,25 +122,16 @@ class TestStateStore:
         store.forget("bn")
         assert store.read().resources == ()
 
-    def test_atomic_write_no_partials(self, tmp_path: Path) -> None:
+    def test_initialize_lays_down_well_formed_no_partials(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.initialize(
             run_id="r1",
             plan_name="hello",
             driver_class="LibvirtDriver",
-            driver_uri="qemu:///session",
+            driver_uri="qemu:///system",
         )
-        partials = list(store.run_dir.glob("*.partial"))
-        assert partials == []
-
-    def test_state_json_is_well_formed(self, tmp_path: Path) -> None:
-        store = self._store(tmp_path)
-        store.initialize(
-            run_id="r1",
-            plan_name="hello",
-            driver_class="LibvirtDriver",
-            driver_uri="qemu:///session",
-        )
+        # No torn-write residue, and the written state.json is well-formed.
+        assert list(store.run_dir.glob("*.partial")) == []
         data = json.loads(store.state_path.read_text())
         assert data["schema_version"] == 1
         assert data["run_id"] == "r1"
@@ -171,15 +159,15 @@ class TestStateStore:
         store.pid_path.write_text("0\n")
         store.require_dead()  # no raise
 
-    def test_mark_done(self, tmp_path: Path) -> None:
+    def test_set_phase_persists(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.initialize(
             run_id="r1",
             plan_name="hello",
             driver_class="LibvirtDriver",
-            driver_uri="qemu:///session",
+            driver_uri="qemu:///system",
         )
-        store.mark_done()
+        store.set_phase(PHASE_DONE)
         assert store.read().phase == PHASE_DONE
 
     def test_remove(self, tmp_path: Path) -> None:

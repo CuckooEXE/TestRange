@@ -1,10 +1,11 @@
-"""State-file schema (version 1).
+"""State-file schema.
 
-Schema is forward-compatible: resource ``metadata`` dict carries per-kind
+Forward-compatible: the per-resource ``metadata`` dict carries per-kind
 fields without a schema bump. ``intent_at`` / ``outcome_at`` separate
-"we asked the backend to create this" from "the backend confirmed it,"
-so a SIGKILL between record and create still leaves enough information
-for cleanup to act safely.
+"asked the backend to create this" from "the backend confirmed it," so a
+crash between the two still leaves cleanup enough information to route
+correctly. Bump ``SCHEMA_VERSION`` when the on-disk shape changes
+incompatibly.
 """
 
 from __future__ import annotations
@@ -15,11 +16,10 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
-# Phase constants. Strings, not an Enum — easier to evolve.
+# Phase constants. Strings (JSON-writable without a custom encoder).
 PHASE_PREFLIGHT = "preflight"
 PHASE_INSTALL = "install"
 PHASE_RUN = "run"
-PHASE_TEST = "test"
 PHASE_CLEANUP = "cleanup"
 PHASE_DONE = "done"
 PHASE_LEAKED = "leaked"
@@ -96,9 +96,7 @@ class State:
     def replace_resource(self, backend_name: str, new: Resource) -> State:
         return replace(
             self,
-            resources=tuple(
-                new if r.backend_name == backend_name else r for r in self.resources
-            ),
+            resources=tuple(new if r.backend_name == backend_name else r for r in self.resources),
         )
 
     def remove_resource(self, backend_name: str) -> State:
@@ -106,9 +104,6 @@ class State:
             self,
             resources=tuple(r for r in self.resources if r.backend_name != backend_name),
         )
-
-    def with_phase(self, phase: str) -> State:
-        return replace(self, phase=phase)
 
     def to_json(self) -> dict[str, Any]:
         return {
