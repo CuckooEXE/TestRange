@@ -39,7 +39,19 @@ skip on machines without ``libvirt-python``.
 - Deterministic names: ``driver.compose_resource_name`` and
   ``driver.compose_mac`` are pure functions of the run + plan + VM.
 
-## Layout
+## Where to go next
 
-See ``docs/Architecture-and-Design.md`` for component overview and
-``docs/adr/`` for load-bearing decisions.
+- [Architecture](architecture.md) — component overview.
+- [Extending](extending/index.md) — how to add a new driver, device,
+  communicator, or builder.
+- [Bugfixing](bugfixing.md) — reproduction, diagnosis, regression tests.
+- [ADRs](../adr/index.md) — load-bearing decisions.
+
+## Building the docs
+
+```sh
+pip install -e '.[docs]'
+make -C docs html
+```
+
+The HTML lands at `docs/_build/html/index.html`.

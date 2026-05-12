@@ -107,8 +107,9 @@ testrange cleanup --all [--dry-run]
   VMs; each VM constructs its own. The single-use guard fails loud
   if you try.
 - Test functions share the brought-up range. State mutations in one
-  test bleed to the next (PLAN.md decision 14). Per-test snapshots
-  are a long-term TODO.
+  test bleed to the next. For per-test reversion, take a snapshot at
+  the start and restore at the end via `orch.driver` — see
+  [Running tests](running-tests.md) for the snapshot recipe.
 - For debugging a failing test, `testrange run --leak-on-failure
   plan.py` retains the brought-up range so you can SSH in. Later,
   tear down with `testrange cleanup <run_id>` (the run id is printed

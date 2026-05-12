@@ -21,7 +21,15 @@ with a date stamp.
 - Nested orchestration (`AbstractHypervisor` shape designed fresh, not
   copied from `.bak`).
 - `--resume <run_id>` (state schema already future-proofed).
-- Snapshots / per-test revert.
+- **Proxy abstraction.** Port back the `Proxy` ABC from `.bak/testrange/
+  proxy/`: two-shape tunnel into a hypervisor's inner-VM network namespace.
+  `connect((host, port)) -> socket.socket` for clients that accept a
+  `sock=` (paramiko, requests adapters, asyncio); `forward((host, port),
+  bind=...) -> (host, port)` for opaque clients that only know
+  `host:port`. Concretes per backend (SSH jumphost for libvirt remote,
+  ESXi web console proxy, Proxmox proxy node, ...). Required for any
+  Communicator to reach a guest on an inner-only network. Design fresh
+  rather than copying `.bak` wholesale.
 - Drivers: Proxmox, ESXi, Hyper-V.
 - Remote hypervisor support (`qemu+ssh://` etc.) — re-introduces a
   storage-transport abstraction.
@@ -59,3 +67,10 @@ with a date stamp.
 - **Driver-level stable MAC assignment.** `LibvirtDriver.compose_mac`
   derives a stable MAC from `(plan_name, vm_name, nic_index)` under
   the KVM `52:54:00:` OUI. See ADR-0006. (2026-05-11)
+- **Snapshots / per-test revert.** `HypervisorDriver` exposes
+  `create_snapshot` / `list_snapshots` / `delete_snapshot` /
+  `restore_snapshot`; `LibvirtDriver` implements via
+  `snapshotCreateXML` / `revertToSnapshot`; teardown handles
+  snapshot-aware cleanup via METADATA_ONLY deletes + pool sweep.
+  Per-test revert is the user's call (the snapshot primitive is
+  there). (v0.0.1)
