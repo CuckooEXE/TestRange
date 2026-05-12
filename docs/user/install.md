@@ -1,37 +1,18 @@
-# Install
+# Installing testrange
 
-`testrange` runs against a local libvirt + KVM host in v0. Remote
-hypervisors and other backends (Proxmox, ESXi, Hyper-V) land later.
+`testrange` is a Python library + CLI. To run tests it needs at least one
+hypervisor backend installed; see [driver install](drivers/index.md) for
+backend prerequisites.
 
-## Prerequisites
+## Requirements
 
-On Debian/Ubuntu:
+- Python 3.11 or later.
+- A hypervisor backend (only [libvirt + KVM](drivers/libvirt.md) is shipped
+  today; ESXi / Proxmox / Hyper-V drivers are on the long-term roadmap).
 
-```sh
-sudo apt install qemu-kvm libvirt-daemon-system libvirt-dev \
-                 python3-pip python3-venv
-sudo usermod -a -G libvirt,kvm "$USER"
-# Log out + back in for group membership to take effect.
-```
+## Install the package
 
-On Fedora:
-
-```sh
-sudo dnf install @virtualization libvirt-devel python3-pip
-sudo usermod -a -G libvirt,kvm "$USER"
-```
-
-Verify libvirt is reachable:
-
-```sh
-virsh -c qemu:///system list --all
-```
-
-`testrange` works with both `qemu:///session` (unprivileged, user-owned) and
-`qemu:///system` (privileged, libvirt-qemu-owned). The default example uses
-`qemu:///system`; either works once the user is in the `libvirt` group.
-
-## Install testrange
+Clone, create a venv, install with the extras you need:
 
 ```sh
 git clone <repo-url> testrange && cd testrange
@@ -40,25 +21,49 @@ source .venv/bin/activate
 pip install -e '.[all,dev]'
 ```
 
-## Verify
+The available extras:
+
+`libvirt`
+: `libvirt-python` — required to talk to libvirtd.
+
+`ssh`
+: `paramiko` — required for `SSHCommunicator` (the only built-in
+  communicator today).
+
+`cloudinit`
+: `pycdlib` + `pyyaml` — required for `CloudInitBuilder` (the only
+  built-in builder today).
+
+`docs`
+: `sphinx` + `furo` + `myst-parser` — to rebuild this documentation.
+
+`dev`
+: dev-only tools (pytest, ruff, mypy, type stubs).
+
+`all`
+: shorthand for `libvirt,ssh,cloudinit`.
+
+For a typical install you'll want `'.[all,dev]'`.
+
+## Verify the install
 
 ```sh
 testrange --version
 testrange describe examples/hello_world.py
 ```
 
-The describe command should run without touching libvirt. The
-``CacheEntry`` references will show "⚠ not in cache" — that's
-expected until you ``testrange cache add`` them.
+`describe` runs without touching libvirt. The `CacheEntry` references will
+show "⚠ not in cache" until you populate the cache. That's the next step
+in the per-driver setup pages.
 
 ## Storage locations
 
+testrange writes to three XDG-style locations:
+
 - `$XDG_CACHE_HOME/testrange/isos/` — content-addressed cache (default:
-  `~/.cache/testrange/isos/`).
-- `$XDG_STATE_HOME/testrange/runs/<run_id>/` — per-run state (default:
-  `~/.local/state/testrange/runs/`).
-- Libvirt storage pool root — picked by the connection URI:
-  - `qemu:///system` (or any remote `/system` URI): `/var/lib/libvirt/images/testrange/`
-    (owned by libvirtd; the driver builds the per-pool subdirectory at pool-create time).
-  - `qemu:///session`: `~/.local/share/testrange/pools/`.
-  One subdirectory per pool per run.
+  `~/.cache/testrange/isos/`). One `<sha>.bin` per disk + sidecar
+  `<sha>.json`.
+- `$XDG_STATE_HOME/testrange/runs/<run_id>/` — per-run state file +
+  PID file (default: `~/.local/state/testrange/runs/`).
+- A hypervisor-side **pool root** for VM disks (path picked by the driver
+  — see the per-driver page).

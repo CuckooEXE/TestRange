@@ -10,7 +10,7 @@ pentest test-ranges.
 ## Quickstart
 
 ```sh
-# Prereqs: libvirt + KVM + group membership (see docs/user/install.md)
+# Prereqs: libvirt + KVM + group membership (see docs/user/drivers/libvirt.md)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[all,dev]'
 
@@ -64,12 +64,23 @@ testrange cleanup --all [--dry-run]
 
 ## Docs
 
-- `docs/user/install.md` — prerequisites and install.
-- `docs/user/writing-a-plan.md` — plan API + examples.
-- `docs/Architecture-and-Design.md` — component overview.
-- `docs/adr/` — load-bearing decisions.
+Sphinx + furo. Build locally:
+
+```sh
+pip install -e '.[docs]'
+make -C docs html
+# open docs/_build/html/index.html
+```
+
+The doc tree:
+
+- **User guide** (`docs/user/`) — install testrange, install your
+  driver of choice, write a plan, run tests.
+- **Developer guide** (`docs/dev/`) — architecture, how to extend
+  (new drivers/devices/communicators/builders), bug-fixing recipes.
+- **ADRs** (`docs/adr/`) — load-bearing decisions.
 
 ## Status
 
-Pre-1.0. See `docs/Architecture-and-Design.md` for the component overview
-and `TODO.md` for in-scope and long-term work.
+Pre-1.0. See `docs/dev/architecture.md` (or the built HTML) for the
+component overview and `TODO.md` for in-scope and long-term work.

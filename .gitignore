@@ -30,5 +30,8 @@ htmlcov/
 Thumbs.db
 
 # Project
-.claude/logs/
+**/.claude/logs/
 *.pid
+
+# Sphinx build output
+docs/_build/
