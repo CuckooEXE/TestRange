@@ -54,7 +54,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", driver="virtio"),
+                        LibvirtNetworkIface("netA", driver="virtio", ipv4="172.31.0.59"),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -97,17 +97,6 @@ def hostname_matches(orch: OrchestratorHandle) -> None:
 
 
 def snapshot_lifecycle(orch: OrchestratorHandle) -> None:
-    """Snapshot → write → reboot → restore → verify revert.
-
-    1. Take a disk-only snapshot of the running VM.
-    2. Write a sentinel file via SSH.
-    3. Reboot via the driver (shutdown + start) and confirm the sentinel
-       persisted across reboot.
-    4. List snapshots (for funsies — and to assert the snapshot is there).
-    5. Restore from the snapshot. Disk-only revert leaves the VM in shutoff,
-       so start it again.
-    6. Confirm the sentinel is gone — proving the revert rewound disk state.
-    """
     vm = orch.vms["web"]
     driver = orch.driver
     vm_be = vm.backend_name
@@ -130,8 +119,6 @@ def snapshot_lifecycle(orch: OrchestratorHandle) -> None:
     snaps = driver.list_snapshots(vm_be)
     assert "pre-write" in snaps, f"snapshot missing from list: {snaps!r}"
 
-    # libvirt requires the VM to be inactive before reverting a disk-only
-    # snapshot. Restore puts the disk back; start brings it up fresh.
     driver.shutdown_vm(vm_be, timeout=60.0)
     driver.restore_snapshot(vm_be, "pre-write")
     driver.start_vm(vm_be)

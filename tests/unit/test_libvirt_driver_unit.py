@@ -25,6 +25,7 @@ from testrange.drivers.libvirt import (
     _render_pool_xml,
 )
 from testrange.networks import Network, Switch
+from testrange.orchestrator.runtime import INSTALL_NETWORK
 from testrange.vms import VMRecipe, VMSpec
 
 
@@ -116,7 +117,7 @@ class TestPreflight:
         src.write_bytes(b"x")
         cache.add(src, name="debian-13")
         mgr = CacheManager(local=cache)
-        report = d.preflight(_plan(), cache_manager=mgr)
+        report = d.preflight(_plan(), cache_manager=mgr, install_network=INSTALL_NETWORK)
         assert bool(report), report.render()
         assert report.errors == ()
         assert (tmp_path / "pools").exists()
@@ -124,7 +125,7 @@ class TestPreflight:
     def test_cache_miss(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
         mgr = CacheManager(local=LocalCache(root=tmp_path / "c"))
-        report = d.preflight(_plan(), cache_manager=mgr)
+        report = d.preflight(_plan(), cache_manager=mgr, install_network=INSTALL_NETWORK)
         codes = {f.code for f in report.errors}
         assert "cache_miss" in codes
 
@@ -149,9 +150,37 @@ class TestPreflight:
                 vms=[_basic_recipe()],
             )
         )
-        report = d.preflight(plan, cache_manager=mgr)
+        report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
         codes = {f.code for f in report.errors}
         assert "subnet_overlap" in codes
+
+    def test_install_cidr_overlap_caught(self, tmp_path: Path) -> None:
+        # A user network that collides with the transient install CIDR must
+        # be caught at preflight (not at install-time when libvirt would
+        # fail with an opaque error).
+        d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
+        cache = LocalCache(root=tmp_path / "c")
+        src = tmp_path / "fake.qcow2"
+        src.write_bytes(b"x")
+        cache.add(src, name="debian-13")
+        mgr = CacheManager(local=cache)
+        # Use a CIDR that overlaps INSTALL_NETWORK ("10.97.99.0/24").
+        plan = Plan(
+            LibvirtHypervisor(
+                connection="qemu:///session",
+                networks=[
+                    Switch("sw1", Network("netA", "10.97.99.0/25")),
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[_basic_recipe()],
+            )
+        )
+        report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
+        overlap_findings = [f for f in report.errors if f.code == "subnet_overlap"]
+        assert overlap_findings, report.render()
+        assert any(
+            f.fix_hint and "install network" in f.fix_hint for f in overlap_findings
+        ), [f.fix_hint for f in overlap_findings]
 
     def test_system_uri_skips_user_side_pool_root_mkdir(self, tmp_path: Path) -> None:
         # Even when pool_root points at an unwritable location, system-mode
@@ -171,7 +200,7 @@ class TestPreflight:
                 vms=[_basic_recipe()],
             )
         )
-        report = d.preflight(plan, cache_manager=mgr)
+        report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
         codes = {f.code for f in report.errors}
         assert "pool_root_unwritable" not in codes
         assert not unwritable.exists()

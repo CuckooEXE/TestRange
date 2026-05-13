@@ -74,7 +74,15 @@ class HypervisorDriver(ABC):
         plan: Plan,
         *,
         cache_manager: CacheManager,
-    ) -> PreflightReport: ...
+        install_network: Network,
+    ) -> PreflightReport:
+        """Read-only checks against the live backend.
+
+        ``install_network`` is the transient subnet the orchestrator will use
+        for the install phase. Preflight includes it in CIDR-overlap checks
+        so a colliding user network is caught here rather than blowing up
+        when the install network is created.
+        """
 
     @abstractmethod
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str: ...

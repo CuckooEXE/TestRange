@@ -32,6 +32,42 @@ class Network:
         """Parsed ip_network object."""
         return ipaddress.ip_network(self.cidr, strict=False)
 
+    @property
+    def gateway(self) -> str:
+        """Gateway address: ``network_address + 1``.
+
+        Convention used by drivers that render a managed bridge for the
+        subnet: the first usable address is the bridge's IP and the guests'
+        default route.
+        """
+        return str(self.network.network_address + 1)
+
+
+@dataclass(frozen=True)
+class NetworkAddressing:
+    """Per-network addressing facts a builder needs to render a guest netplan.
+
+    Lives here (not in builders) because it is hypervisor-agnostic and
+    derived purely from :class:`Network`. The orchestrator brokers: it
+    builds a ``Mapping[network_name, NetworkAddressing]`` from
+    ``hypervisor.all_networks`` and hands it to the builder so the builder
+    never has to know about hypervisor types.
+    """
+
+    cidr: str
+    prefix_len: int
+    gateway: str
+    dhcp: bool
+
+    @classmethod
+    def from_network(cls, net: Network) -> NetworkAddressing:
+        return cls(
+            cidr=net.cidr,
+            prefix_len=net.network.prefixlen,
+            gateway=net.gateway,
+            dhcp=net.dhcp,
+        )
+
 
 @dataclass(frozen=True)
 class Switch:

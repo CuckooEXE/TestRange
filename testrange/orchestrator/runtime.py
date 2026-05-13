@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType, TracebackType
@@ -35,7 +35,7 @@ from testrange.exceptions import (
     OrchestratorError,
     PreflightError,
 )
-from testrange.networks.base import Network, Switch
+from testrange.networks.base import Network, NetworkAddressing, Switch
 from testrange.plan import Plan
 from testrange.state.schema import (
     PHASE_CLEANUP,
@@ -57,10 +57,12 @@ _DEFAULT_INSTALL_TIMEOUT_S = 600.0
 _DEFAULT_LEASE_TIMEOUT_S = 120.0
 
 # Transient install network. Subnet must not collide with any user-declared
-# network in the Plan; preflight validates that. A single hardcoded subnet is
-# fine for the single-run-per-host case; a hashed-from-run-id derivation
-# would be needed for concurrent runs sharing a libvirtd.
-_INSTALL_CIDR = "10.97.99.0/24"
+# network in the Plan; the driver's preflight validates that (the orchestrator
+# passes this constant in as a kwarg so the driver doesn't reach upward).
+# A single hardcoded subnet is fine for the single-run-per-host case; a
+# hashed-from-run-id derivation would be needed for concurrent runs sharing a
+# libvirtd.
+INSTALL_NETWORK = Network("install", "10.97.99.0/24", dhcp=True, dns=False)
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,19 @@ class Orchestrator:
         self._network_backends: dict[str, str] = {}  # plan_name -> backend_name
         self._post_install_paths: dict[str, Path] = {}  # vm_name -> cached disk path
         self._uploaded_bases: set[tuple[str, str]] = set()  # (pool_backend, vol_name)
+        # Builder-facing addressing map. The orchestrator brokers per the
+        # stovepipe rule: builders never see a hypervisor type, they get the
+        # one piece of info they need — per-network CIDR/prefix/gateway/dhcp.
+        self._addressing: Mapping[str, NetworkAddressing] = {
+            n.name: NetworkAddressing.from_network(n)
+            for n in self._all_user_networks()
+        }
+
+    def _all_user_networks(self) -> Sequence[Network]:
+        all_networks = getattr(self.plan.hypervisor, "all_networks", None)
+        if all_networks is None:
+            return ()
+        return tuple(all_networks)
 
     def _build_driver(self) -> HypervisorDriver:
         return driver_for(self.plan.hypervisor)
@@ -139,7 +154,11 @@ class Orchestrator:
         self._install_signal_handlers()
         self.driver.connect()
         try:
-            report = self.driver.preflight(self.plan, cache_manager=self.cache)
+            report = self.driver.preflight(
+                self.plan,
+                cache_manager=self.cache,
+                install_network=INSTALL_NETWORK,
+            )
             if not report:
                 raise PreflightError(report.render())
             self._store.initialize(
@@ -225,7 +244,7 @@ class Orchestrator:
         install_net_backend = self.driver.compose_resource_name(
             self.run_id, "install_network", "install"
         )
-        install_net = Network("install", _INSTALL_CIDR, dhcp=True, dns=False)
+        install_net = INSTALL_NETWORK
         install_switch = Switch("install", install_net, internet=True)
         self._store.record_intent(
             kind="install_network",
@@ -281,7 +300,9 @@ class Orchestrator:
             )
 
         base_info = self.cache.resolve(builder.base)
-        config_hash = builder.config_hash(vm.spec, vm, base_sha=base_info.sha256)
+        config_hash = builder.config_hash(
+            vm.spec, vm, addressing=self._addressing, base_sha=base_info.sha256
+        )
         post_install_name = f"_post_install_{config_hash}"
 
         # Cache hit? Manager checks local then HTTP (if configured); a hit
@@ -323,7 +344,7 @@ class Orchestrator:
         self._store.confirm(install_disk_name, pool_backend=pool_backend)
 
         # Render + write seed
-        seed_bytes = builder.render_seed(vm.spec, vm)
+        seed_bytes = builder.render_seed(vm.spec, vm, addressing=self._addressing)
         self._store.record_intent(
             kind="install_seed",
             backend_name=install_seed_name,
@@ -490,9 +511,21 @@ class Orchestrator:
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
 
     def _discover_ip(self, vm: VMRecipe) -> str:
+        """Resolve the IPv4 address of the VM's **first** declared NIC.
+
+        Static (``nic.ipv4 is not None``): return the declared address
+        directly — the staged run-phase netplan applies it on the first
+        run-phase boot.
+
+        DHCP: poll the driver for the lease keyed on the stable MAC derived
+        from ``(plan_name, vm_name, nic_idx=0)`` until ``lease_timeout_s``
+        elapses. Raises :class:`OrchestratorError` on timeout.
+        """
         if not vm.spec.nics:
-            raise OrchestratorError(f"vm {vm.name!r}: no NICs; cannot bind a network communicator")
+            raise OrchestratorError(f"vm {vm.name!r}: no NICs; cannot resolve an address")
         first_nic = vm.spec.nics[0]
+        if first_nic.ipv4 is not None:
+            return first_nic.ipv4
         net_backend = self._network_backends[first_nic.network]
         mac = self.driver.compose_mac(self._plan_name, vm.name, 0)
         deadline = time.monotonic() + self.lease_timeout_s

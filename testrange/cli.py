@@ -193,6 +193,10 @@ def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
                 print(f"    disk:   {d.pool!r}, {d.size_gb} GB")
             for nic in vm.spec.nics:
                 extra = []
+                if nic.ipv4 is not None:
+                    extra.append(f"ipv4={nic.ipv4}")
+                else:
+                    extra.append("dhcp")
                 if drv := getattr(nic, "driver", None):
                     extra.append(f"driver={drv}")
                 extra_str = f" ({', '.join(extra)})" if extra else ""

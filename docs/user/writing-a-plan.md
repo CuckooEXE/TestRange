@@ -75,6 +75,82 @@ testrange describe path/to/plan.py
 testrange run path/to/plan.py
 ```
 
+## Networking
+
+### Static IPs vs DHCP
+
+Each NIC is DHCP by default. Pin a static address with `ipv4=`:
+
+```python
+LibvirtNetworkIface("netA", ipv4="172.31.0.50")  # static
+LibvirtNetworkIface("netA")                       # DHCP
+```
+
+Plan-time validation runs at Hypervisor construction and reports every
+problem at once:
+
+- `ipv4` must be inside the referenced network's CIDR.
+- `ipv4` cannot equal the network/broadcast address or the gateway
+  (`cidr.network_address + 1`).
+- `ipv4` cannot fall inside the driver's managed DHCP pool when
+  `Network.dhcp=True`. (The libvirt driver currently uses `.100`–`.200`
+  within the subnet.)
+- A NIC without `ipv4` attached to a `Network(dhcp=False)` is rejected
+  (the NIC would never get an address at run-phase).
+- Duplicate static IPs within the same network across VMs are rejected.
+
+### How the install/run swap works
+
+The install phase always runs on a transient internet-attached subnet so
+`apt` and friends work. If the user's real subnets were used during
+install, a static IP would have no route and break the install mid-boot.
+
+When any NIC declares a static `ipv4`, the cloud-init seed stages two
+extra files on the post-install disk:
+
+1. The real run-phase netplan at `/etc/netplan/50-cloud-init.yaml`.
+   Cloud-init's `config` stage writes this AFTER its `init` stage renders
+   the install-time DHCP netplan, so the cached disk ends up with the real
+   netplan in place.
+2. `/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg` so
+   cloud-init does not re-render the netplan on subsequent boots.
+
+The run-phase VM clones the cached disk and attaches to the user's real
+networks. The OS boots reading the staged netplan and comes up on the
+static address.
+
+### Which NIC does the communicator use?
+
+For communicators that reach the VM over the network (the SSH
+communicator is the v0 instance of this pattern), the orchestrator
+resolves the bind address from the **first** declared NIC of the VM.
+If you declare multiple NICs and want the communicator to reach the
+VM via a specific one, declare that NIC first. The other NICs are
+brought up on the guest (per the staged netplan) but are not used for
+the communicator's connection.
+
+```python
+VMSpec(
+    name="multihomed",
+    devices=[
+        CPU(2), Memory(1024), OSDrive("pool1", 8),
+        # Communicator binds to this address:
+        LibvirtNetworkIface("mgmt", ipv4="10.0.0.10"),
+        # Available on the guest, not used by the communicator:
+        LibvirtNetworkIface("data"),
+    ],
+)
+```
+
+If the first NIC is static, the orchestrator skips DHCP-lease lookup and
+binds to `nic.ipv4` directly. If the first NIC is DHCP, the orchestrator
+polls the driver for the lease keyed on the stable MAC.
+
+The first-NIC rule does not apply to communicators that don't use a
+network address — for example, an in-band channel (e.g., a guest-agent
+exec channel) binds via a driver-supplied handle, not a NIC, so NIC
+ordering is irrelevant to it.
+
 ## API recipes
 
 - **Argv-list execute**: `vm.communicator.execute(["systemctl",

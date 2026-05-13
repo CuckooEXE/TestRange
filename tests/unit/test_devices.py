@@ -61,6 +61,7 @@ class TestNICs:
         n = LibvirtNetworkIface("netA")
         assert n.network == "netA"
         assert n.driver == "virtio"
+        assert n.ipv4 is None
         assert isinstance(n, NetworkIface)
 
     def test_libvirt_iface_with_driver(self) -> None:
@@ -70,6 +71,21 @@ class TestNICs:
     def test_invalid_network(self) -> None:
         with pytest.raises(ValueError):
             LibvirtNetworkIface("")
+
+    def test_static_ipv4(self) -> None:
+        n = LibvirtNetworkIface("netA", ipv4="172.31.0.50")
+        assert n.ipv4 == "172.31.0.50"
+
+    def test_static_ipv4_base(self) -> None:
+        n = NetworkIface("netA", ipv4="10.0.0.5")
+        assert n.ipv4 == "10.0.0.5"
+
+    @pytest.mark.parametrize(
+        "bad", ["not-an-ip", "300.300.300.300", "10.0.0", "::1", ""]
+    )
+    def test_invalid_ipv4(self, bad: str) -> None:
+        with pytest.raises(ValueError):
+            LibvirtNetworkIface("netA", ipv4=bad)
 
 
 class TestPool:
