@@ -62,8 +62,10 @@ class _FakeDriver:
         self.connected = False
         self._record("disconnect")
 
-    def preflight(self, plan: Any, *, cache_manager: Any) -> PreflightReport:
-        del plan, cache_manager
+    def preflight(
+        self, plan: Any, *, cache_manager: Any, install_network: Any
+    ) -> PreflightReport:
+        del plan, cache_manager, install_network
         self._record("preflight")
         return self.preflight_report
 
@@ -163,7 +165,7 @@ class _FakeDriver:
         return "running"
 
     def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
-        del network_backend_name
+        self._record("get_lease_ip", network_backend_name, mac)
         # Deterministic fake IP keyed on the MAC; always succeeds.
         last_octet = int(mac.split(":")[-1], 16) % 254 + 1
         return f"10.97.99.{last_octet}"
@@ -459,3 +461,65 @@ class TestHandleLeak:
         # transient install resources, so they aren't clean sentinels.)
         names = [c[0] for c in fake_driver.calls]
         assert "destroy_pool" not in names
+
+
+def _static_plan(ipv4: str) -> Plan:
+    return Plan(
+        LibvirtHypervisor(
+            connection="qemu:///session",
+            networks=[
+                Switch("sw1", Network("netA", "172.31.0.0/24", dhcp=True)),
+            ],
+            pools=[StoragePool("pool1", 32)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(
+                        name="web",
+                        devices=[
+                            CPU(1),
+                            Memory(512),
+                            OSDrive("pool1", 8),
+                            LibvirtNetworkIface("netA", ipv4=ipv4),
+                        ],
+                    ),
+                    builder=CloudInitBuilder(
+                        base=CacheEntry("debian-13"),
+                        credentials=[PosixCred("u", password="p")],
+                    ),
+                    communicator=SSHCommunicator("u"),
+                ),
+            ],
+        ),
+        name="hello",
+    )
+
+
+class TestStaticIPDiscovery:
+    """Static-IP NICs short-circuit DHCP lease lookup."""
+
+    def test_static_ip_skips_get_lease_ip(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_static_plan("172.31.0.50"), cache_manager=mgr) as orch:
+            web = orch.vms["web"]
+            assert isinstance(web.communicator, SSHCommunicator)
+            # SSHCommunicator stores the bound host on _host (post-bind).
+            assert web.communicator._host == "172.31.0.50"
+        # get_lease_ip should not have been called at all — static short-circuits.
+        names = [c[0] for c in fake_driver.calls]
+        assert "get_lease_ip" not in names
+
+    def test_dhcp_still_uses_lease_lookup(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # The default _plan() has a NIC without ipv4 — lease lookup must fire.
+        mgr, _ = populated_cache
+        with Orchestrator(_plan(), cache_manager=mgr):
+            pass
+        names = [c[0] for c in fake_driver.calls]
+        assert "get_lease_ip" in names

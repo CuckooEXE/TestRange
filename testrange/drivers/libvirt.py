@@ -22,6 +22,7 @@ from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError
 from testrange.networks.base import Network, Switch
+from testrange.networks.validate import validate_addressing
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms.recipe import VMRecipe
 from testrange.vms.spec import VMSpec
@@ -107,6 +108,11 @@ class LibvirtHypervisor:
                         f"VM {r.name!r} HardDrive references unknown pool "
                         f"{d.pool!r}; declared pools: {sorted(pool_names)}"
                     )
+
+        # Plan-wide addressing validation (static IP membership, gateway
+        # collision, DHCP-pool collision, duplicates, dhcp=False + no static).
+        # Accumulates every problem into one ValueError.
+        validate_addressing([n for s in switches for n in s.networks], rs)
 
         object.__setattr__(self, "connection", connection)
         object.__setattr__(self, "networks", switches)
@@ -209,6 +215,7 @@ class LibvirtDriver(HypervisorDriver):
         plan: Plan,
         *,
         cache_manager: CacheManager,
+        install_network: Network,
     ) -> PreflightReport:
         findings: list[PreflightFinding] = []
 
@@ -225,7 +232,7 @@ class LibvirtDriver(HypervisorDriver):
             )
             return PreflightReport(findings=tuple(findings))
 
-        findings.extend(_collect_subnet_findings(hyp))
+        findings.extend(_collect_subnet_findings(hyp, install_network))
         findings.extend(_collect_cache_findings(hyp, cache_manager))
         findings.extend(self._collect_pool_root_findings())
 
@@ -734,9 +741,17 @@ class LibvirtDriver(HypervisorDriver):
         dom.revertToSnapshot(snap, 0)
 
 
-def _collect_subnet_findings(hyp: LibvirtHypervisor) -> list[PreflightFinding]:
+def _collect_subnet_findings(
+    hyp: LibvirtHypervisor, install_network: Network
+) -> list[PreflightFinding]:
+    """Pairwise CIDR-overlap check across every user network and the install network.
+
+    The install network is rendered on the same libvirtd as user networks; a
+    CIDR collision would surface as a confusing libvirt error at install
+    time. Catching it here gives the user a `fix_hint` they can act on.
+    """
     findings: list[PreflightFinding] = []
-    nets = list(hyp.all_networks)
+    nets: list[Network] = [*hyp.all_networks, install_network]
     parsed = []
     for n in nets:
         try:
@@ -753,11 +768,20 @@ def _collect_subnet_findings(hyp: LibvirtHypervisor) -> list[PreflightFinding]:
     for i, (a, an) in enumerate(parsed):
         for _b, bn in parsed[i + 1 :]:
             if an.overlaps(bn):
+                hint = None
+                if a is install_network or _b is install_network:
+                    user_net = _b if a is install_network else a
+                    hint = (
+                        f"network {user_net.name!r} overlaps the install "
+                        f"network's CIDR ({install_network.cidr}); pick a "
+                        f"different CIDR for {user_net.name!r}"
+                    )
                 findings.append(
                     PreflightFinding(
                         severity="error",
                         code="subnet_overlap",
                         message=f"networks {a.name!r} and {_b.name!r} overlap ({an} vs {bn})",
+                        fix_hint=hint,
                     )
                 )
     return findings
@@ -803,7 +827,7 @@ def _render_network_xml(network: Network, switch: Switch, backend_name: str) -> 
     net = network.network
     if not isinstance(net, ipaddress.IPv4Network):
         raise DriverError(f"only IPv4 networks supported in v0, got {network.cidr!r}")
-    gateway = str(net.network_address + 1)
+    gateway = network.gateway
     netmask = str(net.netmask)
     forward = "<forward mode='nat'/>" if switch.internet else ""
 

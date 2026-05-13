@@ -8,13 +8,33 @@ cached post-install artifact.
 
 Network rendering uses **interface-name matching** (``match: name: ...``)
 so the cached disk doesn't bake in the install VM's MAC.
+
+Static IPs
+----------
+When any NIC declares a static ``ipv4``, the install seed still uses DHCP
+(install runs on a transient internet-attached subnet; static IPs from the
+user's real subnets have no route there). To make the run-phase clone come
+up on the user's networks with the right static address, the builder stages
+two cloud-init ``write_files`` entries:
+
+* ``/etc/netplan/50-cloud-init.yaml`` — the *real* run-phase netplan, mode
+  ``0600``. Cloud-init writes the install-time DHCP netplan at this path in
+  its ``init`` stage; our ``write_files`` (``config`` stage) overwrites it
+  later in the same boot, so the cached post-install disk already contains
+  the static-aware netplan.
+* ``/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg`` —
+  ``network: {config: disabled}`` so cloud-init never re-renders the
+  netplan on later boots.
+
+No ``netplan apply`` during install. The new file is consumed at the
+run-phase boot, when the VM is attached to the user's real networks.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -24,6 +44,7 @@ from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
 from testrange.exceptions import BuilderError
+from testrange.networks.base import NetworkAddressing
 from testrange.packages.apt import Apt
 from testrange.packages.base import Package
 from testrange.packages.pip import Pip
@@ -136,8 +157,20 @@ class CloudInitBuilder(Builder):
                 return c
         return None
 
-    def render_user_data(self, spec: VMSpec, recipe: VMRecipe) -> str:
-        """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header)."""
+    def render_user_data(
+        self,
+        spec: VMSpec,
+        recipe: VMRecipe,
+        *,
+        addressing: Mapping[str, NetworkAddressing],
+    ) -> str:
+        """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header).
+
+        When any NIC has a static ``ipv4``, the run-phase netplan and a
+        cloud-init disable drop-in are spliced into ``write_files`` so the
+        cached post-install disk boots on the user's real networks with the
+        right addressing. See module docstring.
+        """
         del recipe  # not used yet; reserved for future per-recipe hooks
         users: list[dict[str, Any]] = []
         chpasswd_lines: list[str] = []
@@ -173,6 +206,7 @@ class CloudInitBuilder(Builder):
         write_files = _render_insecure_write_files(
             insecure_apt=self.insecure_apt, insecure_dnf=self.insecure_dnf
         )
+        write_files.extend(_render_run_netplan_write_files(spec, addressing))
         if write_files:
             body["write_files"] = write_files
         if chpasswd_lines:
@@ -204,14 +238,25 @@ class CloudInitBuilder(Builder):
         }
         return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
 
-    def render_network_config(self, spec: VMSpec, recipe: VMRecipe) -> str:
-        """Render cloud-init ``network-config`` (netplan v2).
+    def render_network_config(
+        self,
+        spec: VMSpec,
+        recipe: VMRecipe,
+        *,
+        addressing: Mapping[str, NetworkAddressing],
+    ) -> str:
+        """Render cloud-init ``network-config`` (netplan v2) for **install**.
+
+        Always DHCP-only — the install VM runs on the transient install
+        network, and any static address from the user's real subnets would
+        have no route there. Static IPs are honored at run-phase via the
+        netplan staged into ``write_files`` (see module docstring).
 
         Matches interfaces by **kernel name** (``match: name: ...``), not
         MAC, so the cached disk works regardless of MAC stability (the
         stable-MAC TODO is belt-and-suspenders).
         """
-        del recipe
+        del recipe, addressing
         # Match NICs by kernel interface name pattern. Index 0 takes any en*
         # (the first PCI-attached NIC); subsequent NICs use a per-index prefix
         # so order is stable regardless of how the backend numbers slots.
@@ -229,29 +274,47 @@ class CloudInitBuilder(Builder):
         }
         return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
 
-    def config_hash(self, spec: VMSpec, recipe: VMRecipe, *, base_sha: str = "") -> str:
+    def config_hash(
+        self,
+        spec: VMSpec,
+        recipe: VMRecipe,
+        *,
+        addressing: Mapping[str, NetworkAddressing],
+        base_sha: str = "",
+    ) -> str:
         """Deterministic 16-char hex hash of the post-install disk contents.
 
-        Inputs are the rendered seed text + the base disk's content sha
-        (passed in by the orchestrator after resolving the CacheEntry).
-        Pure: no clocks, no run_id, no I/O.
+        Inputs: rendered seed text (which folds in the staged run-phase
+        netplan for static-IP VMs) + the base disk's content sha. Pure: no
+        clocks, no run_id, no I/O. Static-IP changes flow into the hash via
+        ``write_files`` so different addresses get different cache entries.
         """
-        u = self.render_user_data(spec, recipe)
+        u = self.render_user_data(spec, recipe, addressing=addressing)
         m = self.render_meta_data(spec, recipe)
-        n = self.render_network_config(spec, recipe)
+        n = self.render_network_config(spec, recipe, addressing=addressing)
         combined = (
             f"user-data:\n{u}\n---\nmeta-data:\n{m}\n---\n"
             f"network-config:\n{n}\n---\nbase:{base_sha}"
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 
-    def render_seed(self, spec: VMSpec, recipe: VMRecipe) -> bytes:
+    def render_seed(
+        self,
+        spec: VMSpec,
+        recipe: VMRecipe,
+        *,
+        addressing: Mapping[str, NetworkAddressing],
+    ) -> bytes:
         """Build the ISO9660 ``cidata`` seed image as bytes."""
         pycdlib = _import_pycdlib()
 
-        user_data = self.render_user_data(spec, recipe).encode("utf-8")
+        user_data = self.render_user_data(
+            spec, recipe, addressing=addressing
+        ).encode("utf-8")
         meta_data = self.render_meta_data(spec, recipe).encode("utf-8")
-        network_config = self.render_network_config(spec, recipe).encode("utf-8")
+        network_config = self.render_network_config(
+            spec, recipe, addressing=addressing
+        ).encode("utf-8")
 
         iso = pycdlib.PyCdlib()
         iso.new(
@@ -350,3 +413,85 @@ def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
             f"{' '.join(insecure)}"
         )
     return lines
+
+
+# ----------------------------------------------------------------------------
+# Run-phase netplan staging.
+#
+# Why this exists: the install VM runs on a transient DHCP-only "install"
+# network so apt etc. work. The user's real subnets only attach at run-phase.
+# Baking a static address into the install-time netplan would have no route
+# during install and break apt mid-boot. Instead we write the *real* netplan
+# at install time via cloud-init's `write_files` (config stage runs AFTER
+# init-stage netplan rendering, so our file wins) and disable cloud-init's
+# network module on subsequent boots so it doesn't undo our work.
+# ----------------------------------------------------------------------------
+
+_RUN_NETPLAN_TARGET = "/etc/netplan/50-cloud-init.yaml"
+_DISABLE_NETWORK_PATH = "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg"
+_DISABLE_NETWORK_BODY = "network: {config: disabled}\n"
+
+
+def _render_run_netplan_yaml(
+    spec: VMSpec, addressing: Mapping[str, NetworkAddressing]
+) -> str:
+    """Render the netplan the guest should use at run-phase.
+
+    Per-NIC: ``ipv4`` set => static address + (first-static-only) default
+    route + nameservers pointing at the gateway; ``ipv4`` unset => dhcp4.
+    Matches interfaces by name pattern (``en*`` / ``enN*``) — same scheme
+    as :meth:`CloudInitBuilder.render_network_config`. Wraps under a
+    top-level ``network:`` because this file goes directly into
+    ``/etc/netplan/`` (cloud-init's ``network-config`` is unwrapped because
+    cloud-init wraps it before writing).
+    """
+    first_static_seen = False
+    ethernets: dict[str, Any] = {}
+    for idx, nic in enumerate(spec.nics):
+        iface_name = f"id{idx}"
+        cfg: dict[str, Any] = {
+            "match": {"name": "en*"} if idx == 0 else {"name": f"en{idx}*"},
+        }
+        if nic.ipv4 is not None:
+            addr = addressing[nic.network]
+            cfg["addresses"] = [f"{nic.ipv4}/{addr.prefix_len}"]
+            cfg["nameservers"] = {"addresses": [addr.gateway]}
+            if not first_static_seen:
+                cfg["routes"] = [{"to": "default", "via": addr.gateway}]
+                first_static_seen = True
+        else:
+            cfg["dhcp4"] = True
+            cfg["dhcp6"] = False
+        ethernets[iface_name] = cfg
+    body = {"network": {"version": 2, "ethernets": ethernets}}
+    return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
+
+
+def _render_run_netplan_write_files(
+    spec: VMSpec, addressing: Mapping[str, NetworkAddressing]
+) -> list[dict[str, Any]]:
+    """Cloud-init ``write_files`` entries that stage the run-phase netplan.
+
+    Returns an empty list when no NIC declares a static ipv4 — the
+    DHCP-only install-time netplan is already correct for that case
+    (DHCP works on both the install network and any user network with
+    ``dhcp=True``).
+    """
+    if not any(nic.ipv4 is not None for nic in spec.nics):
+        return []
+    staged = _render_run_netplan_yaml(spec, addressing)
+    return [
+        {
+            "path": _RUN_NETPLAN_TARGET,
+            "content": staged,
+            "owner": "root:root",
+            # netplan 0.106+ warns/errors on world-readable netplan files.
+            "permissions": "0600",
+        },
+        {
+            "path": _DISABLE_NETWORK_PATH,
+            "content": _DISABLE_NETWORK_BODY,
+            "owner": "root:root",
+            "permissions": "0644",
+        },
+    ]
