@@ -10,7 +10,7 @@ from testrange.orchestrator.runtime import (
 )
 from testrange.plan import Plan
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "Orchestrator",
