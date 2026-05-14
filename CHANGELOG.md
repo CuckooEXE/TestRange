@@ -5,7 +5,110 @@ All notable changes to this project are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 This project predates 1.0; expect breaking changes between minor versions.
 
-## [Unreleased]
+## [0.2.0] — 2026-05-14
+
+Post-0.1.0 work: an interactive REPL at test-execution phase, full
+static-IP support on the Plan side with plan-wide addressing validation,
+a multi-NIC reliability fix for the run-phase netplan that switches
+matching from interface-name globs to stable MACs, and a
+builder-declared run-phase readiness hook brokered by the orchestrator.
+
+### Added
+
+- **Builder-declared run-phase readiness, brokered by the orchestrator.**
+  ``Builder.wait_ready_argv(spec, recipe) -> tuple[str, ...] | None`` on
+  the ABC (non-abstract, default ``None`` — no check). ``CloudInitBuilder``
+  overrides it to return ``("cloud-init", "status", "--wait")``. The
+  orchestrator runs the check against each VM's bound communicator after
+  ``_bind_communicators`` and before yielding the ``OrchestratorHandle``,
+  raising ``BuildNotReadyError`` on a non-zero exit. Readiness is no
+  longer something a plan author wires into ``TESTS`` by hand; the
+  ``cloud_init_finished`` test was dropped from the shipped examples.
+- ``Orchestrator(ready_timeout_s=...)`` — per-VM timeout for the builder
+  readiness check; defaults to 300s.
+- ``BuildNotReadyError(BuilderError)`` — raised when a brought-up VM
+  never reaches the builder-declared ready state.
+
+- ``testrange repl <plan>`` — brings the range up exactly the way ``run``
+  does (preflight → install → run-phase → communicators bound), prints
+  the ``describe`` output, then drops into a stdlib ``code.interact()``
+  session with ``orch``, ``plan``, and ``tests`` pre-bound. Ctrl-D /
+  ``exit()`` triggers normal teardown. Same exit codes as ``run``
+  (0/1/2/130). Inside the REPL — or from test code — ``orch.leak()``
+  skips teardown so the user can SSH in to debug; ``testrange cleanup
+  <run_id>`` tears down later.
+- ``NetworkIface.ipv4`` (and ``LibvirtNetworkIface.ipv4`` by inheritance)
+  for static-IP NICs. DHCP remains the default. Install still runs on a
+  transient DHCP-only subnet so apt works; the static address is applied
+  at run-phase via a netplan staged into cloud-init ``write_files`` plus
+  a ``99-testrange-disable-network.cfg`` drop-in so cloud-init doesn't
+  re-render later boots. No ``netplan apply`` mid-install — the cached
+  post-install disk already contains the static-aware netplan, and the
+  run-phase boot reads it directly.
+- ``testrange/networks/validate.py`` — plan-wide addressing validation
+  that accumulates every problem into one ``ValueError`` at Hypervisor
+  construction: CIDR membership, gateway/network/broadcast collision,
+  DHCP-pool collision, duplicate ``ipv4`` within a network, and
+  ``Network(dhcp=False)`` + NIC without ``ipv4``.
+- ``NetworkAddressing`` — ``(cidr, prefix_len, gateway, dhcp)`` view per
+  network. Builders take a ``Mapping[network_name, NetworkAddressing]``
+  rather than the whole hypervisor, keeping the builder stovepipe
+  hypervisor-agnostic.
+- ``Builder.render_seed`` / ``Builder.config_hash`` now take a
+  ``macs: Sequence[str] = ()`` kwarg. The orchestrator computes stable
+  MACs via ``driver.compose_mac(plan_name, vm_name, nic_idx)`` and
+  threads them in.
+- ``examples/private_public.py`` — airgap-vs-internet topology with a
+  dual-homed client. Two switches (one ``internet=False``), three VMs
+  (two webservers, one client with NICs on both networks), and
+  reachability tests asserting the isolation as well as the install-phase
+  internet access that builds the air-gapped server's nginx.
+- ``RESEARCH.md`` — open design notes (first entry: ESXi DHCP-sidecar
+  strategy). Distinct from ``PLAN.md`` (agreed design) and ``TODO.md``
+  (work queue).
+- ``docs/user/writing-a-plan.md`` networking section — ``ipv4=`` usage,
+  the first-NIC rule for network-using communicators, DHCP vs static
+  trade-offs.
+
+### Changed
+
+- ``OrchestratorHandle`` gains a ``leak: Callable[[], None]`` field
+  bound to ``Orchestrator.leak``. Available from both test code and the
+  REPL.
+- ``Orchestrator._discover_ip`` short-circuits to the first NIC's
+  ``ipv4`` when set; falls through to the existing DHCP-lease poll
+  otherwise.
+- ``HypervisorDriver.preflight`` gains an ``install_network=`` kwarg so
+  the orchestrator brokers the transient install CIDR down to the
+  driver, which folds it into the pairwise overlap check with a
+  ``fix_hint`` on collision.
+- ``CloudInitBuilder.render_user_data`` / ``render_seed`` /
+  ``config_hash`` accept ``macs: Sequence[str] = ()``. When provided,
+  the run-phase netplan matches NICs by MAC. The cache key folds in
+  MACs via the rendered seed text; stable MACs → stable cache hits.
+- ``testrange describe`` NIC line now shows ``ipv4=<addr>`` or ``dhcp``
+  so plan addressing is visible at a glance.
+
+### Fixed
+
+- **Multi-NIC run-phase netplan matched by broken name globs.**
+  ``_render_run_netplan_yaml`` previously generated
+  ``match: {name: en*}`` for NIC0 and ``match: {name: en{idx}*}`` for
+  NIC1+. On guests with systemd's predictable interface naming
+  (``enp1s0``, ``enp2s0``, …), ``en1*`` matches nothing — ``enp2s0``
+  starts with ``enp``, not ``en1``. NIC1+ silently went unconfigured,
+  surfacing later as DHCP failure / no route on the second network.
+  Now matches by stable MAC when the orchestrator supplies them; the
+  legacy name-glob fallback is kept for callers without MACs and is
+  only safe for single-NIC VMs. The "skip run-phase netplan entirely"
+  short-circuit now fires only for single-NIC all-DHCP VMs; multi-NIC
+  always emits the run-phase netplan.
+- ``cache-server`` first-boot permission error: nginx (uid 101 inside
+  the container) couldn't write to ``./storage`` because the host-side
+  mount is owned by the host user. A one-shot ``cache-init`` sidecar
+  (alpine + ``chown -R 101:101``) runs to completion before nginx
+  starts (``service_completed_successfully`` gate). Re-runs are
+  idempotent.
 
 ## [0.1.0] — 2026-05-12
 
