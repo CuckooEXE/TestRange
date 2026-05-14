@@ -16,7 +16,7 @@ hypervisor type.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -46,12 +46,17 @@ class Builder(ABC):
         *,
         addressing: Mapping[str, NetworkAddressing],
         base_sha: str = "",
+        macs: Sequence[str] = (),
     ) -> str:
         """16-char hex hash that uniquely identifies the post-install disk.
 
         Pure: must not depend on run_id, clocks, or any non-deterministic
-        input. Same spec+recipe+addressing+base_sha -> same hash, every
-        time. This is the cache key for the post-install disk.
+        input. Same spec+recipe+addressing+base_sha+macs -> same hash,
+        every time. This is the cache key for the post-install disk.
+
+        ``macs`` (one per NIC in spec order) lets concretes that bake
+        positional NIC config into the install payload key the cache on
+        the stable MACs the orchestrator will assign at run-phase.
         """
 
     @abstractmethod
@@ -61,5 +66,28 @@ class Builder(ABC):
         recipe: VMRecipe,
         *,
         addressing: Mapping[str, NetworkAddressing],
+        macs: Sequence[str] = (),
     ) -> bytes:
-        """Render the install payload (e.g., a cloud-init seed ISO) as bytes."""
+        """Render the install payload (e.g., a cloud-init seed ISO) as bytes.
+
+        ``macs`` (one per NIC in spec order) lets concretes bake
+        positional NIC config (run-phase netplan match-by-MAC etc.) into
+        the payload.
+        """
+
+    def wait_ready_argv(
+        self, spec: VMSpec, recipe: VMRecipe
+    ) -> tuple[str, ...] | None:
+        """Argv whose exit-zero signals the brought-up VM is ready for tests.
+
+        ``None`` (the default) means no check needed — for builders that
+        produce a fully-baked disk with no post-boot finalization.
+        Concretes override when their build leaves work to finish at
+        run-phase boot (cloud-init's stage machine, Ignition's
+        finalize, etc.). The orchestrator executes the returned argv
+        via the bound Communicator after ``_bind_communicators`` and
+        before yielding the ``OrchestratorHandle`` to test code; a
+        non-zero exit raises :class:`BuildNotReadyError`.
+        """
+        del spec, recipe
+        return None

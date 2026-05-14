@@ -16,13 +16,14 @@ import pytest
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
-from testrange.communicators import SSHCommunicator
+from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import (
+    BuildNotReadyError,
     InstallTimeoutError,
     OrchestratorError,
     PreflightError,
@@ -288,6 +289,31 @@ def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("testrange.orchestrator.runtime.time.sleep", lambda _s: None)
 
 
+@pytest.fixture(autouse=True)
+def stub_ssh_execute(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, tuple[str, ...], float]]:
+    """Default SSHCommunicator.execute to a success no-op.
+
+    Lets bring-up paths that call execute (e.g., the builder readiness
+    check on a real CloudInitBuilder) complete without real SSH. Tests
+    that want to assert what got executed can read the returned list;
+    tests that want a failure can override the attribute themselves.
+    """
+    calls: list[tuple[str, tuple[str, ...], float]] = []
+
+    def fake_execute(
+        self: SSHCommunicator,
+        argv: Any,
+        *,
+        timeout: float = 60.0,
+        cwd: str | None = None,
+    ) -> ExecResult:
+        calls.append((self.username, tuple(argv), timeout))
+        return ExecResult(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
+
+    monkeypatch.setattr(SSHCommunicator, "execute", fake_execute)
+    return calls
+
+
 class TestEnterAndExit:
     def test_full_lifecycle(
         self,
@@ -523,3 +549,70 @@ class TestStaticIPDiscovery:
             pass
         names = [c[0] for c in fake_driver.calls]
         assert "get_lease_ip" in names
+
+
+class TestBuilderReadiness:
+    def test_cloudinit_check_runs_after_bind(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+        stub_ssh_execute: list[tuple[str, tuple[str, ...], float]],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_plan(), cache_manager=mgr):
+            pass
+        # CloudInitBuilder's readiness argv must have been executed once
+        # against the bound communicator with the orchestrator's timeout.
+        ready_calls = [c for c in stub_ssh_execute if c[1] == ("cloud-init", "status", "--wait")]
+        assert len(ready_calls) == 1
+        assert ready_calls[0][2] == 300.0  # default ready_timeout_s
+
+    def test_custom_ready_timeout_propagated(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+        stub_ssh_execute: list[tuple[str, tuple[str, ...], float]],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_plan(), cache_manager=mgr, ready_timeout_s=42.0):
+            pass
+        ready_calls = [c for c in stub_ssh_execute if c[1] == ("cloud-init", "status", "--wait")]
+        assert ready_calls and ready_calls[0][2] == 42.0
+
+    def test_failed_check_raises_and_tears_down(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mgr, _ = populated_cache
+
+        def failing_execute(
+            self: SSHCommunicator, argv: Any, *, timeout: float = 60.0, cwd: str | None = None
+        ) -> ExecResult:
+            return ExecResult(exit_code=3, stdout=b"", stderr=b"degraded", duration=0.1)
+
+        monkeypatch.setattr(SSHCommunicator, "execute", failing_execute)
+        with pytest.raises(BuildNotReadyError, match="readiness"):
+            with Orchestrator(_plan(), cache_manager=mgr):
+                pass
+        # Teardown ran even though bring-up failed.
+        names = [c[0] for c in fake_driver.calls]
+        assert "destroy_vm" in names
+        assert "destroy_pool" in names
+
+    def test_builder_returning_none_skips_check(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+        stub_ssh_execute: list[tuple[str, tuple[str, ...], float]],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Force the builder's readiness override to None and assert that
+        # no readiness argv was executed.
+        monkeypatch.setattr(CloudInitBuilder, "wait_ready_argv", lambda *a, **kw: None)
+        mgr, _ = populated_cache
+        with Orchestrator(_plan(), cache_manager=mgr):
+            pass
+        ready_calls = [c for c in stub_ssh_execute if c[1] == ("cloud-init", "status", "--wait")]
+        assert ready_calls == []

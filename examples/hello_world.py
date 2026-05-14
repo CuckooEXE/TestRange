@@ -30,7 +30,6 @@ from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
-
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
@@ -79,13 +78,6 @@ PLAN = Plan(
 )
 
 
-def cloud_init_finished(orch: OrchestratorHandle) -> None:
-    r = orch.vms["web"].communicator.execute(
-        ["cloud-init", "status", "--wait"], timeout=300.0
-    )
-    assert r.exit_code == 0, r
-
-
 def nginx_is_installed(orch: OrchestratorHandle) -> None:
     r = orch.vms["web"].communicator.execute(["dpkg", "-l", "nginx"])
     assert r.exit_code == 0, "nginx missing"
@@ -127,7 +119,7 @@ def snapshot_lifecycle(orch: OrchestratorHandle) -> None:
     assert not r.ok, f"sentinel should be gone after restore: stdout={r.stdout!r}"
 
 
-TESTS = [cloud_init_finished, nginx_is_installed, hostname_matches, snapshot_lifecycle]
+TESTS = [nginx_is_installed, hostname_matches, snapshot_lifecycle]
 
 
 if __name__ == "__main__":

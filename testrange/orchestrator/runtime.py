@@ -29,6 +29,7 @@ from testrange.credentials.posix import PosixCred
 from testrange.drivers import driver_for
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import (
+    BuildNotReadyError,
     CacheError,
     CacheMissError,
     InstallTimeoutError,
@@ -55,6 +56,9 @@ _DEFAULT_INSTALL_TIMEOUT_S = 600.0
 
 # Per-VM DHCP-lease timeout after the run VM starts.
 _DEFAULT_LEASE_TIMEOUT_S = 120.0
+
+# Per-VM builder-readiness timeout after the communicator binds.
+_DEFAULT_READY_TIMEOUT_S = 300.0
 
 # Transient install network. Subnet must not collide with any user-declared
 # network in the Plan; the driver's preflight validates that (the orchestrator
@@ -118,12 +122,14 @@ class Orchestrator:
         run_id: str | None = None,
         install_timeout_s: float = _DEFAULT_INSTALL_TIMEOUT_S,
         lease_timeout_s: float = _DEFAULT_LEASE_TIMEOUT_S,
+        ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_S,
     ) -> None:
         self.plan = plan
         self.cache = cache_manager or CacheManager()
         self.run_id = run_id or new_run_id()
         self.install_timeout_s = install_timeout_s
         self.lease_timeout_s = lease_timeout_s
+        self.ready_timeout_s = ready_timeout_s
         self.driver: HypervisorDriver = self._build_driver()
         self._store = StateStore(run_dir_for(self.run_id))
         self._handle: OrchestratorHandle | None = None
@@ -172,6 +178,7 @@ class Orchestrator:
                 self._run_phase()
                 self._handle = self._build_handle()
                 self._bind_communicators()
+                self._wait_builder_ready()
             except Exception:
                 _log.exception("bring-up failed; tearing down")
                 self._teardown()
@@ -300,8 +307,16 @@ class Orchestrator:
             )
 
         base_info = self.cache.resolve(builder.base)
+        macs = tuple(
+            self.driver.compose_mac(self._plan_name, vm.name, i)
+            for i in range(len(vm.spec.nics))
+        )
         config_hash = builder.config_hash(
-            vm.spec, vm, addressing=self._addressing, base_sha=base_info.sha256
+            vm.spec,
+            vm,
+            addressing=self._addressing,
+            base_sha=base_info.sha256,
+            macs=macs,
         )
         post_install_name = f"_post_install_{config_hash}"
 
@@ -344,7 +359,9 @@ class Orchestrator:
         self._store.confirm(install_disk_name, pool_backend=pool_backend)
 
         # Render + write seed
-        seed_bytes = builder.render_seed(vm.spec, vm, addressing=self._addressing)
+        seed_bytes = builder.render_seed(
+            vm.spec, vm, addressing=self._addressing, macs=macs
+        )
         self._store.record_intent(
             kind="install_seed",
             backend_name=install_seed_name,
@@ -509,6 +526,28 @@ class Orchestrator:
             cred = self._lookup_credential(vm)
             vm.communicator.bind(host=ip, credential=cred)
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
+
+    def _wait_builder_ready(self) -> None:
+        """Run each builder's readiness check against its bound communicator.
+
+        Builder declares the check, orchestrator executes via the
+        Communicator. Builders never see Communicator types. A ``None``
+        return from ``wait_ready_argv`` means no check is needed for
+        that builder.
+        """
+        for vm in self.plan.hypervisor.vms:
+            argv = vm.builder.wait_ready_argv(vm.spec, vm)
+            if argv is None:
+                continue
+            _log.info(
+                "vm %s: builder readiness: %s", vm.name, " ".join(argv)
+            )
+            r = vm.communicator.execute(list(argv), timeout=self.ready_timeout_s)
+            if r.exit_code != 0:
+                raise BuildNotReadyError(
+                    f"vm {vm.name!r}: builder readiness check {argv!r} exited "
+                    f"{r.exit_code}; stderr={r.stderr!r}"
+                )
 
     def _discover_ip(self, vm: VMRecipe) -> str:
         """Resolve the IPv4 address of the VM's **first** declared NIC.

@@ -10,7 +10,7 @@ import pytest
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
-from testrange.communicators import SSHCommunicator
+from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
@@ -23,6 +23,25 @@ from testrange.vms import VMRecipe, VMSpec
 @pytest.fixture(autouse=True)
 def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("testrange.orchestrator.runtime.time.sleep", lambda _s: None)
+
+
+@pytest.fixture(autouse=True)
+def stub_ssh_execute(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default SSHCommunicator.execute to a success no-op so the new
+    builder-readiness step (``cloud-init status --wait`` against
+    paramiko) doesn't try a real SSH connect in unit tests."""
+
+    def fake_execute(
+        self: SSHCommunicator,
+        argv: Any,
+        *,
+        timeout: float = 60.0,
+        cwd: str | None = None,
+    ) -> ExecResult:
+        del self, argv, timeout, cwd
+        return ExecResult(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
+
+    monkeypatch.setattr(SSHCommunicator, "execute", fake_execute)
 
 
 @pytest.fixture

@@ -163,6 +163,7 @@ class CloudInitBuilder(Builder):
         recipe: VMRecipe,
         *,
         addressing: Mapping[str, NetworkAddressing],
+        macs: Sequence[str] = (),
     ) -> str:
         """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header).
 
@@ -170,6 +171,13 @@ class CloudInitBuilder(Builder):
         cloud-init disable drop-in are spliced into ``write_files`` so the
         cached post-install disk boots on the user's real networks with the
         right addressing. See module docstring.
+
+        ``macs`` (when provided, one entry per NIC in spec order) switches
+        the run-phase netplan to MAC-based matching, which is the only
+        reliable way to address NICs positionally on guests with
+        predictable interface names (``enp1s0``/``enp2s0``/...). When
+        empty, falls back to name-pattern matching for backwards compat
+        with callers that don't have stable MACs available.
         """
         del recipe  # not used yet; reserved for future per-recipe hooks
         users: list[dict[str, Any]] = []
@@ -206,7 +214,7 @@ class CloudInitBuilder(Builder):
         write_files = _render_insecure_write_files(
             insecure_apt=self.insecure_apt, insecure_dnf=self.insecure_dnf
         )
-        write_files.extend(_render_run_netplan_write_files(spec, addressing))
+        write_files.extend(_render_run_netplan_write_files(spec, addressing, macs))
         if write_files:
             body["write_files"] = write_files
         if chpasswd_lines:
@@ -281,6 +289,7 @@ class CloudInitBuilder(Builder):
         *,
         addressing: Mapping[str, NetworkAddressing],
         base_sha: str = "",
+        macs: Sequence[str] = (),
     ) -> str:
         """Deterministic 16-char hex hash of the post-install disk contents.
 
@@ -288,8 +297,10 @@ class CloudInitBuilder(Builder):
         netplan for static-IP VMs) + the base disk's content sha. Pure: no
         clocks, no run_id, no I/O. Static-IP changes flow into the hash via
         ``write_files`` so different addresses get different cache entries.
+        ``macs`` flows in via the rendered run-phase netplan: stable MACs
+        for the same plan/VM produce a stable hash.
         """
-        u = self.render_user_data(spec, recipe, addressing=addressing)
+        u = self.render_user_data(spec, recipe, addressing=addressing, macs=macs)
         m = self.render_meta_data(spec, recipe)
         n = self.render_network_config(spec, recipe, addressing=addressing)
         combined = (
@@ -298,18 +309,34 @@ class CloudInitBuilder(Builder):
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 
+    def wait_ready_argv(
+        self, spec: VMSpec, recipe: VMRecipe
+    ) -> tuple[str, ...]:
+        """``cloud-init status --wait`` blocks until cloud-init reaches done.
+
+        At run-phase boot, cloud-init re-walks its stage machine on the
+        cloned disk; SSH binds after ``cloud-init.target`` (the second
+        stage), but ``cloud-config`` and ``cloud-final`` keep running
+        after SSH accepts connections. Waiting on the cloud-init final
+        state lets the orchestrator hand test code a guest whose
+        finalizers have all unwound.
+        """
+        del spec, recipe
+        return ("cloud-init", "status", "--wait")
+
     def render_seed(
         self,
         spec: VMSpec,
         recipe: VMRecipe,
         *,
         addressing: Mapping[str, NetworkAddressing],
+        macs: Sequence[str] = (),
     ) -> bytes:
         """Build the ISO9660 ``cidata`` seed image as bytes."""
         pycdlib = _import_pycdlib()
 
         user_data = self.render_user_data(
-            spec, recipe, addressing=addressing
+            spec, recipe, addressing=addressing, macs=macs
         ).encode("utf-8")
         meta_data = self.render_meta_data(spec, recipe).encode("utf-8")
         network_config = self.render_network_config(
@@ -433,25 +460,36 @@ _DISABLE_NETWORK_BODY = "network: {config: disabled}\n"
 
 
 def _render_run_netplan_yaml(
-    spec: VMSpec, addressing: Mapping[str, NetworkAddressing]
+    spec: VMSpec,
+    addressing: Mapping[str, NetworkAddressing],
+    macs: Sequence[str] = (),
 ) -> str:
     """Render the netplan the guest should use at run-phase.
 
     Per-NIC: ``ipv4`` set => static address + (first-static-only) default
     route + nameservers pointing at the gateway; ``ipv4`` unset => dhcp4.
-    Matches interfaces by name pattern (``en*`` / ``enN*``) — same scheme
-    as :meth:`CloudInitBuilder.render_network_config`. Wraps under a
-    top-level ``network:`` because this file goes directly into
-    ``/etc/netplan/`` (cloud-init's ``network-config`` is unwrapped because
-    cloud-init wraps it before writing).
+    Wraps under a top-level ``network:`` because this file goes directly
+    into ``/etc/netplan/`` (cloud-init's ``network-config`` is unwrapped
+    because cloud-init wraps it before writing).
+
+    When ``macs`` is provided (one per NIC in spec order), matches by
+    MAC — the only reliable way to address NICs positionally on guests
+    with predictable interface names. When empty, falls back to a name
+    pattern; this fallback is only safe for single-NIC VMs.
     """
+    if macs and len(macs) != len(spec.nics):
+        raise ValueError(
+            f"macs has {len(macs)} entries but spec.nics has {len(spec.nics)}"
+        )
     first_static_seen = False
     ethernets: dict[str, Any] = {}
     for idx, nic in enumerate(spec.nics):
         iface_name = f"id{idx}"
-        cfg: dict[str, Any] = {
-            "match": {"name": "en*"} if idx == 0 else {"name": f"en{idx}*"},
-        }
+        if macs:
+            match: dict[str, Any] = {"macaddress": macs[idx].lower()}
+        else:
+            match = {"name": "en*"} if idx == 0 else {"name": f"en{idx}*"}
+        cfg: dict[str, Any] = {"match": match}
         if nic.ipv4 is not None:
             addr = addressing[nic.network]
             cfg["addresses"] = [f"{nic.ipv4}/{addr.prefix_len}"]
@@ -468,18 +506,23 @@ def _render_run_netplan_yaml(
 
 
 def _render_run_netplan_write_files(
-    spec: VMSpec, addressing: Mapping[str, NetworkAddressing]
+    spec: VMSpec,
+    addressing: Mapping[str, NetworkAddressing],
+    macs: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """Cloud-init ``write_files`` entries that stage the run-phase netplan.
 
-    Returns an empty list when no NIC declares a static ipv4 — the
-    DHCP-only install-time netplan is already correct for that case
-    (DHCP works on both the install network and any user network with
-    ``dhcp=True``).
+    Returns an empty list for single-NIC all-DHCP VMs — the install-time
+    DHCP netplan already matches the single NIC by name pattern and works
+    at run-phase too. Any static IP, or any multi-NIC topology, needs the
+    run-phase netplan: static addresses must be baked in, and multi-NIC
+    matching by interface name is unreliable on guests with predictable
+    names (only MAC matching disambiguates positionally).
     """
-    if not any(nic.ipv4 is not None for nic in spec.nics):
+    no_statics = not any(nic.ipv4 is not None for nic in spec.nics)
+    if len(spec.nics) <= 1 and no_statics:
         return []
-    staged = _render_run_netplan_yaml(spec, addressing)
+    staged = _render_run_netplan_yaml(spec, addressing, macs)
     return [
         {
             "path": _RUN_NETPLAN_TARGET,
