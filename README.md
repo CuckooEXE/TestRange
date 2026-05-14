@@ -58,6 +58,7 @@ testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
 testrange cache list / del / rename / forget-name
 testrange describe <plan.py>
 testrange run <plan.py> [--fail-fast] [--leak-on-failure]
+testrange repl <plan.py>
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
 ```

@@ -14,11 +14,38 @@ class Builder(ABC):
     def credentials(self) -> tuple[Credential, ...]: ...
 
     @abstractmethod
-    def config_hash(self, spec: VMSpec, recipe: VMRecipe) -> str: ...
+    def config_hash(
+        self,
+        spec: VMSpec,
+        recipe: VMRecipe,
+        *,
+        addressing: Mapping[str, NetworkAddressing],
+        base_sha: str = "",
+        macs: Sequence[str] = (),
+    ) -> str: ...
 
     @abstractmethod
-    def render_seed(self, spec: VMSpec, recipe: VMRecipe) -> bytes: ...
+    def render_seed(
+        self,
+        spec: VMSpec,
+        recipe: VMRecipe,
+        *,
+        addressing: Mapping[str, NetworkAddressing],
+        macs: Sequence[str] = (),
+    ) -> bytes: ...
+
+    # Non-abstract — default returns None (no readiness check).
+    def wait_ready_argv(
+        self, spec: VMSpec, recipe: VMRecipe
+    ) -> tuple[str, ...] | None: ...
 ```
+
+`addressing` is a `Mapping[network_name, NetworkAddressing]` the
+orchestrator brokers in — builders stay hypervisor-agnostic and never
+see the hypervisor type. `macs` (one per NIC, in spec order) lets a
+builder bake positional NIC config (run-phase netplan match-by-MAC,
+etc.) into the payload and key the cache on the stable MACs the
+orchestrator will assign at run-phase.
 
 ## The install-cache contract
 
@@ -49,14 +76,14 @@ A safe default: hash the rendered seed bytes + the base SHA. See
        def credentials(self) -> tuple[Credential, ...]:
            return self._credentials
 
-       def render_seed(self, spec, recipe) -> bytes:
+       def render_seed(self, spec, recipe, *, addressing, macs=()) -> bytes:
            # Produce the install-time payload as bytes. The orchestrator
            # writes these into a pool volume the install VM mounts.
            ...
 
-       def config_hash(self, spec, recipe, *, base_sha="") -> str:
+       def config_hash(self, spec, recipe, *, addressing, base_sha="", macs=()) -> str:
            # 16-char hex of (rendered seed + base SHA).
-           rendered = self.render_seed(spec, recipe)
+           rendered = self.render_seed(spec, recipe, addressing=addressing, macs=macs)
            h = hashlib.sha256(rendered + base_sha.encode()).hexdigest()[:16]
            return h
    ```
@@ -74,6 +101,16 @@ A safe default: hash the rendered seed bytes + the base SHA. See
    directly in their Plan files; mypy isn't part of plan loading.
    Type/value-check at `__init__` and/or in
    `_validate_init_params` for readability.
+
+5. **Declare run-phase readiness (optional).** If your build leaves
+   work to finish at run-phase boot — cloud-init's stage machine,
+   Ignition's finalize — override `wait_ready_argv` to return an argv
+   whose exit-zero means "ready for tests". The orchestrator runs it
+   against the bound communicator after bring-up and before yielding
+   to test code, raising `BuildNotReadyError` on a non-zero exit. The
+   default returns `None` (no check) — right for builders that produce
+   a fully-baked disk. Readiness is the orchestrator's job, never
+   something a plan author wires into `TESTS`.
 
 ## Optional dependencies
 

@@ -151,6 +151,20 @@ network address — for example, an in-band channel (e.g., a guest-agent
 exec channel) binds via a driver-supplied handle, not a NIC, so NIC
 ordering is irrelevant to it.
 
+## Readiness is the orchestrator's job
+
+By the time your tests receive the `OrchestratorHandle`, each VM has
+already passed its builder's readiness check. For `CloudInitBuilder`
+that's `cloud-init status --wait` — i.e., all four cloud-init stages
+(`local → network → config → final`) have completed, not just the one
+that SSH is ordered after. You don't need to add a `cloud-init status
+--wait` test to your suite; if cloud-init never reaches done, bring-up
+itself raises `BuildNotReadyError` before tests start.
+
+The readiness timeout is the orchestrator's `ready_timeout_s`
+(default 300s). If a particular builder is genuinely slow, pass a
+larger value when constructing the `Orchestrator`.
+
 ## API recipes
 
 - **Argv-list execute**: `vm.communicator.execute(["systemctl",
@@ -170,6 +184,7 @@ testrange cache add <path-or-url> [--name <pretty>]
 testrange cache list
 testrange describe plan.py
 testrange run plan.py [--fail-fast] [--leak-on-failure]
+testrange repl plan.py
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
 ```

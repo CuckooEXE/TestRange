@@ -50,6 +50,13 @@ with a date stamp.
 
 ## Done / Superseded
 
+- **Builder-declared readiness hook**, brokered by the orchestrator.
+  `Builder.wait_ready_argv(spec, recipe) -> tuple[str, ...] | None`
+  on the ABC (default `None`); `CloudInitBuilder` returns
+  `("cloud-init", "status", "--wait")`. Orchestrator runs the check
+  after `_bind_communicators` and before yielding the handle, raising
+  `BuildNotReadyError` on non-zero exit. `cloud_init_finished` test
+  dropped from `examples/*.py`. See PLAN.md §19. (2026-05-13)
 - **DHCP-on-by-default per Network.** `Network.dhcp` defaults to `True`;
   `LibvirtDriver` renders DHCP in the network XML. (2026-05-11)
 - **`internet=True` (default) / `internet=False` on Switch.** Switch's
