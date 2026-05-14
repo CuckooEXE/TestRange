@@ -51,12 +51,13 @@ with a date stamp.
 ## Done / Superseded
 
 - **Builder-declared readiness hook**, brokered by the orchestrator.
-  `Builder.wait_ready_argv(spec, recipe) -> tuple[str, ...] | None`
-  on the ABC (default `None`); `CloudInitBuilder` returns
-  `("cloud-init", "status", "--wait")`. Orchestrator runs the check
-  after `_bind_communicators` and before yielding the handle, raising
-  `BuildNotReadyError` on non-zero exit. `cloud_init_finished` test
-  dropped from `examples/*.py`. See PLAN.md §19. (2026-05-13)
+  `Builder.wait_ready(spec, recipe, execute)` on the ABC (non-abstract
+  no-op default); the orchestrator hands the builder its VM's `execute`
+  callable (`GuestExec`, from `testrange/guest_io.py`) after
+  `_bind_communicators`. `CloudInitBuilder` runs `cloud-init status
+  --wait` and raises `BuildNotReadyError`. `cloud_init_finished` test
+  dropped from `examples/*.py`. See PLAN.md §19.
+  (2026-05-13; reshaped argv→callable 2026-05-14)
 - **DHCP-on-by-default per Network.** `Network.dhcp` defaults to `True`;
   `LibvirtDriver` renders DHCP in the network XML. (2026-05-11)
 - **`internet=True` (default) / `internet=False` on Switch.** Switch's

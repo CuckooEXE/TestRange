@@ -34,10 +34,10 @@ class Builder(ABC):
         macs: Sequence[str] = (),
     ) -> bytes: ...
 
-    # Non-abstract — default returns None (no readiness check).
-    def wait_ready_argv(
-        self, spec: VMSpec, recipe: VMRecipe
-    ) -> tuple[str, ...] | None: ...
+    # Non-abstract — default is a no-op (no readiness check).
+    def wait_ready(
+        self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec
+    ) -> None: ...
 ```
 
 `addressing` is a `Mapping[network_name, NetworkAddressing]` the
@@ -104,13 +104,15 @@ A safe default: hash the rendered seed bytes + the base SHA. See
 
 5. **Declare run-phase readiness (optional).** If your build leaves
    work to finish at run-phase boot — cloud-init's stage machine,
-   Ignition's finalize — override `wait_ready_argv` to return an argv
-   whose exit-zero means "ready for tests". The orchestrator runs it
-   against the bound communicator after bring-up and before yielding
-   to test code, raising `BuildNotReadyError` on a non-zero exit. The
-   default returns `None` (no check) — right for builders that produce
-   a fully-baked disk. Readiness is the orchestrator's job, never
-   something a plan author wires into `TESTS`.
+   Ignition's finalize — override `wait_ready`. It receives an
+   `execute` callable (`GuestExec` from `testrange.guest_io` — the
+   shape of `Communicator.execute`, injected by the orchestrator);
+   run your readiness command through it, inspect the `ExecResult`,
+   and raise `BuildNotReadyError` if the VM never becomes ready. The
+   builder never sees a Communicator type — only the callable. The
+   default is a no-op — right for builders that produce a fully-baked
+   disk. Readiness is the orchestrator's job, never something a plan
+   author wires into `TESTS`.
 
 ## Optional dependencies
 

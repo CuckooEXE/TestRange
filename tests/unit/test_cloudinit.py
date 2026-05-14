@@ -14,6 +14,8 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.exceptions import BuildNotReadyError
+from testrange.guest_io import ExecResult
 from testrange.networks import Network, NetworkAddressing
 from testrange.packages import Apt, Pip
 from testrange.vms import VMRecipe, VMSpec
@@ -51,6 +53,21 @@ def _basic_builder() -> CloudInitBuilder:
         packages=[Apt("nginx"), Apt("curl"), Pip("requests")],
         post_install_commands=("echo hi > /tmp/hi",),
     )
+
+
+class _FakeExec:
+    """A GuestExec-shaped callable that records calls and returns a canned result."""
+
+    def __init__(self, exit_code: int = 0, stderr: bytes = b"") -> None:
+        self._exit_code = exit_code
+        self._stderr = stderr
+        self.calls: list[tuple[tuple[str, ...], float]] = []
+
+    def __call__(self, argv, *, timeout=60.0, cwd=None):  # type: ignore[no-untyped-def]
+        self.calls.append((tuple(argv), timeout))
+        return ExecResult(
+            exit_code=self._exit_code, stdout=b"", stderr=self._stderr, duration=0.0
+        )
 
 
 class TestRenderUserData:
@@ -425,15 +442,22 @@ class TestRunPhaseNetplanStaging:
         assert h_dhcp != h_static
 
 
-class TestWaitReadyArgv:
-    def test_cloudinit_returns_status_wait(self) -> None:
+class TestWaitReady:
+    def test_cloudinit_runs_status_wait(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        assert b.wait_ready_argv(spec, _recipe(b, spec)) == (
-            "cloud-init", "status", "--wait",
-        )
+        ex = _FakeExec()
+        b.wait_ready(spec, _recipe(b, spec), ex)
+        assert ex.calls == [(("cloud-init", "status", "--wait"), 300.0)]
 
-    def test_abc_default_is_none(self) -> None:
+    def test_cloudinit_raises_on_nonzero(self) -> None:
+        b = _basic_builder()
+        spec = _spec()
+        ex = _FakeExec(exit_code=1, stderr=b"degraded")
+        with pytest.raises(BuildNotReadyError, match="exited 1"):
+            b.wait_ready(spec, _recipe(b, spec), ex)
+
+    def test_abc_default_is_noop(self) -> None:
         from testrange.builders.base import Builder
         from testrange.credentials.base import Credential
 
@@ -450,4 +474,6 @@ class TestWaitReadyArgv:
 
         b = _NullBuilder()
         spec = _spec()
-        assert b.wait_ready_argv(spec, _recipe(_basic_builder(), spec)) is None
+        ex = _FakeExec()
+        b.wait_ready(spec, _recipe(_basic_builder(), spec), ex)
+        assert ex.calls == []  # the ABC default never touches execute

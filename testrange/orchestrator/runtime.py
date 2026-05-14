@@ -57,9 +57,6 @@ _DEFAULT_INSTALL_TIMEOUT_S = 600.0
 # Per-VM DHCP-lease timeout after the run VM starts.
 _DEFAULT_LEASE_TIMEOUT_S = 120.0
 
-# Per-VM builder-readiness timeout after the communicator binds.
-_DEFAULT_READY_TIMEOUT_S = 300.0
-
 # Transient install network. Subnet must not collide with any user-declared
 # network in the Plan; the driver's preflight validates that (the orchestrator
 # passes this constant in as a kwarg so the driver doesn't reach upward).
@@ -122,14 +119,12 @@ class Orchestrator:
         run_id: str | None = None,
         install_timeout_s: float = _DEFAULT_INSTALL_TIMEOUT_S,
         lease_timeout_s: float = _DEFAULT_LEASE_TIMEOUT_S,
-        ready_timeout_s: float = _DEFAULT_READY_TIMEOUT_S,
     ) -> None:
         self.plan = plan
         self.cache = cache_manager or CacheManager()
         self.run_id = run_id or new_run_id()
         self.install_timeout_s = install_timeout_s
         self.lease_timeout_s = lease_timeout_s
-        self.ready_timeout_s = ready_timeout_s
         self.driver: HypervisorDriver = self._build_driver()
         self._store = StateStore(run_dir_for(self.run_id))
         self._handle: OrchestratorHandle | None = None
@@ -528,26 +523,19 @@ class Orchestrator:
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
 
     def _wait_builder_ready(self) -> None:
-        """Run each builder's readiness check against its bound communicator.
+        """Drive each builder's readiness check via the bound communicator.
 
-        Builder declares the check, orchestrator executes via the
-        Communicator. Builders never see Communicator types. A ``None``
-        return from ``wait_ready_argv`` means no check is needed for
-        that builder.
+        The builder runs its own readiness command through the injected
+        ``execute`` callable (``vm.communicator.execute`` — whatever the
+        communicator is) and raises :class:`BuildNotReadyError` itself.
+        Builders never see a Communicator type; the orchestrator only
+        brokers the callable and tags failures with the VM name.
         """
         for vm in self.plan.hypervisor.vms:
-            argv = vm.builder.wait_ready_argv(vm.spec, vm)
-            if argv is None:
-                continue
-            _log.info(
-                "vm %s: builder readiness: %s", vm.name, " ".join(argv)
-            )
-            r = vm.communicator.execute(list(argv), timeout=self.ready_timeout_s)
-            if r.exit_code != 0:
-                raise BuildNotReadyError(
-                    f"vm {vm.name!r}: builder readiness check {argv!r} exited "
-                    f"{r.exit_code}; stderr={r.stderr!r}"
-                )
+            try:
+                vm.builder.wait_ready(vm.spec, vm, vm.communicator.execute)
+            except BuildNotReadyError as e:
+                raise BuildNotReadyError(f"vm {vm.name!r}: {e}") from e
 
     def _discover_ip(self, vm: VMRecipe) -> str:
         """Resolve the IPv4 address of the VM's **first** declared NIC.

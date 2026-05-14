@@ -161,9 +161,11 @@ that SSH is ordered after. You don't need to add a `cloud-init status
 --wait` test to your suite; if cloud-init never reaches done, bring-up
 itself raises `BuildNotReadyError` before tests start.
 
-The readiness timeout is the orchestrator's `ready_timeout_s`
-(default 300s). If a particular builder is genuinely slow, pass a
-larger value when constructing the `Orchestrator`.
+Each builder owns its own readiness logic and timeout: the orchestrator
+hands the builder its VM's `execute` callable, and the builder runs
+whatever command it needs. `CloudInitBuilder` allows `cloud-init status
+--wait` five minutes — a cold boot's `cloud-final` stage genuinely takes
+that long.
 
 ## API recipes
 

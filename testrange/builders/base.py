@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.credentials.base import Credential
+    from testrange.guest_io import GuestExec
     from testrange.networks.base import NetworkAddressing
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
@@ -75,19 +76,19 @@ class Builder(ABC):
         the payload.
         """
 
-    def wait_ready_argv(
-        self, spec: VMSpec, recipe: VMRecipe
-    ) -> tuple[str, ...] | None:
-        """Argv whose exit-zero signals the brought-up VM is ready for tests.
+    def wait_ready(
+        self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec
+    ) -> None:
+        """Block until the brought-up VM is ready for tests.
 
-        ``None`` (the default) means no check needed — for builders that
-        produce a fully-baked disk with no post-boot finalization.
-        Concretes override when their build leaves work to finish at
-        run-phase boot (cloud-init's stage machine, Ignition's
-        finalize, etc.). The orchestrator executes the returned argv
-        via the bound Communicator after ``_bind_communicators`` and
-        before yielding the ``OrchestratorHandle`` to test code; a
-        non-zero exit raises :class:`BuildNotReadyError`.
+        Default: no-op — for builders that produce a fully-baked disk
+        with no post-boot finalization. Concretes whose build leaves
+        work to finish at run-phase boot (cloud-init's stage machine,
+        Ignition's finalize, etc.) override: run the readiness command
+        via ``execute`` and raise :class:`BuildNotReadyError` if it
+        never succeeds. The builder never sees a Communicator type —
+        only the injected ``execute`` callable. The orchestrator calls
+        this after ``_bind_communicators`` and before yielding the
+        ``OrchestratorHandle`` to test code.
         """
-        del spec, recipe
-        return None
+        del spec, recipe, execute

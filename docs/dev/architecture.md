@@ -80,10 +80,12 @@ Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
 3. **Run** — user networks created; each VM gets a fresh overlay off
    the cached post-install disk; defined + started with no seed.
 4. **Test** — communicators are bound (discovered IP per VM), then
-   each builder's readiness check (`builder.wait_ready_argv`) runs
-   against the bound communicator; a non-zero exit raises
-   `BuildNotReadyError` before any test runs. Once every VM is ready,
-   the `OrchestratorHandle` is exposed to user test functions with
+   each builder's `wait_ready` runs: the orchestrator hands the
+   builder the bound communicator's `execute` callable (a `GuestExec`
+   from `testrange.guest_io`), the builder runs its own readiness
+   command and raises `BuildNotReadyError` if the VM never becomes
+   ready — before any test runs. Once every VM is ready, the
+   `OrchestratorHandle` is exposed to user test functions with
    `vms[name]` having a bound communicator. Sequential,
    continue-on-failure default.
 5. **Cleanup** — LIFO over `state.json` resources. PID-gated so the

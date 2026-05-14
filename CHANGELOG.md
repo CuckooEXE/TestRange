@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 This project predates 1.0; expect breaking changes between minor versions.
 
+## [Unreleased]
+
+### Added
+
+- ``testrange/guest_io.py`` — a neutral module of callable-shape
+  ``Protocol``s (``GuestExec`` / ``GuestReadFile`` / ``GuestWriteFile``)
+  plus a re-export of ``ExecResult``. These are exactly the shapes of
+  ``Communicator.execute`` / ``read_file`` / ``write_file``; they let a
+  builder's readiness hook (and, later, a native-agent communicator)
+  take loose callables without importing a Communicator or driver.
+
+### Changed
+
+- **Builder readiness is now callable-injection, not argv.**
+  ``Builder.wait_ready_argv(spec, recipe) -> tuple[str, ...] | None`` is
+  replaced by ``Builder.wait_ready(spec, recipe, execute: GuestExec) ->
+  None``. The orchestrator hands the builder its VM's ``execute``
+  callable; the builder runs its own readiness command, inspects the
+  ``ExecResult``, and raises ``BuildNotReadyError`` itself.
+  ``CloudInitBuilder`` runs ``cloud-init status --wait`` with an inline
+  ``timeout=300.0``.
+- **Removed ``Orchestrator(ready_timeout_s=...)``.** The readiness
+  ``execute`` call now lives in the builder, which owns its own timeout
+  inline — there is no framework-wide knob.
+
 ## [0.2.0] — 2026-05-14
 
 Post-0.1.0 work: an interactive REPL at test-execution phase, full

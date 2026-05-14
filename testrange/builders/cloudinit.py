@@ -43,13 +43,14 @@ from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
-from testrange.exceptions import BuilderError
+from testrange.exceptions import BuilderError, BuildNotReadyError
 from testrange.networks.base import NetworkAddressing
 from testrange.packages.apt import Apt
 from testrange.packages.base import Package
 from testrange.packages.pip import Pip
 
 if TYPE_CHECKING:  # pragma: no cover
+    from testrange.guest_io import GuestExec
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
 
@@ -309,20 +310,26 @@ class CloudInitBuilder(Builder):
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 
-    def wait_ready_argv(
-        self, spec: VMSpec, recipe: VMRecipe
-    ) -> tuple[str, ...]:
-        """``cloud-init status --wait`` blocks until cloud-init reaches done.
+    def wait_ready(
+        self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec
+    ) -> None:
+        """Run ``cloud-init status --wait`` until cloud-init reaches done.
 
         At run-phase boot, cloud-init re-walks its stage machine on the
         cloned disk; SSH binds after ``cloud-init.target`` (the second
         stage), but ``cloud-config`` and ``cloud-final`` keep running
-        after SSH accepts connections. Waiting on the cloud-init final
-        state lets the orchestrator hand test code a guest whose
-        finalizers have all unwound.
+        after SSH accepts connections. Blocking on the cloud-init final
+        state hands test code a guest whose finalizers have all unwound.
+        ``cloud-init status --wait`` can take minutes on a cold boot,
+        hence the explicit timeout.
         """
         del spec, recipe
-        return ("cloud-init", "status", "--wait")
+        r = execute(("cloud-init", "status", "--wait"), timeout=300.0)
+        if r.exit_code != 0:
+            raise BuildNotReadyError(
+                f"cloud-init status --wait exited {r.exit_code}; "
+                f"stderr={r.stderr!r}"
+            )
 
     def render_seed(
         self,
