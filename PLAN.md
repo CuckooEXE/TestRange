@@ -260,6 +260,127 @@ Mutually exclusive with the future `--resume`.
 
 State and cache are independently disposable.
 
+### 19. Builder declares run-phase readiness; orchestrator brokers
+
+`SSH up != system ready`. A run-phase VM's SSH service is ordered
+`After=cloud-init.target`, but `cloud-init.target` is reached after
+only the second of four cloud-init stages (local → network → config →
+final). `cloud-config.service` and `cloud-final.service` keep running
+after SSH accepts connections; modules in those stages may still
+rewrite hostname, `/etc/hosts`, etc. Tests that read system state in
+that window race the finalizer.
+
+Without a builder-defined ready signal, every Plan author has to
+write the same `cloud-init status --wait` boilerplate as their first
+test (see the pre-rework `hello_world.py` and `private_public.py`).
+That's a leaky abstraction — users shouldn't need to know cloud-init
+has multiple stages, and a plan that forgets the wait silently
+race-conditions in CI.
+
+**Decision: each Builder declares its own "ready for tests" check;
+the orchestrator runs it between Communicator bind and yielding the
+`OrchestratorHandle` to test code.** Builder never imports
+Communicator — it returns a description of the check, and the
+orchestrator brokers the actual execution. Same stovepipe shape as
+`builder.credentials` → orchestrator → `communicator.bind(credential=)`.
+
+#### Shape
+
+```python
+class Builder(ABC):
+    def wait_ready_argv(
+        self, spec: VMSpec, recipe: VMRecipe
+    ) -> tuple[str, ...] | None:
+        """Argv that, when executed in the guest, exits 0 once the VM is
+        ready for test code. ``None`` (the default) means "no check
+        needed" — used by builders that produce a fully-baked disk
+        with no post-boot finalization."""
+        return None
+```
+
+`CloudInitBuilder` overrides:
+
+```python
+def wait_ready_argv(self, spec, recipe):
+    return ("cloud-init", "status", "--wait")
+```
+
+The orchestrator, in `__enter__` after `_bind_communicators`:
+
+```python
+for vm in self.plan.hypervisor.vms:
+    argv = vm.builder.wait_ready_argv(vm.spec, vm)
+    if argv is None:
+        continue
+    r = vm.communicator.execute(argv, timeout=self.ready_timeout_s)
+    if r.exit_code != 0:
+        raise BuildNotReadyError(
+            f"vm {vm.name!r}: builder readiness check failed: {r}"
+        )
+```
+
+#### Why argv, not a callable taking a Communicator
+
+A `Builder.wait_ready(self, communicator) -> None` shape would let the
+builder do richer probes (read a file, check multiple things). But it
+would also put the Communicator ABC type on Builder's signature, which
+crosses the stovepipe rule ("don't add a method on one stovepipe that
+takes the other"). Returning `tuple[str, ...] | None` keeps Builder
+ignorant of Communicator entirely; the orchestrator does the dispatch.
+
+Argv-only. Not a `ReadinessCheck` dataclass — every probe shape
+we've imagined (cloud-init wait, sentinel-file existence, systemd
+`is-system-running --wait`, port probe via `nc -z`) reduces to one
+argv that exits 0 when ready. Multi-step composes via
+`sh -c 'A && B'`. Polling vs. self-blocking is the builder's choice
+of command, not the orchestrator's. If a future builder genuinely
+can't be expressed as argv-in-guest (e.g., a host-side probe), promote
+to a dataclass then — additive change, defaults preserve current
+behavior.
+
+#### Single shared timeout knob
+
+One orchestrator attribute, `ready_timeout_s` (default 300.0). Builder
+doesn't get to override per-build — if a particular installer is
+genuinely slow, the user adjusts the orchestrator's timeout, not
+something baked into the builder render. Matches the existing
+`lease_timeout_s` shape.
+
+#### Error type
+
+`BuildNotReadyError(BuilderError)`. Distinct from `BuilderError` so
+callers can catch "VM came up but never reached ready" narrowly. CLI
+exit code stays at 1 (general orchestrator failure) — no new
+dedicated exit code.
+
+#### Example impact
+
+Removes the `cloud_init_finished` test function from
+`examples/hello_world.py` and `examples/private_public.py`. Test
+authors no longer need to know about cloud-init's stage machine. The
+orchestrator's bring-up sequence becomes: preflight → install → run →
+**bind** → **wait-ready** → hand off `OrchestratorHandle` to tests.
+
+#### Files touched
+
+- `testrange/builders/base.py` — add `wait_ready_argv` to ABC,
+  default returns `None`.
+- `testrange/builders/cloudinit.py` — override returning
+  `("cloud-init", "status", "--wait")`.
+- `testrange/orchestrator/runtime.py` — call site after
+  `_bind_communicators`; new `ready_timeout_s` attribute.
+- `testrange/exceptions.py` — `BuildNotReadyError`.
+- `examples/hello_world.py`, `examples/private_public.py` — drop
+  `cloud_init_finished` test.
+- `tests/unit/test_cloudinit.py` — assert override returns the
+  expected argv; assert ABC default returns `None`.
+- `tests/unit/test_orchestrator.py` — fake builder + fake
+  communicator; assert the check is invoked, and that a non-zero
+  exit raises `BuildNotReadyError`.
+- `docs/user/writing-a-plan.md` — note that readiness is the
+  orchestrator's job; you no longer need a `cloud-init status --wait`
+  test.
+
 ## v0 example (target shape)
 
 ```python

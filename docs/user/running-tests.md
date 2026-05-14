@@ -23,6 +23,7 @@ testrange describe <plan.py>            # passive structure summary, no backend 
 testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
   --leak-on-failure                     #   skip teardown if any test fails
+testrange repl <plan.py>                # bring-up, drop into a Python REPL, no TESTS
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
 testrange cache add <path-or-url>       # cache subcommands:
@@ -152,10 +153,15 @@ refuses to act on a run whose owning process is still alive.
 The shipped example exercises every load-bearing path:
 
 - A two-network plan with `nginx` installed via cloud-init.
-- `cloud_init_finished` — proves the seed applied.
 - `nginx_is_installed` — proves the apt package install ran.
 - `hostname_matches` — proves the cloud-init meta-data hostname stuck.
 - `snapshot_lifecycle` — the snapshot recipe above end-to-end.
+
+There is no `cloud_init_finished` test: builder readiness is the
+orchestrator's job, not the plan author's. By the time `TESTS` run,
+each VM has already passed its builder's readiness check (for
+`CloudInitBuilder`, `cloud-init status --wait`) — see
+[Writing a plan](writing-a-plan.md#readiness-is-the-orchestrators-job).
 
 It's a good starting template — copy it and adapt the `PLAN` /
 `TESTS` to your topology.
