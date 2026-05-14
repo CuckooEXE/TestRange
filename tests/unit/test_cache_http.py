@@ -93,7 +93,7 @@ class TestResolve:
             "description": None,
         }
         fake_requests.get.side_effect = [
-            _resp(200, text="b" * 64),         # /names/thing
+            _resp(200, text="b" * 64),  # /names/thing
             _resp(200, text=json.dumps(sidecar)),  # /isos/<sha>.json
         ]
         c = HttpCache("https://h")
@@ -229,7 +229,7 @@ class TestAddName:
         urls = [call.args[0] for call in fake_requests.put.call_args_list]
         assert urls == [
             f"https://h/isos/{'e' * 64}.json",  # sidecar first
-            "https://h/names/thing",            # pointer second
+            "https://h/names/thing",  # pointer second
         ]
         body = fake_requests.put.call_args_list[0].kwargs["data"]
         body_text = body.decode("utf-8") if isinstance(body, bytes) else body
@@ -258,7 +258,7 @@ class TestForgetName:
             "description": None,
         }
         fake_requests.get.side_effect = [
-            _resp(200, text="f" * 64),          # /names/thing
+            _resp(200, text="f" * 64),  # /names/thing
             _resp(200, text=json.dumps(sidecar)),  # /isos/<sha>.json
         ]
         fake_requests.delete.return_value = _resp(204)
@@ -282,10 +282,19 @@ class TestForgetName:
 
 class TestVerifyAlwaysFalse:
     def test_get_passes_verify_false(self, fake_requests: Any) -> None:
-        fake_requests.get.return_value = _resp(200, text=json.dumps({
-            "sha256": "a" * 64, "size": 1, "names": [],
-            "origin": None, "added_at": "x", "description": None,
-        }))
+        fake_requests.get.return_value = _resp(
+            200,
+            text=json.dumps(
+                {
+                    "sha256": "a" * 64,
+                    "size": 1,
+                    "names": [],
+                    "origin": None,
+                    "added_at": "x",
+                    "description": None,
+                }
+            ),
+        )
         c = HttpCache("https://h")
         c.resolve("a" * 64)
         # The whole point of this cache is to trust the network gate

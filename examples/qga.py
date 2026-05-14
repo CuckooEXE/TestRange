@@ -45,9 +45,7 @@ PLAN = Plan(
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     packages=[Apt("nginx"), Apt("qemu-guest-agent")],
-                    post_install_commands=(
-                        "systemctl enable --now qemu-guest-agent",
-                    ),
+                    post_install_commands=("systemctl enable --now qemu-guest-agent",),
                 ),
                 communicator=QGACommunicator(),
             ),

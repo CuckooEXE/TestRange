@@ -92,9 +92,7 @@ class CacheManager:
             path=bin_path,
         )
         self.local._write_sidecar(sidecar, local_info)
-        _log.info(
-            "fetched %s from http cache (%d bytes)", info.sha256[:16], info.size
-        )
+        _log.info("fetched %s from http cache (%d bytes)", info.sha256[:16], info.size)
         return local_info
 
     # ---- mutation --------------------------------------------------------
@@ -135,7 +133,9 @@ class CacheManager:
             except Exception as e:
                 _log.warning(
                     "http cache: add_name %s→%s failed: %s",
-                    info.short_sha, new_name, e,
+                    info.short_sha,
+                    new_name,
+                    e,
                 )
         return info
 

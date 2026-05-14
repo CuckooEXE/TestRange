@@ -84,6 +84,7 @@ class TestResolveFallthrough:
         # Simulate the fetch by writing the bin to the local path.
         def fake_fetch(sha: str, dest: Path) -> None:
             dest.write_bytes(b"PAYLOAD-FROM-HTTP")
+
         http.fetch.side_effect = fake_fetch
 
         mgr = CacheManager(local=local, http=http)
@@ -110,9 +111,7 @@ class TestResolveFallthrough:
         with pytest.raises(CacheMissError):
             mgr.resolve("nope")
 
-    def test_fetch_false_returns_http_info_without_materializing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_fetch_false_returns_http_info_without_materializing(self, tmp_path: Path) -> None:
         local = _local(tmp_path)
         http = _http_mock()
         http.resolve.return_value = CacheEntryInfo(
@@ -235,8 +234,10 @@ class TestPushPull:
             description=None,
             path=None,
         )
+
         def fake_fetch(sha: str, dest: Path) -> None:
             dest.write_bytes(b"PAYLOAD")
+
         http.fetch.side_effect = fake_fetch
         mgr = CacheManager(local=local, http=http)
         info = mgr.pull("debian-13")

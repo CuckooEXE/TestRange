@@ -34,9 +34,7 @@ def _import_requests() -> Any:
         import requests
         import urllib3
     except ImportError as e:
-        raise CacheError(
-            "requests is not installed; install with `pip install -e .[http]`"
-        ) from e
+        raise CacheError("requests is not installed; install with `pip install -e .[http]`") from e
     # The cache server uses self-signed certs by design; suppress the per-
     # request warning that requests emits when verify=False. The fact that
     # the cache is unverified is documented; no need to spam the log.
@@ -108,9 +106,7 @@ class HttpCache:
         if resp.status_code == 404:
             raise CacheMissError(f"no entry with name {name!r} in http cache")
         if not resp.ok:
-            raise CacheError(
-                f"http cache: GET /names/{name} → {resp.status_code}"
-            )
+            raise CacheError(f"http cache: GET /names/{name} → {resp.status_code}")
         sha: str = resp.text.strip()
         if not sha:
             raise CacheError(f"http cache: name {name!r} resolved to empty sha")
@@ -121,9 +117,7 @@ class HttpCache:
         if resp.status_code == 404:
             raise CacheMissError(f"no sidecar for {sha[:16]} in http cache")
         if not resp.ok:
-            raise CacheError(
-                f"http cache: GET /isos/{sha}.json → {resp.status_code}"
-            )
+            raise CacheError(f"http cache: GET /isos/{sha}.json → {resp.status_code}")
         data = json.loads(resp.text)
         return CacheEntryInfo(
             sha256=data["sha256"],
@@ -213,9 +207,7 @@ class HttpCache:
                 description=info.description,
                 path=None,
             )
-            resp = self._put(
-                f"/isos/{sha}.json", data=self._sidecar_body(new_info).encode("utf-8")
-            )
+            resp = self._put(f"/isos/{sha}.json", data=self._sidecar_body(new_info).encode("utf-8"))
             self._raise_for_put(resp, f"/isos/{sha}.json")
         self._put_name(name, sha)
 
@@ -243,9 +235,7 @@ class HttpCache:
             description=info.description,
             path=None,
         )
-        resp = self._put(
-            f"/isos/{sha}.json", data=self._sidecar_body(new_info).encode("utf-8")
-        )
+        resp = self._put(f"/isos/{sha}.json", data=self._sidecar_body(new_info).encode("utf-8"))
         self._raise_for_put(resp, f"/isos/{sha}.json")
 
     # ---- helpers ----------------------------------------------------------

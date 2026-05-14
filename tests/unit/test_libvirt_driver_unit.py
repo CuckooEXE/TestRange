@@ -183,9 +183,9 @@ class TestPreflight:
         report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
         overlap_findings = [f for f in report.errors if f.code == "subnet_overlap"]
         assert overlap_findings, report.render()
-        assert any(
-            f.fix_hint and "install network" in f.fix_hint for f in overlap_findings
-        ), [f.fix_hint for f in overlap_findings]
+        assert any(f.fix_hint and "install network" in f.fix_hint for f in overlap_findings), [
+            f.fix_hint for f in overlap_findings
+        ]
 
     def test_system_uri_skips_user_side_pool_root_mkdir(self, tmp_path: Path) -> None:
         # Even when pool_root points at an unwritable location, system-mode
@@ -398,9 +398,7 @@ class _FakeSnapshot:
 
     def delete(self, flags: int) -> None:
         self.deleted = True
-        self._parent._snapshots = [
-            s for s in self._parent._snapshots if s.name != self.name
-        ]
+        self._parent._snapshots = [s for s in self._parent._snapshots if s.name != self.name]
 
 
 class _FakeDomain:

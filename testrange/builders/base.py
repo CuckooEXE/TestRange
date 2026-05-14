@@ -76,9 +76,7 @@ class Builder(ABC):
         the payload.
         """
 
-    def wait_ready(
-        self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec
-    ) -> None:
+    def wait_ready(self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec) -> None:
         """Block until the brought-up VM is ready for tests.
 
         Default: no-op — for builders that produce a fully-baked disk

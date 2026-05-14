@@ -20,6 +20,5 @@ def validate_name(name: str) -> None:
     """Reject names that aren't safe to use as HTTP path components."""
     if not isinstance(name, str) or not _NAME_RE.match(name):
         raise CacheError(
-            f"cache name {name!r} must match {_NAME_RE.pattern} "
-            "(no slashes, spaces, or unicode)"
+            f"cache name {name!r} must match {_NAME_RE.pattern} (no slashes, spaces, or unicode)"
         )

@@ -19,9 +19,7 @@ class _Recorder:
         self.read_calls: list[str] = []
         self.write_calls: list[tuple[str, bytes]] = []
 
-    def execute(
-        self, argv: Any, *, timeout: float = 60.0, cwd: str | None = None
-    ) -> ExecResult:
+    def execute(self, argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
         self.exec_calls.append((tuple(argv), timeout, cwd))
         return ExecResult(exit_code=0, stdout=b"out", stderr=b"", duration=0.1)
 

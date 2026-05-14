@@ -310,9 +310,7 @@ class CloudInitBuilder(Builder):
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 
-    def wait_ready(
-        self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec
-    ) -> None:
+    def wait_ready(self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec) -> None:
         """Run ``cloud-init status --wait`` until cloud-init reaches done.
 
         At run-phase boot, cloud-init re-walks its stage machine on the
@@ -327,8 +325,7 @@ class CloudInitBuilder(Builder):
         r = execute(("cloud-init", "status", "--wait"), timeout=300.0)
         if r.exit_code != 0:
             raise BuildNotReadyError(
-                f"cloud-init status --wait exited {r.exit_code}; "
-                f"stderr={r.stderr!r}"
+                f"cloud-init status --wait exited {r.exit_code}; stderr={r.stderr!r}"
             )
 
     def render_seed(
@@ -342,13 +339,13 @@ class CloudInitBuilder(Builder):
         """Build the ISO9660 ``cidata`` seed image as bytes."""
         pycdlib = _import_pycdlib()
 
-        user_data = self.render_user_data(
-            spec, recipe, addressing=addressing, macs=macs
-        ).encode("utf-8")
+        user_data = self.render_user_data(spec, recipe, addressing=addressing, macs=macs).encode(
+            "utf-8"
+        )
         meta_data = self.render_meta_data(spec, recipe).encode("utf-8")
-        network_config = self.render_network_config(
-            spec, recipe, addressing=addressing
-        ).encode("utf-8")
+        network_config = self.render_network_config(spec, recipe, addressing=addressing).encode(
+            "utf-8"
+        )
 
         iso = pycdlib.PyCdlib()
         iso.new(
@@ -399,9 +396,7 @@ _INSECURE_APT_CONFIG = (
 _INSECURE_DNF_CONFIG = "sslverify=False\ngpgcheck=0\n"
 
 
-def _render_insecure_write_files(
-    *, insecure_apt: bool, insecure_dnf: bool
-) -> list[dict[str, Any]]:
+def _render_insecure_write_files(*, insecure_apt: bool, insecure_dnf: bool) -> list[dict[str, Any]]:
     """Build cloud-init ``write_files`` entries for the insecure apt/dnf flags."""
     entries: list[dict[str, Any]] = []
     if insecure_apt:
@@ -485,9 +480,7 @@ def _render_run_netplan_yaml(
     pattern; this fallback is only safe for single-NIC VMs.
     """
     if macs and len(macs) != len(spec.nics):
-        raise ValueError(
-            f"macs has {len(macs)} entries but spec.nics has {len(spec.nics)}"
-        )
+        raise ValueError(f"macs has {len(macs)} entries but spec.nics has {len(spec.nics)}")
     first_static_seen = False
     ethernets: dict[str, Any] = {}
     for idx, nic in enumerate(spec.nics):

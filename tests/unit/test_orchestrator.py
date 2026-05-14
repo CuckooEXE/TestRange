@@ -63,9 +63,7 @@ class _FakeDriver:
         self.connected = False
         self._record("disconnect")
 
-    def preflight(
-        self, plan: Any, *, cache_manager: Any, install_network: Any
-    ) -> PreflightReport:
+    def preflight(self, plan: Any, *, cache_manager: Any, install_network: Any) -> PreflightReport:
         del plan, cache_manager, install_network
         self._record("preflight")
         return self.preflight_report
@@ -172,9 +170,7 @@ class _FakeDriver:
         return f"10.97.99.{last_octet}"
 
     def native_guest_execute(self, backend_name: str) -> Any:
-        def _execute(
-            argv: Any, *, timeout: float = 60.0, cwd: str | None = None
-        ) -> ExecResult:
+        def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
             del timeout, cwd
             self._record("native_guest_execute", backend_name, tuple(argv))
             return ExecResult(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
@@ -226,9 +222,7 @@ class _FakeDriver:
         self._record("create_snapshot", vm_backend_name, name, description, mem)
         snaps = self._snapshots.setdefault(vm_backend_name, [])
         if name in snaps:
-            raise DriverError(
-                f"snapshot {name!r} already exists on vm {vm_backend_name!r}"
-            )
+            raise DriverError(f"snapshot {name!r} already exists on vm {vm_backend_name!r}")
         snaps.append(name)
 
     def list_snapshots(self, vm_backend_name: str) -> list[str]:
@@ -245,9 +239,7 @@ class _FakeDriver:
 
         self._record("restore_snapshot", vm_backend_name, name)
         if name not in self._snapshots.get(vm_backend_name, []):
-            raise DriverError(
-                f"snapshot {name!r} not found on vm {vm_backend_name!r}"
-            )
+            raise DriverError(f"snapshot {name!r} not found on vm {vm_backend_name!r}")
 
 
 def _plan(name: str = "hello") -> Plan:
@@ -677,9 +669,7 @@ class TestQGABinding:
         assert not any(c[0] == "get_lease_ip" for c in fake_driver.calls)
         # Builder readiness ran `cloud-init status --wait` through the agent.
         agent_calls = [c for c in fake_driver.calls if c[0] == "native_guest_execute"]
-        assert any(
-            c[1][1] == ("cloud-init", "status", "--wait") for c in agent_calls
-        )
+        assert any(c[1][1] == ("cloud-init", "status", "--wait") for c in agent_calls)
 
     def test_qga_communicator_execute_reaches_driver(
         self,
@@ -691,6 +681,5 @@ class TestQGABinding:
             r = orch.vms["web"].communicator.execute(["id", "-u"])
         assert r.exit_code == 0
         assert any(
-            c[0] == "native_guest_execute" and c[1][1] == ("id", "-u")
-            for c in fake_driver.calls
+            c[0] == "native_guest_execute" and c[1][1] == ("id", "-u") for c in fake_driver.calls
         )

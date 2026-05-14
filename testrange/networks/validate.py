@@ -24,9 +24,7 @@ _DHCP_RANGE_LO = 100
 _DHCP_RANGE_HI = 200
 
 
-def validate_addressing(
-    networks: Iterable[Network], vms: Iterable[VMRecipe]
-) -> None:
+def validate_addressing(networks: Iterable[Network], vms: Iterable[VMRecipe]) -> None:
     """Validate every NIC against the plan's network shape.
 
     Accumulates all issues and raises one ``ValueError`` containing every
@@ -44,9 +42,7 @@ def validate_addressing(
             origin = f"VM {vm.name!r} NIC {idx} ({nic.network!r})"
             net = nets_by_name.get(nic.network)
             if net is None:
-                problems.append(
-                    f"{origin}: references unknown network {nic.network!r}"
-                )
+                problems.append(f"{origin}: references unknown network {nic.network!r}")
                 continue
 
             if nic.ipv4 is None:
@@ -76,20 +72,14 @@ def validate_addressing(
                 problems.append(f"{origin}: address not in subnet {subnet!s}")
                 continue
             if addr == subnet.network_address:
-                problems.append(
-                    f"{origin}: address is the subnet's network address"
-                )
+                problems.append(f"{origin}: address is the subnet's network address")
                 continue
             if addr == subnet.broadcast_address:
-                problems.append(
-                    f"{origin}: address is the subnet's broadcast address"
-                )
+                problems.append(f"{origin}: address is the subnet's broadcast address")
                 continue
             gw = ipaddress.IPv4Address(net.gateway)
             if addr == gw:
-                problems.append(
-                    f"{origin}: address collides with gateway {gw!s}"
-                )
+                problems.append(f"{origin}: address collides with gateway {gw!s}")
                 continue
             if net.dhcp:
                 lo = subnet.network_address + _DHCP_RANGE_LO
@@ -106,17 +96,13 @@ def validate_addressing(
             seen = seen_per_net.setdefault(nic.network, {})
             prior = seen.get(nic.ipv4)
             if prior is not None:
-                problems.append(
-                    f"{origin}: duplicate — address already used by {prior}"
-                )
+                problems.append(f"{origin}: duplicate — address already used by {prior}")
                 continue
             seen[nic.ipv4] = origin
 
     if problems:
         joined = "\n  - ".join(problems)
-        raise ValueError(
-            f"plan has {len(problems)} addressing problem(s):\n  - {joined}"
-        )
+        raise ValueError(f"plan has {len(problems)} addressing problem(s):\n  - {joined}")
 
 
 __all__ = ["validate_addressing"]

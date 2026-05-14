@@ -683,9 +683,7 @@ class LibvirtDriver(HypervisorDriver):
                         libvirt.VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY
                     )
                 except Exception as e:
-                    _log.warning(
-                        "vm %s: snapshot %s delete failed: %s", backend_name, snap_name, e
-                    )
+                    _log.warning("vm %s: snapshot %s delete failed: %s", backend_name, snap_name, e)
         except Exception as e:
             _log.warning("vm %s: snapshot enumeration failed: %s", backend_name, e)
         try:
@@ -717,9 +715,7 @@ class LibvirtDriver(HypervisorDriver):
             if "not found" not in msg and "no domain snapshot" not in msg:
                 raise
         else:
-            raise DriverError(
-                f"snapshot {name!r} already exists on vm {vm_backend_name!r}"
-            )
+            raise DriverError(f"snapshot {name!r} already exists on vm {vm_backend_name!r}")
         # mem=False → DISK_ONLY flag (no RAM capture, VM can be running or
         # shut off); mem=True → default (memory included when running, must
         # be running to mean anything).
@@ -754,9 +750,7 @@ class LibvirtDriver(HypervisorDriver):
         except libvirt.libvirtError as e:
             msg = str(e).lower()
             if "not found" in msg or "no domain snapshot" in msg:
-                raise DriverError(
-                    f"snapshot {name!r} not found on vm {vm_backend_name!r}"
-                ) from e
+                raise DriverError(f"snapshot {name!r} not found on vm {vm_backend_name!r}") from e
             raise
         _log.info("revert vm %s to snapshot %s", vm_backend_name, name)
         dom.revertToSnapshot(snap, 0)
@@ -776,11 +770,7 @@ class LibvirtDriver(HypervisorDriver):
 def _qga_agent_not_ready(e: Exception) -> bool:
     """True when a libvirtError reads like the guest agent is not up yet."""
     msg = str(e).lower()
-    return (
-        "guest agent is not" in msg
-        or "not connected" in msg
-        or "not responding" in msg
-    )
+    return "guest agent is not" in msg or "not connected" in msg or "not responding" in msg
 
 
 def _qga_argv(argv: Sequence[str], cwd: str | None) -> tuple[str, list[str]]:
@@ -812,9 +802,7 @@ class _LibvirtGuestAgent:
         self._driver = driver
         self._backend_name = backend_name
 
-    def _send(
-        self, command: str, arguments: dict[str, Any] | None, *, deadline: float
-    ) -> Any:
+    def _send(self, command: str, arguments: dict[str, Any] | None, *, deadline: float) -> Any:
         """Send one QGA command; return its decoded ``return`` payload.
 
         Retries a not-yet-responding agent until ``deadline``. Wraps
@@ -848,9 +836,7 @@ class _LibvirtGuestAgent:
                 f"QGA {command!r} on {self._backend_name!r} returned non-JSON: {raw!r}"
             ) from e
         if "error" in resp:
-            raise GuestAgentError(
-                f"QGA {command!r} on {self._backend_name!r}: {resp['error']}"
-            )
+            raise GuestAgentError(f"QGA {command!r} on {self._backend_name!r}: {resp['error']}")
         return resp.get("return")
 
     def execute(
@@ -876,8 +862,7 @@ class _LibvirtGuestAgent:
                 break
             if time.monotonic() >= deadline:
                 raise GuestAgentError(
-                    f"QGA guest-exec on {self._backend_name!r} did not finish "
-                    f"within {timeout:.0f}s"
+                    f"QGA guest-exec on {self._backend_name!r} did not finish within {timeout:.0f}s"
                 )
             time.sleep(0.5)
         return ExecResult(
@@ -890,9 +875,7 @@ class _LibvirtGuestAgent:
     def read_file(self, path: str) -> bytes:
         """Read a guest file via ``guest-file-open``/``-read``/``-close``."""
         deadline = time.monotonic() + 60.0
-        ret = self._send(
-            "guest-file-open", {"path": path, "mode": "r"}, deadline=deadline
-        )
+        ret = self._send("guest-file-open", {"path": path, "mode": "r"}, deadline=deadline)
         handle = ret if isinstance(ret, int) else ret["handle"]
         chunks: list[bytes] = []
         try:
@@ -911,9 +894,7 @@ class _LibvirtGuestAgent:
     def write_file(self, path: str, data: bytes) -> None:
         """Write a guest file via ``guest-file-open``/``-write``/``-close``."""
         deadline = time.monotonic() + 60.0
-        ret = self._send(
-            "guest-file-open", {"path": path, "mode": "w"}, deadline=deadline
-        )
+        ret = self._send("guest-file-open", {"path": path, "mode": "w"}, deadline=deadline)
         handle = ret if isinstance(ret, int) else ret["handle"]
         try:
             self._send(

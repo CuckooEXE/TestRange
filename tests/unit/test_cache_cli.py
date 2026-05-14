@@ -160,9 +160,7 @@ class TestPushPullCli:
         ok = MagicMock(status_code=201, ok=True, text="")
         fake_requests.put.return_value = ok
         with patch("testrange.cache.http._import_requests", return_value=fake_requests):
-            rc = cli.main(
-                ["--cache", "https://cache.local:8443", "cache", "push", "thing"]
-            )
+            rc = cli.main(["--cache", "https://cache.local:8443", "cache", "push", "thing"])
         assert rc == 0
         # bin + sidecar + 1 name = 3 PUTs.
         assert fake_requests.put.call_count == 3

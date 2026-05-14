@@ -65,9 +65,7 @@ class _FakeExec:
 
     def __call__(self, argv, *, timeout=60.0, cwd=None):  # type: ignore[no-untyped-def]
         self.calls.append((tuple(argv), timeout))
-        return ExecResult(
-            exit_code=self._exit_code, stdout=b"", stderr=self._stderr, duration=0.0
-        )
+        return ExecResult(exit_code=self._exit_code, stdout=b"", stderr=self._stderr, duration=0.0)
 
 
 class TestRenderUserData:
@@ -290,9 +288,9 @@ class TestConfigHash:
         )
         r1 = _recipe(b1, spec)
         r2 = _recipe(b2, spec)
-        assert b1.config_hash(
-            spec, r1, addressing=DEFAULT_ADDR, base_sha="z"
-        ) != b2.config_hash(spec, r2, addressing=DEFAULT_ADDR, base_sha="z")
+        assert b1.config_hash(spec, r1, addressing=DEFAULT_ADDR, base_sha="z") != b2.config_hash(
+            spec, r2, addressing=DEFAULT_ADDR, base_sha="z"
+        )
 
 
 class TestRenderSeed:
@@ -420,7 +418,9 @@ class TestRunPhaseNetplanStaging:
         # NIC has a static ipv4 — install runs on a different subnet.
         spec = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
         b = CloudInitBuilder(base=CacheEntry("x"))
-        netcfg = yaml.safe_load(b.render_network_config(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
+        netcfg = yaml.safe_load(
+            b.render_network_config(spec, _recipe(b, spec), addressing=DEFAULT_ADDR)
+        )
         eth = netcfg["ethernets"]["id0"]
         assert eth["dhcp4"] is True
         assert "addresses" not in eth
@@ -437,8 +437,12 @@ class TestRunPhaseNetplanStaging:
         b = CloudInitBuilder(base=CacheEntry("x"))
         spec_dhcp = _static_spec(LibvirtNetworkIface("netA"))
         spec_static = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
-        h_dhcp = b.config_hash(spec_dhcp, _recipe(b, spec_dhcp), addressing=DEFAULT_ADDR, base_sha="z")
-        h_static = b.config_hash(spec_static, _recipe(b, spec_static), addressing=DEFAULT_ADDR, base_sha="z")
+        h_dhcp = b.config_hash(
+            spec_dhcp, _recipe(b, spec_dhcp), addressing=DEFAULT_ADDR, base_sha="z"
+        )
+        h_static = b.config_hash(
+            spec_static, _recipe(b, spec_static), addressing=DEFAULT_ADDR, base_sha="z"
+        )
         assert h_dhcp != h_static
 
 

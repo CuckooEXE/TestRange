@@ -80,9 +80,7 @@ class TestNICs:
         n = NetworkIface("netA", ipv4="10.0.0.5")
         assert n.ipv4 == "10.0.0.5"
 
-    @pytest.mark.parametrize(
-        "bad", ["not-an-ip", "300.300.300.300", "10.0.0", "::1", ""]
-    )
+    @pytest.mark.parametrize("bad", ["not-an-ip", "300.300.300.300", "10.0.0", "::1", ""])
     def test_invalid_ipv4(self, bad: str) -> None:
         with pytest.raises(ValueError):
             LibvirtNetworkIface("netA", ipv4=bad)

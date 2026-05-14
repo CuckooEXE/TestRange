@@ -139,8 +139,7 @@ class Orchestrator:
         # stovepipe rule: builders never see a hypervisor type, they get the
         # one piece of info they need — per-network CIDR/prefix/gateway/dhcp.
         self._addressing: Mapping[str, NetworkAddressing] = {
-            n.name: NetworkAddressing.from_network(n)
-            for n in self._all_user_networks()
+            n.name: NetworkAddressing.from_network(n) for n in self._all_user_networks()
         }
 
     def _all_user_networks(self) -> Sequence[Network]:
@@ -304,8 +303,7 @@ class Orchestrator:
 
         base_info = self.cache.resolve(builder.base)
         macs = tuple(
-            self.driver.compose_mac(self._plan_name, vm.name, i)
-            for i in range(len(vm.spec.nics))
+            self.driver.compose_mac(self._plan_name, vm.name, i) for i in range(len(vm.spec.nics))
         )
         config_hash = builder.config_hash(
             vm.spec,
@@ -332,7 +330,9 @@ class Orchestrator:
             # but log loud enough to be noticed in CI.
             _log.warning(
                 "vm %s: cache lookup error on %s (%s); building install VM",
-                vm.name, config_hash, e,
+                vm.name,
+                config_hash,
+                e,
             )
 
         pool_backend = self._pool_backends[vm.spec.os_drive.pool]
@@ -355,9 +355,7 @@ class Orchestrator:
         self._store.confirm(install_disk_name, pool_backend=pool_backend)
 
         # Render + write seed
-        seed_bytes = builder.render_seed(
-            vm.spec, vm, addressing=self._addressing, macs=macs
-        )
+        seed_bytes = builder.render_seed(vm.spec, vm, addressing=self._addressing, macs=macs)
         self._store.record_intent(
             kind="install_seed",
             backend_name=install_seed_name,
@@ -462,9 +460,7 @@ class Orchestrator:
                 plan_name=vm.name,
                 pool_backend=pool_backend,
             )
-            base_ref = self._ensure_base_in_pool(
-                pool_backend, self._post_install_paths[vm.name]
-            )
+            base_ref = self._ensure_base_in_pool(pool_backend, self._post_install_paths[vm.name])
             self.driver.create_disk_from_base(run_disk_ref, base_ref)
             self._store.confirm(run_disk_name, pool_backend=pool_backend)
 
