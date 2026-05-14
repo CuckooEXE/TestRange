@@ -1,8 +1,8 @@
 # Adding a communicator
 
 A `Communicator` is the test-code-facing transport into a running VM.
-`SSHCommunicator` is the only built-in; future ones include QGA
-(QEMU Guest Agent), VMware Tools, WinRM, and serial console.
+`SSHCommunicator` and `QGACommunicator` (QEMU Guest Agent) are the
+built-ins; future ones include VMware Tools, WinRM, and serial console.
 
 The contract is in `testrange/communicators/base.py`:
 
@@ -19,8 +19,8 @@ class Communicator(ABC):
 ```
 
 Note: **the ABC does NOT define a `bind()` method.** Different
-communicators bind with wildly different inputs (an IP for SSH, a
-libvirt connection + domain name for QGA, a serial path for console).
+communicators bind with wildly different inputs (an IP + credential for
+SSH, driver-supplied callables for QGA, a serial path for console).
 Each concrete declares its own per-type `bind(...)` signature; the
 orchestrator dispatches by communicator type at run-phase bring-up.
 
@@ -28,57 +28,76 @@ orchestrator dispatches by communicator type at run-phase bring-up.
 
 1. **Subclass `Communicator`.** Implement the four abstract methods.
    The Plan-time constructor takes whatever the user puts in their
-   plan (typically a username or a service-account identifier).
-   Validate types at the trust boundary in `__init__`:
+   plan — a username for SSH, nothing at all for QGA (the agent's
+   identity is the VM). Validate types at the trust boundary in
+   `__init__`:
 
    ```python
-   class QGACommunicator(Communicator):
+   class WinRMCommunicator(Communicator):
        def __init__(self, username: str) -> None:
            if not isinstance(username, str) or not username:
-               raise ValueError("QGACommunicator(username) must be non-empty")
+               raise ValueError("WinRMCommunicator(username) must be non-empty")
            self._username = username
            self._bound = False
            # ... transport-specific state, initially None
    ```
 
 2. **Declare your `bind(...)` signature.** Whatever inputs your
-   transport needs:
+   transport needs. The two built-ins show the range:
 
    ```python
-   def bind(self, *, libvirt_conn: Any, vm_backend_name: str) -> None:
-       if self._bound:
-           raise CommunicatorAlreadyBoundError(...)
-       # ... store inputs, lazy-connect on first execute
+   # SSHCommunicator — addressing the orchestrator discovers:
+   def bind(self, *, host: str, credential: PosixCred, port: int = 22) -> None: ...
+
+   # QGACommunicator — VM-bound callables the orchestrator pulls off
+   # the driver. The communicator never imports a driver type:
+   def bind(self, *, execute: GuestExec, read_file: GuestReadFile,
+            write_file: GuestWriteFile) -> None: ...
    ```
 
-   Add a `is_bound: bool` property and a `_ensure_connected()`
-   helper. Connection should be **lazy** — first `execute` call
-   opens the connection with a retry loop (the VM may take time to
-   come up).
+   Always guard against double-bind with a `_bound` flag raising
+   `CommunicatorAlreadyBoundError`, and add an `is_bound: bool`
+   property. For network transports, connection should be **lazy** —
+   the first `execute` opens the connection with a retry loop (see
+   `SSHCommunicator._ensure_connected`). A shim over driver callables
+   (`QGACommunicator`) has nothing to connect — it just delegates.
 
 3. **Wire orchestrator dispatch.** In `Orchestrator._bind_communicators`
-   (`testrange/orchestrator/runtime.py`), add the per-type branch:
+   (`testrange/orchestrator/runtime.py`), add a branch to the
+   `isinstance` ladder:
 
    ```python
-   elif isinstance(vm.communicator, QGACommunicator):
-       vm.communicator.bind(
-           libvirt_conn=self.driver.conn,
-           vm_backend_name=...,
-       )
+   elif isinstance(comm, WinRMCommunicator):
+       ip = self._discover_ip(vm)
+       cred = self._lookup_credential(vm)
+       comm.bind(host=ip, credential=cred)
    ```
 
-   The orchestrator already has the driver + the VM's backend name
-   available at bind time.
+   The orchestrator already has the driver, the VM's backend name
+   (`driver.compose_resource_name(self.run_id, "vm", vm.name)`), and
+   the discovered IP available at bind time. It is the only broker —
+   the communicator never reaches into the driver itself.
 
-4. **Don't reuse a communicator across VMs.** Communicators have a
-   single-use guard (the `_bound` flag); reusing one is a
-   programmer error. The orchestrator constructs the right one per
-   VM from `vm.communicator` on the `VMRecipe`.
+4. **Native-agent communicators: use `testrange.guest_io`.** If your
+   transport rides a hypervisor's native in-guest agent rather than the
+   network, the driver exposes the agent operations via
+   `native_guest_execute` / `native_guest_read_file` /
+   `native_guest_write_file` (typed as the `GuestExec` /
+   `GuestReadFile` / `GuestWriteFile` Protocols in
+   `testrange/guest_io.py`). Your communicator's `bind` takes those
+   callables and delegates to them — that's all `QGACommunicator` is.
+   The driver-side wire protocol lives in the driver (e.g.,
+   `_LibvirtGuestAgent`), never in the communicator.
 
-5. **Honor the `close()` contract.** `close()` must be idempotent.
-   Test code calls `vm.communicator.close()` after a driver-level
-   reboot so the next `execute` triggers a reconnect. Make sure
-   re-`_ensure_connected` works after a close.
+5. **Don't reuse a communicator across VMs.** Communicators have a
+   single-use guard (the `_bound` flag); reusing one is a programmer
+   error. The orchestrator constructs the right one per VM from
+   `vm.communicator` on the `VMRecipe`.
+
+6. **Honor the `close()` contract.** `close()` must be idempotent.
+   For network transports, test code calls `vm.communicator.close()`
+   after a driver-level reboot so the next `execute` triggers a
+   reconnect — make sure re-`_ensure_connected` works after a close.
 
 ## Optional dependencies
 
@@ -88,8 +107,10 @@ import.
 
 ## Tests
 
-`tests/unit/test_ssh_communicator.py` is the template. Mock the
-underlying SDK at the import point (`monkeypatch.setattr(
-"testrange.communicators.ssh._import_paramiko", lambda: fake)`),
-then drive the communicator through its full lifecycle (construct,
-bind, execute, close, re-execute).
+`tests/unit/test_ssh_communicator.py` is the template for a network
+transport: mock the underlying SDK at the import point
+(`monkeypatch.setattr("testrange.communicators.ssh._import_paramiko",
+lambda: fake)`), then drive the full lifecycle (construct, bind,
+execute, close, re-execute). `tests/unit/test_qga_communicator.py` is
+the template for a shim — bind with fake callables and assert it
+delegates.

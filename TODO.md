@@ -36,7 +36,11 @@ with a date stamp.
 - Cross-format disk conversion (qcow2 ↔ vmdk ↔ raw) — re-introduces a
   sanctioned `qemu-img` subprocess module with its own ADR.
 - Builders: Proxmox answer-file, ESXi kickstart, Windows unattended.
-- Communicators: QGA, WinRM, VMware Tools, serial console.
+- Communicators: WinRM, VMware Tools, serial console.
+- QGA libvirt-stderr silencer — a process-global `registerErrorHandler`
+  is the obvious way to mute "guest agent is not responding" noise
+  during the not-yet-up retry, but it's refcounted mutable global
+  state. Deferred; revisit only if the noise becomes a real problem.
 - IPv6, VLAN tagging, VXLAN, NAT port-forwards.
 - `pytest-testrange` plugin.
 - Push-only HTTP cache mode for CI.
@@ -50,6 +54,13 @@ with a date stamp.
 
 ## Done / Superseded
 
+- **QGACommunicator** — Communicator backed by a hypervisor's native
+  guest agent. Driver owns the wire protocol (`_LibvirtGuestAgent` over
+  `libvirt_qemu.qemuAgentCommand`), exposed via
+  `HypervisorDriver.native_guest_{execute,read_file,write_file}`; the
+  communicator is a thin shim over the three loose callables the
+  orchestrator brokers in. `GuestAgentError` for agent failures. See
+  PLAN.md §20, `examples/qga.py`. (2026-05-14)
 - **Builder-declared readiness hook**, brokered by the orchestrator.
   `Builder.wait_ready(spec, recipe, execute)` on the ABC (non-abstract
   no-op default); the orchestrator hands the builder its VM's `execute`

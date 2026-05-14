@@ -24,6 +24,7 @@ from typing import Any
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.cache.manager import CacheManager
+from testrange.communicators.qga import QGACommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
 from testrange.drivers import driver_for
@@ -505,22 +506,32 @@ class Orchestrator:
 
         Each Communicator declares its own ``bind`` signature; the orchestrator
         dispatches by communicator type and hands each one the inputs it needs.
-        Transport-specific addressing (IPs, sockets, etc.) lives on the bound
-        communicator, not on VMHandle.
+        Transport-specific state (IPs, callables) lives on the bound
+        communicator, not on VMHandle. The ``isinstance`` ladder is the
+        sanctioned trust boundary between the user's Plan and dispatch.
         """
         assert self._handle is not None
         for vm in self.plan.hypervisor.vms:
-            if not isinstance(vm.communicator, SSHCommunicator):
-                _log.debug(
-                    "vm %s: no SSHCommunicator (%s); skipping bind",
-                    vm.name,
-                    type(vm.communicator).__name__,
+            comm = vm.communicator
+            if isinstance(comm, SSHCommunicator):
+                ip = self._discover_ip(vm)
+                cred = self._lookup_credential(vm)
+                comm.bind(host=ip, credential=cred)
+                _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
+            elif isinstance(comm, QGACommunicator):
+                backend = self.driver.compose_resource_name(self.run_id, "vm", vm.name)
+                comm.bind(
+                    execute=self.driver.native_guest_execute(backend),
+                    read_file=self.driver.native_guest_read_file(backend),
+                    write_file=self.driver.native_guest_write_file(backend),
                 )
-                continue
-            ip = self._discover_ip(vm)
-            cred = self._lookup_credential(vm)
-            vm.communicator.bind(host=ip, credential=cred)
-            _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
+                _log.info("vm %s: bound QGACommunicator via %s", vm.name, backend)
+            else:
+                _log.debug(
+                    "vm %s: communicator %s not bindable; skipping",
+                    vm.name,
+                    type(comm).__name__,
+                )
 
     def _wait_builder_ready(self) -> None:
         """Drive each builder's readiness check via the bound communicator.

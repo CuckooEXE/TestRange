@@ -369,6 +369,75 @@ preflight → install → run → **bind** → **wait-ready** → hand off
 - `docs/` — readiness is the orchestrator's job; no `cloud-init status
   --wait` test needed.
 
+### 20. QGA communicator: driver owns the wire protocol, communicator is a shim
+
+`SSHCommunicator` is not always usable: an air-gapped VM with no
+management network has no IP to reach, and even on a networked VM SSH
+is not up until late in boot. Every hypervisor with a native in-guest
+agent (libvirt/QGA, ESXi/VMware Tools, Proxmox/QGA) offers an in-band
+exec channel that sidesteps both problems.
+
+**Decision: the driver owns the agent wire protocol; the communicator
+is a thin shim over loose callables.** The driver exposes three
+optional-capability accessors —
+`native_guest_execute`/`native_guest_read_file`/`native_guest_write_file`
+— each returning a VM-bound callable typed as the matching `guest_io`
+Protocol (`GuestExec`/`GuestReadFile`/`GuestWriteFile`). `QGACommunicator`
+takes those three callables in `bind` and delegates; it imports nothing
+driver-side. The orchestrator is the broker — it pulls the callables
+off the driver and hands them over.
+
+Loose callables, not a bundle object: a future native agent might not
+expose every operation, and three independent callables leave room for
+that without a rigid all-or-nothing Protocol. Nothing optional is built
+now — all three are required at `bind`.
+
+#### Libvirt concretes
+
+- `_import_libvirt_qemu()` — lazy import mirroring `_import_libvirt`
+  (`libvirt_qemu` ships inside `libvirt-python`; same `.[libvirt]`
+  extra, no new dependency).
+- `_LibvirtGuestAgent` — VM-bound, re-resolves the domain per call,
+  speaks the QGA JSON protocol over `libvirt_qemu.qemuAgentCommand`
+  (`guest-exec` + `guest-exec-status` poll; `guest-file-open/read/
+  write/close`; `cwd` shimmed via `sh -c`). Tolerates a not-yet-up
+  agent with a bounded retry, the same shape as
+  `SSHCommunicator._ensure_connected`. Wraps libvirt errors and QGA
+  `{"error": ...}` responses into `GuestAgentError`.
+- Every libvirt domain renders an `org.qemu.guest_agent.0` virtio
+  `<channel>` unconditionally — inert without the guest package,
+  and it avoids a cross-stovepipe `isinstance` in the driver.
+
+#### `qemu-guest-agent` is user-declared
+
+The guest needs `qemu-guest-agent` installed and running.
+`CloudInitBuilder` is *not* changed to auto-inject it — that would be
+the builder peeking at the communicator type. The plan author declares
+`Apt("qemu-guest-agent")` + a `systemctl enable --now` line. A plan
+that forgets it fails at the first `execute` with a clear
+`GuestAgentError`.
+
+#### Error type
+
+`GuestAgentError(DriverError)`. A brought-up VM whose agent never
+answers surfaces here.
+
+#### Files touched
+
+- `testrange/guest_io.py` — the shared Protocols (also used by §19).
+- `testrange/exceptions.py` — `GuestAgentError`.
+- `testrange/drivers/base.py` — the three `native_guest_*` accessors.
+- `testrange/drivers/libvirt.py` — `_import_libvirt_qemu`,
+  `_LibvirtGuestAgent`, the accessors, the QGA `<channel>`.
+- `testrange/communicators/qga.py` — `QGACommunicator`.
+- `testrange/communicators/__init__.py` — re-export.
+- `testrange/orchestrator/runtime.py` — QGA branch in
+  `_bind_communicators`.
+- `examples/qga.py`, `tests/integration/test_libvirt_qga.py`,
+  `tests/unit/test_qga_communicator.py`,
+  `tests/unit/test_libvirt_driver_unit.py`,
+  `tests/unit/test_drivers_base.py` — example + coverage.
+
 ## v0 example (target shape)
 
 ```python

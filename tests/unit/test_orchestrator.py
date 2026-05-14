@@ -16,7 +16,7 @@ import pytest
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
-from testrange.communicators import ExecResult, SSHCommunicator
+from testrange.communicators import ExecResult, QGACommunicator, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
@@ -171,6 +171,30 @@ class _FakeDriver:
         last_octet = int(mac.split(":")[-1], 16) % 254 + 1
         return f"10.97.99.{last_octet}"
 
+    def native_guest_execute(self, backend_name: str) -> Any:
+        def _execute(
+            argv: Any, *, timeout: float = 60.0, cwd: str | None = None
+        ) -> ExecResult:
+            del timeout, cwd
+            self._record("native_guest_execute", backend_name, tuple(argv))
+            return ExecResult(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
+
+        return _execute
+
+    def native_guest_read_file(self, backend_name: str) -> Any:
+        def _read_file(path: str) -> bytes:
+            self._record("native_guest_read_file", backend_name, path)
+            return b"fake-contents"
+
+        return _read_file
+
+    def native_guest_write_file(self, backend_name: str) -> Any:
+        def _write_file(path: str, data: bytes) -> None:
+            del data
+            self._record("native_guest_write_file", backend_name, path)
+
+        return _write_file
+
     def shutdown_vm(self, backend_name: str, *, timeout: float = 120.0) -> None:
         del timeout
         self._record("shutdown_vm", backend_name)
@@ -251,6 +275,39 @@ def _plan(name: str = "hello") -> Plan:
                         packages=[Apt("nginx")],
                     ),
                     communicator=SSHCommunicator("u"),
+                ),
+            ],
+        ),
+        name=name,
+    )
+
+
+def _qga_plan(name: str = "hello") -> Plan:
+    """Same shape as ``_plan`` but the VM talks over a QGACommunicator."""
+    return Plan(
+        LibvirtHypervisor(
+            connection="qemu:///session",
+            networks=[
+                Switch("sw1", Network("netA", "10.0.1.0/24", dhcp=True, dns=True)),
+            ],
+            pools=[StoragePool("pool1", 32)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(
+                        name="web",
+                        devices=[
+                            CPU(1),
+                            Memory(512),
+                            OSDrive("pool1", 8),
+                            LibvirtNetworkIface("netA"),
+                        ],
+                    ),
+                    builder=CloudInitBuilder(
+                        base=CacheEntry("debian-13"),
+                        credentials=[PosixCred("u", password="p")],
+                        packages=[Apt("nginx")],
+                    ),
+                    communicator=QGACommunicator(),
                 ),
             ],
         ),
@@ -603,3 +660,37 @@ class TestBuilderReadiness:
             pass
         ready_calls = [c for c in stub_ssh_execute if c[1] == ("cloud-init", "status", "--wait")]
         assert ready_calls == []
+
+
+class TestQGABinding:
+    def test_qga_plan_binds_via_driver(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_qga_plan(), cache_manager=mgr) as orch:
+            comm = orch.vms["web"].communicator
+            assert isinstance(comm, QGACommunicator)
+            assert comm.is_bound is True
+        # The QGA path never discovers an IP — get_lease_ip is SSH-only.
+        assert not any(c[0] == "get_lease_ip" for c in fake_driver.calls)
+        # Builder readiness ran `cloud-init status --wait` through the agent.
+        agent_calls = [c for c in fake_driver.calls if c[0] == "native_guest_execute"]
+        assert any(
+            c[1][1] == ("cloud-init", "status", "--wait") for c in agent_calls
+        )
+
+    def test_qga_communicator_execute_reaches_driver(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_qga_plan(), cache_manager=mgr) as orch:
+            r = orch.vms["web"].communicator.execute(["id", "-u"])
+        assert r.exit_code == 0
+        assert any(
+            c[0] == "native_guest_execute" and c[1][1] == ("id", "-u")
+            for c in fake_driver.calls
+        )

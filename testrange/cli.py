@@ -216,7 +216,9 @@ def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
                 print(f"    creds:  {names}")
             comm = vm.communicator
-            print(f"    comm:   {type(comm).__name__}({getattr(comm, 'username', '?')!r})")
+            username = getattr(comm, "username", None)
+            arg = repr(username) if username is not None else ""
+            print(f"    comm:   {type(comm).__name__}({arg})")
         print()
 
     if tests:

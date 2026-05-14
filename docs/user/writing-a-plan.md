@@ -146,10 +146,10 @@ If the first NIC is static, the orchestrator skips DHCP-lease lookup and
 binds to `nic.ipv4` directly. If the first NIC is DHCP, the orchestrator
 polls the driver for the lease keyed on the stable MAC.
 
-The first-NIC rule does not apply to communicators that don't use a
-network address — for example, an in-band channel (e.g., a guest-agent
-exec channel) binds via a driver-supplied handle, not a NIC, so NIC
-ordering is irrelevant to it.
+The first-NIC rule applies only to communicators that reach the VM over
+the network (SSH). `QGACommunicator` rides the hypervisor's native
+guest agent — an in-band channel with no IP — so NIC ordering is
+irrelevant to it.
 
 ## Readiness is the orchestrator's job
 
@@ -166,6 +166,33 @@ hands the builder its VM's `execute` callable, and the builder runs
 whatever command it needs. `CloudInitBuilder` allows `cloud-init status
 --wait` five minutes — a cold boot's `cloud-final` stage genuinely takes
 that long.
+
+## Communicators
+
+A VM's `communicator` is how test code talks to it. Two are built in:
+
+- **`SSHCommunicator("user")`** — connects over SSH to the VM's first
+  NIC (see above). Needs a `PosixCred` with a matching username on the
+  builder. The default for VMs on a reachable network.
+- **`QGACommunicator()`** — rides the hypervisor's native guest agent
+  (QEMU Guest Agent on libvirt): no network, no credentials, no IP
+  discovery. Takes no constructor arguments — the VM *is* the agent's
+  identity. The guest must have `qemu-guest-agent` installed and
+  running, which you declare yourself in the builder:
+
+  ```python
+  builder=CloudInitBuilder(
+      base=CacheEntry("debian-13"),
+      packages=[Apt("qemu-guest-agent")],
+      post_install_commands=("systemctl enable --now qemu-guest-agent",),
+  ),
+  communicator=QGACommunicator(),
+  ```
+
+  Reach for `QGACommunicator` when a VM has no reachable NIC (air-gapped
+  with no management network), when you don't want SSH on the guest at
+  all, or when you need an out-of-band path independent of guest
+  networking. See `examples/qga.py`.
 
 ## API recipes
 

@@ -5,6 +5,8 @@ Connection + live libvirt calls are exercised in tests/integration/.
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -21,9 +23,12 @@ from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import (
     LibvirtDriver,
     LibvirtHypervisor,
+    _LibvirtGuestAgent,
+    _render_domain_xml,
     _render_network_xml,
     _render_pool_xml,
 )
+from testrange.exceptions import GuestAgentError
 from testrange.networks import Network, Switch
 from testrange.orchestrator.runtime import INSTALL_NETWORK
 from testrange.vms import VMRecipe, VMSpec
@@ -772,3 +777,191 @@ class TestSnapshots:
         assert d.list_snapshots("tr_vm_abc_web") == ["lingering"]
         d.destroy_vm("tr_vm_abc_web")
         assert d.list_snapshots("tr_vm_abc_web") == []
+
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+class _FakeQGA:
+    """Stand-in for the libvirt_qemu module.
+
+    ``qemuAgentCommand`` parses the JSON wire command, records it, and
+    returns the next scripted response for that command: a dict is
+    JSON-encoded and returned, a ``BaseException`` is raised. A command's
+    script list is consumed front-to-back until one entry remains, which
+    then sticks (so polled commands can be scripted as a short list).
+    """
+
+    def __init__(self, script: dict[str, list[Any]]) -> None:
+        self._script = script
+        self.calls: list[dict[str, Any]] = []
+
+    def qemuAgentCommand(self, dom: Any, wire: str, timeout: int, flags: int) -> str:
+        del dom, timeout, flags
+        payload = json.loads(wire)
+        self.calls.append(payload)
+        queue = self._script[payload["execute"]]
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, BaseException):
+            raise item
+        return json.dumps(item)
+
+
+def _agent_with(
+    monkeypatch: pytest.MonkeyPatch, script: dict[str, list[Any]]
+) -> tuple[_LibvirtGuestAgent, _FakeQGA]:
+    d = LibvirtDriver(uri="qemu:///system", pool_root=Path("/tmp"))
+    d._conn = _FakeConn()  # type: ignore[assignment]
+    fake = _FakeQGA(script)
+    monkeypatch.setattr("testrange.drivers.libvirt._import_libvirt_qemu", lambda: fake)
+    monkeypatch.setattr("testrange.drivers.libvirt.time.sleep", lambda _s: None)
+    return _LibvirtGuestAgent(d, "tr_vm_abc_web"), fake
+
+
+class TestLibvirtGuestAgent:
+    def test_execute_runs_and_polls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, fake = _agent_with(
+            monkeypatch,
+            {
+                "guest-exec": [{"return": {"pid": 7}}],
+                "guest-exec-status": [
+                    {"return": {"exited": False}},
+                    {
+                        "return": {
+                            "exited": True,
+                            "exitcode": 0,
+                            "out-data": _b64(b"hi\n"),
+                            "err-data": _b64(b""),
+                        }
+                    },
+                ],
+            },
+        )
+        r = agent.execute(["echo", "hi"])
+        assert r.exit_code == 0
+        assert r.stdout == b"hi\n"
+        assert r.stderr == b""
+        exec_args = fake.calls[0]["arguments"]
+        assert fake.calls[0]["execute"] == "guest-exec"
+        assert exec_args["path"] == "echo"
+        assert exec_args["arg"] == ["hi"]
+        assert exec_args["capture-output"] is True
+
+    def test_execute_cwd_shim(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, fake = _agent_with(
+            monkeypatch,
+            {
+                "guest-exec": [{"return": {"pid": 1}}],
+                "guest-exec-status": [
+                    {"return": {"exited": True, "exitcode": 0, "out-data": "", "err-data": ""}}
+                ],
+            },
+        )
+        agent.execute(["ls", "-la"], cwd="/var/log")
+        args = fake.calls[0]["arguments"]
+        assert args["path"] == "sh"
+        assert args["arg"][0] == "-c"
+        assert "cd -- /var/log" in args["arg"][1]
+        assert "exec ls -la" in args["arg"][1]
+
+    def test_execute_nonzero_exit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, _ = _agent_with(
+            monkeypatch,
+            {
+                "guest-exec": [{"return": {"pid": 2}}],
+                "guest-exec-status": [
+                    {
+                        "return": {
+                            "exited": True,
+                            "exitcode": 3,
+                            "out-data": "",
+                            "err-data": _b64(b"boom"),
+                        }
+                    }
+                ],
+            },
+        )
+        r = agent.execute(["false"])
+        assert r.exit_code == 3
+        assert r.stderr == b"boom"
+
+    def test_qga_error_response_wraps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, _ = _agent_with(
+            monkeypatch,
+            {"guest-exec": [{"error": {"class": "GenericError", "desc": "boom"}}]},
+        )
+        with pytest.raises(GuestAgentError, match="guest-exec"):
+            agent.execute(["echo", "hi"])
+
+    def test_libvirt_error_wraps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import libvirt
+
+        agent, _ = _agent_with(
+            monkeypatch,
+            {"guest-exec": [libvirt.libvirtError("kaboom")]},
+        )
+        with pytest.raises(GuestAgentError, match="failed"):
+            agent.execute(["echo", "hi"])
+
+    def test_agent_not_ready_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import libvirt
+
+        agent, fake = _agent_with(
+            monkeypatch,
+            {
+                "guest-exec": [
+                    libvirt.libvirtError("Guest agent is not responding"),
+                    libvirt.libvirtError("Guest agent is not responding"),
+                    {"return": {"pid": 9}},
+                ],
+                "guest-exec-status": [
+                    {"return": {"exited": True, "exitcode": 0, "out-data": "", "err-data": ""}}
+                ],
+            },
+        )
+        r = agent.execute(["echo", "hi"])
+        assert r.exit_code == 0
+        # guest-exec retried twice before succeeding.
+        assert sum(1 for c in fake.calls if c["execute"] == "guest-exec") == 3
+
+    def test_read_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, fake = _agent_with(
+            monkeypatch,
+            {
+                "guest-file-open": [{"return": 9}],
+                "guest-file-read": [
+                    {"return": {"buf-b64": _b64(b"chunk1"), "eof": False}},
+                    {"return": {"buf-b64": _b64(b"chunk2"), "eof": True}},
+                ],
+                "guest-file-close": [{"return": {}}],
+            },
+        )
+        assert agent.read_file("/etc/hostname") == b"chunk1chunk2"
+        assert any(c["execute"] == "guest-file-close" for c in fake.calls)
+
+    def test_write_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        agent, fake = _agent_with(
+            monkeypatch,
+            {
+                "guest-file-open": [{"return": 4}],
+                "guest-file-write": [{"return": {"count": 5}}],
+                "guest-file-close": [{"return": {}}],
+            },
+        )
+        agent.write_file("/tmp/x", b"hello")
+        write_call = next(c for c in fake.calls if c["execute"] == "guest-file-write")
+        assert write_call["arguments"]["buf-b64"] == _b64(b"hello")
+        assert write_call["arguments"]["count"] == 5
+
+    def test_domain_xml_renders_qga_channel(self) -> None:
+        xml = _render_domain_xml(
+            "tr_vm_abc_web",
+            _basic_recipe().spec,
+            os_disk_path=Path("/var/lib/libvirt/images/x.qcow2"),
+            seed_iso_path=None,
+            network_refs={"netA": "tr_network_abc_netA"},
+            macs=["52:54:00:00:00:01"],
+        )
+        assert "<channel type='unix'>" in xml
+        assert "org.qemu.guest_agent.0" in xml

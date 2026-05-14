@@ -74,7 +74,8 @@ all tests run sequentially and the runner continues on failure; pass
 
 ## What a communicator exposes
 
-`SSHCommunicator` is the only built-in:
+Two are built in — `SSHCommunicator` and `QGACommunicator` (QEMU Guest
+Agent). Both implement the same four-method surface:
 
 `execute(argv, *, timeout=60.0, cwd=None) -> ExecResult`
 : Run a command in the guest. `argv` is a list; no shell, no quoting
@@ -83,17 +84,20 @@ all tests run sequentially and the runner continues on failure; pass
   (`exit_code == 0`).
 
 `read_file(path) -> bytes`
-: Read a guest-side file via SFTP.
+: Read a guest-side file (SFTP for SSH; `guest-file-*` for QGA).
 
 `write_file(path, data)`
-: Write a guest-side file via SFTP.
+: Write a guest-side file.
 
 `close()`
-: Drop the underlying paramiko client. The next `execute` will
-  reconnect (useful after a driver-level reboot).
+: Release the transport. For `SSHCommunicator` the next `execute`
+  reconnects — useful after a driver-level reboot.
 
-`host: str | None`
-: The bound IP, set by the orchestrator during bring-up.
+`SSHCommunicator` additionally exposes `host: str | None` — the bound
+IP, set by the orchestrator during bring-up. `QGACommunicator` has no
+address; it reaches the VM through the hypervisor's guest-agent
+channel. See [Writing a plan](writing-a-plan.md#communicators) for when
+to pick which.
 
 ## Snapshots / per-test revert
 

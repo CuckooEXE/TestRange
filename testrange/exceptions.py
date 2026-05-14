@@ -31,6 +31,10 @@ class DriverError(TestRangeError):
     """Hypervisor driver failure."""
 
 
+class GuestAgentError(DriverError):
+    """A hypervisor's native guest agent (QGA / VMware Tools / ...) command failed."""
+
+
 class StateError(TestRangeError):
     """State-file read/write/parse error."""
 

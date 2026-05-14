@@ -13,8 +13,24 @@ This project predates 1.0; expect breaking changes between minor versions.
   ``Protocol``s (``GuestExec`` / ``GuestReadFile`` / ``GuestWriteFile``)
   plus a re-export of ``ExecResult``. These are exactly the shapes of
   ``Communicator.execute`` / ``read_file`` / ``write_file``; they let a
-  builder's readiness hook (and, later, a native-agent communicator)
-  take loose callables without importing a Communicator or driver.
+  builder's readiness hook and a native-agent communicator take loose
+  callables without importing a Communicator or driver.
+- ``QGACommunicator`` — a Communicator backed by a hypervisor's native
+  guest agent (QEMU Guest Agent on libvirt). Takes no Plan-time
+  arguments; the orchestrator binds it with three VM-bound callables
+  (``execute`` / ``read_file`` / ``write_file``) pulled off the driver.
+  No SSH, no credentials, no IP discovery — reaches the guest in-band.
+  The guest must have ``qemu-guest-agent`` installed (user-declared in
+  the builder). See ``examples/qga.py``.
+- ``HypervisorDriver.native_guest_execute`` / ``native_guest_read_file``
+  / ``native_guest_write_file`` — optional-capability accessors
+  returning VM-bound guest-agent callables; the default raises
+  ``DriverError`` for backends with no native agent. ``LibvirtDriver``
+  implements them via ``_LibvirtGuestAgent`` over
+  ``libvirt_qemu.qemuAgentCommand``. Every libvirt domain now renders an
+  ``org.qemu.guest_agent.0`` virtio channel unconditionally.
+- ``GuestAgentError(DriverError)`` — raised when a native guest-agent
+  command fails (agent not responding, timeout, QGA protocol error).
 
 ### Changed
 

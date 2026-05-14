@@ -6,11 +6,13 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NewType
 
+from testrange.exceptions import DriverError
 from testrange.preflight import PreflightReport
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
+    from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.networks.base import Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
@@ -216,6 +218,27 @@ class HypervisorDriver(ABC):
     @abstractmethod
     def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
         """Look up an IP leased to ``mac`` on ``network_backend_name``. ``None`` if not yet leased."""
+
+    # --- Native guest agent (optional capability) ---------------------
+    # A backend with a native in-guest agent (libvirt/QGA, future
+    # ESXi/VMware Tools) overrides these three to return VM-bound
+    # callables. They are non-abstract: the default for a backend with
+    # no native agent is a clean DriverError, not a missing method.
+
+    def native_guest_execute(self, backend_name: str) -> GuestExec:
+        """A VM-bound callable that runs a command in the guest via the
+        backend's native agent. Default: no native agent."""
+        raise DriverError(f"{type(self).__name__}: no native guest agent")
+
+    def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
+        """A VM-bound callable that reads a file from the guest via the
+        backend's native agent. Default: no native agent."""
+        raise DriverError(f"{type(self).__name__}: no native guest agent")
+
+    def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
+        """A VM-bound callable that writes a file into the guest via the
+        backend's native agent. Default: no native agent."""
+        raise DriverError(f"{type(self).__name__}: no native guest agent")
 
     @abstractmethod
     def create_snapshot(

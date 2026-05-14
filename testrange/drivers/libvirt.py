@@ -8,9 +8,13 @@ methods so the rest of the package is importable on hosts without
 
 from __future__ import annotations
 
+import base64
+import contextlib
 import hashlib
 import io
 import ipaddress
+import json
+import shlex
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -20,7 +24,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from testrange._log import get_logger
 from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import HypervisorDriver, VolumeRef
-from testrange.exceptions import DriverError
+from testrange.exceptions import DriverError, GuestAgentError
+from testrange.guest_io import ExecResult
 from testrange.networks.base import Network, Switch
 from testrange.networks.validate import validate_addressing
 from testrange.preflight import PreflightFinding, PreflightReport
@@ -29,6 +34,7 @@ from testrange.vms.spec import VMSpec
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
+    from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.plan import Plan
 
 _log = get_logger(__name__)
@@ -133,6 +139,21 @@ def _import_libvirt() -> Any:
             "libvirt-python is not installed; install with `pip install -e .[libvirt]`"
         ) from e
     return libvirt
+
+
+def _import_libvirt_qemu() -> Any:
+    """Lazy import of ``libvirt_qemu`` (the QEMU-specific libvirt module).
+
+    ``libvirt_qemu`` ships inside the ``libvirt-python`` package, so a
+    missing import is the same dependency gap as :func:`_import_libvirt`.
+    """
+    try:
+        import libvirt_qemu
+    except ImportError as e:
+        raise DriverError(
+            "libvirt-python is not installed; install with `pip install -e .[libvirt]`"
+        ) from e
+    return libvirt_qemu
 
 
 def _short(s: str, n: int) -> str:
@@ -740,6 +761,174 @@ class LibvirtDriver(HypervisorDriver):
         _log.info("revert vm %s to snapshot %s", vm_backend_name, name)
         dom.revertToSnapshot(snap, 0)
 
+    # --- Native guest agent (QEMU Guest Agent) ------------------------
+
+    def native_guest_execute(self, backend_name: str) -> GuestExec:
+        return _LibvirtGuestAgent(self, backend_name).execute
+
+    def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
+        return _LibvirtGuestAgent(self, backend_name).read_file
+
+    def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
+        return _LibvirtGuestAgent(self, backend_name).write_file
+
+
+def _qga_agent_not_ready(e: Exception) -> bool:
+    """True when a libvirtError reads like the guest agent is not up yet."""
+    msg = str(e).lower()
+    return (
+        "guest agent is not" in msg
+        or "not connected" in msg
+        or "not responding" in msg
+    )
+
+
+def _qga_argv(argv: Sequence[str], cwd: str | None) -> tuple[str, list[str]]:
+    """Split argv into QGA's ``(path, arg-list)``.
+
+    QGA's ``guest-exec`` has no native ``cwd``; when one is requested it
+    is shimmed through ``sh -c 'cd -- <dir> && exec <argv>'``.
+    """
+    if not argv:
+        raise GuestAgentError("guest-exec: empty argv")
+    if cwd is not None:
+        inner = " ".join(shlex.quote(a) for a in argv)
+        return "sh", ["-c", f"cd -- {shlex.quote(cwd)} && exec {inner}"]
+    return argv[0], list(argv[1:])
+
+
+class _LibvirtGuestAgent:
+    """VM-bound QEMU Guest Agent executor for one libvirt domain.
+
+    Speaks the QGA JSON protocol over ``libvirt_qemu.qemuAgentCommand``.
+    The domain is re-resolved on every call — a cached ``virDomain`` goes
+    stale across a libvirt reconnect, so this matches the rest of the
+    driver's lookup discipline. Operations tolerate a guest agent that
+    has not finished coming up, retrying for a bounded deadline — the
+    same shape as the SSH communicator's connect-retry.
+    """
+
+    def __init__(self, driver: LibvirtDriver, backend_name: str) -> None:
+        self._driver = driver
+        self._backend_name = backend_name
+
+    def _send(
+        self, command: str, arguments: dict[str, Any] | None, *, deadline: float
+    ) -> Any:
+        """Send one QGA command; return its decoded ``return`` payload.
+
+        Retries a not-yet-responding agent until ``deadline``. Wraps
+        libvirt-side errors and QGA ``{"error": ...}`` responses into
+        :class:`GuestAgentError`.
+        """
+        libvirt = _import_libvirt()
+        libvirt_qemu = _import_libvirt_qemu()
+        payload: dict[str, Any] = {"execute": command}
+        if arguments is not None:
+            payload["arguments"] = arguments
+        wire = json.dumps(payload)
+        while True:
+            dom = self._driver.conn.lookupByName(self._backend_name)
+            try:
+                # 10s per-RPC: QGA control commands answer fast; the only
+                # slow thing (a guest process) is polled, not awaited here.
+                raw = libvirt_qemu.qemuAgentCommand(dom, wire, 10, 0)
+                break
+            except libvirt.libvirtError as e:
+                if time.monotonic() < deadline and _qga_agent_not_ready(e):
+                    time.sleep(0.5)
+                    continue
+                raise GuestAgentError(
+                    f"QGA {command!r} on {self._backend_name!r} failed: {e}"
+                ) from e
+        try:
+            resp = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            raise GuestAgentError(
+                f"QGA {command!r} on {self._backend_name!r} returned non-JSON: {raw!r}"
+            ) from e
+        if "error" in resp:
+            raise GuestAgentError(
+                f"QGA {command!r} on {self._backend_name!r}: {resp['error']}"
+            )
+        return resp.get("return")
+
+    def execute(
+        self,
+        argv: Sequence[str],
+        *,
+        timeout: float = 60.0,
+        cwd: str | None = None,
+    ) -> ExecResult:
+        """Run a command via ``guest-exec``; poll ``guest-exec-status``."""
+        started = time.monotonic()
+        deadline = started + timeout
+        path, args = _qga_argv(argv, cwd)
+        ret = self._send(
+            "guest-exec",
+            {"path": path, "arg": args, "capture-output": True},
+            deadline=deadline,
+        )
+        pid = ret["pid"]
+        while True:
+            status = self._send("guest-exec-status", {"pid": pid}, deadline=deadline)
+            if status.get("exited"):
+                break
+            if time.monotonic() >= deadline:
+                raise GuestAgentError(
+                    f"QGA guest-exec on {self._backend_name!r} did not finish "
+                    f"within {timeout:.0f}s"
+                )
+            time.sleep(0.5)
+        return ExecResult(
+            exit_code=int(status.get("exitcode", -1)),
+            stdout=base64.b64decode(status.get("out-data", "") or ""),
+            stderr=base64.b64decode(status.get("err-data", "") or ""),
+            duration=time.monotonic() - started,
+        )
+
+    def read_file(self, path: str) -> bytes:
+        """Read a guest file via ``guest-file-open``/``-read``/``-close``."""
+        deadline = time.monotonic() + 60.0
+        ret = self._send(
+            "guest-file-open", {"path": path, "mode": "r"}, deadline=deadline
+        )
+        handle = ret if isinstance(ret, int) else ret["handle"]
+        chunks: list[bytes] = []
+        try:
+            while True:
+                r = self._send("guest-file-read", {"handle": handle}, deadline=deadline)
+                buf = r.get("buf-b64")
+                if buf:
+                    chunks.append(base64.b64decode(buf))
+                if r.get("eof"):
+                    break
+        finally:
+            with contextlib.suppress(GuestAgentError):
+                self._send("guest-file-close", {"handle": handle}, deadline=deadline)
+        return b"".join(chunks)
+
+    def write_file(self, path: str, data: bytes) -> None:
+        """Write a guest file via ``guest-file-open``/``-write``/``-close``."""
+        deadline = time.monotonic() + 60.0
+        ret = self._send(
+            "guest-file-open", {"path": path, "mode": "w"}, deadline=deadline
+        )
+        handle = ret if isinstance(ret, int) else ret["handle"]
+        try:
+            self._send(
+                "guest-file-write",
+                {
+                    "handle": handle,
+                    "buf-b64": base64.b64encode(data).decode("ascii"),
+                    "count": len(data),
+                },
+                deadline=deadline,
+            )
+        finally:
+            with contextlib.suppress(GuestAgentError):
+                self._send("guest-file-close", {"handle": handle}, deadline=deadline)
+
 
 def _collect_subnet_findings(
     hyp: LibvirtHypervisor, install_network: Network
@@ -941,6 +1130,13 @@ def _render_domain_xml(
         f"</disk>"
         f"{seed_xml}"
         f"{''.join(nic_xmls)}"
+        # QEMU Guest Agent virtio channel — rendered unconditionally.
+        # Inert on guests without qemu-guest-agent installed; lets a
+        # QGACommunicator reach the guest via libvirt_qemu.qemuAgentCommand
+        # without the driver having to inspect the communicator type.
+        f"<channel type='unix'>"
+        f"<target type='virtio' name='org.qemu.guest_agent.0'/>"
+        f"</channel>"
         f"<serial type='pty'><target port='0'/></serial>"
         f"<console type='pty'><target type='serial' port='0'/></console>"
         # VNC + virtio-gpu so `virt-viewer <domain>` works out of the box.
