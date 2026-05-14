@@ -1,0 +1,216 @@
+"""private_public: airgap vs internet, with a dual-homed client and reachability checks.
+
+Prerequisites:
+    testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
+        --name debian-13
+
+Usage:
+    testrange describe examples/private_public.py
+    testrange run examples/private_public.py
+"""
+
+from __future__ import annotations
+
+import sys
+
+from testrange import OrchestratorHandle, Plan, run_tests
+from testrange.builders import CloudInitBuilder
+from testrange.cache import CacheEntry
+from testrange.communicators import SSHCommunicator
+from testrange.credentials import PosixCred, SSHKey
+from testrange.devices import (
+    CPU,
+    Memory,
+    OSDrive,
+    StoragePool,
+)
+from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.networks import Network, Switch
+from testrange.packages import Apt
+from testrange.vms import VMRecipe, VMSpec
+
+_KEY = SSHKey.generate(comment="testrange-private-public")
+
+_PRIVATE_WEB_IP = "10.20.0.10"
+_CLIENT_PRIVATE_IP = "10.20.0.20"
+
+
+PLAN = Plan(
+    LibvirtHypervisor(
+        connection="qemu:///system",
+        networks=[
+            Switch(
+                "priv-sw",
+                Network("private-net", "10.20.0.0/24", dhcp=False, dns=False),
+                mgmt=True,
+                internet=False,
+            ),
+            Switch(
+                "pub-sw",
+                Network("public-net", "10.30.0.0/24", dhcp=True, dns=True),
+                mgmt=True,
+                internet=True,
+            ),
+        ],
+        pools=[StoragePool("pool1", 32)],
+        vms=[
+            VMRecipe(
+                spec=VMSpec(
+                    name="private-web",
+                    devices=[
+                        CPU(2),
+                        Memory(1024),
+                        OSDrive("pool1", 8),
+                        LibvirtNetworkIface("private-net", ipv4=_PRIVATE_WEB_IP),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[
+                        PosixCred("root", password="root"),
+                        PosixCred(
+                            "myuser",
+                            password="mypass",
+                            pubkey=_KEY.auth_line,
+                            privkey=_KEY.priv,
+                            sudo=True,
+                        ),
+                    ],
+                    packages=[Apt("nginx")],
+                    post_install_commands=(
+                        "sh -c 'echo air-gapped > /var/www/html/index.html'",
+                        "systemctl enable --now nginx",
+                    ),
+                ),
+                communicator=SSHCommunicator("myuser"),
+            ),
+            VMRecipe(
+                spec=VMSpec(
+                    name="public-web",
+                    devices=[
+                        CPU(2),
+                        Memory(1024),
+                        OSDrive("pool1", 8),
+                        LibvirtNetworkIface("public-net"),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[
+                        PosixCred("root", password="root"),
+                        PosixCred(
+                            "myuser",
+                            password="mypass",
+                            pubkey=_KEY.auth_line,
+                            privkey=_KEY.priv,
+                            sudo=True,
+                        ),
+                    ],
+                    packages=[Apt("nginx")],
+                    post_install_commands=(
+                        "sh -c 'echo internet-connected > /var/www/html/index.html'",
+                        "systemctl enable --now nginx",
+                    ),
+                ),
+                communicator=SSHCommunicator("myuser"),
+            ),
+            VMRecipe(
+                spec=VMSpec(
+                    name="client",
+                    devices=[
+                        CPU(2),
+                        Memory(1024),
+                        OSDrive("pool1", 8),
+                        LibvirtNetworkIface("private-net", ipv4=_CLIENT_PRIVATE_IP),
+                        LibvirtNetworkIface("public-net"),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[
+                        PosixCred("root", password="root"),
+                        PosixCred(
+                            "myuser",
+                            password="mypass",
+                            pubkey=_KEY.auth_line,
+                            privkey=_KEY.priv,
+                            sudo=True,
+                        ),
+                    ],
+                    packages=[Apt("curl")],
+                ),
+                communicator=SSHCommunicator("myuser"),
+            ),
+        ],
+    ),
+)
+
+
+def client_can_curl_private_web(orch: OrchestratorHandle) -> None:
+    r = orch.vms["client"].communicator.execute(
+        ["curl", "-sf", "--max-time", "10", f"http://{_PRIVATE_WEB_IP}/"],
+        timeout=20.0,
+    )
+    assert r.ok, f"curl to private-web failed: {r}"
+    assert b"air-gapped" in r.stdout, f"unexpected body: {r.stdout!r}"
+
+
+def client_can_curl_public_web(orch: OrchestratorHandle) -> None:
+    public_ip = orch.vms["public-web"].communicator.host
+    assert public_ip, "public-web has no discovered host"
+    r = orch.vms["client"].communicator.execute(
+        ["curl", "-sf", "--max-time", "10", f"http://{public_ip}/"],
+        timeout=20.0,
+    )
+    assert r.ok, f"curl to public-web failed: {r}"
+    assert b"internet-connected" in r.stdout, f"unexpected body: {r.stdout!r}"
+
+
+def private_web_cannot_reach_public_web(orch: OrchestratorHandle) -> None:
+    public_ip = orch.vms["public-web"].communicator.host
+    assert public_ip, "public-web has no discovered host"
+    r = orch.vms["private-web"].communicator.execute(
+        ["curl", "-sf", "--max-time", "5", f"http://{public_ip}/"],
+        timeout=15.0,
+    )
+    assert not r.ok, f"private-web reached public-web (should be isolated): {r.stdout!r}"
+
+
+def public_web_cannot_reach_private_web(orch: OrchestratorHandle) -> None:
+    r = orch.vms["public-web"].communicator.execute(
+        ["curl", "-sf", "--max-time", "5", f"http://{_PRIVATE_WEB_IP}/"],
+        timeout=15.0,
+    )
+    assert not r.ok, f"public-web reached private-web (should be isolated): {r.stdout!r}"
+
+
+def private_web_cannot_reach_internet(orch: OrchestratorHandle) -> None:
+    r = orch.vms["private-web"].communicator.execute(
+        ["curl", "-sf", "--max-time", "5", "-o", "/dev/null", "https://google.com/"],
+        timeout=15.0,
+    )
+    assert not r.ok, "private-web reached the internet (should be air-gapped)"
+
+
+def public_web_can_reach_internet(orch: OrchestratorHandle) -> None:
+    r = orch.vms["public-web"].communicator.execute(
+        ["curl", "-sf", "--max-time", "10", "-o", "/dev/null", "https://google.com/"],
+        timeout=20.0,
+    )
+    assert r.ok, f"public-web failed to reach the internet: {r}"
+
+
+TESTS = [
+    client_can_curl_private_web,
+    client_can_curl_public_web,
+    private_web_cannot_reach_public_web,
+    public_web_cannot_reach_private_web,
+    private_web_cannot_reach_internet,
+    public_web_can_reach_internet,
+]
+
+
+if __name__ == "__main__":
+    results = run_tests(TESTS, PLAN)
+    sys.exit(0 if all(r.passed for r in results) else 1)

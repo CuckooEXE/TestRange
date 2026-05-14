@@ -423,3 +423,31 @@ class TestRunPhaseNetplanStaging:
         h_dhcp = b.config_hash(spec_dhcp, _recipe(b, spec_dhcp), addressing=DEFAULT_ADDR, base_sha="z")
         h_static = b.config_hash(spec_static, _recipe(b, spec_static), addressing=DEFAULT_ADDR, base_sha="z")
         assert h_dhcp != h_static
+
+
+class TestWaitReadyArgv:
+    def test_cloudinit_returns_status_wait(self) -> None:
+        b = _basic_builder()
+        spec = _spec()
+        assert b.wait_ready_argv(spec, _recipe(b, spec)) == (
+            "cloud-init", "status", "--wait",
+        )
+
+    def test_abc_default_is_none(self) -> None:
+        from testrange.builders.base import Builder
+        from testrange.credentials.base import Credential
+
+        class _NullBuilder(Builder):
+            @property
+            def credentials(self) -> tuple[Credential, ...]:
+                return ()
+
+            def config_hash(self, spec, recipe, *, addressing, base_sha="", macs=()):  # type: ignore[no-untyped-def]
+                return "0" * 16
+
+            def render_seed(self, spec, recipe, *, addressing, macs=()):  # type: ignore[no-untyped-def]
+                return b""
+
+        b = _NullBuilder()
+        spec = _spec()
+        assert b.wait_ready_argv(spec, _recipe(_basic_builder(), spec)) is None

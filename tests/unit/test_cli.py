@@ -40,7 +40,7 @@ class TestDescribe:
         assert "web" in out
         assert "debian-13" in out
         assert "⚠ not in cache" in out  # cache resolution attempted, miss surfaced
-        assert "cloud_init_finished" in out
+        assert "nginx_is_installed" in out
 
     def test_describe_missing_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:

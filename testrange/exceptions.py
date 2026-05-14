@@ -51,6 +51,10 @@ class BuilderError(TestRangeError):
     """Builder-side failure (render, seed authoring, etc.)."""
 
 
+class BuildNotReadyError(BuilderError):
+    """A brought-up VM never reached the builder-declared ready state."""
+
+
 class OrchestratorError(TestRangeError):
     """Orchestrator-level failure (phase sequencing, lifecycle)."""
 
