@@ -22,7 +22,7 @@ from testrange.vms import VMRecipe, VMSpec
 
 @pytest.fixture(autouse=True)
 def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("testrange.orchestrator.runtime.time.sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
 
 
 @pytest.fixture(autouse=True)

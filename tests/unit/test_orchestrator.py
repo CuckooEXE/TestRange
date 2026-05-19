@@ -374,7 +374,7 @@ def populated_cache(
 @pytest.fixture(autouse=True)
 def fast_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Skip real time.sleep in orchestrator tests."""
-    monkeypatch.setattr("testrange.orchestrator.runtime.time.sleep", lambda _s: None)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
 
 
 @pytest.fixture(autouse=True)
