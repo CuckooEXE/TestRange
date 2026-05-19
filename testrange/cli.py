@@ -26,7 +26,7 @@ from testrange.exceptions import (
     TestRangeError,
 )
 from testrange.networks.base import Network, Switch
-from testrange.orchestrator.runtime import run_tests
+from testrange.orchestrator.runner import run_tests
 from testrange.plan import Plan
 from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
 from testrange.vms.recipe import VMRecipe

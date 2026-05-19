@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from testrange.orchestrator.runtime import (
-    Orchestrator,
-    OrchestratorHandle,
-    TestResult,
-    run_tests,
-)
+from testrange.orchestrator.runner import TestResult, run_tests
+from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
 from testrange.plan import Plan
 
 __version__ = "0.2.0"

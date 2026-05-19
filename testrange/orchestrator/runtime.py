@@ -14,7 +14,6 @@ import signal
 import sys
 import tempfile
 import time
-import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,8 +28,6 @@ from testrange.cache.manager import CacheManager
 from testrange.communicators.qga import QGACommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
-from testrange.devices import CPU, Memory, OSDrive
-from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers import driver_for
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import (
@@ -50,6 +47,7 @@ from testrange.networks.sidecar import (
     render_sysctl_conf,
     sidecar_nic_specs,
 )
+from testrange.orchestrator.install import _install_switch, _sidecar_spec
 from testrange.plan import Plan
 from testrange.state.schema import (
     PHASE_CLEANUP,
@@ -61,71 +59,8 @@ from testrange.state.schema import (
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms.handle import VMHandle
 from testrange.vms.recipe import VMRecipe
-from testrange.vms.spec import VMSpec
 
 _log = get_logger(__name__)
-
-# Transient install Switch — sidecar-served DHCP+DNS+NAT so install VMs can
-# reach the internet for apt/pip. Uplink is provided by the Hypervisor
-# (`install_uplink="..."`) and bound into the synthesized switch at
-# install-phase entry. Subnet must not collide with any user-declared
-# Switch; the driver's preflight validates that.
-INSTALL_CIDR = "10.97.99.0/24"
-INSTALL_NETWORK_NAME = "install"
-INSTALL_SWITCH_NAME = "__install"
-
-
-def _sidecar_spec(switch: Switch, pool_name: str) -> VMSpec:
-    """Synthesize the sidecar VM's spec for one Switch.
-
-    Always 1 vCPU + 256 MiB + 2 GiB OS disk. NICs in the order produced
-    by :func:`sidecar_nic_specs`: ``eth0`` on the switch network (static
-    ``.1``), and ``eth1`` on the hidden ``__uplink__<switch>`` network
-    (no static IP — sidecar DHCPs from the upstream LAN) when ``nat=True``.
-    """
-    nic_specs = sidecar_nic_specs(switch)
-    nics = [LibvirtNetworkIface(name, ipv4=ip) for (name, ip) in nic_specs]
-    return VMSpec(
-        name=f"__sidecar_{switch.name}",
-        devices=[CPU(1), Memory(256), OSDrive(pool_name, 2), *nics],
-    )
-
-
-def _install_switch(uplink: str | None) -> Switch:
-    if uplink is None:
-        return Switch(
-            INSTALL_SWITCH_NAME,
-            Network(INSTALL_NETWORK_NAME),
-            cidr=INSTALL_CIDR,
-            dhcp=True,
-            dns=True,
-        )
-    return Switch(
-        INSTALL_SWITCH_NAME,
-        Network(INSTALL_NETWORK_NAME),
-        cidr=INSTALL_CIDR,
-        uplink=uplink,
-        dhcp=True,
-        dns=True,
-        nat=True,
-    )
-
-
-@dataclass(frozen=True)
-class TestResult:
-    """Outcome of one test function."""
-
-    name: str
-    passed: bool
-    error: str | None = None
-    duration: float = 0.0
-
-    def report_line(self) -> str:
-        status = "PASS" if self.passed else "FAIL"
-        line = f"[{status}] {self.name} ({self.duration:.2f}s)"
-        if self.error:
-            line += f"\n      {self.error}"
-        return line
 
 
 @dataclass(frozen=True)
@@ -901,65 +836,7 @@ class Orchestrator:
             )
 
 
-def run_tests(
-    tests: list[Callable[[OrchestratorHandle], None]],
-    plan: Plan,
-    *,
-    cache_manager: CacheManager | None = None,
-    fail_fast: bool = False,
-    leak_on_failure: bool = False,
-) -> list[TestResult]:
-    """Bring the range up, execute the tests, tear it down.
-
-    Tests run sequentially. Continue-on-failure is the default;
-    ``fail_fast=True`` stops on the first failure. With
-    ``leak_on_failure=True``, if any test fails the orchestrator skips
-    teardown and the user can SSH in to debug; tear down later with
-    ``testrange cleanup <run_id>``.
-    """
-    results: list[TestResult] = []
-    o = Orchestrator(plan, cache_manager=cache_manager)
-    with o as orch:
-        _execute_tests(orch, tests, results, fail_fast=fail_fast)
-        if leak_on_failure and any(not r.passed for r in results):
-            _log.warning("--leak-on-failure: skipping teardown; run_id=%s", o.run_id)
-            o.leak()
-    return results
-
-
-def _execute_tests(
-    orch: OrchestratorHandle,
-    tests: list[Callable[[OrchestratorHandle], None]],
-    results: list[TestResult],
-    *,
-    fail_fast: bool,
-) -> None:
-    """Run tests sequentially, capture failures, append to ``results``."""
-    for t in tests:
-        name = getattr(t, "__name__", repr(t))
-        start = time.monotonic()
-        try:
-            t(orch)
-        except Exception as e:
-            tb = traceback.format_exc()
-            results.append(
-                TestResult(
-                    name=name,
-                    passed=False,
-                    error=tb if tb.strip() else str(e),
-                    duration=time.monotonic() - start,
-                )
-            )
-            if fail_fast:
-                _log.warning("--fail-fast: stopping on %s", name)
-                return
-            continue
-        results.append(TestResult(name=name, passed=True, duration=time.monotonic() - start))
-
-
 __all__ = [
     "Orchestrator",
     "OrchestratorHandle",
-    "TestResult",
-    "run_tests",
 ]

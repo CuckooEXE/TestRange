@@ -31,7 +31,7 @@ from testrange.drivers.libvirt import (
 from testrange.exceptions import GuestAgentError
 from testrange.networks import Network, Switch
 from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
-from testrange.orchestrator.runtime import _install_switch
+from testrange.orchestrator.install import _install_switch
 from testrange.vms import VMRecipe, VMSpec
 
 _INSTALL_SWITCH = _install_switch("lo")
