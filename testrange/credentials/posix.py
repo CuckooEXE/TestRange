@@ -5,21 +5,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from testrange.credentials.base import Credential
+from testrange.utils import SSHKey
 
 
 @dataclass(frozen=True)
 class PosixCred(Credential):
-    """POSIX user with optional password and/or SSH public key.
+    """POSIX user with optional password and/or SSH keypair.
 
-    Auth precedence at use-time: SSH pubkey if present, else password.
+    Auth precedence at use-time: SSH key if present, else password.
     Carrying both is legal — the credential is just data.
 
     Fields:
       username: POSIX username.
       password: optional plaintext password (rendered to a deterministic
         sha512 crypt by the builder when needed).
-      pubkey: OpenSSH-format public key text. Baked into authorized_keys.
-      privkey: OpenSSH-format private key text. Held in memory only; never
+      ssh_key: optional SSH keypair. The public half is baked into
+        authorized_keys; the private half is held in memory only and never
         written to the orchestrator host's filesystem.
       sudo: grant passwordless sudo (POSIX-specific). Translated by the
         builder into the right sudoers fragment.
@@ -27,18 +28,13 @@ class PosixCred(Credential):
     """
 
     password: str | None = None
-    pubkey: str | None = None
-    privkey: str | None = None
+    ssh_key: SSHKey | None = None
     sudo: bool = False
-    extra_groups: tuple[str, ...] = field(default_factory=tuple)
+    groups: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.password is None and self.pubkey is None:
+        if self.password is None and self.ssh_key is None:
             raise ValueError(
-                f"PosixCred({self.username!r}) needs at least one of password or pubkey"
-            )
-        if self.privkey is not None and self.pubkey is None:
-            raise ValueError(
-                f"PosixCred({self.username!r}) has privkey without pubkey; provide both or neither"
+                f"PosixCred({self.username!r}) needs at least one of password or ssh_key"
             )

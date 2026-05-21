@@ -160,24 +160,31 @@ class CloudInitBuilder(Builder):
         with callers that don't have stable MACs available.
         """
         del recipe  # not used yet; reserved for future per-recipe hooks
+        # NOTE: any plaintext password below is baked into the cloud-init seed
+        # ISO, which lives in the libvirt storage pool in cleartext — anyone
+        # with read access to the pool can recover it. Acceptable only for
+        # ephemeral, isolated test guests; prefer ssh-key-only PosixCreds for
+        # anything sensitive.
         users: list[dict[str, Any]] = []
-        chpasswd_lines: list[str] = []
+        chpasswd_users: list[dict[str, str]] = []
         for c in self._credentials:
             if not isinstance(c, PosixCred):
                 continue
             user_entry: dict[str, Any] = {"name": c.username, "lock_passwd": False}
             if c.username != "root":
                 user_entry["shell"] = "/bin/bash"
-            if c.pubkey:
-                user_entry["ssh_authorized_keys"] = [c.pubkey]
+            if c.ssh_key:
+                user_entry["ssh_authorized_keys"] = [c.ssh_key.auth_line]
             if c.sudo or c.admin:
                 user_entry["sudo"] = "ALL=(ALL) NOPASSWD:ALL"
-                user_entry["groups"] = list(c.extra_groups) or ["sudo"]
-            elif c.extra_groups:
-                user_entry["groups"] = list(c.extra_groups)
+                user_entry["groups"] = list(c.groups) or ["sudo"]
+            elif c.groups:
+                user_entry["groups"] = list(c.groups)
             users.append(user_entry)
             if c.password:
-                chpasswd_lines.append(f"{c.username}:{c.password}")
+                # Modern cloud-init chpasswd form (`type: text` = plaintext).
+                # The top-level `list:` string form is deprecated.
+                chpasswd_users.append({"name": c.username, "type": "text", "password": c.password})
 
         apt_pkgs = [p.name for p in self.packages if isinstance(p, Apt)]
         pips = [p for p in self.packages if isinstance(p, Pip)]

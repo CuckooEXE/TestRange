@@ -20,17 +20,19 @@ from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
-from testrange.credentials import PosixCred, SSHKey
+from testrange.credentials import PosixCred
 from testrange.devices import (
     CPU,
     Memory,
     OSDrive,
     StoragePool,
 )
+from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
+from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
 UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
@@ -72,7 +74,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("private-net", ipv4=_PRIVATE_WEB_IP),
+                        LibvirtNetworkIface("private-net", addr=StaticAddr(_PRIVATE_WEB_IP)),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -82,8 +84,7 @@ PLAN = Plan(
                         PosixCred(
                             "myuser",
                             password="mypass",
-                            pubkey=_KEY.auth_line,
-                            privkey=_KEY.priv,
+                            ssh_key=_KEY,
                             sudo=True,
                         ),
                     ],
@@ -102,7 +103,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("public-net"),
+                        LibvirtNetworkIface("public-net", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -112,8 +113,7 @@ PLAN = Plan(
                         PosixCred(
                             "myuser",
                             password="mypass",
-                            pubkey=_KEY.auth_line,
-                            privkey=_KEY.priv,
+                            ssh_key=_KEY,
                             sudo=True,
                         ),
                     ],
@@ -132,8 +132,8 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("private-net", ipv4=_CLIENT_PRIVATE_IP),
-                        LibvirtNetworkIface("public-net"),
+                        LibvirtNetworkIface("private-net", addr=StaticAddr(_CLIENT_PRIVATE_IP)),
+                        LibvirtNetworkIface("public-net", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -143,8 +143,7 @@ PLAN = Plan(
                         PosixCred(
                             "myuser",
                             password="mypass",
-                            pubkey=_KEY.auth_line,
-                            privkey=_KEY.priv,
+                            ssh_key=_KEY,
                             sudo=True,
                         ),
                     ],
@@ -154,6 +153,7 @@ PLAN = Plan(
             ),
         ],
     ),
+    name="private-public",
 )
 
 

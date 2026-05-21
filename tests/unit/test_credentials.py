@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from testrange.credentials import PosixCred, SSHKey
+from testrange.credentials import PosixCred
+from testrange.utils import SSHKey
 
 
 class TestPosixCred:
@@ -12,24 +13,20 @@ class TestPosixCred:
         c = PosixCred("root", password="x")
         assert c.username == "root"
         assert c.password == "x"
-        assert c.pubkey is None
+        assert c.ssh_key is None
 
-    def test_pubkey_only(self) -> None:
-        c = PosixCred("u", pubkey="ssh-ed25519 AAA...")
-        assert c.pubkey is not None
+    def test_ssh_key_only(self) -> None:
+        c = PosixCred("u", ssh_key=SSHKey.generate())
+        assert c.ssh_key is not None
 
     def test_both(self) -> None:
-        c = PosixCred("u", password="p", pubkey="ssh-ed25519 AAA...", sudo=True)
-        assert c.password is not None and c.pubkey is not None
+        c = PosixCred("u", password="p", ssh_key=SSHKey.generate(), sudo=True)
+        assert c.password is not None and c.ssh_key is not None
         assert c.sudo is True
 
     def test_neither_auth(self) -> None:
         with pytest.raises(ValueError):
             PosixCred("u")
-
-    def test_privkey_without_pubkey(self) -> None:
-        with pytest.raises(ValueError):
-            PosixCred("u", privkey="-----BEGIN-----", password="x")
 
     def test_empty_username(self) -> None:
         with pytest.raises(ValueError):

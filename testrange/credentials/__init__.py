@@ -4,6 +4,5 @@ from __future__ import annotations
 
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
-from testrange.credentials.ssh import SSHKey
 
-__all__ = ["Credential", "PosixCred", "SSHKey"]
+__all__ = ["Credential", "PosixCred"]

@@ -2,8 +2,10 @@
 
 ``SSHKey.generate(comment=...)`` produces a deterministic Ed25519 keypair
 as text. The keypair never touches the orchestrator host's filesystem — it
-lives in the returned object and is handed to PosixCred / SSHCommunicator
-as bytes/text.
+lives in the returned object and is passed around as bytes/text (e.g. into
+a ``PosixCred`` or an ``SSHCommunicator``). This is a standalone value type
+with no dependency on the credential ABC, hence its home under
+``testrange.utils`` rather than ``testrange.credentials``.
 """
 
 from __future__ import annotations
@@ -24,8 +26,9 @@ class SSHKey:
     - ``pub``: multi-line PEM ``-----BEGIN PUBLIC KEY-----`` block
       (SubjectPublicKeyInfo). The interoperable public-key encoding for
       non-SSH crypto consumers.
-    - ``priv``: multi-line ``-----BEGIN OPENSSH PRIVATE KEY-----`` block.
-      Unencrypted (ephemeral keypair, in-memory, single run).
+    - ``priv``: multi-line OpenSSH private-key PEM block (the standard
+      ``OPENSSH PRIVATE KEY`` banner). Unencrypted (ephemeral keypair,
+      in-memory, single run).
     - ``auth_line``: the single-line OpenSSH public-key wire format,
       ``ssh-ed25519 AAA... comment`` — the literal string for
       ``authorized_keys``.

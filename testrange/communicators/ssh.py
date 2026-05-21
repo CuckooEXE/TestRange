@@ -138,16 +138,22 @@ class SSHCommunicator(Communicator):
             "allow_agent": False,
         }
         # Auth precedence: pkey if present, else password.
-        if self._credential.privkey:
-            kwargs["pkey"] = _load_private_key(self._credential.privkey, paramiko)
+        if self._credential.ssh_key:
+            kwargs["pkey"] = _load_private_key(self._credential.ssh_key.priv, paramiko)
         elif self._credential.password:
             kwargs["password"] = self._credential.password
         else:
             raise CommunicatorError(
-                f"PosixCred({self._username!r}) has neither pubkey/privkey nor password"
+                f"PosixCred({self._username!r}) has neither ssh_key nor password"
             )
 
         client = paramiko.SSHClient()
+        # Trust-on-first-use: every test VM is freshly provisioned with a new
+        # host key, so there is no known_hosts entry to verify against and
+        # AutoAddPolicy is the only thing that works here. This is safe ONLY
+        # because the guests are ephemeral and on an isolated test range — do
+        # not lift this pattern into production code, where it defeats MITM
+        # protection.
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
         deadline = time.monotonic() + total_timeout_s

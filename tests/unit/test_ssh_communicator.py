@@ -10,8 +10,9 @@ import pytest
 
 from testrange.communicators import SSHCommunicator
 from testrange.communicators.base import ExecResult
-from testrange.credentials import PosixCred, SSHKey
+from testrange.credentials import PosixCred
 from testrange.exceptions import CommunicatorError
+from testrange.utils import SSHKey
 
 
 class _FakeChannel:
@@ -65,7 +66,7 @@ class _FakeSFTP:
 
 class _FakeClient:
     def __init__(self) -> None:
-        self.connect_args: dict[str, Any] | None = None
+        self.connect_args: dict[str, Any] = {}
         self.connect_calls = 0
         self.fail_first_n = 0
         self.exec_commands: list[tuple[str, dict[str, Any]]] = []
@@ -167,12 +168,12 @@ class TestAuthSelection:
     def test_pkey_when_present(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         _, client = fake_paramiko
         kp = SSHKey.generate()
-        cred = PosixCred("u", password="pw", pubkey=kp.auth_line, privkey=kp.priv)
+        cred = PosixCred("u", password="pw", ssh_key=kp)
         c = SSHCommunicator("u")
         c.bind(host="10.0.0.1", credential=cred)
         c.execute(["true"])
-        assert "pkey" in client.connect_args  # type: ignore[arg-type]
-        assert "password" not in client.connect_args  # type: ignore[operator]
+        assert "pkey" in client.connect_args
+        assert "password" not in client.connect_args
 
     def test_password_when_no_key(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         _, client = fake_paramiko
@@ -180,8 +181,8 @@ class TestAuthSelection:
         c = SSHCommunicator("u")
         c.bind(host="10.0.0.1", credential=cred)
         c.execute(["true"])
-        assert "password" in client.connect_args  # type: ignore[arg-type]
-        assert "pkey" not in client.connect_args  # type: ignore[operator]
+        assert "password" in client.connect_args
+        assert "pkey" not in client.connect_args
 
 
 class TestRetry:
@@ -197,6 +198,8 @@ class TestRetry:
         assert client.connect_calls == 4  # 3 failures + 1 success
 
     def test_total_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import time
+
         from testrange.communicators import ssh as ssh_mod
 
         paramiko_mock = MagicMock()
@@ -206,9 +209,11 @@ class TestRetry:
         paramiko_mock.SSHException = Exception
         monkeypatch.setattr(ssh_mod, "_import_paramiko", lambda: paramiko_mock)
         # Advance monotonic so the deadline is reached after a few attempts.
+        # ssh_mod uses `import time`, so patching the shared time module here
+        # affects the calls inside the communicator's retry loop.
         ticks = iter([0.0] + [9999.0] * 50)
-        monkeypatch.setattr(ssh_mod.time, "monotonic", lambda: next(ticks))
-        monkeypatch.setattr(ssh_mod.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
         c = SSHCommunicator("u")
         c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
         with pytest.raises(CommunicatorError, match="SSH connect"):
