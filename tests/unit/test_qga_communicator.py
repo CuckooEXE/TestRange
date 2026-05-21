@@ -7,7 +7,11 @@ from typing import Any
 import pytest
 
 from testrange.communicators import QGACommunicator
-from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError
+from testrange.exceptions import (
+    CommunicatorAlreadyBoundError,
+    CommunicatorClosedError,
+    CommunicatorError,
+)
 from testrange.guest_io import ExecResult
 
 
@@ -95,8 +99,35 @@ class TestClose:
         c.close()
         c.close()  # second close must not raise
 
-    def test_execute_after_close_raises(self) -> None:
+    def test_is_bound_false_after_close(self) -> None:
         c, _ = _bound()
         c.close()
-        with pytest.raises(CommunicatorError):
+        assert c.is_bound is False
+
+    def test_execute_after_close_raises_closed(self) -> None:
+        c, _ = _bound()
+        c.close()
+        with pytest.raises(CommunicatorClosedError, match="has been closed"):
             c.execute(["echo"])
+
+    def test_read_file_after_close_raises_closed(self) -> None:
+        c, _ = _bound()
+        c.close()
+        with pytest.raises(CommunicatorClosedError, match="has been closed"):
+            c.read_file("/x")
+
+    def test_write_file_after_close_raises_closed(self) -> None:
+        c, _ = _bound()
+        c.close()
+        with pytest.raises(CommunicatorClosedError, match="has been closed"):
+            c.write_file("/x", b"y")
+
+    def test_rebind_after_close_raises_closed(self) -> None:
+        c, rec = _bound()
+        c.close()
+        with pytest.raises(CommunicatorClosedError, match="has been closed"):
+            c.bind(
+                execute=rec.execute,
+                read_file=rec.read_file,
+                write_file=rec.write_file,
+            )

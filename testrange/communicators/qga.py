@@ -6,7 +6,11 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from testrange.communicators.base import Communicator, ExecResult
-from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError
+from testrange.exceptions import (
+    CommunicatorAlreadyBoundError,
+    CommunicatorClosedError,
+    CommunicatorError,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
@@ -22,14 +26,17 @@ class QGACommunicator(Communicator):
     """
 
     def __init__(self) -> None:
-        self._bound = False
+        # `_closed` is the only flag: "bound" is just "callables present and
+        # not yet closed". Three nullable callables + one terminal flag, no
+        # redundant `_bound` mirror.
+        self._closed = False
         self._execute: GuestExec | None = None
         self._read_file: GuestReadFile | None = None
         self._write_file: GuestWriteFile | None = None
 
     @property
     def is_bound(self) -> bool:
-        return self._bound
+        return self._execute is not None and not self._closed
 
     def bind(
         self,
@@ -39,14 +46,17 @@ class QGACommunicator(Communicator):
         write_file: GuestWriteFile,
     ) -> None:
         """Bind to a live VM's guest agent. Called by the orchestrator."""
-        if self._bound:
+        if self._closed:
+            raise CommunicatorClosedError(
+                "QGACommunicator has been closed; construct a fresh instance per VM"
+            )
+        if self._execute is not None:
             raise CommunicatorAlreadyBoundError(
                 "QGACommunicator already bound; construct a fresh instance per VM"
             )
         self._execute = execute
         self._read_file = read_file
         self._write_file = write_file
-        self._bound = True
 
     def execute(
         self,
@@ -55,28 +65,35 @@ class QGACommunicator(Communicator):
         timeout: float = 60.0,
         cwd: str | None = None,
     ) -> ExecResult:
+        self._check_usable()
+        assert self._execute is not None  # narrowed by _check_usable
+        return self._execute(argv, timeout=timeout, cwd=cwd)
+
+    def read_file(self, path: str) -> bytes:
+        self._check_usable()
+        assert self._read_file is not None
+        return self._read_file(path)
+
+    def write_file(self, path: str, data: bytes) -> None:
+        self._check_usable()
+        assert self._write_file is not None
+        self._write_file(path, data)
+
+    def _check_usable(self) -> None:
+        """Raise the right error for a closed or never-bound communicator."""
+        if self._closed:
+            raise CommunicatorClosedError(
+                "QGACommunicator has been closed; construct a fresh instance per VM"
+            )
         if self._execute is None:
             raise CommunicatorError(
                 "QGACommunicator is not bound; the orchestrator must call .bind() first"
             )
-        return self._execute(argv, timeout=timeout, cwd=cwd)
-
-    def read_file(self, path: str) -> bytes:
-        if self._read_file is None:
-            raise CommunicatorError(
-                "QGACommunicator is not bound; the orchestrator must call .bind() first"
-            )
-        return self._read_file(path)
-
-    def write_file(self, path: str, data: bytes) -> None:
-        if self._write_file is None:
-            raise CommunicatorError(
-                "QGACommunicator is not bound; the orchestrator must call .bind() first"
-            )
-        self._write_file(path, data)
 
     def close(self) -> None:
-        """Drop the bound callables. Idempotent."""
+        """Close the communicator. Terminal and idempotent — a closed
+        communicator cannot be re-bound (construct a fresh instance per VM)."""
+        self._closed = True
         self._execute = None
         self._read_file = None
         self._write_file = None
