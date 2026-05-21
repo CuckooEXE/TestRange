@@ -28,6 +28,8 @@ class VMSpec:
     devices: tuple[Device, ...] = field(default_factory=tuple)
 
     def __init__(self, *, name: str, devices: Sequence[Device]) -> None:
+        # Backend-agnostic check only; libvirt-specific charset rules are
+        # enforced at the LibvirtHypervisor boundary.
         if not name:
             raise ValueError("VMSpec.name must be a non-empty string")
         devs = tuple(devices)
@@ -41,9 +43,7 @@ class VMSpec:
         if mems != 1:
             raise ValueError(f"VMSpec({name!r}) must have exactly one Memory, found {mems}")
         if os_drives != 1:
-            raise ValueError(
-                f"VMSpec({name!r}) must have exactly one OSDrive, found {os_drives}"
-            )
+            raise ValueError(f"VMSpec({name!r}) must have exactly one OSDrive, found {os_drives}")
 
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "devices", devs)

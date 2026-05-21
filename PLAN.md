@@ -81,22 +81,26 @@ no uniform "handle" — different communicators need different inputs.
 
 ```python
 class SSHCommunicator(Communicator):
-    def __init__(self, username: str): ...
+    def __init__(self, username: str, *, nic_idx: int | None = None): ...
     def bind(self, *, host: str, credential: PosixCred) -> None: ...
 
 class QGACommunicator(Communicator):
     def __init__(self): ...
-    def bind(self, *, exec_fn: Callable[..., ExecResult]) -> None: ...
+    def bind(self, *, execute, read_file, write_file) -> None: ...  # three callables
 ```
 
 The orchestrator dispatches by communicator type (it's the broker per the
 stovepipe rule):
 
-- For `SSHCommunicator`: orchestrator passes the resolved IP + the
-  credential looked up from `builder.credentials` by `username=`.
-- For `QGACommunicator`: orchestrator passes a driver-supplied `exec_fn`
-  callable that wraps the libvirt domain ref in a closure. QGA itself
-  never sees a libvirt type.
+- For `SSHCommunicator`: orchestrator resolves the IP (`run_phase.discover_ip`)
+  and passes it plus the credential looked up from `builder.credentials` by
+  `username=`. The address comes from the NIC selected by `nic_idx` (its
+  position in the device list — the only thing that disambiguates multiple
+  NICs on one network), or, when `nic_idx is None`, the first NIC that carries
+  an address. The communicator holds only the `nic_idx` int — never a NIC.
+- For `QGACommunicator`: orchestrator passes the driver-supplied
+  `execute`/`read_file`/`write_file` callables that wrap the libvirt domain
+  ref in closures. QGA itself never sees a libvirt type.
 
 Single-use guard on each concrete so a Communicator reused across two VMs
 fails loud. No `clone()`, no install-phase binding — install is
@@ -166,6 +170,27 @@ bare Switch is a pure L2 wire.
 - `.3`–`.9` — reserved.
 - `.10`–`.99` — DHCP lease pool (iff `dhcp=True`).
 - `.100`–`.254` — user statics.
+
+**NIC addressing** (`testrange/devices/network/base.py`): the *Switch* owns
+infrastructure; each *NIC* declares how it takes a run-phase address via
+`NetworkIface.addr`, a three-case sum type:
+
+- `None` (default) — the NIC is left **unconfigured** (no address, no DHCP).
+  Renders `dhcp4: false`. (Not the same as DHCP — that distinction is the
+  whole point; the old `ipv4`-or-`None` overload conflated them and shipped a
+  bug where a no-DHCP NIC still rendered `dhcp4: true`.)
+- `DHCPAddr()` — request a lease at boot. Renders `dhcp4: true` regardless of
+  the Switch's `dhcp` flag (an out-of-band DHCP server is a legitimate
+  topology; the flag only describes whether *our* sidecar serves leases).
+- `StaticAddr("10.0.0.5/24", gw=..., dns=[...])` — a static address. Resolution
+  per field: **explicit wins, else derive from the Switch, else raise.** Only
+  the prefix is ever underivable (a static address needs a netmask); a missing
+  gateway/DNS resolves to "isolated, no default route", which is valid. This is
+  what lets a NIC point at an unmanaged gateway (a guest acting as a router).
+
+The install phase always renders DHCP regardless of `addr` (install needs
+internet); the run-phase netplan is staged separately via cloud-init
+`write_files`.
 
 **Sidecar VM** (`testrange/networks/sidecar.py`,
 `testrange/builders/sidecar_iso.py`): a pre-built Alpine image with
@@ -502,11 +527,13 @@ from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Switch, Network
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.devices.network import DHCPAddr
 from testrange.vms import VMSpec, VMRecipe
 from testrange.builders import CloudInitBuilder
-from testrange.credentials import PosixCred, SSHKey
+from testrange.credentials import PosixCred
 from testrange.communicators import SSHCommunicator
 from testrange.packages import Apt
+from testrange.utils import SSHKey
 
 _KEY = SSHKey.generate(comment="testrange-hello")
 
@@ -529,7 +556,7 @@ PLAN = Plan(
                     name="web",
                     devices=[
                         CPU(2), Memory(1024), OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", driver="virtio"),
+                        LibvirtNetworkIface("netA", driver="virtio", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -557,7 +584,9 @@ Key shape invariants this demonstrates:
 - `SSHKey.generate(...)` returns `.auth_line` (single-line `authorized_keys`
   format) for `pubkey=` and `.priv` (OpenSSH PEM) for `privkey=`.
 - `LibvirtNetworkIface` lives under `testrange.devices.network.libvirt`, not
-  the top-level `testrange.devices`.
+  the top-level `testrange.devices`; the address modes (`DHCPAddr`,
+  `StaticAddr`) are exported from both `testrange.devices.network` and
+  top-level `testrange.devices`.
 
 ## v0 phases
 
@@ -605,7 +634,7 @@ be cleaned up via state-file-driven `testrange cleanup`.
 ## CLI surface (v0)
 
 ```
-testrange --verbose --log-level {debug,info,warn,error}
+testrange --log-level {debug,info,warn,error}
 testrange --cache https://… <subcommand>          # HTTP cache injection
 
 testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
@@ -716,7 +745,7 @@ runner against vapor.
   `LibvirtHypervisor`, `Switch`, `Network`, `StoragePool`, `CPU`,
   `Memory`, `OSDrive`, `HardDrive`, `LibvirtNetworkIface`, `VMSpec`,
   `VMRecipe`, `CloudInitBuilder` (data only), `CacheEntry`, `PosixCred`,
-  `SSHCommunicator` (unbound), `Apt`, `gen_ssh_key`.
+  `SSHCommunicator` (unbound), `Apt`, `SSHKey.generate`.
 - Singleton-device runtime checks (`VMSpec.__post_init__`).
 - Pretty-print `testrange describe examples/hello_world.py` walks
   the tree.
@@ -815,7 +844,7 @@ exits 0.
 
 ### Phase 6 — Polish, signal handling, docs
 
-- `--leak-on-failure`, `--fail-fast`, `--verbose`, `--log-level`.
+- `--leak-on-failure`, `--fail-fast`, `--log-level`.
 - SIGINT / SIGTERM handler that transitions through cleanup before
   exit (vs `atexit`, which doesn't run on signals reliably).
 - `cleanup --dry-run` listing.

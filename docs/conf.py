@@ -4,7 +4,7 @@ from __future__ import annotations
 
 project = "testrange"
 author = "testrange contributors"
-copyright = f"{author}"  # noqa: A001 — Sphinx reads this name
+copyright = f"{author}"
 
 extensions = [
     "myst_parser",
@@ -19,9 +19,9 @@ source_suffix = {
 # Recognized by myst-parser; corresponds to common Markdown extensions
 # the existing .md files use.
 myst_enable_extensions = [
-    "colon_fence",   # ::: fence directive form
-    "deflist",       # definition lists
-    "smartquotes",   # typographic quotes
+    "colon_fence",  # ::: fence directive form
+    "deflist",  # definition lists
+    "smartquotes",  # typographic quotes
 ]
 myst_heading_anchors = 3
 

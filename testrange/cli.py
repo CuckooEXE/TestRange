@@ -16,6 +16,7 @@ from testrange.cache.entry import CacheEntry
 from testrange.cache.http import HttpCache
 from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
+from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.exceptions import (
     CacheError,
     CacheMissError,
@@ -202,10 +203,12 @@ def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
                 print(f"    disk:   {d.pool!r}, {d.size_gb} GB")
             for nic in vm.spec.nics:
                 extra = []
-                if nic.ipv4 is not None:
-                    extra.append(f"ipv4={nic.ipv4}")
-                else:
+                if isinstance(nic.addr, StaticAddr):
+                    extra.append(f"static={nic.addr.addr}")
+                elif isinstance(nic.addr, DHCPAddr):
                     extra.append("dhcp")
+                else:
+                    extra.append("no addr")
                 if drv := getattr(nic, "driver", None):
                     extra.append(f"driver={drv}")
                 extra_str = f" ({', '.join(extra)})" if extra else ""
@@ -317,7 +320,6 @@ def _format_size(n: int) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="testrange")
     parser.add_argument("--version", action="version", version=f"testrange {__version__}")
-    parser.add_argument("--verbose", action="store_true", help="enable DEBUG-level logging")
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -416,8 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    level = "DEBUG" if args.verbose else args.log_level
-    configure_logging(level=level)
+    configure_logging(level=args.log_level)
     rc = args.func(args)
     return int(rc or 0)
 

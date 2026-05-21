@@ -11,15 +11,17 @@ from testrange.devices.base import Device
 from testrange.devices.cpu.base import CPU
 from testrange.devices.disk.base import HardDrive, OSDrive
 from testrange.devices.memory.base import Memory
-from testrange.devices.network.base import NetworkIface
+from testrange.devices.network.base import DHCPAddr, NetworkIface, StaticAddr
 from testrange.devices.pool.base import StoragePool
 
 __all__ = [
     "CPU",
+    "DHCPAddr",
     "Device",
     "HardDrive",
     "Memory",
     "NetworkIface",
     "OSDrive",
+    "StaticAddr",
     "StoragePool",
 ]

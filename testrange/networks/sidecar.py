@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 
+from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.networks._addressing_consts import (
     DHCP_RANGE_HI,
     DHCP_RANGE_LO,
@@ -52,12 +53,8 @@ def sidecar_nic_specs(switch: Switch) -> list[tuple[str, str | None]]:
     the sidecar acquires an address via the upstream LAN's DHCP.
     """
     if not switch.networks:
-        raise ValueError(
-            f"switch {switch.name!r} has no Networks; cannot place a sidecar NIC"
-        )
-    specs: list[tuple[str, str | None]] = [
-        (switch.networks[0].name, switch.sidecar_ip)
-    ]
+        raise ValueError(f"switch {switch.name!r} has no Networks; cannot place a sidecar NIC")
+    specs: list[tuple[str, str | None]] = [(switch.networks[0].name, switch.sidecar_ip)]
     if switch.nat:
         specs.append((_uplink_network_name(switch), None))
     return specs
@@ -87,11 +84,13 @@ def render_sidecar_interfaces(switch: Switch) -> str:
         "",
     ]
     if switch.nat:
-        blocks.extend([
-            f"auto {SIDECAR_UPLINK_NIC}",
-            f"iface {SIDECAR_UPLINK_NIC} inet dhcp",
-            "",
-        ])
+        blocks.extend(
+            [
+                f"auto {SIDECAR_UPLINK_NIC}",
+                f"iface {SIDECAR_UPLINK_NIC} inet dhcp",
+                "",
+            ]
+        )
     return "\n".join(blocks)
 
 
@@ -153,14 +152,17 @@ def render_dnsmasq_conf(
         for net in switch.networks:
             lines.append(f"domain={net.name},{switch.cidr}")
 
+    # VM and network names are interpolated raw below; they are safe because
+    # validate_name (testrange._names) rejects `, = # \n` and XML metachars at
+    # the LibvirtHypervisor boundary, so they can't break a dnsmasq directive.
     for vm in vms:
         for idx, nic in enumerate(vm.spec.nics):
             if nic.network not in networks_on_switch:
                 continue
-            if nic.ipv4 is not None:
+            if isinstance(nic.addr, StaticAddr):
                 if switch.dns:
-                    lines.append(f"host-record={vm.name}.{nic.network},{nic.ipv4}")
-            elif switch.dhcp:
+                    lines.append(f"host-record={vm.name}.{nic.network},{nic.addr.host}")
+            elif isinstance(nic.addr, DHCPAddr) and switch.dhcp:
                 lines.append(f"dhcp-host={mac_for(vm.name, idx)},{vm.name}")
 
     return "\n".join(lines) + "\n"
@@ -181,7 +183,7 @@ def render_nftables_ruleset(switch: Switch) -> str:
         "table ip nat {\n"
         "    chain postrouting {\n"
         "        type nat hook postrouting priority srcnat;\n"
-        f"        oifname \"{SIDECAR_UPLINK_NIC}\" masquerade\n"
+        f'        oifname "{SIDECAR_UPLINK_NIC}" masquerade\n'
         "    }\n"
         "}\n"
     )

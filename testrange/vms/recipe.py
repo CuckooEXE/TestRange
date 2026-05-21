@@ -11,12 +11,7 @@ from testrange.vms.spec import VMSpec
 
 @dataclass(frozen=True)
 class VMRecipe:
-    """A VM declaration: hardware spec + how to install + how to talk to it.
-
-    Credentials live on the ``builder`` (it's what bakes them into the
-    disk). The orchestrator brokers the credential lookup to the
-    communicator at bind time.
-    """
+    """A VM declaration: hardware spec + how to install + how to talk to it."""
 
     spec: VMSpec
     builder: Builder

@@ -32,7 +32,7 @@ testrange run examples/hello_world.py
 PLAN = Plan(
     LibvirtHypervisor(
         connection="qemu:///system",
-        networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
+        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24")],
         pools=[StoragePool("pool1", 32)],
         vms=[
             VMRecipe(
@@ -56,6 +56,7 @@ TESTS = [my_test]
 ```
 testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
 testrange cache list / del / rename / forget-name
+testrange cache push / pull <sha-or-name> --cache <url>
 testrange describe <plan.py>
 testrange run <plan.py> [--fail-fast] [--leak-on-failure]
 testrange repl <plan.py>

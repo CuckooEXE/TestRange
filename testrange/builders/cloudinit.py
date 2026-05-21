@@ -43,6 +43,7 @@ from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
+from testrange.devices.network import DHCPAddr
 from testrange.exceptions import BuilderError, BuildNotReadyError
 from testrange.networks.base import NetworkAddressing
 from testrange.packages.apt import Apt
@@ -204,9 +205,9 @@ class CloudInitBuilder(Builder):
         write_files.extend(_render_run_netplan_write_files(spec, addressing, macs))
         if write_files:
             body["write_files"] = write_files
-        if chpasswd_lines:
+        if chpasswd_users:
             body["chpasswd"] = {
-                "list": "\n".join(chpasswd_lines),
+                "users": chpasswd_users,
                 "expire": False,
             }
         if apt_pkgs:
@@ -334,6 +335,10 @@ class CloudInitBuilder(Builder):
         )
 
         iso = pycdlib.PyCdlib()
+        # interchange_level=3 (relaxed ISO9660 names), joliet=3 (Windows-style
+        # long names), rock_ridge="1.09" (the Rock Ridge version Linux mounts
+        # cleanly, for POSIX names). vol_ident="cidata" is REQUIRED — cloud-init
+        # discovers the NoCloud datasource by that exact volume label.
         iso.new(
             interchange_level=3,
             joliet=3,
@@ -442,6 +447,7 @@ def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
 # network module on subsequent boots so it doesn't undo our work.
 # ----------------------------------------------------------------------------
 
+
 def _render_run_netplan_yaml(
     spec: VMSpec,
     addressing: Mapping[str, NetworkAddressing],
@@ -449,8 +455,15 @@ def _render_run_netplan_yaml(
 ) -> str:
     """Render the netplan the guest should use at run-phase.
 
-    Per-NIC: ``ipv4`` set => static address + (first-static-only) default
-    route + nameservers pointing at the gateway; ``ipv4`` unset => dhcp4.
+    Per-NIC, keyed on ``nic.addr``:
+
+    - ``None`` => ``dhcp4: false, dhcp6: false, optional: true`` — the NIC is
+      left unconfigured (no address, and crucially no DHCP wait).
+    - :class:`DHCPAddr` => ``dhcp4: true``.
+    - :class:`StaticAddr` => static address + (first-static-only) default
+      route + nameservers; prefix/gateway/DNS are taken from the ``StaticAddr``
+      when listed, else derived from the Switch's :class:`NetworkAddressing`.
+
     Wraps under a top-level ``network:`` because this file goes directly
     into ``/etc/netplan/`` (cloud-init's ``network-config`` is unwrapped
     because cloud-init wraps it before writing).
@@ -471,17 +484,30 @@ def _render_run_netplan_yaml(
         else:
             match = {"name": "en*"} if idx == 0 else {"name": f"en{idx}*"}
         cfg: dict[str, Any] = {"match": match}
-        if nic.ipv4 is not None:
-            addr = addressing[nic.network]
-            cfg["addresses"] = [f"{nic.ipv4}/{addr.prefix_len}"]
-            if addr.dns_server is not None:
-                cfg["nameservers"] = {"addresses": [addr.dns_server]}
-            if addr.gateway is not None and not first_static_seen:
-                cfg["routes"] = [{"to": "default", "via": addr.gateway}]
-                first_static_seen = True
-        else:
+        a = nic.addr
+        if a is None:
+            # NIC present but unconfigured: leave it to the OS. Must NOT emit
+            # dhcp4: true — that hangs boot waiting for a lease nothing serves.
+            cfg["dhcp4"] = False
+            cfg["dhcp6"] = False
+            cfg["optional"] = True
+        elif isinstance(a, DHCPAddr):
             cfg["dhcp4"] = True
             cfg["dhcp6"] = False
+        else:  # StaticAddr — explicit wins, else derive from the Switch.
+            sub = addressing.get(nic.network)
+            cfg["addresses"] = [a.cidr(sub.prefix_len if sub is not None else None)]
+            dns = (
+                list(a.dns)
+                if a.dns
+                else ([sub.dns_server] if sub is not None and sub.dns_server is not None else [])
+            )
+            if dns:
+                cfg["nameservers"] = {"addresses": dns}
+            gw = a.gw if a.gw is not None else (sub.gateway if sub is not None else None)
+            if gw is not None and not first_static_seen:
+                cfg["routes"] = [{"to": "default", "via": gw}]
+                first_static_seen = True
         ethernets[iface_name] = cfg
     body = {"network": {"version": 2, "ethernets": ethernets}}
     return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
@@ -496,13 +522,14 @@ def _render_run_netplan_write_files(
 
     Returns an empty list for single-NIC all-DHCP VMs — the install-time
     DHCP netplan already matches the single NIC by name pattern and works
-    at run-phase too. Any static IP, or any multi-NIC topology, needs the
-    run-phase netplan: static addresses must be baked in, and multi-NIC
-    matching by interface name is unreliable on guests with predictable
-    names (only MAC matching disambiguates positionally).
+    at run-phase too. Anything else needs the run-phase netplan: a static
+    address must be baked in, an unconfigured (``addr=None``) NIC must render
+    ``dhcp4: false`` (which the install netplan does *not* do), and multi-NIC
+    matching by interface name is unreliable on guests with predictable names
+    (only MAC matching disambiguates positionally).
     """
-    no_statics = not any(nic.ipv4 is not None for nic in spec.nics)
-    if len(spec.nics) <= 1 and no_statics:
+    all_dhcp = all(isinstance(nic.addr, DHCPAddr) for nic in spec.nics)
+    if len(spec.nics) <= 1 and all_dhcp:
         return []
     staged = _render_run_netplan_yaml(spec, addressing, macs)
     return [

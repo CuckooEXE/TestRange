@@ -21,6 +21,7 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import QGACommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import DHCPAddr
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
@@ -53,7 +54,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", driver="virtio"),
+                        LibvirtNetworkIface("netA", driver="virtio", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -65,6 +66,7 @@ PLAN = Plan(
             ),
         ],
     ),
+    name="qga-demo",
 )
 
 

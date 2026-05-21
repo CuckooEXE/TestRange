@@ -45,12 +45,17 @@ class TestPlan:
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe()],
         )
-        plan = Plan(hyp)
+        plan = Plan(hyp, name="t")
         assert plan.hypervisor is hyp
 
     def test_empty_plan(self) -> None:
         with pytest.raises(ValueError):
             Plan()
+
+    def test_name_required(self) -> None:
+        hyp = LibvirtHypervisor(connection="qemu:///session")
+        with pytest.raises(ValueError, match="required"):
+            Plan(hyp)
 
     def test_multi_hypervisor_not_supported(self) -> None:
         hyp = LibvirtHypervisor(connection="qemu:///session")
@@ -103,11 +108,62 @@ class TestLibvirtHypervisor:
                 vms=[],
             )
 
+    def test_reserved_double_underscore_switch_rejected(self) -> None:
+        # `__`-prefixed names belong to the orchestrator (__install, __uplink__*).
+        with pytest.raises(ValueError, match="reserved"):
+            LibvirtHypervisor(
+                connection="qemu:///session",
+                networks=[Switch("__install", Network("netA"), cidr="10.0.0.0/24")],
+                pools=[StoragePool("pool1", 32)],
+                vms=[],
+            )
+
+    def test_reserved_double_underscore_network_rejected(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            LibvirtHypervisor(
+                connection="qemu:///session",
+                networks=[Switch("sw1", Network("__uplink__sw1"), cidr="10.0.0.0/24")],
+                pools=[StoragePool("pool1", 32)],
+                vms=[],
+            )
+
+    def test_illegal_network_name_rejected(self) -> None:
+        # Libvirt-specific charset rule is enforced here, not on Network().
+        with pytest.raises(ValueError, match="illegal characters"):
+            LibvirtHypervisor(
+                connection="qemu:///session",
+                networks=[Switch("sw1", Network("net,a"), cidr="10.0.0.0/24")],
+                pools=[StoragePool("pool1", 32)],
+                vms=[],
+            )
+
+    def test_illegal_switch_name_rejected(self) -> None:
+        with pytest.raises(ValueError, match="illegal characters"):
+            LibvirtHypervisor(
+                connection="qemu:///session",
+                networks=[Switch("sw=1", Network("netA"), cidr="10.0.0.0/24")],
+                pools=[StoragePool("pool1", 32)],
+                vms=[],
+            )
+
+    def test_illegal_vm_name_rejected(self) -> None:
+        with pytest.raises(ValueError, match="illegal characters"):
+            LibvirtHypervisor(
+                connection="qemu:///session",
+                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                pools=[StoragePool("pool1", 32)],
+                vms=[_basic_recipe("bad,name")],
+            )
+
 
 class TestVMRecipe:
     def test_credentials_lookup(self) -> None:
         r = _basic_recipe()
-        cred = r.builder.find_credential("u")
+        # find_credential is CloudInitBuilder-specific (the orchestrator narrows
+        # the same way — only CloudInitBuilder is supported in v0).
+        builder = r.builder
+        assert isinstance(builder, CloudInitBuilder)
+        cred = builder.find_credential("u")
         assert cred is not None
         assert cred.username == "u"
-        assert r.builder.find_credential("nope") is None
+        assert builder.find_credential("nope") is None

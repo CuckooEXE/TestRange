@@ -1,9 +1,9 @@
 """Builder ABC.
 
-The Builder is the only component that drives the install lifecycle — no
-Communicator is involved during install. The Builder produces a
-self-terminating install payload (e.g., cloud-init seed that ends with
-``poweroff``), and the orchestrator polls driver-level power state.
+The Builder drives the install lifecycle end to end: it produces a
+self-terminating install payload (e.g., a cloud-init seed that ends with
+``poweroff``), and the orchestrator polls driver-level power state until
+the VM shuts off.
 
 Builders are hypervisor-agnostic. When a builder needs per-network
 addressing facts (CIDR, prefix, gateway, DHCP flag) to render guest config,
@@ -51,9 +51,10 @@ class Builder(ABC):
     ) -> str:
         """16-char hex hash that uniquely identifies the post-install disk.
 
-        Pure: must not depend on run_id, clocks, or any non-deterministic
-        input. Same spec+recipe+addressing+base_sha+macs -> same hash,
-        every time. This is the cache key for the post-install disk.
+        Pure and deterministic: same ``(spec, recipe, addressing, base_sha,
+        macs)`` -> same hash, every time, with no ``run_id``/clock/random
+        input. This is the post-install cache key; the rationale and the
+        contract for builder authors live in ADR-0007.
 
         ``macs`` (one per NIC in spec order) lets concretes that bake
         positional NIC config into the install payload key the cache on

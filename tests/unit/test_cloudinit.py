@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from collections.abc import Mapping
+from typing import Any
 
 import pytest
 import yaml
@@ -12,25 +13,38 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, Memory, OSDrive
+from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
 from testrange.networks import Network, NetworkAddressing, Switch
 from testrange.packages import Apt, Pip
+from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
+
+_KEY = SSHKey.generate(comment="cloudinit-test")
 
 # Default per-test addressing map. Builders take a Mapping[network_name,
 # NetworkAddressing] from the orchestrator so they never see a hypervisor.
 # Both fixture switches have dhcp + dns + nat + uplink set so addr.gateway
 # and addr.dns_server are non-None (exercises the full netplan path).
 _SW_A = Switch(
-    "swA", Network("netA"), cidr="172.31.0.0/24",
-    dhcp=True, dns=True, nat=True, uplink="lo",
+    "swA",
+    Network("netA"),
+    cidr="172.31.0.0/24",
+    dhcp=True,
+    dns=True,
+    nat=True,
+    uplink="lo",
 )
 _SW_B = Switch(
-    "swB", Network("netB"), cidr="10.10.10.0/24",
-    dhcp=True, dns=True, nat=True, uplink="lo",
+    "swB",
+    Network("netB"),
+    cidr="10.10.10.0/24",
+    dhcp=True,
+    dns=True,
+    nat=True,
+    uplink="lo",
 )
 DEFAULT_ADDR: Mapping[str, NetworkAddressing] = {
     "netA": NetworkAddressing.from_switch(_SW_A),
@@ -41,7 +55,12 @@ DEFAULT_ADDR: Mapping[str, NetworkAddressing] = {
 def _spec(name: str = "web") -> VMSpec:
     return VMSpec(
         name=name,
-        devices=[CPU(1), Memory(512), OSDrive("p1", 8), LibvirtNetworkIface("netA")],
+        devices=[
+            CPU(1),
+            Memory(512),
+            OSDrive("p1", 8),
+            LibvirtNetworkIface("netA", addr=DHCPAddr()),
+        ],
     )
 
 
@@ -58,7 +77,7 @@ def _basic_builder() -> CloudInitBuilder:
         base=CacheEntry("debian-13"),
         credentials=[
             PosixCred("root", password="rootpass"),
-            PosixCred("u", password="upass", pubkey="ssh-ed25519 AAA... u", sudo=True),
+            PosixCred("u", password="upass", ssh_key=_KEY, sudo=True),
         ],
         packages=[Apt("nginx"), Apt("curl"), Pip("requests")],
         post_install_commands=("echo hi > /tmp/hi",),
@@ -100,7 +119,7 @@ class TestRenderUserData:
         recipe = _recipe(b, spec)
         body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
         u = next(u for u in body["users"] if u["name"] == "u")
-        assert u["ssh_authorized_keys"] == ["ssh-ed25519 AAA... u"]
+        assert u["ssh_authorized_keys"] == [_KEY.auth_line]
         assert u["sudo"] == "ALL=(ALL) NOPASSWD:ALL"
 
     def test_chpasswd(self) -> None:
@@ -108,9 +127,13 @@ class TestRenderUserData:
         spec = _spec()
         recipe = _recipe(b, spec)
         body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        cp = body["chpasswd"]["list"]
-        assert "root:rootpass" in cp
-        assert "u:upass" in cp
+        # Modern cloud-init form: chpasswd.users[] with type=text, not the
+        # deprecated top-level `list:` string.
+        assert "list" not in body["chpasswd"]
+        users = {u["name"]: u for u in body["chpasswd"]["users"]}
+        assert users["root"] == {"name": "root", "type": "text", "password": "rootpass"}
+        assert users["u"] == {"name": "u", "type": "text", "password": "upass"}
+        assert body["chpasswd"]["expire"] is False
 
     def test_apt_packages(self) -> None:
         b = _basic_builder()
@@ -191,7 +214,6 @@ class TestInsecureFlags:
         assert "/etc/dnf/dnf.conf" in paths
 
 
-
 class TestPipInsecure:
     def test_default_secure_pip_one_install_line(self) -> None:
         b = CloudInitBuilder(
@@ -233,7 +255,6 @@ class TestPipInsecure:
         pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
         assert len(pip_lines) == 1
         assert "--trusted-host" in pip_lines[0]
-
 
 
 class TestRenderMetaData:
@@ -347,7 +368,7 @@ class TestRunPhaseNetplanStaging:
         assert "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg" not in paths
 
     def test_static_nic_writes_netplan_and_disable_cfg(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
+        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -358,7 +379,7 @@ class TestRunPhaseNetplanStaging:
 
     def test_staged_netplan_has_secure_permissions(self) -> None:
         # netplan 0.106+ warns on world-readable netplan files.
-        spec = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
+        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -366,7 +387,7 @@ class TestRunPhaseNetplanStaging:
         assert wf["/etc/netplan/50-cloud-init.yaml"]["owner"] == "root:root"
 
     def test_disable_drop_in_content(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
+        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -376,7 +397,7 @@ class TestRunPhaseNetplanStaging:
         assert cfg == {"network": {"config": "disabled"}}
 
     def test_staged_netplan_content_single_static(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
+        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -390,8 +411,8 @@ class TestRunPhaseNetplanStaging:
     def test_staged_netplan_first_static_gets_default_route(self) -> None:
         # Two static NICs: only the first declares the default route.
         spec = _static_spec(
-            LibvirtNetworkIface("netA", ipv4="172.31.0.50"),
-            LibvirtNetworkIface("netB", ipv4="10.10.10.50"),
+            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")),
+            LibvirtNetworkIface("netB", addr=StaticAddr("10.10.10.50")),
         )
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
@@ -404,8 +425,8 @@ class TestRunPhaseNetplanStaging:
     def test_staged_netplan_mixed_static_dhcp(self) -> None:
         # NIC0 static, NIC1 DHCP — netplan reflects both branches.
         spec = _static_spec(
-            LibvirtNetworkIface("netA", ipv4="172.31.0.50"),
-            LibvirtNetworkIface("netB"),
+            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")),
+            LibvirtNetworkIface("netB", addr=DHCPAddr()),
         )
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
@@ -418,7 +439,7 @@ class TestRunPhaseNetplanStaging:
     def test_install_network_config_stays_dhcp(self) -> None:
         # The install-time network-config must remain DHCP-only even when a
         # NIC has a static ipv4 — install runs on a different subnet.
-        spec = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
+        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         netcfg = yaml.safe_load(
             b.render_network_config(spec, _recipe(b, spec), addressing=DEFAULT_ADDR)
@@ -429,16 +450,16 @@ class TestRunPhaseNetplanStaging:
 
     def test_config_hash_sensitive_to_ipv4(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_a = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
-        spec_b = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.60"))
+        spec_a = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec_b = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.60")))
         h_a = b.config_hash(spec_a, _recipe(b, spec_a), addressing=DEFAULT_ADDR, base_sha="z")
         h_b = b.config_hash(spec_b, _recipe(b, spec_b), addressing=DEFAULT_ADDR, base_sha="z")
         assert h_a != h_b
 
     def test_config_hash_static_vs_dhcp_differs(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_dhcp = _static_spec(LibvirtNetworkIface("netA"))
-        spec_static = _static_spec(LibvirtNetworkIface("netA", ipv4="172.31.0.50"))
+        spec_dhcp = _static_spec(LibvirtNetworkIface("netA", addr=DHCPAddr()))
+        spec_static = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         h_dhcp = b.config_hash(
             spec_dhcp, _recipe(b, spec_dhcp), addressing=DEFAULT_ADDR, base_sha="z"
         )
@@ -446,6 +467,73 @@ class TestRunPhaseNetplanStaging:
             spec_static, _recipe(b, spec_static), addressing=DEFAULT_ADDR, base_sha="z"
         )
         assert h_dhcp != h_static
+
+
+class TestRunPhaseNetplanTriState:
+    """``addr`` is a three-case sum type: ``None`` (no address),
+    ``DHCPAddr()``, or ``StaticAddr(...)`` (unspecified gw/dns/prefix derive
+    from the Switch). Replaces the old overload where a NIC with no ``ipv4``
+    meant DHCP. See TODO.md "Run-phase netplan renders ``dhcp4: true`` for a
+    no-DHCP NIC".
+    """
+
+    def _netplan(
+        self,
+        nic: LibvirtNetworkIface,
+        addressing: Mapping[str, NetworkAddressing] = DEFAULT_ADDR,
+    ) -> dict[str, Any]:
+        # Render directly — bypasses the single-NIC-all-DHCP write_files skip so
+        # each address mode's netplan can be inspected in isolation.
+        from testrange.builders.cloudinit import _render_run_netplan_yaml
+
+        body = yaml.safe_load(_render_run_netplan_yaml(_static_spec(nic), addressing))
+        eth: dict[str, Any] = body["network"]["ethernets"]["id0"]
+        return eth
+
+    def test_staged_netplan_nic_on_bare_switch(self) -> None:
+        # addr=None: the NIC exists but takes no address. Must NOT emit
+        # dhcp4: true (the bug) — leave it to the OS so boot doesn't block
+        # waiting for a lease nothing serves.
+        eth = self._netplan(LibvirtNetworkIface("netA", addr=None))
+        assert eth["dhcp4"] is False
+        assert eth["dhcp6"] is False
+        assert eth["optional"] is True
+        assert "addresses" not in eth
+
+    def test_staged_netplan_explicit_dhcp(self) -> None:
+        eth = self._netplan(LibvirtNetworkIface("netA", addr=DHCPAddr()))
+        assert eth["dhcp4"] is True
+        assert eth["dhcp6"] is False
+        assert "addresses" not in eth
+
+    def test_staged_netplan_static_derives_from_switch(self) -> None:
+        # StaticAddr with no prefix/gw/dns on a managed (nat+dns) switch:
+        # prefix/gateway/dns all derived from the Switch's NetworkAddressing.
+
+        eth = self._netplan(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        assert eth["addresses"] == ["172.31.0.50/24"]
+        assert eth["nameservers"] == {"addresses": ["172.31.0.1"]}
+        assert eth["routes"] == [{"to": "default", "via": "172.31.0.1"}]
+
+    def test_staged_netplan_static_dictates_gateway_on_dumb_switch(self) -> None:
+        # Dumb L2 switch (no nat/dns => derived gateway/dns are None). A guest
+        # at .123 acts as the gateway; the NIC dictates everything via StaticAddr.
+
+        bare = {
+            "netA": NetworkAddressing(
+                cidr="192.168.5.0/24", prefix_len=24, dhcp=False, gateway=None, dns_server=None
+            )
+        }
+        eth = self._netplan(
+            LibvirtNetworkIface(
+                "netA",
+                addr=StaticAddr("192.168.5.124/24", gw="192.168.5.123", dns=("192.168.5.123",)),
+            ),
+            addressing=bare,
+        )
+        assert eth["addresses"] == ["192.168.5.124/24"]
+        assert eth["routes"] == [{"to": "default", "via": "192.168.5.123"}]
+        assert eth["nameservers"] == {"addresses": ["192.168.5.123"]}
 
 
 class TestWaitReady:

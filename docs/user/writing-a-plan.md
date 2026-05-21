@@ -11,8 +11,10 @@ from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
-from testrange.credentials import PosixCred, SSHKey
+from testrange.credentials import PosixCred
+from testrange.utils import SSHKey
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import DHCPAddr
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
@@ -48,7 +50,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA"),
+                        LibvirtNetworkIface("netA", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -114,27 +116,36 @@ Switch(
 For a per-flag breakdown and the per-driver implementation, see
 [Networking modes](drivers/networking-modes.md).
 
-### Static IPs vs DHCP
+### NIC addressing: static, DHCP, or unconfigured
 
-Each NIC is DHCP by default. Pin a static address with `ipv4=`:
+A NIC's run-phase address mode is set with `addr=`, which takes one of
+three values:
 
 ```python
-LibvirtNetworkIface("netA", ipv4="172.31.0.150")  # static
-LibvirtNetworkIface("netA")                       # DHCP
+LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.150"))  # static
+LibvirtNetworkIface("netA", addr=DHCPAddr())                  # DHCP lease
+LibvirtNetworkIface("netA")                                   # addr=None: unconfigured
 ```
 
-Plan-time validation runs at Hypervisor construction and reports every
-problem at once:
+The default is `addr=None` — **unconfigured**, *not* DHCP. The guest's
+netplan renders `dhcp4: false` and the OS decides what to do (link-local,
+its own client, or nothing). Use `DHCPAddr()` to request a lease (the
+Switch must have `dhcp=True` for anything to answer) and `StaticAddr(...)`
+to pin an address.
 
-- `ipv4` must be inside the owning Switch's CIDR.
-- `ipv4` cannot equal the subnet's network or broadcast address.
-- `ipv4` cannot collide with the pinned sidecar slot (`.1`, present iff
+Plan-time validation runs at Hypervisor construction and reports every
+problem at once. For a `StaticAddr`:
+
+- the address must be inside the owning Switch's CIDR.
+- it cannot equal the subnet's network or broadcast address.
+- it cannot collide with the pinned sidecar slot (`.1`, present iff
   `dhcp|dns|nat`) or the mgmt slot (`.2`, present iff `mgmt`).
-- `ipv4` cannot fall inside the DHCP pool (`.10`–`.99`) when `dhcp=True`.
+- it cannot fall inside the DHCP pool (`.10`–`.99`) when `dhcp=True`.
   Pick something in `.100`–`.254`.
-- A NIC without `ipv4` attached to a Switch with `dhcp=False` is rejected
-  (the NIC would never get an address at run-phase).
-- Duplicate static IPs within the same Network across VMs are rejected.
+- duplicate static addresses within the same Network across VMs are rejected.
+
+A NIC with `addr=None` or `addr=DHCPAddr()` is left for plan-level
+validation to skip — there is no static address to range-check.
 
 ### `install_uplink` and the install phase
 
@@ -159,7 +170,7 @@ the whole install topology down LIFO before the run phase. Skip
 
 ### Static-NIC netplan staging
 
-When any NIC declares a static `ipv4`, the cloud-init seed stages two
+When any NIC declares a static address (`StaticAddr`), the cloud-init seed stages two
 extra files on the post-install disk:
 
 1. The real run-phase netplan at `/etc/netplan/50-cloud-init.yaml`.
@@ -177,30 +188,30 @@ static address.
 
 For communicators that reach the VM over the network (the SSH
 communicator is the v0 instance of this pattern), the orchestrator
-resolves the bind address from the **first** declared NIC of the VM.
-If you declare multiple NICs and want the communicator to reach the
-VM via a specific one, declare that NIC first. The other NICs are
-brought up on the guest (per the staged netplan) but are not used for
-the communicator's connection.
+resolves the bind address from the VM's **first *addressed* NIC** — the
+first NIC in device order that carries a `StaticAddr` or `DHCPAddr`
+(unconfigured `addr=None` NICs are skipped). To pin a specific NIC
+regardless of order, pass `SSHCommunicator("user", nic_idx=N)` where `N`
+is the NIC's position in the device list.
 
 ```python
 VMSpec(
     name="multihomed",
     devices=[
         CPU(2), Memory(1024), OSDrive("pool1", 8),
-        # Communicator binds to this address:
-        LibvirtNetworkIface("mgmt", ipv4="10.0.0.10"),
-        # Available on the guest, not used by the communicator:
-        LibvirtNetworkIface("data"),
+        # Communicator binds to this address (first addressed NIC):
+        LibvirtNetworkIface("mgmt", addr=StaticAddr("10.0.0.10")),
+        # Also up on the guest, but not used by the communicator:
+        LibvirtNetworkIface("data", addr=DHCPAddr()),
     ],
 )
 ```
 
-If the first NIC is static, the orchestrator skips DHCP-lease lookup and
-binds to `nic.ipv4` directly. If the first NIC is DHCP, the orchestrator
-polls the driver for the lease keyed on the stable MAC.
+If the bound NIC is a `StaticAddr`, the orchestrator skips DHCP-lease
+lookup and binds to that address directly. If it is a `DHCPAddr`, the
+orchestrator polls the driver for the lease keyed on the stable MAC.
 
-The first-NIC rule applies only to communicators that reach the VM over
+The addressed-NIC rule applies only to communicators that reach the VM over
 the network (SSH). `QGACommunicator` rides the hypervisor's native
 guest agent — an in-band channel with no IP — so NIC ordering is
 irrelevant to it.
@@ -226,7 +237,7 @@ that long.
 A VM's `communicator` is how test code talks to it. Two are built in:
 
 - **`SSHCommunicator("user")`** — connects over SSH to the VM's first
-  NIC (see above). Needs a `PosixCred` with a matching username on the
+  addressed NIC (or the NIC at `nic_idx=`; see above). Needs a `PosixCred` with a matching username on the
   builder. The default for VMs on a reachable network.
 - **`QGACommunicator()`** — rides the hypervisor's native guest agent
   (QEMU Guest Agent on libvirt): no network, no credentials, no IP
@@ -265,6 +276,8 @@ A VM's `communicator` is how test code talks to it. Two are built in:
 ```
 testrange cache add <path-or-url> [--name <pretty>]
 testrange cache list
+testrange cache push <sha-or-name> --cache <url>   # publish to an HTTP cache
+testrange cache pull <sha-or-name> --cache <url>   # fetch from an HTTP cache
 testrange describe plan.py
 testrange run plan.py [--fail-fast] [--leak-on-failure]
 testrange repl plan.py

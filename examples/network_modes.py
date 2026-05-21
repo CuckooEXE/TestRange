@@ -23,11 +23,13 @@ from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
-from testrange.credentials import PosixCred, SSHKey
+from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import StaticAddr
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
+from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
 UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
@@ -43,7 +45,7 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
                 CPU(1),
                 Memory(512),
                 OSDrive("pool1", 8),
-                LibvirtNetworkIface(network, ipv4=ipv4),
+                LibvirtNetworkIface(network, addr=StaticAddr(ipv4)),
             ],
         ),
         builder=CloudInitBuilder(
@@ -53,8 +55,7 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
                 PosixCred(
                     "myuser",
                     password="mypass",
-                    pubkey=_KEY.auth_line,
-                    privkey=_KEY.priv,
+                    ssh_key=_KEY,
                     sudo=True,
                 ),
             ],
@@ -98,6 +99,7 @@ PLAN = Plan(
             _vm("both-vm", "both-net", "10.53.0.100"),
         ],
     ),
+    name="network-modes",
 )
 
 

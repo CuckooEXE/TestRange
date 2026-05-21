@@ -16,6 +16,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Iterable
 
+from testrange.devices.network import StaticAddr
 from testrange.networks._addressing_consts import (
     DHCP_RANGE_HI,
     DHCP_RANGE_LO,
@@ -52,20 +53,18 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
                 continue
             switch = switch_opt
 
-            if nic.ipv4 is None:
-                if not switch.dhcp:
-                    problems.append(
-                        f"{origin}: nic_no_address — switch {switch.name!r} has "
-                        f"dhcp=False and the NIC declares no static ipv4; this "
-                        f"NIC would never get an address. Set ipv4= on the NIC "
-                        f"or set dhcp=True on the switch."
-                    )
+            if not isinstance(nic.addr, StaticAddr):
+                # DHCPAddr or None: nothing to validate at the plan level. A
+                # DHCP NIC gets a lease; an unconfigured (None) NIC has no
+                # address. Neither can collide with a reserved slot, and the
+                # guest OS's behavior is not the plan validator's to police.
                 continue
 
-            origin = f"{origin}={nic.ipv4}"
+            static_ip = nic.addr.host
+            origin = f"{origin}={static_ip}"
             subnet = switch.network
             try:
-                addr = ipaddress.IPv4Address(nic.ipv4)
+                addr = ipaddress.IPv4Address(static_ip)
             except ValueError as e:  # pragma: no cover (caught at NIC level)
                 problems.append(f"{origin}: {e}")
                 continue
@@ -83,16 +82,12 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
             if switch.needs_sidecar:
                 sidecar = subnet.network_address + SIDECAR_OFFSET
                 if addr == sidecar:
-                    problems.append(
-                        f"{origin}: address collides with sidecar slot {sidecar!s}"
-                    )
+                    problems.append(f"{origin}: address collides with sidecar slot {sidecar!s}")
                     continue
             if switch.mgmt:
                 mgmt = subnet.network_address + MGMT_OFFSET
                 if addr == mgmt:
-                    problems.append(
-                        f"{origin}: address collides with mgmt slot {mgmt!s}"
-                    )
+                    problems.append(f"{origin}: address collides with mgmt slot {mgmt!s}")
                     continue
             if switch.dhcp:
                 lo = subnet.network_address + DHCP_RANGE_LO
@@ -107,11 +102,11 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
                     continue
 
             seen = seen_per_net.setdefault(nic.network, {})
-            prior = seen.get(nic.ipv4)
+            prior = seen.get(static_ip)
             if prior is not None:
                 problems.append(f"{origin}: duplicate — address already used by {prior}")
                 continue
-            seen[nic.ipv4] = origin
+            seen[static_ip] = origin
 
     if problems:
         joined = "\n  - ".join(problems)

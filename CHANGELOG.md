@@ -31,6 +31,14 @@ This project predates 1.0; expect breaking changes between minor versions.
   ``org.qemu.guest_agent.0`` virtio channel unconditionally.
 - ``GuestAgentError(DriverError)`` — raised when a native guest-agent
   command fails (agent not responding, timeout, QGA protocol error).
+- VM snapshot lifecycle on the driver: ``create_snapshot`` /
+  ``list_snapshots`` / ``delete_snapshot`` / ``restore_snapshot`` on the
+  ``HypervisorDriver`` ABC and ``LibvirtDriver``, reachable from test code
+  via ``orch.driver``. ``create_snapshot(..., mem=False)`` takes a
+  disk-only snapshot; backends that don't support memory snapshots raise
+  ``DriverError`` when ``mem=True``. See the snapshot recipe in the
+  Running tests guide and ``examples/hello_world.py``
+  (``snapshot_lifecycle``).
 
 ### Changed
 

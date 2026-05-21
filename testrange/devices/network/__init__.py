@@ -1,3 +1,3 @@
-from testrange.devices.network.base import NetworkIface
+from testrange.devices.network.base import DHCPAddr, NetworkIface, StaticAddr
 
-__all__ = ["NetworkIface"]
+__all__ = ["DHCPAddr", "NetworkIface", "StaticAddr"]

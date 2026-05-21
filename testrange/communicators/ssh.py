@@ -7,6 +7,13 @@ Plan-time::
 The orchestrator binds it with host + credential during the run phase,
 then test code calls ``execute`` / ``read_file`` / ``write_file``.
 
+For a multi-NIC VM, pass ``nic_idx`` to choose which NIC's address to
+connect on (by position in the VM's device list — the only thing that
+disambiguates multiple NICs on one network). Omitted, the orchestrator
+uses the first NIC that carries an address::
+
+    communicator=SSHCommunicator("myuser", nic_idx=1)
+
 The private key (if provided) is loaded from text in memory — never
 written to the orchestrator host's filesystem.
 """
@@ -68,10 +75,17 @@ class SSHCommunicator(Communicator):
     call opens it with a retry loop (sshd takes time after VM boot).
     """
 
-    def __init__(self, username: str) -> None:
+    def __init__(self, username: str, *, nic_idx: int | None = None) -> None:
         if not isinstance(username, str) or not username:
             raise ValueError("SSHCommunicator(username) must be a non-empty string")
+        if nic_idx is not None:
+            # bool is an int subclass; reject it so nic_idx=True isn't taken as 1.
+            if isinstance(nic_idx, bool) or not isinstance(nic_idx, int):
+                raise TypeError("SSHCommunicator(nic_idx) must be an int or None")
+            if nic_idx < 0:
+                raise ValueError(f"SSHCommunicator(nic_idx) must be >= 0, got {nic_idx}")
         self._username = username
+        self._nic_idx = nic_idx
         self._bound = False
         self._host: str | None = None
         self._port: int = 22
@@ -81,6 +95,12 @@ class SSHCommunicator(Communicator):
     @property
     def username(self) -> str:
         return self._username
+
+    @property
+    def nic_idx(self) -> int | None:
+        """Which NIC (by position in the VM's device list) the orchestrator
+        should resolve the SSH address from. ``None`` => first addressed NIC."""
+        return self._nic_idx
 
     @property
     def is_bound(self) -> bool:

@@ -13,9 +13,15 @@ materialized at ``.1`` of the Switch's subnet. ``mgmt=True`` puts a
 host adapter at ``.2``. ``uplink="<nic>"`` asks the driver to bridge
 the Switch to a physical NIC.
 
-ESXi-shaped semantics: ``uplink`` is the physical NIC name (a ``vmnic``
-on ESXi). On libvirt, the driver creates a host bridge and enslaves the
-NIC via pyroute2.
+``uplink`` is a physical NIC name on the hypervisor host; what the driver
+does with it is backend-specific:
+
+    ========  ==========================================================
+    Driver    ``uplink`` semantics
+    ========  ==========================================================
+    libvirt   create a host bridge and enslave the NIC via pyroute2
+    ESXi      the NIC is a ``vmnic`` attached to a vSwitch (planned)
+    ========  ==========================================================
 """
 
 from __future__ import annotations
@@ -42,6 +48,9 @@ class Network:
     name: str
 
     def __post_init__(self) -> None:
+        # Only the backend-agnostic check here: a name must be non-empty.
+        # Charset rules (dnsmasq/XML safety) are libvirt-specific and live at
+        # the LibvirtHypervisor boundary, so other backends can set their own.
         if not self.name:
             raise ValueError("Network.name must be a non-empty string")
 
@@ -139,9 +148,7 @@ class Switch:
                 f"(network address, not a host address): got {cidr!r}: {e}"
             ) from e
         if not isinstance(parsed, ipaddress.IPv4Network):
-            raise ValueError(
-                f"Switch.cidr must be IPv4 (v0 limitation); got {cidr!r}"
-            )
+            raise ValueError(f"Switch.cidr must be IPv4 (v0 limitation); got {cidr!r}")
 
         if nat and uplink is None:
             raise ValueError(

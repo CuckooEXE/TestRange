@@ -19,6 +19,20 @@ class TestSSHCommunicator:
         with pytest.raises(ValueError):
             SSHCommunicator("")
 
+    def test_nic_idx_defaults_none(self) -> None:
+        assert SSHCommunicator("u").nic_idx is None
+
+    def test_nic_idx_stored(self) -> None:
+        assert SSHCommunicator("u", nic_idx=2).nic_idx == 2
+
+    def test_nic_idx_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="nic_idx"):
+            SSHCommunicator("u", nic_idx=-1)
+
+    def test_nic_idx_non_int_raises(self) -> None:
+        with pytest.raises((ValueError, TypeError)):
+            SSHCommunicator("u", nic_idx="0")  # type: ignore[arg-type]
+
     def test_bind(self) -> None:
         c = SSHCommunicator("u")
         cred = PosixCred("u", password="p")

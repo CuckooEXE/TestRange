@@ -35,7 +35,7 @@ drift:
 | Mgmt          | `network_address + 2`  | `mgmt=True`             | Host adapter on the segment (no NAT, no forwarding)    |
 | Reserved      | `.3`–`.9`              | always                  | Future infra; not assignable                           |
 | DHCP pool     | `.10`–`.99`            | `dhcp=True`             | Lease range served by the sidecar                      |
-| User statics  | `.100`–`.254`          | always                  | Free for `LibvirtNetworkIface(..., ipv4="...")`        |
+| User statics  | `.100`–`.254`          | always                  | Free for `LibvirtNetworkIface(..., addr=StaticAddr("..."))` |
 
 Constants live in `testrange/networks/_addressing_consts.py`.
 
@@ -200,8 +200,10 @@ future hypervisor's construction) enforces:
 - Static IP can't collide with `.1` (sidecar) when `needs_sidecar`, or
   `.2` (mgmt) when `mgmt=True`.
 - Static IP can't fall in `.10`–`.99` when `dhcp=True`.
-- A NIC without `ipv4` on a Switch with `dhcp=False` is rejected (the
-  NIC would never get an address).
+- A NIC with no address (`addr=None`) is allowed on any Switch,
+  including `dhcp=False`: it renders unconfigured (`dhcp4: false`) and
+  the guest OS decides what to do. There is no static address to
+  range-check, so plan-time validation skips it.
 - Duplicate static IPs within the same Network across VMs are rejected.
 
 Every problem is collected and reported in one `ValueError` — fix
@@ -211,7 +213,7 @@ once, retry, see the next one.
 
 ```python
 # Bare L2 switch — guests can talk to each other on .100-.254 statics
-# but get no address otherwise (you must set ipv4= on every NIC).
+# but get no address otherwise (set addr=StaticAddr(...) on each NIC).
 Switch("isolated", Network("a"), cidr="10.50.0.0/24")
 
 # Mgmt-only — host reachable at .2; static guests at .100-.254.

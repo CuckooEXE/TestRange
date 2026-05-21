@@ -60,6 +60,12 @@ def build_sidecar_config_iso(
     ]
 
     iso = pycdlib.PyCdlib()
+    # interchange_level=3: ISO9660 with long/relaxed filenames.
+    # joliet=3: Joliet extension level 3 (Windows-style long names; harmless
+    #   on Linux, lets the guest mount by the friendly names too).
+    # rock_ridge="1.09": the Rock Ridge version Linux mounts cleanly — gives
+    #   POSIX names/permissions so the sidecar reads /dnsmasq.conf etc. as-is.
+    # These mirror the cloud-init seed ISO (see builders/cloudinit.py).
     iso.new(
         interchange_level=3,
         joliet=3,
