@@ -35,7 +35,6 @@ _ABSTRACT_METHODS = (
     "shutdown_vm",
     "destroy_vm",
     "get_vm_power_state",
-    "get_lease_ip",
     "create_snapshot",
     "list_snapshots",
     "delete_snapshot",
@@ -86,6 +85,7 @@ class TestDestroyDispatcher:
             def _stub(self: object, *a: object, **_k: object) -> None:
                 del self
                 calls.append((method, str(a[0]) if a else ""))
+
             return _stub
 
         attrs: dict[str, object] = {name: _stub for name in _ABSTRACT_METHODS}

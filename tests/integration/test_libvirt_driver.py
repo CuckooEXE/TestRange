@@ -47,8 +47,8 @@ def test_create_destroy_network(tmp_path: Path) -> None:
     driver.connect()
     try:
         backend_name = driver.compose_resource_name("integ-1", "network", "netA")
-        n = Network("netA", "192.0.2.0/24", dhcp=True, dns=True)
-        sw = Switch("sw1", internet=False)
+        n = Network("netA")
+        sw = Switch("sw1", n, cidr="192.0.2.0/24", dhcp=True, dns=True)
         driver.create_network(n, sw, backend_name)
         driver.destroy_network(backend_name)
     finally:

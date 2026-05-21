@@ -126,15 +126,11 @@ class HypervisorDriver(ABC):
         """Deterministic kernel bridge name. Override for backend-specific limits."""
         raise DriverError(f"{type(self).__name__}: no bridge management")
 
-    def create_bridge(
-        self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None
-    ) -> None:
+    def create_bridge(self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
         """Create the host bridge and enslave ``uplink``. Optional mgmt IP."""
         raise DriverError(f"{type(self).__name__}: no bridge management")
 
-    def create_isolated_bridge(
-        self, bridge_name: str, *, mgmt_cidr: str | None = None
-    ) -> None:
+    def create_isolated_bridge(self, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
         """Create an isolated host bridge (no enslaved NIC). Optional mgmt IP."""
         raise DriverError(f"{type(self).__name__}: no bridge management")
 
@@ -250,9 +246,10 @@ class HypervisorDriver(ABC):
     @abstractmethod
     def get_vm_power_state(self, backend_name: str) -> str: ...
 
-    @abstractmethod
-    def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
-        """Look up an IP leased to ``mac`` on ``network_backend_name``. ``None`` if not yet leased."""
+    # DHCP lease lookup is intentionally NOT a driver method: testrange's
+    # per-Switch sidecar owns DHCP, so a lease lives in the sidecar's
+    # dnsmasq lease file, not in anything the hypervisor manages. The
+    # orchestrator reads it over the native guest-file transport below.
 
     # --- Native guest agent (optional capability) ---------------------
     # A backend with a native in-guest agent (libvirt/QGA, future
@@ -344,9 +341,7 @@ class HypervisorDriver(ABC):
         elif kind in ("bridge", "install_bridge"):
             destroy_bridge = getattr(self, "destroy_bridge", None)
             if destroy_bridge is None:
-                raise NotImplementedError(
-                    f"destroy({kind!r}): driver has no destroy_bridge"
-                )
+                raise NotImplementedError(f"destroy({kind!r}): driver has no destroy_bridge")
             destroy_bridge(backend_name)
         else:
             raise NotImplementedError(f"destroy({kind!r}) not implemented")

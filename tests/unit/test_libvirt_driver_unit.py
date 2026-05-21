@@ -24,6 +24,7 @@ from testrange.drivers.libvirt import (
     LibvirtDriver,
     LibvirtHypervisor,
     _LibvirtGuestAgent,
+    _qga_agent_not_ready,
     _render_domain_xml,
     _render_network_xml,
     _render_pool_xml,
@@ -77,7 +78,8 @@ def _plan() -> Plan:
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe()],
-        )
+        ),
+        name="t",
     )
 
 
@@ -163,7 +165,8 @@ class TestPreflight:
                 ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe()],
-            )
+            ),
+            name="t",
         )
         report = d.preflight(plan, cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         codes = {f.code for f in report.errors}
@@ -186,7 +189,8 @@ class TestPreflight:
                 ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe()],
-            )
+            ),
+            name="t",
         )
         report = d.preflight(plan, cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         overlap_findings = [f for f in report.errors if f.code == "subnet_overlap"]
@@ -210,7 +214,8 @@ class TestPreflight:
                 networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe()],
-            )
+            ),
+            name="t",
         )
         report = d.preflight(plan, cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         codes = {f.code for f in report.errors}
@@ -495,13 +500,13 @@ class TestUploadToPool:
         src.write_bytes(payload)
 
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
-        d._conn = _FakeConn()  # type: ignore[assignment]
+        d._conn = _FakeConn()
 
         target = d.compose_volume_ref("p1", "tr_base_abc.qcow2")
         out = d.upload_to_pool(target, src)
 
         assert out == target
-        conn: _FakeConn = d._conn  # type: ignore[assignment]
+        conn: _FakeConn = d._conn
         assert "tr_base_abc.qcow2" in conn.pool.volumes
         vol = conn.pool.volumes["tr_base_abc.qcow2"]
         assert vol.upload_called_with is not None
@@ -521,7 +526,7 @@ class TestUploadToPool:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
         conn.pool.volumes["already-here.qcow2"] = _FakeStorageVol("already-here.qcow2")
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         target = d.compose_volume_ref("p1", "already-here.qcow2")
         out = d.upload_to_pool(target, src)
@@ -535,14 +540,14 @@ class TestUploadToPool:
 
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         original_send_all = _FakeStream.sendAll
 
         def patched_send_all(_self: _FakeStream, _handler: Any, _opaque: Any) -> None:
             raise RuntimeError("simulated network failure")
 
-        _FakeStream.sendAll = patched_send_all  # type: ignore[method-assign]
+        _FakeStream.sendAll = patched_send_all  # type: ignore[method-assign,assignment]
         target = d.compose_volume_ref("p1", "broken.qcow2")
         try:
             with pytest.raises(RuntimeError, match="simulated"):
@@ -561,7 +566,7 @@ class TestCreatePool:
         unwritable_root = Path("/nonexistent-root/should-not-be-created")
         d = LibvirtDriver(uri="qemu:///system", pool_root=unwritable_root)
         conn = _FakeConn()
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         pool = StoragePool("pool1", 32)
         d.create_pool(pool, "tr_pool_abc_pool1")
@@ -577,7 +582,7 @@ class TestCreatePool:
     def test_pool_xml_target_path_is_under_pool_root(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "p")
         conn = _FakeConn()
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
         d.create_pool(StoragePool("pool1", 32), "tr_pool_xyz_pool1")
         xml = conn.defined_pool_xmls[0]
         assert str(tmp_path / "p" / "tr_pool_xyz_pool1") in xml
@@ -590,7 +595,7 @@ class TestDestroyPool:
         # /var/lib/libvirt/images/testrange/ on each teardown.
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         d.destroy_pool("tr_pool_xyz_pool1")
 
@@ -603,7 +608,7 @@ class TestWriteToPool:
     def test_streams_bytes_as_raw_volume(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         data = b"cidata-iso-bytes\x00\x01\x02" * 256
         target = d.compose_volume_ref("p1", "seed.iso")
@@ -624,7 +629,7 @@ class TestWriteToPool:
         conn = _FakeConn()
         old = _FakeStorageVol("seed.iso")
         conn.pool.volumes["seed.iso"] = old
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         d.write_to_pool(d.compose_volume_ref("p1", "seed.iso"), b"fresh-bytes")
 
@@ -640,7 +645,7 @@ class TestDownloadFromPool:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
         conn.pool.volumes["disk.qcow2"] = _FakeStorageVol("disk.qcow2", contents=payload)
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         dest = tmp_path / "out.qcow2"
         vol_ref = d.compose_volume_ref("p1", "disk.qcow2")
@@ -660,14 +665,14 @@ class TestDownloadFromPool:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
         conn.pool.volumes["disk.qcow2"] = _FakeStorageVol("disk.qcow2", contents=b"x" * 100)
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         original_recv = _FakeStream.recvAll
 
         def patched(_self: _FakeStream, _handler: Any, _opaque: Any) -> None:
             raise RuntimeError("simulated read failure")
 
-        _FakeStream.recvAll = patched  # type: ignore[method-assign]
+        _FakeStream.recvAll = patched  # type: ignore[method-assign,assignment]
         dest = tmp_path / "out.qcow2"
         vol_ref = d.compose_volume_ref("p1", "disk.qcow2")
         try:
@@ -689,7 +694,7 @@ class TestCreateDiskFromBase:
         conn = _FakeConn()
         source = _FakeStorageVol("base.qcow2", contents=b"BASE-BYTES" * 1024)
         conn.pool.volumes["base.qcow2"] = source
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
 
         source_ref = d.compose_volume_ref("p1", "base.qcow2")
         target_ref = d.compose_volume_ref("p1", "web.qcow2")
@@ -711,7 +716,7 @@ class TestSnapshots:
         d = LibvirtDriver(uri="qemu:///system", pool_root=tmp_path / "pools")
         conn = _FakeConn()
         conn.domains[vm] = _FakeDomain(vm)
-        d._conn = conn  # type: ignore[assignment]
+        d._conn = conn
         return d
 
     def test_create_disk_only_passes_disk_only_flag(self, tmp_path: Path) -> None:
@@ -830,7 +835,7 @@ def _agent_with(
     monkeypatch: pytest.MonkeyPatch, script: dict[str, list[Any]]
 ) -> tuple[_LibvirtGuestAgent, _FakeQGA]:
     d = LibvirtDriver(uri="qemu:///system", pool_root=Path("/tmp"))
-    d._conn = _FakeConn()  # type: ignore[assignment]
+    d._conn = _FakeConn()
     fake = _FakeQGA(script)
     monkeypatch.setattr("testrange.drivers.libvirt._import_libvirt_qemu", lambda: fake)
     monkeypatch.setattr("testrange.drivers.libvirt.time.sleep", lambda _s: None)
@@ -943,6 +948,27 @@ class TestLibvirtGuestAgent:
         # guest-exec retried twice before succeeding.
         assert sum(1 for c in fake.calls if c["execute"] == "guest-exec") == 3
 
+    def test_not_ready_by_error_code(self) -> None:
+        import libvirt
+
+        class _Coded(Exception):
+            def get_error_code(self) -> int:
+                return int(libvirt.VIR_ERR_AGENT_UNRESPONSIVE)
+
+        # Structured code wins even with a message the substrings won't match.
+        assert _qga_agent_not_ready(_Coded("totally unrelated wording")) is True
+
+    def test_not_ready_other_code_is_false(self) -> None:
+        class _Coded(Exception):
+            def get_error_code(self) -> int:
+                return -999999
+
+        assert _qga_agent_not_ready(_Coded("some other failure")) is False
+
+    def test_not_ready_substring_backstop(self) -> None:
+        # No structured code available -> fall back to substring match.
+        assert _qga_agent_not_ready(Exception("Guest agent is not connected")) is True
+
     def test_read_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
         agent, fake = _agent_with(
             monkeypatch,
@@ -971,6 +997,32 @@ class TestLibvirtGuestAgent:
         write_call = next(c for c in fake.calls if c["execute"] == "guest-file-write")
         assert write_call["arguments"]["buf-b64"] == _b64(b"hello")
         assert write_call["arguments"]["count"] == 5
+
+    def test_read_file_caps_total_size(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("testrange.drivers.libvirt._QGA_MAX_FILE_BYTES", 8)
+        agent, fake = _agent_with(
+            monkeypatch,
+            {
+                "guest-file-open": [{"return": 9}],
+                "guest-file-read": [
+                    {"return": {"buf-b64": _b64(b"123456"), "eof": False}},
+                    {"return": {"buf-b64": _b64(b"789abc"), "eof": False}},
+                ],
+                "guest-file-close": [{"return": {}}],
+            },
+        )
+        with pytest.raises(GuestAgentError, match="exceeded 8 bytes"):
+            agent.read_file("/var/log/huge")
+        # The handle is still closed on the way out.
+        assert any(c["execute"] == "guest-file-close" for c in fake.calls)
+
+    def test_write_file_rejects_oversize(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("testrange.drivers.libvirt._QGA_MAX_FILE_BYTES", 4)
+        agent, fake = _agent_with(monkeypatch, {"guest-file-open": [{"return": 4}]})
+        with pytest.raises(GuestAgentError, match="exceeds the 4-byte"):
+            agent.write_file("/tmp/x", b"hello")
+        # Rejected before opening a handle.
+        assert fake.calls == []
 
     def test_domain_xml_renders_qga_channel(self) -> None:
         xml = _render_domain_xml(

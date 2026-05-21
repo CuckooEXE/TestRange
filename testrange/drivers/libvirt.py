@@ -20,8 +20,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
+from xml.sax.saxutils import escape as _xml_escape
 
 from testrange._log import get_logger
+from testrange._names import validate_name
 from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
@@ -44,6 +46,16 @@ _log = get_logger(__name__)
 
 # Locally-administered OUI for KVM/QEMU guests.
 _KVM_OUI = "52:54:00"
+
+# QGA virtio channel name — the guest-side socket a QGACommunicator reaches.
+_QGA_CHANNEL_NAME = "org.qemu.guest_agent.0"
+
+# Ceiling for a single QGA guest-file transfer. guest-file-read accumulates
+# the whole file in the orchestrator's address space, so an unbounded read of
+# a journal or multi-GB file would exhaust memory; guest-file-write ships the
+# blob as one base64 message QGA would otherwise reject opaquely. 64 MiB is far
+# above any config/lease file testrange reads and well under an OOM risk.
+_QGA_MAX_FILE_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -78,9 +90,7 @@ class LibvirtHypervisor:
         if not connection:
             raise ValueError("LibvirtHypervisor.connection must be a non-empty string")
         if install_uplink is not None and not install_uplink:
-            raise ValueError(
-                "LibvirtHypervisor.install_uplink must be a non-empty string or None"
-            )
+            raise ValueError("LibvirtHypervisor.install_uplink must be a non-empty string or None")
         switches = tuple(networks)
         ps = tuple(pools)
         rs = tuple(vms)
@@ -95,6 +105,27 @@ class LibvirtHypervisor:
         dup_nets = {n for n in all_nets if all_nets.count(n) > 1}
         if dup_nets:
             raise ValueError(f"LibvirtHypervisor networks have duplicate names: {sorted(dup_nets)}")
+
+        # Charset rules are libvirt-specific (names reach dnsmasq.conf and
+        # libvirt XML), so they're enforced here at the libvirt boundary rather
+        # than on the backend-agnostic Network/Switch/VMSpec value objects.
+        for s in switches:
+            validate_name(s.name, "Switch.name")
+        for n in all_nets:
+            validate_name(n, "Network.name")
+        for r in rs:
+            validate_name(r.name, "VMSpec.name")
+
+        # The orchestrator synthesizes internal switches/networks/VMs under a
+        # `__` prefix (__install, __uplink__<sw>, __sidecar_<sw>). Reserve that
+        # prefix against user names so a plan can't collide with them.
+        reserved = sorted(
+            {n for n in (*(s.name for s in switches), *all_nets, *vm_names) if n.startswith("__")}
+        )
+        if reserved:
+            raise ValueError(
+                f"names starting with '__' are reserved for testrange internals; rename: {reserved}"
+            )
 
         for r in rs:
             for nic in r.spec.nics:
@@ -116,8 +147,8 @@ class LibvirtHypervisor:
                     )
 
         # Plan-wide addressing validation (subnet membership, reserved-slot
-        # collision, DHCP-pool collision, duplicates, dhcp=False + no static).
-        # Accumulates every problem into one ValueError.
+        # collision, DHCP-pool collision, duplicates). Accumulates every
+        # problem into one ValueError.
         validate_addressing(switches, rs)
 
         object.__setattr__(self, "connection", connection)
@@ -243,7 +274,17 @@ class LibvirtDriver(HypervisorDriver):
         return f"tr_{kind}_{run_short}_{safe_name}"
 
     def compose_mac(self, plan_name: str, vm_name: str, nic_idx: int) -> str:
-        """Stable MAC from (plan_name, vm_name, nic_idx) under the KVM OUI."""
+        """Stable MAC from (plan_name, vm_name, nic_idx) under the KVM OUI.
+
+        The seed deliberately excludes ``run_id``: the MAC must be identical
+        across runs so the post-install cache key (which folds in the MAC)
+        stays stable — see ADR-0006. The trade-off is that two *different*
+        plans that share a ``(vm_name, nic_idx)`` and the same ``plan_name``
+        collide on the same L2 segment, and that the 24 bits of hash entropy
+        give a birthday collision around ~4096 NICs. Both are non-issues for
+        any plausible plan size; a topology that needs cross-plan coexistence
+        on one segment must give its plans distinct names.
+        """
         seed = f"{plan_name}/{vm_name}/{nic_idx}"
         h = hashlib.sha256(seed.encode("utf-8")).hexdigest()
         return f"{_KVM_OUI}:{h[0:2]}:{h[2:4]}:{h[4:6]}"
@@ -438,20 +479,7 @@ class LibvirtDriver(HypervisorDriver):
                 _wrap_netlink_error(e, f"bring up bridge {bridge_name!r}")
 
             if mgmt_cidr:
-                address, _, prefix_str = mgmt_cidr.partition("/")
-                if not prefix_str:
-                    raise DriverError(
-                        f"mgmt_cidr {mgmt_cidr!r} must be in CIDR form (e.g. 10.0.0.2/24)"
-                    )
-                try:
-                    ipr.addr(
-                        "add", index=bridge_idx, address=address, prefixlen=int(prefix_str)
-                    )
-                except pyroute2.NetlinkError as e:
-                    if "File exists" not in str(e):
-                        _wrap_netlink_error(
-                            e, f"assign {mgmt_cidr!r} to bridge {bridge_name!r}"
-                        )
+                _assign_bridge_addr(pyroute2, ipr, bridge_idx, mgmt_cidr, bridge_name)
 
     def create_isolated_bridge(self, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
         """Create an isolated host bridge with no enslaved NIC.
@@ -478,16 +506,7 @@ class LibvirtDriver(HypervisorDriver):
             except pyroute2.NetlinkError as e:
                 _wrap_netlink_error(e, f"bring up bridge {bridge_name!r}")
             if mgmt_cidr:
-                address, _, prefix_str = mgmt_cidr.partition("/")
-                try:
-                    ipr.addr(
-                        "add", index=bridge_idx, address=address, prefixlen=int(prefix_str)
-                    )
-                except pyroute2.NetlinkError as e:
-                    if "File exists" not in str(e):
-                        _wrap_netlink_error(
-                            e, f"assign {mgmt_cidr!r} to bridge {bridge_name!r}"
-                        )
+                _assign_bridge_addr(pyroute2, ipr, bridge_idx, mgmt_cidr, bridge_name)
 
     def destroy_bridge(self, bridge_name: str) -> None:
         """Remove the host bridge. Idempotent.
@@ -823,25 +842,6 @@ class LibvirtDriver(HypervisorDriver):
         dom = self.conn.lookupByName(backend_name)
         dom.create()
 
-    def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
-        """Look up an IP leased to ``mac`` on a libvirt network's dnsmasq."""
-        try:
-            net = self.conn.networkLookupByName(network_backend_name)
-        except Exception as e:
-            _log.warning("lease lookup: network %s not found: %s", network_backend_name, e)
-            return None
-        try:
-            leases = net.DHCPLeases()
-        except Exception as e:
-            _log.debug("DHCPLeases failed: %s", e)
-            return None
-        mac_lc = mac.lower()
-        for lease in leases:
-            if lease.get("mac", "").lower() == mac_lc:
-                ip = lease.get("ipaddr")
-                return str(ip) if ip else None
-        return None
-
     def get_vm_power_state(self, backend_name: str) -> str:
         libvirt = _import_libvirt()
         dom = self.conn.lookupByName(backend_name)
@@ -926,6 +926,10 @@ class LibvirtDriver(HypervisorDriver):
         mem: bool = False,
     ) -> None:
         libvirt = _import_libvirt()
+        # `name` reaches snapshot XML and libvirt's snapshot namespace; reject
+        # XML-metacharacter/illegal names at the API boundary (this method is
+        # reachable from user test code via OrchestratorHandle.driver).
+        validate_name(name, "snapshot name")
         dom = self.conn.lookupByName(vm_backend_name)
         # Reject duplicates up-front for a clear error; otherwise libvirt
         # would emit a less-readable internal-error message.
@@ -989,7 +993,18 @@ class LibvirtDriver(HypervisorDriver):
 
 
 def _qga_agent_not_ready(e: Exception) -> bool:
-    """True when a libvirtError reads like the guest agent is not up yet."""
+    """True when a libvirtError reads like the guest agent is not up yet.
+
+    Prefers libvirt's structured error code (``VIR_ERR_AGENT_UNRESPONSIVE``),
+    which is locale- and wording-independent; falls back to substring
+    matching for builds/paths that don't surface a code.
+    """
+    get_code = getattr(e, "get_error_code", None)
+    if callable(get_code):
+        libvirt = _import_libvirt()
+        unresponsive = getattr(libvirt, "VIR_ERR_AGENT_UNRESPONSIVE", None)
+        if unresponsive is not None and get_code() == unresponsive:
+            return True
     msg = str(e).lower()
     return "guest agent is not" in msg or "not connected" in msg or "not responding" in msg
 
@@ -1099,12 +1114,21 @@ class _LibvirtGuestAgent:
         ret = self._send("guest-file-open", {"path": path, "mode": "r"}, deadline=deadline)
         handle = ret if isinstance(ret, int) else ret["handle"]
         chunks: list[bytes] = []
+        total = 0
         try:
             while True:
                 r = self._send("guest-file-read", {"handle": handle}, deadline=deadline)
                 buf = r.get("buf-b64")
                 if buf:
-                    chunks.append(base64.b64decode(buf))
+                    decoded = base64.b64decode(buf)
+                    total += len(decoded)
+                    if total > _QGA_MAX_FILE_BYTES:
+                        raise GuestAgentError(
+                            f"QGA read of {path!r} on {self._backend_name!r} "
+                            f"exceeded {_QGA_MAX_FILE_BYTES} bytes; refusing to "
+                            f"buffer an unbounded file in memory"
+                        )
+                    chunks.append(decoded)
                 if r.get("eof"):
                     break
         finally:
@@ -1113,7 +1137,19 @@ class _LibvirtGuestAgent:
         return b"".join(chunks)
 
     def write_file(self, path: str, data: bytes) -> None:
-        """Write a guest file via ``guest-file-open``/``-write``/``-close``."""
+        """Write a guest file via ``guest-file-open``/``-write``/``-close``.
+
+        The payload ships as a single ``guest-file-write`` (one base64
+        message), so it is bounded by ``_QGA_MAX_FILE_BYTES`` — a larger
+        blob is rejected up front with a clear error rather than QGA's
+        opaque message-size failure.
+        """
+        if len(data) > _QGA_MAX_FILE_BYTES:
+            raise GuestAgentError(
+                f"QGA write of {len(data)} bytes to {path!r} on "
+                f"{self._backend_name!r} exceeds the {_QGA_MAX_FILE_BYTES}-byte "
+                f"single-message ceiling"
+            )
         deadline = time.monotonic() + 60.0
         ret = self._send("guest-file-open", {"path": path, "mode": "w"}, deadline=deadline)
         handle = ret if isinstance(ret, int) else ret["handle"]
@@ -1278,9 +1314,7 @@ def _collect_sidecar_findings(
             PreflightFinding(
                 severity="error",
                 code="sidecar_no_pool",
-                message=(
-                    "sidecar VM needs a pool for its disk but the plan declares none"
-                ),
+                message=("sidecar VM needs a pool for its disk but the plan declares none"),
                 fix_hint="declare at least one StoragePool in the plan",
             )
         )
@@ -1301,16 +1335,48 @@ def _collect_sidecar_findings(
 def _wrap_netlink_error(e: Exception, what: str) -> None:
     msg = str(e)
     if "Operation not permitted" in msg or "EPERM" in msg:
-        raise DriverError(
-            f"{what}: needs CAP_NET_ADMIN (run as root, or grant the cap)"
-        ) from e
+        raise DriverError(f"{what}: needs CAP_NET_ADMIN (run as root, or grant the cap)") from e
     raise DriverError(f"{what}: {e}") from e
 
 
+def _assign_bridge_addr(
+    pyroute2: Any, ipr: Any, bridge_idx: int, mgmt_cidr: str, bridge_name: str
+) -> None:
+    """Idempotently put ``mgmt_cidr`` on a bridge.
+
+    Checks the bridge's current addresses first, so a re-run is a no-op only
+    when *this exact* address/prefix is already present. A stale address from
+    an aborted run that used a different prefix is left in place (a second
+    address is legal) — but we no longer infer success from swallowing a
+    generic "File exists", which could equally mask an unrelated EEXIST.
+    """
+    address, _, prefix_str = mgmt_cidr.partition("/")
+    if not prefix_str:
+        raise DriverError(f"mgmt_cidr {mgmt_cidr!r} must be in CIDR form (e.g. 10.0.0.2/24)")
+    prefixlen = int(prefix_str)
+    for a in ipr.get_addr(index=bridge_idx):
+        if a.get_attr("IFA_ADDRESS") == address and a["prefixlen"] == prefixlen:
+            _log.info("bridge %s already has %s", bridge_name, mgmt_cidr)
+            return
+    try:
+        ipr.addr("add", index=bridge_idx, address=address, prefixlen=prefixlen)
+    except pyroute2.NetlinkError as e:
+        # Tolerate only a concurrent duplicate add; surface everything else.
+        if "File exists" not in str(e):
+            _wrap_netlink_error(e, f"assign {mgmt_cidr!r} to bridge {bridge_name!r}")
+
+
 def _render_pool_xml(backend_name: str, path: Path) -> str:
-    """Render a libvirt `<pool type='dir'>` XML doc."""
+    """Render a libvirt `<pool type='dir'>` XML doc.
+
+    ``path`` derives from a user-supplied ``pool_root`` and may contain XML
+    metacharacters, so it is escaped; ``backend_name`` is composed by
+    ``compose_resource_name`` (already libvirt-safe) but is escaped too for
+    uniformity.
+    """
     return (
-        f"<pool type='dir'><name>{backend_name}</name><target><path>{path}</path></target></pool>"
+        f"<pool type='dir'><name>{_xml_escape(backend_name)}</name>"
+        f"<target><path>{_xml_escape(str(path))}</path></target></pool>"
     )
 
 
@@ -1330,9 +1396,14 @@ def _render_uploaded_volume_xml(vol_name: str, capacity_bytes: int, fmt: str = "
 
 
 def _render_snapshot_xml(name: str, description: str) -> str:
-    """Render a libvirt domain-snapshot XML doc."""
-    desc_block = f"<description>{description}</description>" if description else ""
-    return f"<domainsnapshot><name>{name}</name>{desc_block}</domainsnapshot>"
+    """Render a libvirt domain-snapshot XML doc.
+
+    ``name`` is validated at the API boundary (``create_snapshot``), but
+    ``description`` is free-form user text, so both are XML-escaped here —
+    an unescaped ``</description><x>`` would otherwise inject elements.
+    """
+    desc_block = f"<description>{_xml_escape(description)}</description>" if description else ""
+    return f"<domainsnapshot><name>{_xml_escape(name)}</name>{desc_block}</domainsnapshot>"
 
 
 def _render_domain_xml(
@@ -1397,14 +1468,16 @@ def _render_domain_xml(
         # QGACommunicator reach the guest via libvirt_qemu.qemuAgentCommand
         # without the driver having to inspect the communicator type.
         f"<channel type='unix'>"
-        f"<target type='virtio' name='org.qemu.guest_agent.0'/>"
+        f"<target type='virtio' name='{_QGA_CHANNEL_NAME}'/>"
         f"</channel>"
         f"<serial type='pty'><target port='0'/></serial>"
         f"<console type='pty'><target type='serial' port='0'/></console>"
         # VNC + virtio-gpu so `virt-viewer <domain>` works out of the box.
         # VNC is universally compiled into qemu; SPICE and QXL are commonly
         # stripped from distro builds. listen='127.0.0.1' keeps the display
-        # local to libvirtd's host.
+        # local to libvirtd's host — a configurable listen address is
+        # deferred until a concrete remote-viewer need exists (use an SSH
+        # tunnel to libvirtd in the meantime).
         f"<graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>"
         f"<video><model type='virtio'/></video>"
         f"</devices>"

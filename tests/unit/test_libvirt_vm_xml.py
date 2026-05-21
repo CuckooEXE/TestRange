@@ -8,7 +8,12 @@ import pytest
 
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtDriver, _render_domain_xml
+from testrange.drivers.libvirt import (
+    LibvirtDriver,
+    _render_domain_xml,
+    _render_pool_xml,
+    _render_snapshot_xml,
+)
 from testrange.exceptions import DriverError
 from testrange.vms import VMSpec
 
@@ -75,6 +80,26 @@ class TestDomainXML:
                 network_refs={"netA": "n1"},  # netB missing
                 macs=["a", "b"],
             )
+
+
+class TestSnapshotXML:
+    def test_description_is_escaped(self) -> None:
+        # A description that tries to close <description> and inject elements
+        # must come out inert.
+        xml = _render_snapshot_xml("snap1", "</description><x>pwn</x>")
+        assert "<x>pwn</x>" not in xml
+        assert "&lt;x&gt;pwn&lt;/x&gt;" in xml
+        assert "<name>snap1</name>" in xml
+
+    def test_no_description_block_when_empty(self) -> None:
+        assert "<description>" not in _render_snapshot_xml("snap1", "")
+
+
+class TestPoolXML:
+    def test_path_is_escaped(self) -> None:
+        xml = _render_pool_xml("tr_pool_abc", Path("/pools/a&b"))
+        assert "/pools/a&b" not in xml
+        assert "/pools/a&amp;b" in xml
 
 
 class TestDestroyDispatch:

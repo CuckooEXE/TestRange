@@ -36,7 +36,14 @@ implementation: `testrange/drivers/libvirt.py`.
      `download_from_pool(vol_ref, dest_path)`,
      `delete_volume(vol_ref)`.
    - VM CRUD: `create_vm`, `start_vm`, `shutdown_vm`,
-     `destroy_vm`, `get_vm_power_state`, `get_lease_ip`.
+     `destroy_vm`, `get_vm_power_state`. (There is no `get_lease_ip`:
+     DHCP leases live in the per-Switch sidecar, which the orchestrator
+     reads via the optional native-guest transport — see below — not
+     through the driver.)
+   - Native guest transport (optional capability): `native_guest_execute`,
+     `native_guest_read_file`, `native_guest_write_file`. Implement these
+     if your backend has an in-band guest channel (e.g. QGA); they back
+     `QGACommunicator` and sidecar lease reads.
    - Snapshots: `create_snapshot`, `list_snapshots`,
      `delete_snapshot`, `restore_snapshot`. Drivers that don't
      support memory snapshots raise `DriverError` when `mem=True`.
@@ -78,11 +85,13 @@ install hint pointing at your `[<extra>]`. Add the extra to
 The default `destroy(kind, backend_name, **metadata)` dispatch on
 `HypervisorDriver` routes:
 
-- `vm`, `install_vm` → `destroy_vm`
+- `vm`, `install_vm`, `sidecar_vm` → `destroy_vm`
 - `network`, `install_network` → `destroy_network`
 - `pool` → `destroy_pool`
-- `install_disk`, `install_seed`, `run_disk`, `base_image`, `volume`
+- `install_disk`, `install_seed`, `run_disk`, `base_image`, `volume`,
+  `sidecar_disk`, `sidecar_config`
   → `delete_volume(compose_volume_ref(pool_backend, backend_name))`
+- `bridge`, `install_bridge` → `destroy_bridge`
 
 If your backend introduces new resource kinds, override `destroy()` on
 your driver and add the kind there. Otherwise the inherited dispatch
