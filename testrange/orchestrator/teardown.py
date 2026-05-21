@@ -11,12 +11,17 @@ _log = get_logger(__name__)
 
 def teardown(ctx: RunContext) -> None:
     """LIFO teardown using state.json as the source of truth."""
+    # Marking the phase is best-effort bookkeeping; if it fails (disk full,
+    # perms) we must STILL attempt the destroys below, or in-flight resources
+    # leak. Log and press on.
     try:
         ctx.store.set_phase(PHASE_CLEANUP)
     except Exception as e:
-        _log.warning("could not set cleanup phase: %s", e)
-        return
+        _log.warning("could not set cleanup phase (continuing teardown): %s", e)
 
+    # The store is the source of truth for what to destroy — if we can't read
+    # it, there is no resource list to act on, so bailing here is correct (the
+    # destroys, not just bookkeeping, depend on this read).
     try:
         state = ctx.store.read()
     except Exception as e:

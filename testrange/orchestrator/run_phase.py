@@ -15,7 +15,10 @@ from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.communicators.qga import QGACommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
-from testrange.exceptions import BuildNotReadyError, OrchestratorError
+from testrange.devices.network import StaticAddr
+from testrange.exceptions import BuildNotReadyError, GuestAgentError, OrchestratorError
+from testrange.networks.base import Switch
+from testrange.networks.sidecar import LEASEFILE, parse_dnsmasq_leases
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.provision import (
     ensure_base_in_pool,
@@ -46,9 +49,7 @@ def run_phase(ctx: RunContext) -> None:
             plan_name=vm.name,
             pool_backend=pool_backend,
         )
-        base_ref = ensure_base_in_pool(
-            ctx, pool_backend, ctx.post_install_paths[vm.name]
-        )
+        base_ref = ensure_base_in_pool(ctx, pool_backend, ctx.post_install_paths[vm.name])
         ctx.driver.create_disk_from_base(run_disk_ref, base_ref)
         ctx.store.confirm(run_disk_name, pool_backend=pool_backend)
 
@@ -82,7 +83,7 @@ def bind_communicators(ctx: RunContext) -> None:
     for vm in ctx.plan.hypervisor.vms:
         comm = vm.communicator
         if isinstance(comm, SSHCommunicator):
-            ip = discover_ip(ctx, vm)
+            ip = discover_ip(ctx, vm, comm.nic_idx)
             cred = lookup_credential(vm)
             comm.bind(host=ip, credential=cred)
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
@@ -118,34 +119,80 @@ def wait_builder_ready(ctx: RunContext) -> None:
             raise BuildNotReadyError(f"vm {vm.name!r}: {e}") from e
 
 
-def discover_ip(ctx: RunContext, vm: VMRecipe) -> str:
-    """Resolve the IPv4 address of the VM's **first** declared NIC.
+def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> str:
+    """Resolve the IPv4 address the orchestrator should SSH to.
 
-    Static (``nic.ipv4 is not None``): return the declared address
-    directly — the staged run-phase netplan applies it on the first
-    run-phase boot.
+    ``nic_idx`` (from ``SSHCommunicator(nic_idx=)``) selects the NIC by its
+    position in the VM's device list — the same index the MAC and staged
+    netplan already key on, and the only thing that disambiguates multiple
+    NICs on one network. When ``None``, the first *addressed* NIC is used
+    (NICs with ``addr=None`` are unconfigured and skipped).
 
-    DHCP: poll the driver for the lease keyed on the stable MAC derived
-    from ``(plan_name, vm_name, nic_idx=0)`` until ``lease_timeout_s``
-    elapses. Raises :class:`OrchestratorError` on timeout.
+    :class:`StaticAddr`: return the declared host address directly — the
+    staged run-phase netplan applies it on the first run-phase boot.
+
+    :class:`DHCPAddr`: the per-Switch sidecar — not libvirt — serves DHCP, so
+    the lease lives in the sidecar's dnsmasq lease file. Poll that file over
+    QGA for the lease keyed on the stable MAC derived from
+    ``(plan_name, vm_name, nic_idx)`` until ``lease_timeout_s`` elapses. The
+    orchestrator brokers: it combines the driver's guest-file read transport
+    with the sidecar's lease-file path and parser.
+
+    Raises :class:`OrchestratorError` when the chosen NIC has no address (or no
+    NIC does), when ``nic_idx`` is out of range, or on DHCP-lease timeout.
     """
-    if not vm.spec.nics:
-        raise OrchestratorError(f"vm {vm.name!r}: no NICs; cannot resolve an address")
-    first_nic = vm.spec.nics[0]
-    if first_nic.ipv4 is not None:
-        return first_nic.ipv4
-    net_backend = ctx.network_backends[first_nic.network]
-    mac = ctx.driver.compose_mac(ctx.plan_name, vm.name, 0)
+    nics = vm.spec.nics
+    if nic_idx is not None:
+        if not 0 <= nic_idx < len(nics):
+            raise OrchestratorError(
+                f"vm {vm.name!r}: nic_idx={nic_idx} out of range (VM has {len(nics)} NIC(s))"
+            )
+        nic = nics[nic_idx]
+        if nic.addr is None:
+            raise OrchestratorError(f"vm {vm.name!r}: nic_idx={nic_idx} has no address to SSH to")
+    else:
+        addressed = [(i, n) for i, n in enumerate(nics) if n.addr is not None]
+        if not addressed:
+            raise OrchestratorError(
+                f"vm {vm.name!r}: no NIC has an address (all unconfigured); "
+                f"cannot resolve an address"
+            )
+        nic_idx, nic = addressed[0]
+    if isinstance(nic.addr, StaticAddr):
+        return nic.addr.host
+
+    switch = _switch_for_network(ctx, nic.network)
+    sidecar_backend = ctx.sidecar_backends.get(switch.name)
+    if sidecar_backend is None:
+        raise OrchestratorError(
+            f"vm {vm.name!r}: DHCP NIC on {nic.network!r} but switch "
+            f"{switch.name!r} has no sidecar lease file to poll"
+        )
+    mac = ctx.driver.compose_mac(ctx.plan_name, vm.name, nic_idx).lower()
+    read_leasefile = ctx.driver.native_guest_read_file(sidecar_backend)
     deadline = time.monotonic() + ctx.lease_timeout_s
     while time.monotonic() < deadline:
-        ip = ctx.driver.get_lease_ip(net_backend, mac)
+        try:
+            raw = read_leasefile(LEASEFILE)
+        except GuestAgentError:
+            raw = b""  # sidecar agent not up yet, or no lease file written yet
+        ip = parse_dnsmasq_leases(raw.decode("utf-8", "replace")).get(mac)
         if ip:
             return ip
         time.sleep(2.0)
     raise OrchestratorError(
         f"vm {vm.name!r} did not acquire a DHCP lease on "
-        f"{first_nic.network!r} within {ctx.lease_timeout_s:.0f}s"
+        f"{nic.network!r} within {ctx.lease_timeout_s:.0f}s"
     )
+
+
+def _switch_for_network(ctx: RunContext, network_name: str) -> Switch:
+    """The Switch that owns ``network_name`` in the plan."""
+    switches: tuple[Switch, ...] = ctx.plan.hypervisor.all_switches
+    for sw in switches:
+        if any(n.name == network_name for n in sw.networks):
+            return sw
+    raise OrchestratorError(f"network {network_name!r} is not owned by any switch")
 
 
 def lookup_credential(vm: VMRecipe) -> PosixCred:

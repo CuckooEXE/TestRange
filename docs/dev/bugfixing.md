@@ -3,7 +3,7 @@
 The fastest reproduction loop is the smoke test:
 
 ```sh
-.venv/bin/python -m testrange.cli --verbose --log-level DEBUG run examples/hello_world.py
+.venv/bin/python -m testrange.cli --log-level DEBUG run examples/hello_world.py
 ```
 
 It exercises the full lifecycle against real libvirt in ~20 seconds
@@ -49,7 +49,7 @@ ruff format --check .
 mypy --strict testrange/
 pytest -q
 # and:
-python -m testrange.cli --verbose --log-level DEBUG run examples/hello_world.py
+python -m testrange.cli --log-level DEBUG run examples/hello_world.py
 ```
 
 All five gates must pass. The smoke run is the one most easily

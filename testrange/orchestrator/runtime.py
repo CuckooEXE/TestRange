@@ -85,7 +85,7 @@ class Orchestrator:
             store=StateStore(run_dir_for(run_id)),
             cache=cache_manager or CacheManager(),
             run_id=run_id,
-            plan_name=plan.name or "plan",
+            plan_name=plan.name,
             install_timeout_s=install_timeout_s,
             lease_timeout_s=lease_timeout_s,
             addressing={
@@ -185,6 +185,19 @@ class Orchestrator:
         self._leak = True
 
     def _install_signal_handlers(self) -> None:
+        """Route SIGTERM/SIGHUP through ``__exit__``'s cleanup path.
+
+        The handler raises ``KeyboardInterrupt`` so an in-flight bring-up
+        unwinds into teardown. Limitation: Python delivers the exception into
+        whatever bytecode is executing at signal time. During bring-up that is
+        our own code and unwinds cleanly; but if a signal lands *mid-test*
+        while control is inside a Communicator's blocking I/O (paramiko read
+        loops, socket waits), that library may swallow the ``KeyboardInterrupt``
+        or be left mid-protocol. A polled ``signal_received`` flag checked at
+        safe points would be more robust but is a larger refactor; until then,
+        ``kill -9`` plus state-driven ``testrange cleanup`` is the recovery
+        path for a wedged mid-test interrupt.
+        """
         self._prior_signal_handlers: dict[int, Any] = {}
 
         def _handler(signum: int, _frame: FrameType | None) -> None:

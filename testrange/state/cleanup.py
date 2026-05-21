@@ -1,4 +1,14 @@
-"""State-file-driven cleanup walker."""
+"""State-file-driven cleanup walker.
+
+Cleanup replays ``state.json`` rather than re-deriving resources from the
+Plan, because the whole point is to recover runs the orchestrator could
+*not* tear down itself — a ``kill -9``, a crash, a power loss. The state
+file is the durable ledger of what was actually created (record-before-
+create), so reversing it is the only source of truth that survives the
+owning process dying. PID-checking guards against the live owner: if the
+process that created a run is still running, its own ``__exit__`` owns
+teardown and we must not race it.
+"""
 
 from __future__ import annotations
 
@@ -18,9 +28,19 @@ _log = get_logger(__name__)
 
 @dataclass(frozen=True)
 class CleanupResult:
+    """Outcome of cleaning one run — kept granular so the CLI can report
+    partial cleanups honestly instead of a single pass/fail.
+
+    The three resource buckets are mutually exclusive per resource and
+    deliberately separate: a resource that erased cleanly is very different
+    from one we *chose* not to touch (``--dry-run``) or one whose destroy
+    raised. Errors carry their message so the operator can act on the real
+    cause (still-attached volume, perms) without re-running to find it.
+    """
+
     run_id: str
     destroyed: tuple[str, ...]
-    skipped: tuple[str, ...]
+    skipped: tuple[str, ...]  # dry-run: would-destroy, not actually destroyed
     errors: tuple[tuple[str, str], ...]  # (backend_name, message)
 
 

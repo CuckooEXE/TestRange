@@ -8,7 +8,7 @@ functions, and tears the range down.
 ## High-level shape
 
 ```
-Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
+Plan(LibvirtHypervisor(connection=, networks=, pools=, vms=[VMRecipe(...)]), name=)
                                                        │
                                                        ▼
                           Orchestrator
@@ -26,9 +26,11 @@ Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
 - **`Plan(*hypervisors, name=)`** — the top-level user declaration.
   Currently exactly one hypervisor; the variadic shape is locked in for
   future multi-hypervisor without changing the call shape.
-- **`LibvirtHypervisor(connection=, networks=, pools=, vms=)`** —
-  the libvirt-flavored top-level entry. The driver is constructed from
-  this type via the driver registry (`testrange.drivers.driver_for`).
+- **`LibvirtHypervisor(connection=, install_uplink=, networks=, pools=, vms=)`** —
+  the libvirt-flavored top-level entry (all arguments keyword-only). The
+  driver is constructed from this type via the driver registry
+  (`testrange.drivers.driver_for`). `install_uplink` is the host NIC the
+  install-phase sidecar egresses through (see the install phase below).
 - **`VMSpec`** — hardware-only (`name`, `devices=[CPU, Memory,
   OSDrive, HardDrive, NetworkIface]`). Singleton-device runtime
   checks enforce exactly one CPU/Memory/OSDrive per spec.
@@ -47,10 +49,15 @@ Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
   bridge management (`compose_bridge_name`, `create_bridge`,
   `create_isolated_bridge`, `destroy_bridge` — default-implemented to
   raise so a backend without bridge needs doesn't have to override),
-  stable MAC derivation, DHCP lease lookup, volume transport (see
-  Pool I/O below). Concretes register themselves with the driver
-  registry at import time. Today: `LibvirtDriver` (uses pyroute2 for
-  bridges; local-netlink only).
+  stable MAC derivation, an optional native-guest transport
+  (`native_guest_execute` / `native_guest_read_file` /
+  `native_guest_write_file`), and volume transport (see Pool I/O below).
+  DHCP lease lookup is deliberately *not* a driver method: the per-Switch
+  sidecar owns DHCP, so a lease lives in the sidecar's `dnsmasq` lease
+  file, which the orchestrator reads over the native-guest transport — not
+  in anything the hypervisor manages. Concretes register themselves with
+  the driver registry at import time. Today: `LibvirtDriver` (uses
+  pyroute2 for bridges; local-netlink only).
 - **Per-Switch sidecar VM** — a pre-built Alpine image with
   `dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
   (`tools/build-sidecar-image/build.sh`). The orchestrator
@@ -64,8 +71,11 @@ Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
 - **Pool I/O** — `upload_to_pool` (host file → in-pool volume) and
   `download_from_pool` (in-pool volume → host file) both flow through
   the driver's stream API. The orchestrator never opens pool files
-  directly. `download_from_pool` flattens copy-on-write chains before
-  streaming so cached disks are self-contained. The pool root is
+  directly. Cached disks are self-contained because `create_disk_from_base`
+  produces a flat full-copy (under the dir-pool driver, libvirt's
+  `createXMLFrom` invokes `qemu-img convert`); `download_from_pool` then
+  requires that self-contained source and just streams it — it does not
+  flatten a backing chain itself. The pool root is
   driver-chosen and may be URI-aware (LibvirtDriver picks
   `/var/lib/libvirt/images/testrange` for `qemu:///system`,
   `~/.local/share/testrange/pools/` for `/session`).
@@ -160,7 +170,7 @@ Ruff's `flake8-tidy-imports` banned-api blocks `import subprocess` at
 lint time and a CI test enforces the same.
 
 libvirtd itself invokes `qemu`, `qemu-img`, `dnsmasq`, etc. — that's
-libvirtd's business. In particular, `LibvirtDriver.download_from_pool`
+libvirtd's business. In particular, `LibvirtDriver.create_disk_from_base`
 flattens via `pool.createXMLFrom`, which internally runs
 `qemu-img convert` inside libvirtd. The ban is on `subprocess` from
 `testrange/` code, not on what libvirtd does on our behalf.

@@ -27,10 +27,12 @@ testrange repl <plan.py>                # bring-up, drop into a Python REPL, no 
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
 testrange cache add <path-or-url>       # cache subcommands:
-testrange cache list                    #   add / list / del / rename / forget-name
+testrange cache list                    #   add / list / del / rename / forget-name / push / pull
 testrange cache del <sha-or-name>
 testrange cache rename <old> <new>
 testrange cache forget-name <name>
+testrange cache push <sha-or-name> --cache <url>   # publish to an HTTP cache
+testrange cache pull <sha-or-name> --cache <url>   # fetch from an HTTP cache
 ```
 
 ## What a test function looks like

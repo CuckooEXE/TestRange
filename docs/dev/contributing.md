@@ -36,8 +36,11 @@ skip on machines without ``libvirt-python``.
 - The orchestrator is the only thing allowed to know about multiple
   stovepipes and broker between them.
 - Resources go into ``state.json`` BEFORE the driver create-call.
-- Deterministic names: ``driver.compose_resource_name`` and
-  ``driver.compose_mac`` are pure functions of the run + plan + VM.
+- Deterministic names: ``driver.compose_resource_name(run_id, kind, name)``
+  is a pure function of run + kind + name; ``driver.compose_mac(plan_name,
+  vm_name, nic_idx)`` is a pure function of plan + VM + NIC index
+  (deliberately run-independent, so a VM's MAC is stable across runs — see
+  ADR 0006).
 
 ## Where to go next
 

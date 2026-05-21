@@ -106,31 +106,42 @@ def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") 
     uplink_bridge_name: str | None = None
     if switch.uplink is not None and switch.nat:
         bridge_name = make_bridge(
-            ctx, switch, suffix="iso", uplink=None,
+            ctx,
+            switch,
+            suffix="iso",
+            uplink=None,
             mgmt_cidr=mgmt_cidr(switch) if switch.mgmt else None,
             kind=f"{kind_prefix}bridge",
         )
         uplink_bridge_name = make_bridge(
-            ctx, switch, suffix="upl", uplink=switch.uplink,
-            mgmt_cidr=None, kind=f"{kind_prefix}bridge",
+            ctx,
+            switch,
+            suffix="upl",
+            uplink=switch.uplink,
+            mgmt_cidr=None,
+            kind=f"{kind_prefix}bridge",
         )
     elif switch.uplink is not None:
         bridge_name = make_bridge(
-            ctx, switch, suffix="upl", uplink=switch.uplink,
+            ctx,
+            switch,
+            suffix="upl",
+            uplink=switch.uplink,
             mgmt_cidr=mgmt_cidr(switch) if switch.mgmt else None,
             kind=f"{kind_prefix}bridge",
         )
     elif switch.mgmt or switch.needs_sidecar:
         bridge_name = make_bridge(
-            ctx, switch, suffix="iso", uplink=None,
+            ctx,
+            switch,
+            suffix="iso",
+            uplink=None,
             mgmt_cidr=mgmt_cidr(switch) if switch.mgmt else None,
             kind=f"{kind_prefix}bridge",
         )
 
     for net in switch.networks:
-        backend = ctx.driver.compose_resource_name(
-            ctx.run_id, f"{kind_prefix}network", net.name
-        )
+        backend = ctx.driver.compose_resource_name(ctx.run_id, f"{kind_prefix}network", net.name)
         ctx.store.record_intent(
             kind=f"{kind_prefix}network",
             backend_name=backend,
@@ -175,9 +186,7 @@ def materialize_sidecar_for(ctx: RunContext, switch: Switch, *, kind_prefix: str
     if not switch.needs_sidecar:
         return
     if not ctx.plan.hypervisor.pools:
-        raise OrchestratorError(
-            f"switch {switch.name!r} needs a sidecar but the plan has no pools"
-        )
+        raise OrchestratorError(f"switch {switch.name!r} needs a sidecar but the plan has no pools")
     pool_name = ctx.plan.hypervisor.pools[0].name
     pool_backend = ctx.pool_backends[pool_name]
     sidecar_spec = _sidecar_spec(switch, pool_name)
@@ -201,14 +210,10 @@ def materialize_sidecar_for(ctx: RunContext, switch: Switch, *, kind_prefix: str
     ctx.store.confirm(sidecar_disk_name, pool_backend=pool_backend)
 
     # 2. Per-run config ISO: dnsmasq.conf + interfaces + nftables + sysctl.
-    sidecar_cfg_name = (
-        f"{sidecar_vm_backend}-cfg{ctx.driver.volume_suffix('sidecar_config')}"
-    )
+    sidecar_cfg_name = f"{sidecar_vm_backend}-cfg{ctx.driver.volume_suffix('sidecar_config')}"
     sidecar_cfg_ref = ctx.driver.compose_volume_ref(pool_backend, sidecar_cfg_name)
     iso_bytes = build_sidecar_config_iso(
-        dnsmasq_conf=render_dnsmasq_conf(
-            switch, ctx.plan.hypervisor.vms, partial(mac_for, ctx)
-        ),
+        dnsmasq_conf=render_dnsmasq_conf(switch, ctx.plan.hypervisor.vms, partial(mac_for, ctx)),
         interfaces=render_sidecar_interfaces(switch),
         nftables_ruleset=render_nftables_ruleset(switch),
         sysctl_conf=render_sysctl_conf(switch),

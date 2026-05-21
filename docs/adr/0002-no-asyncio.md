@@ -27,9 +27,20 @@ State-file safety:
 Replaced PLAN.md's earlier ``filelock.FileLock`` approach with the PID
 file — simpler and produces a meaningful error message.
 
+## Caveat (added post-acceptance)
+
+A later dependency, ``pyroute2`` (added with the libvirt bridge
+management), uses ``asyncio`` *internally*. As with libvirtd's
+subprocesses in ADR-0001, this does not violate the decision: ``testrange``
+code drives pyroute2 through its synchronous ``IPRoute()`` API and never
+touches an event loop. The "no asyncio in ``testrange/``" rule still holds;
+the Context's blanket claim that no dependency has an asyncio variant is
+simply no longer literally true.
+
 ## Consequences
 
-- The public API is fully synchronous. No ``async def`` anywhere.
+- The public API is fully synchronous. No ``async def`` anywhere in
+  ``testrange/``.
 - A future parallel install pass is a long-term TODO; it'll need a
   per-driver ``RLock`` (libvirt-python isn't fully thread-safe) plus
   whatever cross-process locking the cache needs.

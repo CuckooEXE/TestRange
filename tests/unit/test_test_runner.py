@@ -12,7 +12,7 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Switch
@@ -72,7 +72,7 @@ def _plan() -> Plan:
                             CPU(1),
                             Memory(512),
                             OSDrive("pool1", 8),
-                            LibvirtNetworkIface("netA"),
+                            LibvirtNetworkIface("netA", addr=DHCPAddr()),
                         ],
                     ),
                     builder=CloudInitBuilder(
@@ -179,4 +179,5 @@ class TestCommunicatorBindDuringEnter:
             handle = orch.vms["web"]
             assert isinstance(handle.communicator, SSHCommunicator)
             assert handle.communicator.is_bound
-            assert (handle.communicator.host or "").startswith("10.97.99.")
+            # DHCP-discovered from the sidecar lease file, in the switch subnet.
+            assert (handle.communicator.host or "").startswith("10.0.1.")

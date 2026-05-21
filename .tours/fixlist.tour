@@ -8,6 +8,31 @@
       "line": 4
     },
     {
+      "file": "testrange/credentials/posix.py",
+      "description": "Just make this `groups`",
+      "line": 33
+    },
+    {
+      "file": "testrange/credentials/ssh.py",
+      "description": "Is this better in some `testrange.utils` organization? I get how it ties into creds, but since it doesn't have anything to do with the ABC...?",
+      "line": 1
+    },
+    {
+      "file": "testrange/networks/base.py",
+      "description": "Clean up this sentence here and maybe make it a table of Driver -> Semantics",
+      "line": 16
+    },
+    {
+      "file": "testrange/networks/validate.py",
+      "description": "We should allow this. If there is no DHCP, and there is no static IP, the NIC's behavior is up to the OS, not our problem",
+      "line": 55
+    },
+    {
+      "file": "testrange/networks/sidecar.py",
+      "description": "This feels weird here... Maybe better in builders?",
+      "line": 71
+    },
+    {
       "file": "testrange/cli.py",
       "description": "If this is the ONLY place args.verbose is used; get rid of it",
       "line": 419

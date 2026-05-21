@@ -18,7 +18,7 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import ExecResult, QGACommunicator, SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.libvirt import LibvirtHypervisor
@@ -29,6 +29,7 @@ from testrange.exceptions import (
     PreflightError,
 )
 from testrange.networks import Network, Switch
+from testrange.networks.sidecar import LEASEFILE
 from testrange.orchestrator import Orchestrator
 from testrange.packages import Apt
 from testrange.preflight import PreflightFinding, PreflightReport
@@ -51,6 +52,11 @@ class _FakeDriver:
         self.fail_create_vm = False
         self._pool_dirs: set[Path] = set()
         self._snapshots: dict[str, list[str]] = {}
+        # Raw dnsmasq lease-file text the orchestrator will read off the
+        # sidecar over QGA during DHCP discovery (see native_guest_read_file).
+        # Empty => fall back to the auto-registered _lease_table.
+        self.sidecar_leases: str = ""
+        self._lease_table: dict[str, str] = {}
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -72,7 +78,13 @@ class _FakeDriver:
         return f"tr_{kind}_{run_id[:8]}_{name}"
 
     def compose_mac(self, plan_name: str, vm_name: str, nic_idx: int) -> str:
-        return f"52:54:00:00:{nic_idx:02d}:{abs(hash(vm_name)) % 256:02x}"
+        mac = f"52:54:00:00:{nic_idx:02d}:{abs(hash(vm_name)) % 256:02x}"
+        # Auto-register a deterministic lease so sidecar-based DHCP discovery
+        # succeeds by default (mirrors the old always-succeeds get_lease_ip);
+        # a test that cares about the exact IP sets `sidecar_leases` instead.
+        last = int(mac.split(":")[-1], 16) % 254 + 1
+        self._lease_table[mac.lower()] = f"10.0.1.{last}"
+        return mac
 
     def compose_volume_ref(self, pool_backend: str, vol_name: str) -> VolumeRef:
         return VolumeRef(str(self.pool_root / pool_backend / vol_name))
@@ -85,9 +97,7 @@ class _FakeDriver:
         *,
         bridge_name: str | None = None,
     ) -> Any:
-        self._record(
-            "create_network", backend_name, network.name, switch.name, bridge_name
-        )
+        self._record("create_network", backend_name, network.name, switch.name, bridge_name)
         return f"net:{backend_name}"
 
     def destroy_network(self, backend_name: str) -> None:
@@ -96,14 +106,10 @@ class _FakeDriver:
     def compose_bridge_name(self, run_id: str, switch_name: str) -> str:
         return f"tr-{run_id[:6]}-{switch_name}"[:15]
 
-    def create_bridge(
-        self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None
-    ) -> None:
+    def create_bridge(self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
         self._record("create_bridge", uplink, bridge_name, mgmt_cidr)
 
-    def create_isolated_bridge(
-        self, bridge_name: str, *, mgmt_cidr: str | None = None
-    ) -> None:
+    def create_isolated_bridge(self, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
         self._record("create_isolated_bridge", bridge_name, mgmt_cidr)
 
     def destroy_bridge(self, bridge_name: str) -> None:
@@ -190,12 +196,6 @@ class _FakeDriver:
             return "shutoff"
         return "running"
 
-    def get_lease_ip(self, network_backend_name: str, mac: str) -> str | None:
-        self._record("get_lease_ip", network_backend_name, mac)
-        # Deterministic fake IP keyed on the MAC; always succeeds.
-        last_octet = int(mac.split(":")[-1], 16) % 254 + 1
-        return f"10.97.99.{last_octet}"
-
     def native_guest_execute(self, backend_name: str) -> Any:
         def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
             del timeout, cwd
@@ -207,6 +207,14 @@ class _FakeDriver:
     def native_guest_read_file(self, backend_name: str) -> Any:
         def _read_file(path: str) -> bytes:
             self._record("native_guest_read_file", backend_name, path)
+            # The orchestrator reads the sidecar's dnsmasq lease file here for
+            # DHCP discovery: explicit sidecar_leases wins, else serve the
+            # auto-registered leases so discovery succeeds by default.
+            if path == LEASEFILE:
+                if self.sidecar_leases:
+                    return self.sidecar_leases.encode("utf-8")
+                lines = [f"100 {m} {ip} host *" for m, ip in self._lease_table.items()]
+                return ("\n".join(lines) + "\n").encode("utf-8")
             return b"fake-contents"
 
         return _read_file
@@ -294,7 +302,7 @@ def _plan(name: str = "hello") -> Plan:
                             CPU(1),
                             Memory(512),
                             OSDrive("pool1", 8),
-                            LibvirtNetworkIface("netA"),
+                            LibvirtNetworkIface("netA", addr=DHCPAddr()),
                         ],
                     ),
                     builder=CloudInitBuilder(
@@ -327,7 +335,7 @@ def _qga_plan(name: str = "hello") -> Plan:
                             CPU(1),
                             Memory(512),
                             OSDrive("pool1", 8),
-                            LibvirtNetworkIface("netA"),
+                            LibvirtNetworkIface("netA", addr=DHCPAddr()),
                         ],
                     ),
                     builder=CloudInitBuilder(
@@ -593,7 +601,7 @@ def _static_plan(ipv4: str) -> Plan:
                             CPU(1),
                             Memory(512),
                             OSDrive("pool1", 8),
-                            LibvirtNetworkIface("netA", ipv4=ipv4),
+                            LibvirtNetworkIface("netA", addr=StaticAddr(ipv4)),
                         ],
                     ),
                     builder=CloudInitBuilder(
@@ -606,6 +614,67 @@ def _static_plan(ipv4: str) -> Plan:
         ),
         name="hello",
     )
+
+
+def _two_static_nic_plan(nic_idx: int | None) -> Plan:
+    # Two NICs on the SAME network — the case where "by network" is ambiguous
+    # and only an index disambiguates the SSH target.
+    comm = SSHCommunicator("u", nic_idx=nic_idx) if nic_idx is not None else SSHCommunicator("u")
+    return Plan(
+        LibvirtHypervisor(
+            connection="qemu:///session",
+            networks=[
+                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", dhcp=True),
+            ],
+            pools=[StoragePool("pool1", 32)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(
+                        name="web",
+                        devices=[
+                            CPU(1),
+                            Memory(512),
+                            OSDrive("pool1", 8),
+                            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.150")),
+                            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.151")),
+                        ],
+                    ),
+                    builder=CloudInitBuilder(
+                        base=CacheEntry("debian-13"),
+                        credentials=[PosixCred("u", password="p")],
+                    ),
+                    communicator=comm,
+                ),
+            ],
+        ),
+        name="hello",
+    )
+
+
+class TestNicIdxSelection:
+    """SSHCommunicator(nic_idx=) picks which NIC's address to bind to."""
+
+    def test_nic_idx_selects_that_nic(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_two_static_nic_plan(nic_idx=1), cache_manager=mgr) as orch:
+            comm = orch.vms["web"].communicator
+            assert isinstance(comm, SSHCommunicator)
+            assert comm._host == "172.31.0.151"
+
+    def test_default_binds_first_addressed_nic(
+        self,
+        fake_driver: _FakeDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        mgr, _ = populated_cache
+        with Orchestrator(_two_static_nic_plan(nic_idx=None), cache_manager=mgr) as orch:
+            comm = orch.vms["web"].communicator
+            assert isinstance(comm, SSHCommunicator)
+            assert comm._host == "172.31.0.150"
 
 
 class TestStaticIPDiscovery:
@@ -626,17 +695,30 @@ class TestStaticIPDiscovery:
         names = [c[0] for c in fake_driver.calls]
         assert "get_lease_ip" not in names
 
-    def test_dhcp_still_uses_lease_lookup(
+    def test_dhcp_reads_lease_from_sidecar(
         self,
         fake_driver: _FakeDriver,
         populated_cache: tuple[CacheManager, Path],
     ) -> None:
-        # The default _plan() has a NIC without ipv4 — lease lookup must fire.
+        # The default _plan() has a NIC without ipv4 on a dhcp switch, so DHCP
+        # discovery must read the lease from the sidecar's dnsmasq lease file
+        # (NOT from any hypervisor-managed DHCP).
         mgr, _ = populated_cache
-        with Orchestrator(_plan(), cache_manager=mgr):
-            pass
-        names = [c[0] for c in fake_driver.calls]
-        assert "get_lease_ip" in names
+        plan = _plan()
+        # Stage a lease for web's first NIC, keyed on its stable MAC.
+        mac = fake_driver.compose_mac(plan.name, "web", 0).lower()
+        fake_driver.sidecar_leases = f"1700000000 {mac} 10.0.1.55 web *\n"
+
+        with Orchestrator(plan, cache_manager=mgr) as orch:
+            comm = orch.vms["web"].communicator
+            assert isinstance(comm, SSHCommunicator)
+            assert comm.host == "10.0.1.55"
+
+        calls = fake_driver.calls
+        # The sidecar's lease file was read over the guest-agent transport...
+        assert any(c[0] == "native_guest_read_file" and c[1][1] == LEASEFILE for c in calls)
+        # ...and the dead hypervisor-side lookup is gone for good.
+        assert not any(c[0] == "get_lease_ip" for c in calls)
 
 
 class TestBuilderReadiness:
