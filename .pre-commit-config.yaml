@@ -36,8 +36,8 @@ repos:
         args: ["testrange", "tests"]
 
       - id: pytest
-        name: pytest (not libvirt)
-        entry: pytest -m "not libvirt"
+        name: pytest (not proxmox)
+        entry: pytest -m "not proxmox"
         language: system
         types: [python]
         pass_filenames: false
