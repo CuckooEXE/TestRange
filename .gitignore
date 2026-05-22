@@ -45,3 +45,4 @@ cache-server/storage/
 # from tools/build-sidecar-image/.
 tools/build-sidecar-image/*.qcow2
 tools/build-sidecar-image/*.raw
+tools/build-sidecar-image/*.manifest.json

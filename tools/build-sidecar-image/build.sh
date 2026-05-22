@@ -3,9 +3,19 @@
 # qemu-guest-agent, plus a small OpenRC hook that picks up the per-run
 # config from a TR_SIDECAR_CFG-labeled ISO at boot.
 #
-# Requires root (alpine-make-vm-image uses chroot internally). Output:
-# ./testrange-sidecar.qcow2 alongside this script. The orchestrator
-# expects the image in the cache under the pretty-name "testrange-sidecar".
+# Requires root (alpine-make-vm-image uses chroot internally). Outputs, both
+# alongside this script:
+#   testrange-sidecar.qcow2            the image
+#   testrange-sidecar.manifest.json    version + content sha + provenance
+# The orchestrator expects the image in the cache under the pretty-name
+# "testrange-sidecar".
+#
+# Versioning (CI-1): the build cache folds the *content sha* of the produced
+# qcow2 into its key (testrange/builders/cloudinit.py::config_hash), so a
+# drifted sidecar invalidates every built disk automatically — no manual bump
+# needed for correctness. SIDECAR_VERSION + the manifest are a human-readable
+# label/provenance trail, and the Alpine branch is pinned (not latest-stable)
+# so a rebuild targets the same release series.
 #
 # Usage:
 #   sudo ./tools/build-sidecar-image/build.sh
@@ -14,8 +24,16 @@
 
 set -euo pipefail
 
+# Bump on any intentional change to the image contents (packages, the
+# config-staging service, the pinned Alpine branch).
+SIDECAR_VERSION="1"
+# Pinned release branch rather than `latest-stable`; bump deliberately.
+ALPINE_BRANCH="v3.21"
+PACKAGES="dnsmasq nftables qemu-guest-agent openrc blkid"
+
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$here/testrange-sidecar.qcow2"
+manifest="$here/testrange-sidecar.manifest.json"
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     echo "build.sh: must run as root (chroot + losetup)" >&2
@@ -80,6 +98,14 @@ rc-update add dnsmasq default
 rc-update add nftables default
 rc-update add qemu-guest-agent default
 CUSTOMIZE
+
+# Append a version-marker step (host-side values baked in; the block above
+# stays a literal quoted heredoc). Lands /etc/testrange-sidecar-version
+# inside the image so a running sidecar is self-identifying.
+cat >>"$customize" <<EOF
+printf 'testrange-sidecar version=%s alpine=%s\\n' '$SIDECAR_VERSION' '$ALPINE_BRANCH' \\
+    > /etc/testrange-sidecar-version
+EOF
 chmod +x "$customize"
 
 echo "build.sh: building $out"
@@ -90,16 +116,36 @@ rm -f "$out"
 
 # `--script-chroot` is a FLAG (binds the script's dir at /mnt inside the
 # image and chroots into it). The script itself is a POSITIONAL argument
-# after `<image>`. `--` ends option parsing.
+# after `<image>`. `--` ends option parsing. `--branch` pins the Alpine
+# release series (used only because we pass no --repositories-file).
 "$mk" \
     --image-format qcow2 \
     --image-size 1G \
-    --packages "dnsmasq nftables qemu-guest-agent openrc blkid" \
+    --branch "$ALPINE_BRANCH" \
+    --packages "$PACKAGES" \
     --script-chroot \
     -- \
     "$out" \
     "$customize"
 
+# Stamp a provenance manifest beside the image: the content sha is what the
+# build cache folds into its key (CI-1), so it is the authoritative drift
+# signal; the rest is human-readable provenance.
+sha="$(sha256sum "$out" | cut -d' ' -f1)"
+cat >"$manifest" <<EOF
+{
+  "name": "testrange-sidecar",
+  "version": "$SIDECAR_VERSION",
+  "alpine_branch": "$ALPINE_BRANCH",
+  "packages": "$PACKAGES",
+  "sha256": "$sha",
+  "size_bytes": $(stat -c %s "$out"),
+  "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
 echo
 echo "build.sh: built $out"
+echo "build.sh: sidecar version $SIDECAR_VERSION (alpine $ALPINE_BRANCH), sha256 $sha"
+echo "build.sh: wrote manifest $manifest"
 echo "next: testrange cache add $out --name testrange-sidecar"

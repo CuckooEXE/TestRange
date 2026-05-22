@@ -159,6 +159,33 @@ class TestBuildPhase:
         # ...and the run phase still gets its disk set populated from cache.
         assert set(ctx2.built_disk_paths["web"]) == {"os", "data0"}
 
+    def test_drifted_sidecar_invalidates_build_cache(
+        self, env: tuple[CacheManager, MockDriver], tmp_path: Path
+    ) -> None:
+        # CI-1: the sidecar serves DHCP/DNS/NAT during every build, so a
+        # drifted sidecar image must move config_hash and force a rebuild —
+        # not silently reuse the disks built against the old sidecar.
+        cache, driver = env
+        plan = _plan(data_disks=1)
+        build_phase(_ctx(plan, driver, cache))
+        first_names = set(_built_names(cache))
+        assert first_names
+
+        # Rebuild the sidecar (same pretty-name, different content sha).
+        drifted = tmp_path / "drifted-sidecar.qcow2"
+        drifted.write_bytes(b"DRIFTED-SIDECAR" * 100)
+        cache.local.forget_name("testrange-sidecar")
+        cache.local.add(drifted, name="testrange-sidecar")
+
+        driver.calls = []
+        ctx2 = _ctx(plan, driver, cache)
+        build_phase(ctx2)
+
+        # The drift is a cache miss: the build VM is stood up again...
+        assert any(c[0] == "create_vm" and "build_vm" in c[1][0] for c in driver.calls)
+        # ...and the rebuilt disks land under a *new* config_hash.
+        assert set(_built_names(cache)) - first_names
+
 
 class TestBuildToRunDataDisk:
     """Data-disk content survives build -> cache -> run (ADR-0010 §4)."""

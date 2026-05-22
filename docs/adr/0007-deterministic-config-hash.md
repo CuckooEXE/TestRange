@@ -8,6 +8,12 @@ whole *disk set* a build produces, not one disk. The OS-drive `size_gb` and
 each data disk's declaration (count + `size_gb`, in spec order) fold into the
 hash, since they change the artifacts the build emits.
 
+Extended by CI-1: the sidecar image's content sha (`sidecar_sha`) folds in
+too. Every build boots on the build switch's sidecar for DHCP/DNS/NAT, so the
+sidecar is part of the build *environment* — a drifted sidecar can produce
+byte-different disks. Folding its sha keeps a sidecar rebuild from silently
+serving disks built against the old one.
+
 ## Context
 
 The expensive part of bringing up a range is the build pass — booting a
@@ -24,7 +30,8 @@ the system:
 - **Sensitive to everything that changes the disk.** If the rendered
   install payload, the base image, or the run-phase MACs change, the disk
   is different and the key must change too — otherwise we serve a stale
-  disk that no longer matches the declaration.
+  disk that no longer matches the declaration. The build-time sidecar
+  (DHCP/DNS/NAT for the build network) is part of that environment.
 
 The MAC point is subtle: the orchestrator assigns stable MACs at run phase
 (see [ADR-0006](0006-driver-stable-mac.md)), and a builder may bake
@@ -34,8 +41,8 @@ its cache key.
 
 ## Decision
 
-`Builder.config_hash(spec, recipe, *, addressing, base_sha, macs) -> str`
-is defined on the `Builder` ABC as a **pure function**:
+`Builder.config_hash(spec, recipe, *, addressing, base_sha, sidecar_sha, macs)
+-> str` is defined on the `Builder` ABC as a **pure function**:
 
 - It MUST NOT depend on `run_id`, clocks, or any non-deterministic input.
 - The same `(spec, recipe, addressing, base_sha, macs)` MUST yield the same

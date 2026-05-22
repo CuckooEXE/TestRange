@@ -19,6 +19,7 @@ from pathlib import Path
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
+from testrange.cache.entry import CacheEntry
 from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import VolumeRef
 from testrange.exceptions import (
@@ -27,6 +28,7 @@ from testrange.exceptions import (
     CacheMissError,
     OrchestratorError,
 )
+from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
 from testrange.networks.base import Switch
 from testrange.networks.sidecar import _uplink_network_name
 from testrange.orchestrator.artifacts import (
@@ -108,10 +110,15 @@ def _probe_all(
     ctx: RunContext,
 ) -> tuple[list[_VMBuildPlan], dict[str, dict[str, Path]]]:
     """Probe every VM. Returns (miss plans, {vm_name: {role: path}} for hits)."""
+    # Every build boots on a sidecar-served switch (DHCP/DNS/NAT), so the
+    # sidecar image is a build input for every VM (CI-1). Resolve its content
+    # sha once — fetch=False keeps this to a metadata read (the bytes are only
+    # needed if we actually build) — and fold it into each VM's config_hash.
+    sidecar_sha = ctx.cache.resolve(CacheEntry(SIDECAR_CACHE_NAME), fetch=False).sha256
     misses: list[_VMBuildPlan] = []
     hits: dict[str, dict[str, Path]] = {}
     for vm in ctx.plan.hypervisor.vms:
-        bp = _probe_vm(ctx, vm)
+        bp = _probe_vm(ctx, vm, sidecar_sha)
         if bp.cached_paths is None:
             _log.info("vm %s: cache miss on %s; will build", vm.name, bp.config_hash)
             misses.append(bp)
@@ -121,7 +128,7 @@ def _probe_all(
     return misses, hits
 
 
-def _probe_vm(ctx: RunContext, vm: VMRecipe) -> _VMBuildPlan:
+def _probe_vm(ctx: RunContext, vm: VMRecipe, sidecar_sha: str) -> _VMBuildPlan:
     if not vm.spec.nics:
         raise OrchestratorError(
             f"vm {vm.name!r} declares no NICs; cloud-init build needs at "
@@ -144,6 +151,7 @@ def _probe_vm(ctx: RunContext, vm: VMRecipe) -> _VMBuildPlan:
         vm,
         addressing=ctx.addressing,
         base_sha=base_info.sha256,
+        sidecar_sha=sidecar_sha,
         macs=macs,
     )
     roles = built_artifact_roles(len(vm.spec.data_drives))

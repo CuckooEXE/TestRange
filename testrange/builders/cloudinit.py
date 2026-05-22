@@ -277,18 +277,26 @@ class CloudInitBuilder(Builder):
         *,
         addressing: Mapping[str, NetworkAddressing],
         base_sha: str = "",
+        sidecar_sha: str = "",
         macs: Sequence[str] = (),
     ) -> str:
         """Deterministic 16-char hex hash keying the built **disk set**.
 
         Inputs: rendered seed text (which folds in the staged run-phase
         netplan for static-IP VMs) + the base disk's content sha + the
-        writable-disk declarations (OS-drive ``size_gb`` and each
-        ``HardDrive``'s ``size_gb``, in spec order). Pure: no clocks, no
-        run_id, no I/O. Static-IP changes flow into the hash via
-        ``write_files`` so different addresses get different cache entries.
-        ``macs`` flows in via the rendered run-phase netplan: stable MACs
-        for the same plan/VM produce a stable hash.
+        sidecar image's content sha + the writable-disk declarations
+        (OS-drive ``size_gb`` and each ``HardDrive``'s ``size_gb``, in spec
+        order). Pure: no clocks, no run_id, no I/O. Static-IP changes flow
+        into the hash via ``write_files`` so different addresses get different
+        cache entries. ``macs`` flows in via the rendered run-phase netplan:
+        stable MACs for the same plan/VM produce a stable hash.
+
+        ``sidecar_sha`` is the content sha of the ``testrange-sidecar`` image
+        (CI-1). Every build boots on the build switch's sidecar for DHCP/DNS/
+        NAT, so the sidecar is part of the build environment: a drifted
+        sidecar can produce byte-different disks under an otherwise-identical
+        key. Folding its content sha in means a drifted sidecar invalidates
+        the build cache instead of silently reusing a stale artifact.
 
         Per ADR-0010 §4 the hash keys the whole artifact set, not one disk:
         because a build boots with every writable disk attached and captures
@@ -305,7 +313,8 @@ class CloudInitBuilder(Builder):
         )
         combined = (
             f"user-data:\n{u}\n---\nmeta-data:\n{m}\n---\n"
-            f"network-config:\n{n}\n---\ndisks:{disks}\n---\nbase:{base_sha}"
+            f"network-config:\n{n}\n---\ndisks:{disks}\n---\n"
+            f"base:{base_sha}\n---\nsidecar:{sidecar_sha}"
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 

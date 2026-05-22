@@ -299,6 +299,16 @@ class TestConfigHash:
             spec, recipe, addressing=DEFAULT_ADDR, base_sha="aaa"
         ) != b.config_hash(spec, recipe, addressing=DEFAULT_ADDR, base_sha="bbb")
 
+    def test_sidecar_sha_affects_hash(self) -> None:
+        # CI-1: a drifted sidecar image must move the key. The sidecar serves
+        # DHCP/DNS/NAT during every build, so it is a build input.
+        b = _basic_builder()
+        spec = _spec()
+        recipe = _recipe(b, spec)
+        assert b.config_hash(
+            spec, recipe, addressing=DEFAULT_ADDR, base_sha="z", sidecar_sha="aaa"
+        ) != b.config_hash(spec, recipe, addressing=DEFAULT_ADDR, base_sha="z", sidecar_sha="bbb")
+
     def test_credentials_affect_hash(self) -> None:
         spec = _spec()
         b1 = CloudInitBuilder(

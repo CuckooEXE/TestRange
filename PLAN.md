@@ -592,6 +592,8 @@ be cleaned up via state-file-driven `testrange cleanup`.
    cache-aware. The cache is probed *before* any infra comes up:
    - Compute `builder.config_hash(...)` — deterministic 16-char hex, keying the
      whole **disk set** (OS + each data disk; ADR-0007/0010). Pure (no `run_id`).
+     Folds the base image sha **and** the sidecar image sha (CI-1) — the build
+     boots on the sidecar's network, so a drifted sidecar invalidates the set.
    - Probe each VM's full artifact set (`_built_<hash>__{os,dataN}`). Collect
      misses; only if ≥1 miss stand up the ephemeral build pool/switch/sidecar.
    - For each missing VM: push the base onto the VM's own OS disk + resize,
