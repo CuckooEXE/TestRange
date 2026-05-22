@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from testrange.communicators.base import ExecResult
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
-from testrange.exceptions import DriverError
+from testrange.exceptions import DriverError, GuestAgentError
 from testrange.networks.sidecar import LEASEFILE
 from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
@@ -45,10 +45,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 _MOCK_OUI = "02:00:00"  # locally-administered, unicast
 _SUFFIXES = {
-    "install_disk": ".qcow2",
+    "build_disk": ".qcow2",
     "run_disk": ".qcow2",
+    "data_disk": ".qcow2",
     "base_image": ".qcow2",
-    "install_seed": ".iso",
+    "build_seed": ".iso",
     "sidecar_disk": ".qcow2",
     "sidecar_config": ".iso",
 }
@@ -67,7 +68,7 @@ class MockHypervisor:
     networks: Sequence[Switch] = ()
     pools: Sequence[StoragePool] = ()
     vms: Sequence[VMRecipe] = ()
-    install_uplink: str | None = None
+    build_uplink: str | None = None
     pool_root: Path | None = None
     backing_capacity_gb: int | None = None
 
@@ -75,8 +76,8 @@ class MockHypervisor:
         object.__setattr__(self, "networks", tuple(self.networks))
         object.__setattr__(self, "pools", tuple(self.pools))
         object.__setattr__(self, "vms", tuple(self.vms))
-        if self.install_uplink is not None and not self.install_uplink:
-            raise ValueError("MockHypervisor.install_uplink must be a non-empty string or None")
+        if self.build_uplink is not None and not self.build_uplink:
+            raise ValueError("MockHypervisor.build_uplink must be a non-empty string or None")
         validate_hypervisor_plan(self.networks, self.pools, self.vms)
 
     @property
@@ -116,6 +117,7 @@ class MockDriver(HypervisorDriver):
         self._pools: set[str] = set()
         self._vms: dict[str, str] = {}  # vm backend -> power state
         self._snapshots: dict[str, list[str]] = {}
+        self._volume_sizes: dict[str, int] = {}  # ref -> last size_gb seen
 
         # Test knobs.
         self.shutoff_after_calls = 1
@@ -126,6 +128,9 @@ class MockDriver(HypervisorDriver):
         # empty falls back to the table auto-registered by compose_mac.
         self.sidecar_leases: str = ""
         self._lease_table: dict[str, str] = {}
+        # When True, native guest-file reads raise GuestAgentError — simulates a
+        # sidecar whose agent never answers, for the readiness-gate test.
+        self.guest_agent_unreachable = False
 
     # -- construction paths ------------------------------------------------
 
@@ -151,9 +156,9 @@ class MockDriver(HypervisorDriver):
         self._record("disconnect")
 
     def preflight(
-        self, plan: Plan, *, cache_manager: CacheManager, install_switch: Switch
+        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
     ) -> PreflightReport:
-        del cache_manager, install_switch
+        del cache_manager, build_switch
         self._record("preflight")
         if self.preflight_override is not None:
             return self.preflight_override
@@ -252,11 +257,28 @@ class MockDriver(HypervisorDriver):
         path.write_bytes(data)
         return target_ref
 
-    def create_disk_from_base(self, target_ref: VolumeRef, source_ref: VolumeRef) -> VolumeRef:
-        self._record("create_disk_from_base", str(target_ref), str(source_ref))
+    def create_blank_volume(self, target_ref: VolumeRef, size_gb: int) -> VolumeRef:
+        self._record("create_blank_volume", str(target_ref), size_gb)
         path = Path(target_ref)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(Path(source_ref).read_bytes())  # full, independent copy
+        # Deterministic sized placeholder: encodes the size so a build->cache
+        # ->run round-trip of a data disk's bytes is observable in tests.
+        path.write_bytes(f"MOCK-BLANK:{size_gb}G\n".encode())
+        self._volume_sizes[str(target_ref)] = size_gb
+        return target_ref
+
+    def resize_volume(self, target_ref: VolumeRef, size_gb: int) -> VolumeRef:
+        self._record("resize_volume", str(target_ref), size_gb)
+        path = Path(target_ref)
+        if not path.exists():
+            raise DriverError(f"resize_volume: no volume at {target_ref!r}")
+        prior = self._volume_sizes.get(str(target_ref))
+        if prior is not None and size_gb < prior:
+            raise DriverError(
+                f"resize_volume: cannot shrink {target_ref!r} from {prior}G to {size_gb}G"
+            )
+        # Content is untouched (grow-in-place); only the recorded size moves.
+        self._volume_sizes[str(target_ref)] = size_gb
         return target_ref
 
     def upload_to_pool(self, target_ref: VolumeRef, source_path: Path) -> VolumeRef:
@@ -287,11 +309,12 @@ class MockDriver(HypervisorDriver):
         os_disk_ref: VolumeRef,
         seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
+        data_disk_refs: Sequence[VolumeRef] = (),
     ) -> Any:
         del plan_name, os_disk_ref, seed_iso_ref, network_refs
         if self.fail_create_vm:
             raise RuntimeError("simulated create_vm failure")
-        self._record("create_vm", backend_name, spec.name)
+        self._record("create_vm", backend_name, spec.name, tuple(str(r) for r in data_disk_refs))
         self._vms[backend_name] = "shutoff"
         return f"vm:{backend_name}"
 
@@ -329,6 +352,8 @@ class MockDriver(HypervisorDriver):
     def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
         def _read_file(path: str) -> bytes:
             self._record("native_guest_read_file", backend_name, path)
+            if self.guest_agent_unreachable:
+                raise GuestAgentError(f"mock: agent unreachable on {backend_name!r}")
             if path == LEASEFILE:
                 if self.sidecar_leases:
                     return self.sidecar_leases.encode("utf-8")

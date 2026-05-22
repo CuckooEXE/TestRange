@@ -27,12 +27,12 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
 - **`Plan(*hypervisors, name=)`** — the top-level user declaration.
   Currently exactly one hypervisor; the variadic shape is locked in for
   future multi-hypervisor without changing the call shape.
-- **`MockHypervisor(networks=, pools=, vms=, install_uplink=, ...)`** —
+- **`MockHypervisor(networks=, pools=, vms=, build_uplink=, ...)`** —
   the top-level entry selecting the in-memory `MockDriver` (the reference
   backend until the real ones are written). Each backend ships its own such
   dataclass; the driver is constructed from its class via the driver registry
-  (`testrange.drivers.driver_for`). `install_uplink` is the host NIC the
-  install-phase sidecar egresses through (see the install phase below).
+  (`testrange.drivers.driver_for`). `build_uplink` is the host NIC the
+  build-phase sidecar egresses through (see the build phase below).
 - **`VMSpec`** — hardware-only (`name`, `devices=[CPU, Memory,
   OSDrive, HardDrive, NetworkIface]`). Singleton-device runtime
   checks enforce exactly one CPU/Memory/OSDrive per spec.
@@ -69,19 +69,21 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
   `nftables.nft`, and `sysctl.conf` rendered by
   `testrange/networks/sidecar.py`. The sidecar IS the gateway when
   `nat=True`; no hypervisor-native NAT/DHCP/DNS is used anywhere
-  (install or run phase).
+  (build or run phase).
 - **Pool I/O** — `upload_to_pool` (host file → in-pool volume) and
   `download_from_pool` (in-pool volume → host file) move bytes between the
   runner host and the backend; the orchestrator never opens pool files
   directly. Caching lives on the runner, never on the backend, so every driver
   must provide *some* transfer channel here — SDK-native where possible (libvirt
   stream, ESXi `/folder` HTTPS), or an out-of-band side channel (Proxmox over
-  SSH, Hyper-V over SMB/WinRM). Cached disks are self-contained because
-  `create_disk_from_base` produces a flat full-copy; `download_from_pool`
-  requires that self-contained source and just streams it — it does not flatten
-  a backing chain itself. A "pool" is a named namespace inside pre-existing
-  backing storage (a libvirt pool, a datastore subdirectory, a host dir/share),
-  not storage the driver provisions.
+  SSH, Hyper-V over SMB/WinRM). **Every disk reaches the backend by host→pool
+  upload** — there is no pool→pool copy and no shared base
+  ([ADR-0010](../adr/0010-build-run-split.md) §3). `create_blank_volume(ref,
+  size_gb)` provisions a blank sized data disk and `resize_volume(ref, size_gb)`
+  grows the image-based OS disk before the build boot; both produce
+  self-contained volumes, so `download_from_pool` just streams them. A "pool" is
+  a named namespace inside pre-existing backing storage (a libvirt pool, a
+  datastore subdirectory, a host dir/share), not storage the driver provisions.
 - **`StateStore`** — `$XDG_STATE_HOME/testrange/runs/<run_id>/state.json`.
   Each resource is recorded with `intent_at` (before backend call)
   and `outcome_at` (after backend confirms). Metadata is stamped at
@@ -95,24 +97,41 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
 
 ## Phases
 
+`build` and `run` are independent phases ([ADR-0010](../adr/0010-build-run-split.md)).
+`testrange build` runs preflight + build only (warms the cache, no tests);
+`testrange run` auto-builds any cache miss, then brings the range up and runs
+tests (`--require-cache` makes a miss fail fast instead of building). The
+`Orchestrator` composes both for the test-runner path.
+
 1. **Pre-Flight** — read-only checks (subnet overlap, cache
    resolvability, pool-root writable). Returns `PreflightReport`.
    Errors abort before any state.json write.
-2. **Install** — per-VM, builder-driven, cache-aware. Cache hit on
-   `builder.config_hash(...)` skips the build. Cache miss synthesizes
-   a transient install Switch from the hypervisor's `install_uplink`
-   (dhcp + dns + nat), brings up the per-Switch sidecar VM to serve
-   DHCP and MASQUERADE outbound, runs each install VM against it,
-   polls power-state until the VM self-terminates via
-   `runcmd: [..., poweroff]`, snapshots the post-install disk into
-   the cache, and tears down the install sidecar + switch LIFO.
-3. **Run** — for every user Switch: `provision_switch` calls
-   `driver.create_switch` (the driver realizes the fabric — bridge / vSwitch /
-   vmbr / VMSwitch — and, for `nat + uplink`, the uplink-facing segment for the
-   sidecar's `eth1`), attaches each Network with `driver.create_network`, and
-   `materialize_sidecar_for` stands up the per-Switch sidecar VM when
-   `dhcp|dns|nat` is set. Then each user VM gets a fresh overlay off the cached
-   post-install disk; defined + started with no seed.
+2. **Build** — warms the cache, nothing else. First it resolves each VM's base,
+   computes `builder.config_hash(...)`, and probes the cache for the VM's full
+   *disk set* (OS disk + every data disk, each named `_built_<hash>__{os,dataN}`);
+   a VM is cached only if **all** its artifacts are present. **Only if at least
+   one VM misses** does it stand up a single ephemeral build pool + a transient
+   build Switch (from `build_uplink`, dhcp + dns + nat) + the per-Switch sidecar,
+   and loop over only the missing VMs. Each missing VM is provisioned as a unit:
+   its base is `upload_to_pool`-ed straight onto its own OS-disk ref and
+   `resize_volume`-d up; each `HardDrive` is a `create_blank_volume`; the seed is
+   written; the VM boots with **all** disks attached and self-terminates via
+   `runcmd: [..., poweroff]`. On power-off every writable disk is
+   `download_from_pool`-ed and `cache.add`-ed (and pushed to the HTTP tier when
+   configured). The build VM and its disks are destroyed immediately after
+   capture; the build pool, switch, and sidecar are torn down at phase end. The
+   backend holds no testrange state between phases.
+3. **Run** — creates the user's `pools` (build leaves none behind), then for
+   every user Switch: `provision_switch` calls `driver.create_switch` (the driver
+   realizes the fabric — bridge / vSwitch / vmbr / VMSwitch — and, for
+   `nat + uplink`, the uplink-facing segment for the sidecar's `eth1`), attaches
+   each Network with `driver.create_network`, and `materialize_sidecar_for` stands
+   up the per-Switch sidecar VM when `dhcp|dns|nat` is set. The phase then blocks
+   until every sidecar is **ready** (its native guest agent answers and the
+   delivered `dnsmasq.conf` reads back) so DHCP is being served before any guest
+   boots. Then each user VM gets its cached built disks (OS + each data disk)
+   `upload_to_pool`-ed onto its own refs — no clone — and is defined with all
+   disks attached and no seed, then started.
 4. **Test** — communicators are bound (discovered IP per VM), then
    each builder's `wait_ready` runs: the orchestrator hands the
    builder the bound communicator's `execute` callable (a `GuestExec`

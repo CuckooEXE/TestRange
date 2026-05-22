@@ -1,6 +1,6 @@
 # Adding a builder
 
-A `Builder` produces the install-time payload that bootstraps a fresh
+A `Builder` produces the build-time payload that bootstraps a fresh
 VM — credentials, packages, post-install commands. `CloudInitBuilder`
 is the only built-in; future ones include Proxmox answer-file, ESXi
 kickstart, Windows unattended.xml.
@@ -47,20 +47,23 @@ builder bake positional NIC config (run-phase netplan match-by-MAC,
 etc.) into the payload and key the cache on the stable MACs the
 orchestrator will assign at run-phase.
 
-## The install-cache contract
+## The build-cache contract
 
-The cache key for the post-install disk is `config_hash`. Two
+The cache key for a VM's built disk set is `config_hash`. Two
 constraints:
 
 1. **Deterministic.** Same inputs → same hash. No clocks, no random,
-   no run_id. The orchestrator caches the post-install disk by this
+   no run_id. The orchestrator caches the built disks by this
    hash; non-determinism means cache misses on every run.
-2. **Captures everything that affects the disk.** Credentials,
-   packages, post-install commands, base image SHA. If a user
-   changes any of them, the hash should change.
+2. **Captures everything that affects the disk *set*.** Credentials,
+   packages, post-install commands, base image SHA — and, since
+   [ADR-0010](../../adr/0010-build-run-split.md) §4, the OS-drive `size_gb`
+   and each data disk's declaration (count + `size_gb`, in spec order),
+   because they change the artifacts the build emits. If a user changes
+   any of them, the hash should change.
 
-A safe default: hash the rendered seed bytes + the base SHA. See
-`CloudInitBuilder.config_hash` for the pattern.
+A safe default: hash the rendered seed bytes + the base SHA + the disk
+sizes. See `CloudInitBuilder.config_hash` for the pattern.
 
 ## Steps
 
@@ -77,8 +80,8 @@ A safe default: hash the rendered seed bytes + the base SHA. See
            return self._credentials
 
        def render_seed(self, spec, recipe, *, addressing, macs=()) -> bytes:
-           # Produce the install-time payload as bytes. The orchestrator
-           # writes these into a pool volume the install VM mounts.
+           # Produce the build-time payload as bytes. The orchestrator
+           # writes these into a pool volume the build VM mounts.
            ...
 
        def config_hash(self, spec, recipe, *, addressing, base_sha="", macs=()) -> str:
@@ -89,13 +92,13 @@ A safe default: hash the rendered seed bytes + the base SHA. See
    ```
 
 2. **Self-terminate.** The orchestrator polls VM power state during
-   install — your seed should end with whatever triggers a shutdown
-   on the target OS so the install VM self-terminates and the
-   orchestrator can snapshot the resulting disk.
+   the build — your seed should end with whatever triggers a shutdown
+   on the target OS so the build VM self-terminates and the
+   orchestrator can capture the resulting disks.
 
-3. **No Communicator during install.** The Communicator only binds
-   at run-phase bring-up, against the cached post-install disk. The
-   Builder owns the install lifecycle on its own.
+3. **No Communicator during build.** The Communicator only binds
+   at run-phase bring-up, against the cached built disks. The
+   Builder owns the build lifecycle on its own.
 
 4. **Validate inputs at the constructor.** Users construct builders
    directly in their Plan files; mypy isn't part of plan loading.

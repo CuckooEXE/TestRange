@@ -91,7 +91,7 @@ def validate_hypervisor_plan(
         validate_name(r.name, "VMSpec.name")
 
     # The orchestrator synthesizes internal switches/networks/VMs under a `__`
-    # prefix (__install, __uplink__<sw>, __sidecar_<sw>); reserve it.
+    # prefix (__build, __uplink__<sw>, __sidecar_<sw>); reserve it.
     reserved = sorted(
         {n for n in (*(s.name for s in switches), *all_nets, *vm_names) if n.startswith("__")}
     )

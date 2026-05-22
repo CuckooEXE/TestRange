@@ -86,11 +86,11 @@ the short version:
   `sudo ./tools/build-sidecar-image/build.sh` and cache it once via
   `testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2
   --name testrange-sidecar`.
-- The install phase requires `install_uplink="<nic>"` on
+- The build phase requires `build_uplink="<nic>"` on
   `LibvirtHypervisor` when any VM is a cache miss; the orchestrator
-  synthesizes a transient install Switch (`10.97.99.0/24`,
+  synthesizes a transient build Switch (`10.97.99.0/24`,
   dhcp+dns+nat) on that uplink, brings up its sidecar, runs the
-  install VMs, and tears it all down LIFO before the run phase.
+  build VMs, and tears it all down LIFO before the run phase.
 
 ### Sidecar image build
 

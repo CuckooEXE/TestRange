@@ -44,11 +44,17 @@ the full contract. The deviation analysis behind this shape is
      pre-existing backing storage** (a libvirt pool, a datastore subdirectory, a
      host dir/share) — not storage you provision. The backing store is static
      driver config.
-   - `volume_suffix(kind)` — file extension per volume kind (`install_disk`,
-     `run_disk`, `base_image`, `install_seed`, `sidecar_disk`,
+   - `volume_suffix(kind)` — file extension per volume kind (`build_disk`,
+     `run_disk`, `data_disk`, `base_image`, `build_seed`, `sidecar_disk`,
      `sidecar_config`).
-   - Volume ops: `write_to_pool`, `upload_to_pool`, `create_disk_from_base`,
-     `download_from_pool`, `delete_volume`.
+   - Volume ops: `write_to_pool`, `upload_to_pool`, `download_from_pool`,
+     `create_blank_volume`, `resize_volume`, `delete_volume`. Every disk
+     reaches the backend by **host→pool upload** — there is no pool→pool copy.
+     `create_blank_volume(ref, size_gb)` provisions a blank sized volume (data
+     disks at build; installer-based OS disks later); `resize_volume(ref,
+     size_gb)` grows the image-based OS disk before the build boot. (ADR-0010
+     §7 removed `create_disk_from_base`: with no shared base and no overlay,
+     there is nothing to clone.)
    - VM CRUD: `create_vm`, `start_vm`, `shutdown_vm`, `destroy_vm`,
      `get_vm_power_state`. (There is no `get_lease_ip`: DHCP leases live in the
      per-Switch sidecar, which the orchestrator reads via the native-guest

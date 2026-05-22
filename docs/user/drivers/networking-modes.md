@@ -236,23 +236,23 @@ Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="eth0")
 The shipped `examples/network_modes.py` exercises four of these in one
 plan (`bare-sw`, `mgmt-sw`, `uplink-sw`, `both-sw`).
 
-## Where to set `install_uplink`
+## Where to set `build_uplink`
 
-The install phase needs internet for `apt` / `pip`. Set the physical
+The build phase needs internet for `apt` / `pip`. Set the physical
 uplink on the hypervisor:
 
 ```python
 LibvirtHypervisor(
     connection="qemu:///system",
-    install_uplink="eth0",
+    build_uplink="eth0",
     networks=[...],
     ...
 )
 ```
 
-The orchestrator synthesizes a transient `Switch("__install", ...,
-uplink=install_uplink, dhcp=True, dns=True, nat=True)` (CIDR
-`10.97.99.0/24`), brings up the sidecar, runs the install VMs, then
-tears it all down LIFO. Skip `install_uplink=` only if every VM
-already has a cache hit (i.e. `_post_install_<config_hash>` is already
-in the cache).
+The orchestrator synthesizes a transient `Switch("__build", ...,
+uplink=build_uplink, dhcp=True, dns=True, nat=True)` (CIDR
+`10.97.99.0/24`), brings up the sidecar, runs the build VMs, then
+tears it all down LIFO. Skip `build_uplink=` only if every VM
+already has a cache hit (i.e. the full `_built_<config_hash>__*` disk
+set is already in the cache).

@@ -40,7 +40,7 @@ _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
     MockHypervisor(
-        install_uplink=UPLINK,
+        build_uplink=UPLINK,
         networks=[
             Switch(
                 "switch1",

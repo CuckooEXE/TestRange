@@ -65,7 +65,7 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
 
 PLAN = Plan(
     MockHypervisor(
-        install_uplink=UPLINK,
+        build_uplink=UPLINK,
         networks=[
             Switch("bare-sw", Network("bare-net"), cidr="10.50.0.0/24"),
             Switch(

@@ -13,6 +13,7 @@ including authorized pentest test-ranges.
 user/install
 user/drivers/index
 user/writing-a-plan
+user/build-vs-run
 user/running-tests
 ```
 

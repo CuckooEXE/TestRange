@@ -1,18 +1,19 @@
-"""Shared provisioning substrate: switches, bridges, sidecars, base images.
+"""Shared provisioning substrate: switches, sidecars, NIC MACs.
 
-These helpers are used by both the install phase and the run phase. Each
+These helpers are used by both the build phase and the run phase. Each
 takes a :class:`RunContext` explicitly and brokers between Plan-time data and
 the driver/cache/state store.
+
+Every disk reaches the backend by host->pool upload (``upload_to_pool``);
+there is no pool->pool copy and no shared base (ADR-0010 §3).
 """
 
 from __future__ import annotations
 
 from functools import partial
-from pathlib import Path
 
 from testrange.builders.sidecar_iso import build_sidecar_config_iso
 from testrange.cache.entry import CacheEntry
-from testrange.drivers.base import VolumeRef
 from testrange.exceptions import OrchestratorError
 from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
 from testrange.networks.base import Switch
@@ -24,32 +25,8 @@ from testrange.networks.sidecar import (
     render_sysctl_conf,
     sidecar_nic_specs,
 )
+from testrange.orchestrator.build import _sidecar_spec
 from testrange.orchestrator.context import RunContext
-from testrange.orchestrator.install import _sidecar_spec
-
-
-def ensure_base_in_pool(ctx: RunContext, pool_backend: str, source_path: Path) -> VolumeRef:
-    """Upload a host-side base image into the pool, idempotent per run.
-
-    Returns the in-pool path. The volume name is derived from the cache
-    file's stem (a content sha), so multiple VMs sharing a base share
-    the in-pool upload too.
-    """
-    vol_name = f"tr_base_{source_path.stem}{ctx.driver.volume_suffix('base_image')}"
-    target_ref = ctx.driver.compose_volume_ref(pool_backend, vol_name)
-    key = (pool_backend, vol_name)
-    if key in ctx.uploaded_bases:
-        return ctx.driver.upload_to_pool(target_ref, source_path)
-    ctx.store.record_intent(
-        kind="base_image",
-        backend_name=vol_name,
-        plan_name=None,
-        pool_backend=pool_backend,
-    )
-    ctx.driver.upload_to_pool(target_ref, source_path)
-    ctx.store.confirm(vol_name, pool_backend=pool_backend)
-    ctx.uploaded_bases.add(key)
-    return target_ref
 
 
 def mac_for(ctx: RunContext, vm_name: str, idx: int) -> str:
@@ -102,31 +79,50 @@ def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") 
         ctx.network_backends[_uplink_network_name(switch)] = uplink_net_backend
 
 
-def materialize_sidecar_for(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") -> None:
+def materialize_sidecar_for(
+    ctx: RunContext,
+    switch: Switch,
+    *,
+    kind_prefix: str = "",
+    pool_backend: str | None = None,
+    pool_name: str | None = None,
+) -> None:
+    """Bring up the per-Switch sidecar VM (DHCP/DNS/NAT services).
+
+    By default the sidecar lands in the user's first declared pool (the
+    run-phase home). The build phase passes an explicit ``pool_backend`` +
+    ``pool_name`` so the sidecar lives in the ephemeral build pool instead —
+    the build phase no longer creates the user's pools (ADR-0010 §9).
+    """
     if not switch.needs_sidecar:
         return
-    if not ctx.plan.hypervisor.pools:
-        raise OrchestratorError(f"switch {switch.name!r} needs a sidecar but the plan has no pools")
-    pool_name = ctx.plan.hypervisor.pools[0].name
-    pool_backend = ctx.pool_backends[pool_name]
+    if pool_backend is None:
+        if not ctx.plan.hypervisor.pools:
+            raise OrchestratorError(
+                f"switch {switch.name!r} needs a sidecar but the plan has no pools"
+            )
+        pool_name = ctx.plan.hypervisor.pools[0].name
+        pool_backend = ctx.pool_backends[pool_name]
+    assert pool_name is not None, "pool_name must accompany an explicit pool_backend"
     sidecar_spec = _sidecar_spec(switch, pool_name)
     sidecar_vm_backend = ctx.driver.compose_resource_name(
         ctx.run_id, f"{kind_prefix}sidecar_vm", switch.name
     )
 
-    # 1. Sidecar's overlay disk (cached Alpine image as base).
+    # 1. Sidecar's OS disk: push the cached Alpine image straight onto the
+    # sidecar's own ref — no shared base, no clone (ADR-0010 §3). Sidecars
+    # carry no data disks.
     sidecar_disk_name = f"{sidecar_vm_backend}{ctx.driver.volume_suffix('sidecar_disk')}"
     sidecar_disk_ref = ctx.driver.compose_volume_ref(pool_backend, sidecar_disk_name)
     base_info = ctx.cache.resolve(CacheEntry(SIDECAR_CACHE_NAME))
     assert base_info.path is not None
-    base_ref = ensure_base_in_pool(ctx, pool_backend, base_info.path)
     ctx.store.record_intent(
         kind="sidecar_disk",
         backend_name=sidecar_disk_name,
         plan_name=switch.name,
         pool_backend=pool_backend,
     )
-    ctx.driver.create_disk_from_base(sidecar_disk_ref, base_ref)
+    ctx.driver.upload_to_pool(sidecar_disk_ref, base_info.path)
     ctx.store.confirm(sidecar_disk_name, pool_backend=pool_backend)
 
     # 2. Per-run config ISO: dnsmasq.conf + interfaces + nftables + sysctl.
@@ -170,7 +166,6 @@ def materialize_sidecar_for(ctx: RunContext, switch: Switch, *, kind_prefix: str
 
 
 __all__ = [
-    "ensure_base_in_pool",
     "mac_for",
     "materialize_sidecar_for",
     "provision_switch",

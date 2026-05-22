@@ -31,7 +31,7 @@ UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
 
 PLAN = Plan(
     MockHypervisor(
-        install_uplink=UPLINK,
+        build_uplink=UPLINK,
         networks=[
             Switch(
                 "switch1",

@@ -32,6 +32,17 @@ class TestResult:
         return line
 
 
+def build_range(plan: Plan, *, cache_manager: CacheManager | None = None) -> str:
+    """Warm the cache for ``plan`` (``testrange build``); run no tests.
+
+    Runs preflight + the build phase only, tearing down all build infra. The
+    backend holds nothing afterward. Returns the run id (for logging).
+    """
+    o = Orchestrator(plan, cache_manager=cache_manager)
+    o.build()
+    return o.run_id
+
+
 def run_tests(
     tests: list[Callable[[OrchestratorHandle], None]],
     plan: Plan,
@@ -39,9 +50,12 @@ def run_tests(
     cache_manager: CacheManager | None = None,
     fail_fast: bool = False,
     leak_on_failure: bool = False,
+    require_cache: bool = False,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
+    Auto-builds any cache miss before running (so a cold cache just works);
+    ``require_cache=True`` instead fails fast on a miss without building.
     Tests run sequentially. Continue-on-failure is the default;
     ``fail_fast=True`` stops on the first failure. With
     ``leak_on_failure=True``, if any test fails the orchestrator skips
@@ -49,7 +63,7 @@ def run_tests(
     ``testrange cleanup <run_id>``.
     """
     results: list[TestResult] = []
-    o = Orchestrator(plan, cache_manager=cache_manager)
+    o = Orchestrator(plan, cache_manager=cache_manager, require_cache=require_cache)
     with o as orch:
         _execute_tests(orch, tests, results, fail_fast=fail_fast)
         if leak_on_failure and any(not r.passed for r in results):
@@ -88,4 +102,4 @@ def _execute_tests(
         results.append(TestResult(name=name, passed=True, duration=time.monotonic() - start))
 
 
-__all__ = ["TestResult", "run_tests"]
+__all__ = ["TestResult", "build_range", "run_tests"]

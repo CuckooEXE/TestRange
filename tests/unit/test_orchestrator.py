@@ -23,7 +23,7 @@ from testrange.devices.network import NetworkIface
 from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import (
     BuildNotReadyError,
-    InstallTimeoutError,
+    BuildTimeoutError,
     OrchestratorError,
     PreflightError,
 )
@@ -183,7 +183,7 @@ class TestEnterAndExit:
         # The libvirt-shaped bridge API is gone — nothing names a bridge.
         assert not any("bridge" in n for n in names)
 
-    def test_install_vm_brought_up_and_torn_down(
+    def test_build_vm_brought_up_and_torn_down(
         self,
         fake_driver: MockDriver,
         populated_cache: tuple[CacheManager, Path],
@@ -191,34 +191,34 @@ class TestEnterAndExit:
         mgr, _ = populated_cache
         with Orchestrator(_plan(), cache_manager=mgr):
             pass
-        # An install_vm was created (cache miss) and destroyed
-        install_creates = [
-            c for c in fake_driver.calls if c[0] == "create_vm" and "install_vm" in c[1][0]
+        # A build_vm was created (cache miss) and destroyed
+        build_creates = [
+            c for c in fake_driver.calls if c[0] == "create_vm" and "build_vm" in c[1][0]
         ]
-        assert len(install_creates) == 1
+        assert len(build_creates) == 1
 
-    def test_cache_hit_skips_install_vm(
+    def test_cache_hit_skips_build_vm(
         self,
         fake_driver: MockDriver,
         populated_cache: tuple[CacheManager, Path],
     ) -> None:
         mgr, _ = populated_cache
-        # First run populates the post-install cache
+        # First run populates the built-disk cache
         with Orchestrator(_plan(), cache_manager=mgr):
             pass
-        first_install_creates = sum(
-            1 for c in fake_driver.calls if c[0] == "create_vm" and "install_vm" in c[1][0]
+        first_build_creates = sum(
+            1 for c in fake_driver.calls if c[0] == "create_vm" and "build_vm" in c[1][0]
         )
-        assert first_install_creates == 1
+        assert first_build_creates == 1
 
         # Reset calls and run again — should hit cache
         fake_driver.calls = []
         with Orchestrator(_plan(), cache_manager=mgr):
             pass
-        second_install_creates = sum(
-            1 for c in fake_driver.calls if c[0] == "create_vm" and "install_vm" in c[1][0]
+        second_build_creates = sum(
+            1 for c in fake_driver.calls if c[0] == "create_vm" and "build_vm" in c[1][0]
         )
-        assert second_install_creates == 0
+        assert second_build_creates == 0
 
     def test_preflight_error_aborts(
         self,
@@ -236,7 +236,7 @@ class TestEnterAndExit:
         names = [c[0] for c in fake_driver.calls]
         assert "create_pool" not in names
 
-    def test_install_timeout(
+    def test_build_timeout(
         self,
         fake_driver: MockDriver,
         populated_cache: tuple[CacheManager, Path],
@@ -244,8 +244,8 @@ class TestEnterAndExit:
         mgr, _ = populated_cache
         fake_driver.shutoff_after_calls = 99_999  # never goes to shutoff
         # Tiny timeout so the test isn't slow
-        with pytest.raises(InstallTimeoutError):
-            with Orchestrator(_plan(), cache_manager=mgr, install_timeout_s=0.01):
+        with pytest.raises(BuildTimeoutError):
+            with Orchestrator(_plan(), cache_manager=mgr, build_timeout_s=0.01):
                 pass
 
     def test_failure_during_bringup_triggers_teardown(
@@ -328,11 +328,14 @@ class TestHandleLeak:
             assert o._leak is False
             orch.leak()
             assert o._leak is True
-        # destroy_pool only runs at teardown — leak() must short-circuit it.
-        # (destroy_vm and destroy_network both fire mid-install for the
-        # transient install resources, so they aren't clean sentinels.)
-        names = [c[0] for c in fake_driver.calls]
-        assert "destroy_pool" not in names
+        # The run VM (`tr_vm_<id>_web`) is destroyed only at teardown, which
+        # leak() must short-circuit. (The build VM, build pool, and sidecar all
+        # fire their destroys mid-build regardless of leak, so they aren't clean
+        # sentinels — note `tr_build_vm_` / `tr_build_pool_` are distinct names.)
+        run_vm_destroys = [
+            c for c in fake_driver.calls if c[0] == "destroy_vm" and c[1][0].startswith("tr_vm_")
+        ]
+        assert run_vm_destroys == []
 
 
 def _static_plan(ipv4: str) -> Plan:

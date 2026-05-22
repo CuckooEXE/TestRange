@@ -21,7 +21,7 @@ from testrange.devices.network import NetworkIface
 from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.networks import Network, Switch
-from testrange.orchestrator.install import _install_switch
+from testrange.orchestrator.build import _build_switch
 from testrange.preflight import mgmt_unsupported_findings, native_capability_findings
 from testrange.vms import VMRecipe, VMSpec
 
@@ -78,6 +78,59 @@ class TestSwitchOwnership:
         assert d.create_switch(plain, "tr_switch_s2") is None
 
 
+class TestDiskPrimitives:
+    """ADR-0010 §7: create_blank_volume + resize_volume; data_disk suffix."""
+
+    def test_data_disk_suffix(self) -> None:
+        assert MockDriver().volume_suffix("data_disk") == ".qcow2"
+
+    def test_create_blank_volume_writes_sized_file(self, tmp_path: Path) -> None:
+        d = MockDriver(pool_root=tmp_path)
+        d.create_pool(StoragePool("pool1", 32), "p")
+        ref = d.compose_volume_ref("p", "data0.qcow2")
+        out = d.create_blank_volume(ref, 16)
+        assert out == ref
+        assert Path(ref).exists()
+        assert b"16G" in Path(ref).read_bytes()
+        assert ("create_blank_volume", (str(ref), 16), {}) in d.calls
+
+    def test_resize_volume_grows_and_records(self, tmp_path: Path) -> None:
+        d = MockDriver(pool_root=tmp_path)
+        d.create_pool(StoragePool("pool1", 32), "p")
+        ref = d.compose_volume_ref("p", "os.qcow2")
+        d.create_blank_volume(ref, 8)
+        out = d.resize_volume(ref, 64)
+        assert out == ref
+        assert d._volume_sizes[str(ref)] == 64
+        assert ("resize_volume", (str(ref), 64), {}) in d.calls
+
+    def test_resize_missing_volume_raises(self, tmp_path: Path) -> None:
+        d = MockDriver(pool_root=tmp_path)
+        d.create_pool(StoragePool("pool1", 32), "p")
+        ref = d.compose_volume_ref("p", "nope.qcow2")
+        with pytest.raises(Exception, match="no volume"):
+            d.resize_volume(ref, 16)
+
+    def test_resize_shrink_raises(self, tmp_path: Path) -> None:
+        d = MockDriver(pool_root=tmp_path)
+        d.create_pool(StoragePool("pool1", 32), "p")
+        ref = d.compose_volume_ref("p", "os.qcow2")
+        d.create_blank_volume(ref, 64)
+        with pytest.raises(Exception, match="shrink"):
+            d.resize_volume(ref, 8)
+
+    def test_blank_volume_content_survives_download(self, tmp_path: Path) -> None:
+        # The sized placeholder round-trips through download_from_pool, which
+        # is what lets the build phase capture a data disk into the cache.
+        d = MockDriver(pool_root=tmp_path)
+        d.create_pool(StoragePool("pool1", 32), "p")
+        ref = d.compose_volume_ref("p", "data0.qcow2")
+        d.create_blank_volume(ref, 16)
+        dest = tmp_path / "captured.qcow2"
+        d.download_from_pool(ref, dest)
+        assert dest.read_bytes() == Path(ref).read_bytes()
+
+
 class TestNativeCapabilities:
     def test_mock_declares_all_three(self) -> None:
         assert MockDriver().native_guest_capabilities() == frozenset(
@@ -126,7 +179,7 @@ class TestMgmtGating:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         report = MockDriver().preflight(
             self._mgmt_plan(), cache_manager=CacheManager(),
-            install_switch=_install_switch(None),
+            build_switch=_build_switch(None),
         )
         assert bool(report) is False
         assert any(f.code == "mgmt-unsupported" for f in report.errors)
@@ -137,7 +190,7 @@ class TestPoolCapacityPreflight:
                    tmp_path: Path) -> object:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         return driver.preflight(
-            plan, cache_manager=CacheManager(), install_switch=_install_switch(None)
+            plan, cache_manager=CacheManager(), build_switch=_build_switch(None)
         )
 
     def test_pool_exceeding_backing_capacity_errors(

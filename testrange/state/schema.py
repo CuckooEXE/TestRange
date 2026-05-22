@@ -18,7 +18,7 @@ SCHEMA_VERSION = 1
 
 # Phase constants. Strings (JSON-writable without a custom encoder).
 PHASE_PREFLIGHT = "preflight"
-PHASE_INSTALL = "install"
+PHASE_BUILD = "build"
 PHASE_RUN = "run"
 PHASE_CLEANUP = "cleanup"
 PHASE_DONE = "done"
@@ -30,8 +30,8 @@ class Resource:
     """One backend resource recorded in state.json.
 
     Fields:
-      kind:         resource kind ("network", "pool", "vm", "install_vm",
-                    "install_network", "disk_volume", ...).
+      kind:         resource kind ("network", "pool", "vm", "build_vm",
+                    "build_network", "disk_volume", ...).
       backend_name: deterministic name on the backend; cleanup destroys
                     by this name.
       plan_name:    user-facing name from the Plan (None for transient

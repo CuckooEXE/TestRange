@@ -31,7 +31,7 @@ def _ctx(store: StateStore, driver: _FakeDriver) -> RunContext:
         cache=cast(Any, None),
         run_id="r1",
         plan_name="p",
-        install_timeout_s=1.0,
+        build_timeout_s=1.0,
         lease_timeout_s=1.0,
         addressing={},
     )

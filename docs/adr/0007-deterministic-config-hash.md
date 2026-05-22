@@ -3,12 +3,17 @@
 Status: Accepted
 Date: 2026-05-19
 
+Extended by [ADR-0010](0010-build-run-split.md): the key now identifies the
+whole *disk set* a build produces, not one disk. The OS-drive `size_gb` and
+each data disk's declaration (count + `size_gb`, in spec order) fold into the
+hash, since they change the artifacts the build emits.
+
 ## Context
 
-The expensive part of bringing up a range is the install pass — booting a
+The expensive part of bringing up a range is the build pass — booting a
 VM, running cloud-init / package installs, powering off. testrange caches
-the resulting post-install disk so that an unchanged VM declaration skips
-the install pass on the next run. That cache needs a key.
+the resulting built disks so that an unchanged VM declaration skips
+the build pass on the next run. That cache needs a key.
 
 The key must satisfy two properties that are in tension with the rest of
 the system:

@@ -21,10 +21,11 @@ from testrange.drivers.base import VolumeRef
 _OUI_FIRST = 0x02
 
 _SUFFIXES = {
-    "install_disk": ".qcow2",
+    "build_disk": ".qcow2",
     "run_disk": ".qcow2",
+    "data_disk": ".qcow2",
     "base_image": ".qcow2",
-    "install_seed": ".iso",
+    "build_seed": ".iso",
     "sidecar_disk": ".qcow2",
     "sidecar_config": ".iso",
 }
@@ -69,12 +70,13 @@ def compose_mac(plan_name: str, vm_name: str, nic_idx: int) -> str:
 def compose_volume_ref(storage: str, pool_backend_name: str, vol_name: str) -> VolumeRef:
     """Pure ``VolumeRef`` keyed on ``(storage, pool, vol_name)``.
 
-    Seeds (``.iso``) and base images (``.qcow2`` reaching here via
+    Seeds (``.iso``) and built/base images (``.qcow2`` reaching here via
     ``upload_to_pool``) are real content volumes — the ref is their actual PVE
-    volid (``local:iso/...`` / ``local:import/...``). Disk refs (``.qcow2`` via
-    ``create_disk_from_base``) reuse the same shape as an opaque handle; the
-    real disk is the vm-scoped volid PVE allocates at ``create_vm`` via
-    ``import-from``, so a disk ref is never realised as a content volume.
+    volid (``local:iso/...`` / ``local:import/...``). Disk refs (``.qcow2``
+    pushed via ``upload_to_pool`` or sized via ``create_blank_volume``) reuse
+    the same shape as an opaque handle; the real disk is the vm-scoped volid PVE
+    allocates at ``create_vm`` via ``import-from``, so a disk ref is never
+    realised as a content volume.
     """
     content = "iso" if vol_name.endswith(".iso") else "import"
     filename = _NOT_FILENAME.sub("-", f"{pool_backend_name}__{vol_name}")

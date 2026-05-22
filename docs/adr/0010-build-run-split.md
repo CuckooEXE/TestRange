@@ -1,6 +1,6 @@
 # ADR-0010: Build/run are two phases, two CLI verbs; disks are cache artifacts; no backend-side reuse
 
-Status: Proposed
+Status: Accepted
 Date: 2026-05-22
 
 Amends [ADR-0008](0008-driver-abc-multi-backend.md) (driver disk surface).

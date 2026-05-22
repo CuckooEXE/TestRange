@@ -22,14 +22,14 @@ from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 # Deterministic from `comment`; same comment -> same keypair across runs,
-# which keeps the rendered cloud-init seed byte-stable so the post-install
+# which keeps the rendered cloud-init seed byte-stable so the build
 # cache hits on subsequent invocations. Insecure by design; test-only.
 _KEY = SSHKey.generate(comment="hello")
 
 PLAN = Plan(
     LibvirtHypervisor(
         connection="qemu:///system",
-        install_uplink="eth0",
+        build_uplink="eth0",
         networks=[
             Switch(
                 "sw1",
@@ -147,42 +147,66 @@ problem at once. For a `StaticAddr`:
 A NIC with `addr=None` or `addr=DHCPAddr()` is left for plan-level
 validation to skip — there is no static address to range-check.
 
-### `install_uplink` and the install phase
+### `build_uplink` and the build phase
 
-The install phase needs internet access so `apt` / `pip` can pull
-packages into the VM's post-install disk. Declare the physical NIC on
+The build phase needs internet access so `apt` / `pip` can pull
+packages into the VM's disks. Declare the physical NIC on
 the libvirtd host that gives that egress:
 
 ```python
 LibvirtHypervisor(
     connection="qemu:///system",
-    install_uplink="eth0",
+    build_uplink="eth0",
     ...
 )
 ```
 
-The orchestrator synthesizes a transient install Switch
+The orchestrator synthesizes a transient build Switch
 (`10.97.99.0/24`, dhcp + dns + nat) using that uplink, brings up a
-sidecar to serve DHCP and MASQUERADE outbound, runs each install VM
-against it, snapshots the post-install disk into the cache, and tears
-the whole install topology down LIFO before the run phase. Skip
-`install_uplink=` only if every VM already has a cache hit.
+sidecar to serve DHCP and MASQUERADE outbound, runs each build VM
+against it, captures every built disk into the cache, and tears
+the whole build topology down LIFO before the run phase. Skip
+`build_uplink=` only if every VM already has a cache hit.
+
+### Data disks (`HardDrive`)
+
+A `HardDrive` is a data disk: zero or more per VM, alongside the single
+`OSDrive`. Data disks are *build artifacts* — the build VM boots with every
+data disk attached (blank and sized), the cloud-init payload formats and
+populates them, and testrange captures each one into the cache. At run the
+populated disk is pushed back, so the VM comes up with its data already in
+place.
+
+```python
+VMSpec(
+    name="fileserver",
+    devices=[
+        CPU(2), Memory(1024), OSDrive("pool1", 8),
+        HardDrive("pool1", 16),   # /dev/vdb on the guest; built once, served at run
+        NetworkIface("netA", addr=StaticAddr("172.31.0.150")),
+    ],
+)
+```
+
+Seed the disk in `post_install_commands` (format, mount, write, persist via
+`/etc/fstab`); see `examples/data_disk.py`. Because the disk's `size_gb` and the
+data-disk count fold into the build cache key, changing either rebuilds the set.
 
 ### Static-NIC netplan staging
 
 When any NIC declares a static address (`StaticAddr`), the cloud-init seed stages two
-extra files on the post-install disk:
+extra files on the built disk:
 
 1. The real run-phase netplan at `/etc/netplan/50-cloud-init.yaml`.
    Cloud-init's `config` stage writes this AFTER its `init` stage renders
-   the install-time DHCP netplan, so the cached disk ends up with the real
+   the build-time DHCP netplan, so the cached disk ends up with the real
    netplan in place.
 2. `/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg` so
    cloud-init does not re-render the netplan on subsequent boots.
 
-The run-phase VM clones the cached disk and attaches to the user's real
-networks. The OS boots reading the staged netplan and comes up on the
-static address.
+The run-phase VM gets the cached built disk pushed onto its own ref and
+attaches to the user's real networks. The OS boots reading the staged netplan
+and comes up on the static address.
 
 ### Which NIC does the communicator use?
 
@@ -279,16 +303,24 @@ testrange cache list
 testrange cache push <sha-or-name> --cache <url>   # publish to an HTTP cache
 testrange cache pull <sha-or-name> --cache <url>   # fetch from an HTTP cache
 testrange describe plan.py
-testrange run plan.py [--fail-fast] [--leak-on-failure]
+testrange build plan.py                            # warm the cache only; no tests
+testrange run plan.py [--fail-fast] [--leak-on-failure] [--require-cache]
 testrange repl plan.py
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
 ```
 
+`build` and `run` are two verbs over the same plan: `build` provisions every
+VM to completion and captures its disks into the cache (warming a shared HTTP
+tier when `--cache` is set), running no tests. `run` brings the range up from
+those cached disks and runs tests — auto-building anything not yet cached, or,
+with `--require-cache`, failing fast on a miss so build and run stay distinct,
+auditable steps. See [build vs run](build-vs-run.md).
+
 ## Tips
 
 - The cloud-init seed `runcmd` always ends with `poweroff` so the
-  install VM self-terminates. The cached disk is what subsequent
+  build VM self-terminates. The cached disks are what subsequent
   runs boot from.
 - Don't reuse one `SSHCommunicator(...)` instance across multiple
   VMs; each VM constructs its own. The single-use guard fails loud

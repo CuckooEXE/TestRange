@@ -67,5 +67,9 @@ class OrchestratorError(TestRangeError):
     """Orchestrator-level failure (phase sequencing, lifecycle)."""
 
 
-class InstallTimeoutError(OrchestratorError):
-    """Install VM did not power off within the configured timeout."""
+class BuildTimeoutError(OrchestratorError):
+    """Build VM did not power off within the configured timeout."""
+
+
+class BuildRequiredError(OrchestratorError):
+    """``run --require-cache`` found one or more artifacts missing from the cache."""

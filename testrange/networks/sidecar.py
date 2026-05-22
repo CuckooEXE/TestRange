@@ -37,6 +37,11 @@ from testrange.networks.base import Switch
 from testrange.vms.recipe import VMRecipe
 
 LEASEFILE = "/var/lib/misc/dnsmasq.leases"
+# Where the sidecar applies the dnsmasq config delivered via its config ISO.
+# Reading it back over the native guest agent is the run-phase readiness probe
+# (ADR-0010 §8): a non-empty read proves the agent answers AND the sidecar has
+# applied its config — so DHCP is being served before any user VM boots.
+SIDECAR_DNSMASQ_CONF = "/etc/dnsmasq.conf"
 
 SIDECAR_SWITCH_NIC = "eth0"
 SIDECAR_UPLINK_NIC = "eth1"
@@ -219,6 +224,7 @@ def parse_dnsmasq_leases(text: str) -> dict[str, str]:
 
 __all__ = [
     "LEASEFILE",
+    "SIDECAR_DNSMASQ_CONF",
     "SIDECAR_SWITCH_NIC",
     "SIDECAR_UPLINK_NIC",
     "parse_dnsmasq_leases",

@@ -18,6 +18,7 @@ from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
 from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.exceptions import (
+    BuildRequiredError,
     CacheError,
     CacheMissError,
     OrchestratorError,
@@ -27,7 +28,7 @@ from testrange.exceptions import (
     TestRangeError,
 )
 from testrange.networks.base import Network, Switch
-from testrange.orchestrator.runner import run_tests
+from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
 from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
 from testrange.vms.recipe import VMRecipe
@@ -61,6 +62,24 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     return plan, list(tests)
 
 
+def _build(args: argparse.Namespace) -> int:
+    plan, _tests = _load_plan_module(args.plan)
+    mgr = _build_manager(args)
+    try:
+        run_id = build_range(plan, cache_manager=mgr)
+    except PreflightError as e:
+        print(f"preflight failed:\n{e}", file=sys.stderr)
+        return 2
+    except OrchestratorError as e:
+        print(f"build failed: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("interrupted; teardown attempted", file=sys.stderr)
+        return 130
+    print(f"build complete; cache warmed (run_id={run_id})")
+    return 0
+
+
 def _run(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     mgr = _build_manager(args)
@@ -71,7 +90,11 @@ def _run(args: argparse.Namespace) -> int:
             cache_manager=mgr,
             fail_fast=args.fail_fast,
             leak_on_failure=args.leak_on_failure,
+            require_cache=args.require_cache,
         )
+    except BuildRequiredError as e:
+        print(f"cache miss: {e}", file=sys.stderr)
+        return 2
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return 2
@@ -385,6 +408,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_cleanup.set_defaults(func=_cleanup)
 
+    p_build = sub.add_parser(
+        "build",
+        help="warm the cache (build every VM); run no tests",
+        description=(
+            "Provision every VM to completion and capture its disks into the "
+            "cache (local, plus the HTTP tier when --cache is set), then tear "
+            "down all build infra. Runs no tests and creates no run VMs. A "
+            "subsequent `testrange run` is a pure warm-cache bring-up."
+        ),
+    )
+    p_build.add_argument("plan", help="path to the plan file (.py)")
+    p_build.set_defaults(func=_build)
+
     p_run = sub.add_parser("run", help="bring up the range, run tests, tear down")
     p_run.add_argument("plan", help="path to the plan file (.py)")
     p_run.add_argument(
@@ -396,6 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--leak-on-failure",
         action="store_true",
         help="if any test fails, skip teardown so you can SSH in to debug",
+    )
+    p_run.add_argument(
+        "--require-cache",
+        action="store_true",
+        help="fail fast if any artifact is missing instead of auto-building it first",
     )
     p_run.set_defaults(func=_run)
 

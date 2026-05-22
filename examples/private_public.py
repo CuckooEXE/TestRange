@@ -44,7 +44,7 @@ _CLIENT_PRIVATE_IP = "10.20.0.101"
 
 PLAN = Plan(
     MockHypervisor(
-        install_uplink=UPLINK,
+        build_uplink=UPLINK,
         networks=[
             Switch(
                 "priv-sw",

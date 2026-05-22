@@ -36,20 +36,24 @@ class RunContext:
     cache: CacheManager
     run_id: str
     plan_name: str
-    install_timeout_s: float
+    build_timeout_s: float
     lease_timeout_s: float
     # Builder-facing addressing map. The orchestrator brokers per the
     # stovepipe rule: builders never see a hypervisor type, they get the
     # one piece of info they need — per-network CIDR/prefix/gateway/dhcp.
     addressing: Mapping[str, NetworkAddressing]
+    # How long the run phase waits for each sidecar's native guest agent to
+    # answer + apply its config before failing loud (ADR-0010 §8).
+    sidecar_ready_timeout_s: float = 120.0
 
     # Resource ledger — written during bring-up, read at teardown.
     pool_backends: dict[str, str] = field(default_factory=dict)  # plan_name -> backend
     network_backends: dict[str, str] = field(default_factory=dict)  # plan_name -> backend
     switch_backends: dict[str, str] = field(default_factory=dict)  # switch -> switch backend
     sidecar_backends: dict[str, str] = field(default_factory=dict)  # switch -> sidecar VM backend
-    post_install_paths: dict[str, Path] = field(default_factory=dict)  # vm -> cached disk path
-    uploaded_bases: set[tuple[str, str]] = field(default_factory=set)  # (pool_backend, vol_name)
+    # vm name -> {role -> cached disk path}, e.g. {"web": {"os": ..., "data0": ...}}.
+    # Populated by the build phase (capture or cache-hit); read by the run phase.
+    built_disk_paths: dict[str, dict[str, Path]] = field(default_factory=dict)
 
 
 __all__ = ["RunContext"]

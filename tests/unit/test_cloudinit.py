@@ -13,7 +13,7 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
+from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StaticAddr
 from testrange.devices.network import NetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
@@ -313,6 +313,84 @@ class TestConfigHash:
         r2 = _recipe(b2, spec)
         assert b1.config_hash(spec, r1, addressing=DEFAULT_ADDR, base_sha="z") != b2.config_hash(
             spec, r2, addressing=DEFAULT_ADDR, base_sha="z"
+        )
+
+    def test_os_drive_size_affects_hash(self) -> None:
+        # ADR-0010 §4: the OS-disk size_gb is load-bearing (resize on build),
+        # so changing it must move the hash.
+        b = _basic_builder()
+        spec_small = VMSpec(
+            name="web",
+            devices=[CPU(1), Memory(512), OSDrive("p1", 8), NetworkIface("netA", addr=DHCPAddr())],
+        )
+        spec_big = VMSpec(
+            name="web",
+            devices=[CPU(1), Memory(512), OSDrive("p1", 64), NetworkIface("netA", addr=DHCPAddr())],
+        )
+        h_small = b.config_hash(spec_small, _recipe(b, spec_small), addressing=DEFAULT_ADDR)
+        h_big = b.config_hash(spec_big, _recipe(b, spec_big), addressing=DEFAULT_ADDR)
+        assert h_small != h_big
+
+    def test_data_disk_size_affects_hash(self) -> None:
+        b = _basic_builder()
+        spec_a = VMSpec(
+            name="web",
+            devices=[
+                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        spec_b = VMSpec(
+            name="web",
+            devices=[
+                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 20),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        assert b.config_hash(spec_a, _recipe(b, spec_a), addressing=DEFAULT_ADDR) != b.config_hash(
+            spec_b, _recipe(b, spec_b), addressing=DEFAULT_ADDR
+        )
+
+    def test_data_disk_count_affects_hash(self) -> None:
+        b = _basic_builder()
+        spec_one = VMSpec(
+            name="web",
+            devices=[
+                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        spec_two = VMSpec(
+            name="web",
+            devices=[
+                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10), HardDrive("p1", 10),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        assert b.config_hash(
+            spec_one, _recipe(b, spec_one), addressing=DEFAULT_ADDR
+        ) != b.config_hash(spec_two, _recipe(b, spec_two), addressing=DEFAULT_ADDR)
+
+    def test_data_disk_order_affects_hash(self) -> None:
+        # Roles are positional (data0, data1, ...); swapping sizes between
+        # slots is a different artifact set.
+        b = _basic_builder()
+        spec_ab = VMSpec(
+            name="web",
+            devices=[
+                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10), HardDrive("p1", 20),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        spec_ba = VMSpec(
+            name="web",
+            devices=[
+                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 20), HardDrive("p1", 10),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        assert b.config_hash(spec_ab, _recipe(b, spec_ab), addressing=DEFAULT_ADDR) != b.config_hash(
+            spec_ba, _recipe(b, spec_ba), addressing=DEFAULT_ADDR
         )
 
 

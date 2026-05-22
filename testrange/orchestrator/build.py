@@ -1,8 +1,8 @@
-"""Transient install-phase network synthesis.
+"""Transient build-phase network synthesis.
 
-The install Switch is a sidecar-served DHCP+DNS+NAT network so install VMs can
+The build Switch is a sidecar-served DHCP+DNS+NAT network so build VMs can
 reach the internet for apt/pip. Uplink is provided by the Hypervisor
-(`install_uplink="..."`) and bound into the synthesized switch at install-phase
+(`build_uplink="..."`) and bound into the synthesized switch at build-phase
 entry. Subnet must not collide with any user-declared Switch; the driver's
 preflight validates that.
 """
@@ -15,24 +15,24 @@ from testrange.networks.base import Network, Switch
 from testrange.networks.sidecar import sidecar_nic_specs
 from testrange.vms.spec import VMSpec
 
-INSTALL_CIDR = "10.97.99.0/24"
-INSTALL_NETWORK_NAME = "install"
-INSTALL_SWITCH_NAME = "__install"
+BUILD_CIDR = "10.97.99.0/24"
+BUILD_NETWORK_NAME = "build"
+BUILD_SWITCH_NAME = "__build"
 
 
-def _install_switch(uplink: str | None) -> Switch:
+def _build_switch(uplink: str | None) -> Switch:
     if uplink is None:
         return Switch(
-            INSTALL_SWITCH_NAME,
-            Network(INSTALL_NETWORK_NAME),
-            cidr=INSTALL_CIDR,
+            BUILD_SWITCH_NAME,
+            Network(BUILD_NETWORK_NAME),
+            cidr=BUILD_CIDR,
             dhcp=True,
             dns=True,
         )
     return Switch(
-        INSTALL_SWITCH_NAME,
-        Network(INSTALL_NETWORK_NAME),
-        cidr=INSTALL_CIDR,
+        BUILD_SWITCH_NAME,
+        Network(BUILD_NETWORK_NAME),
+        cidr=BUILD_CIDR,
         uplink=uplink,
         dhcp=True,
         dns=True,
@@ -62,9 +62,9 @@ def _sidecar_spec(switch: Switch, pool_name: str) -> VMSpec:
 
 
 __all__ = [
-    "INSTALL_CIDR",
-    "INSTALL_NETWORK_NAME",
-    "INSTALL_SWITCH_NAME",
-    "_install_switch",
+    "BUILD_CIDR",
+    "BUILD_NETWORK_NAME",
+    "BUILD_SWITCH_NAME",
+    "_build_switch",
     "_sidecar_spec",
 ]

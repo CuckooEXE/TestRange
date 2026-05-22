@@ -279,21 +279,33 @@ class CloudInitBuilder(Builder):
         base_sha: str = "",
         macs: Sequence[str] = (),
     ) -> str:
-        """Deterministic 16-char hex hash of the post-install disk contents.
+        """Deterministic 16-char hex hash keying the built **disk set**.
 
         Inputs: rendered seed text (which folds in the staged run-phase
-        netplan for static-IP VMs) + the base disk's content sha. Pure: no
-        clocks, no run_id, no I/O. Static-IP changes flow into the hash via
+        netplan for static-IP VMs) + the base disk's content sha + the
+        writable-disk declarations (OS-drive ``size_gb`` and each
+        ``HardDrive``'s ``size_gb``, in spec order). Pure: no clocks, no
+        run_id, no I/O. Static-IP changes flow into the hash via
         ``write_files`` so different addresses get different cache entries.
         ``macs`` flows in via the rendered run-phase netplan: stable MACs
         for the same plan/VM produce a stable hash.
+
+        Per ADR-0010 §4 the hash keys the whole artifact set, not one disk:
+        because a build boots with every writable disk attached and captures
+        each, anything that changes the *set* the build produces (a data
+        disk's size, the data-disk count, the OS-disk size) must move the
+        hash — otherwise a resized disk would silently reuse a stale artifact.
         """
         u = self.render_user_data(spec, recipe, addressing=addressing, macs=macs)
         m = self.render_meta_data(spec, recipe)
         n = self.render_network_config(spec, recipe, addressing=addressing)
+        disks = "|".join(
+            [f"os:{spec.os_drive.size_gb}"]
+            + [f"data{i}:{d.size_gb}" for i, d in enumerate(spec.data_drives)]
+        )
         combined = (
             f"user-data:\n{u}\n---\nmeta-data:\n{m}\n---\n"
-            f"network-config:\n{n}\n---\nbase:{base_sha}"
+            f"network-config:\n{n}\n---\ndisks:{disks}\n---\nbase:{base_sha}"
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NewType
 
@@ -76,15 +77,15 @@ class HypervisorDriver(ABC):
         plan: Plan,
         *,
         cache_manager: CacheManager,
-        install_switch: Switch,
+        build_switch: Switch,
     ) -> PreflightReport:
         """Read-only checks against the live backend.
 
-        ``install_switch`` is the transient Switch the orchestrator will
-        bring up for the install phase (sidecar-served DHCP+DNS+NAT, with
-        the Hypervisor's ``install_uplink`` as the upstream NIC). Preflight
+        ``build_switch`` is the transient Switch the orchestrator will
+        bring up for the build phase (sidecar-served DHCP+DNS+NAT, with
+        the Hypervisor's ``build_uplink`` as the upstream NIC). Preflight
         includes it in CIDR-overlap checks so a colliding user Switch is
-        caught here rather than blowing up at install time.
+        caught here rather than blowing up at build time.
         """
 
     @abstractmethod
@@ -167,9 +168,10 @@ class HypervisorDriver(ABC):
         """File-extension suffix for a volume of ``kind`` on this backend.
 
         ``kind`` is one of the orchestrator's logical volume kinds
-        (``install_disk``, ``run_disk``, ``base_image``, ``install_seed``).
-        Drivers return the right extension for their on-disk format
-        (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for cloud-init seeds).
+        (``build_disk``, ``run_disk``, ``data_disk``, ``base_image``,
+        ``build_seed``). Drivers return the right extension for their
+        on-disk format (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for
+        cloud-init seeds).
         """
 
     @abstractmethod
@@ -182,17 +184,24 @@ class HypervisorDriver(ABC):
         """
 
     @abstractmethod
-    def create_disk_from_base(
-        self,
-        target_ref: VolumeRef,
-        source_ref: VolumeRef,
-    ) -> VolumeRef:
-        """Create a self-contained writable disk at ``target_ref``, initialized from ``source_ref``.
+    def create_blank_volume(self, target_ref: VolumeRef, size_gb: int) -> VolumeRef:
+        """Provision a blank, sized volume at ``target_ref``. Returns ``target_ref``.
 
-        The new disk is a full, independent copy of the source — writes go
-        to the new disk and the source is untouched. This is the universal
-        primitive across hypervisor backends (libvirt full clone, VMware
-        full clone, Proxmox ``qm clone``, etc.). Returns ``target_ref``.
+        Used for data disks at build time (a guest formats and populates
+        them during the build boot) and, later, for installer-based OS
+        disks. The volume's content is undefined (zeroed / sparse) — the
+        contract is only that it exists at ``size_gb``. Replace-if-exists.
+        """
+
+    @abstractmethod
+    def resize_volume(self, target_ref: VolumeRef, size_gb: int) -> VolumeRef:
+        """Grow the volume at ``target_ref`` to ``size_gb``. Returns ``target_ref``.
+
+        Used for the image-based OS disk before the build boot: the base
+        image is uploaded onto the VM's own OS-disk ref, then grown to the
+        declared ``OSDrive.size_gb`` so cloud-init's ``growpart``/``resize2fs``
+        can expand the rootfs on first boot. ``size_gb`` must be ``>=`` the
+        volume's current size; shrinking is not supported.
         """
 
     @abstractmethod
@@ -210,14 +219,14 @@ class HypervisorDriver(ABC):
 
         Boundary crossing: ``dest_path`` is an **orchestrator-host** file
         path; returns the same. Symmetric inverse of ``upload_to_pool``. Used
-        after the install phase to ingest the post-install OS disk back into
+        after the build phase to ingest each built disk (OS + data) back into
         the host-side cache — the on-disk file may not be readable by the
         orchestrator process (different uid, remote hypervisor, ...).
 
         Invariant: the source volume must be self-contained (no backing
-        chain). The orchestrator only ever uses ``create_disk_from_base``
-        (full copies), so this holds. ``dest_path``'s parent must already
-        exist; the file is overwritten if present.
+        chain). Every disk arrives by ``upload_to_pool`` (full content, no
+        overlay) or ``create_blank_volume``, so this holds. ``dest_path``'s
+        parent must already exist; the file is overwritten if present.
         """
 
     @abstractmethod
@@ -233,6 +242,7 @@ class HypervisorDriver(ABC):
         os_disk_ref: VolumeRef,
         seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
+        data_disk_refs: Sequence[VolumeRef] = (),
     ) -> Any:
         """Define a VM on the backend.
 
@@ -242,14 +252,19 @@ class HypervisorDriver(ABC):
           spec:          ``VMSpec`` from the Plan (CPU/memory/devices/NICs).
           plan_name:     User-facing Plan name (drivers that derive stable
             MACs from ``(plan_name, vm_name, nic_idx)`` use this).
-          os_disk_ref:   Locator for the writable OS disk produced by an
-            earlier ``create_disk_from_base`` call.
+          os_disk_ref:   Locator for the writable OS disk (pushed onto this
+            VM's own ref via ``upload_to_pool``).
           seed_iso_ref:  Locator for the cloud-init seed ISO produced by an
             earlier ``write_to_pool`` call, or ``None`` for VMs that don't
             need a seed (run-phase VMs).
           network_refs:  ``{plan_network_name: backend_network_name}`` map
             so the driver can wire NICs declared in ``spec`` to the right
             backend network.
+          data_disk_refs: Locators for the VM's ``HardDrive`` data disks, in
+            spec order — attached alongside the OS disk. Empty for VMs with
+            no data disks (the common case). Per ADR-0010 §4 a build VM boots
+            with every writable disk attached so the install payload can
+            populate it.
         """
 
     @abstractmethod
@@ -348,20 +363,21 @@ class HypervisorDriver(ABC):
     def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
         """Destroy a resource by kind (default dispatch).
 
-        Volume kinds (``install_disk``, ``install_seed``, ``run_disk``)
-        require a ``pool_backend`` in ``metadata`` so the driver knows
-        which pool to remove the volume from.
+        Volume kinds (``build_disk``, ``build_seed``, ``data_disk``,
+        ``run_disk``) require a ``pool_backend`` in ``metadata`` so the
+        driver knows which pool to remove the volume from.
         """
-        if kind in ("network", "install_network"):
+        if kind in ("network", "build_network"):
             self.destroy_network(backend_name)
-        elif kind == "pool":
+        elif kind in ("pool", "build_pool"):
             self.destroy_pool(backend_name)
-        elif kind in ("vm", "install_vm", "sidecar_vm"):
+        elif kind in ("vm", "build_vm", "sidecar_vm"):
             self.destroy_vm(backend_name)
         elif kind in (
-            "install_disk",
-            "install_seed",
+            "build_disk",
+            "build_seed",
             "run_disk",
+            "data_disk",
             "base_image",
             "volume",
             "sidecar_disk",
@@ -373,7 +389,7 @@ class HypervisorDriver(ABC):
                     f"destroy({kind!r}): missing pool_backend metadata for volume kind"
                 )
             self.delete_volume(self.compose_volume_ref(str(pool_backend), backend_name))
-        elif kind in ("switch", "install_switch"):
+        elif kind in ("switch", "build_switch"):
             self.destroy_switch(backend_name)
         else:
             raise NotImplementedError(f"destroy({kind!r}) not implemented")

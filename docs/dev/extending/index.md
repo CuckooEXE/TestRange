@@ -38,7 +38,7 @@ Every backend resource the orchestrator creates is recorded in
 ```python
 self._store.record_intent(kind="run_disk", backend_name=name, plan_name=vm.name,
                           pool_backend=pool_backend)
-self.driver.create_disk_from_base(target_ref, base_ref)
+self.driver.upload_to_pool(target_ref, built_disk_path)
 self._store.confirm(name, pool_backend=pool_backend)
 ```
 
