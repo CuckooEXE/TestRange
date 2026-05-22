@@ -15,4 +15,5 @@ context, the decision, and the consequences. Listed newest-first.
 0007-deterministic-config-hash
 0008-driver-abc-multi-backend
 0009-mgmt-switch-semantics
+0010-build-run-split
 ```

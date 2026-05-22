@@ -856,3 +856,187 @@ exits 0.
 **Done**: README quickstart copy-pasteable on a clean machine works
 first try (libvirt + KVM prerequisites assumed). Ctrl-C mid-run leaves
 the host clean.
+
+## Build/Run Split — Engineering Phases (ADR-0010)
+
+Implements [ADR-0010](docs/adr/0010-build-run-split.md). This **supersedes the
+install-phase parts** of the v0 phases above (the original "Install" phase
+becomes the "Build" phase) and amends the driver disk surface from
+[ADR-0008](docs/adr/0008-driver-abc-multi-backend.md). The reference backend is
+`MockDriver` (libvirt is deleted; Proxmox is in progress) — driver work targets
+the ABC + `MockDriver`, with Proxmox following the same contract.
+
+What changes, in one breath: rename install→build; the build phase warms the
+cache and nothing else; every writable disk (OS **and** each data disk) is a
+build artifact; nothing is shared or cloned on the backend (push per VM, delete
+everything); `run` auto-builds on a cache miss; sidecars must answer a native
+guest agent before any user VM starts; and `testrange build` / `testrange run`
+become separate CLI verbs.
+
+Ordering is Mikado-style: additive driver primitives first (suite stays green),
+then rewire the orchestrator onto them, then delete the old primitives, then the
+CLI seam. Dependency chain is linear: B0 → B1 → B2 → B3 → B4 → B5 → B6. Each
+phase ends with a green suite (unit + the mock-driver integration tests it
+enables); TDD per phase.
+
+### Phase B0 — `config_hash` keys the disk *set* (pure, no backend)
+
+Leaf work, no I/O — safe to land first.
+
+- Extend `CloudInitBuilder.config_hash(spec, recipe, *, addressing, base_sha,
+  macs)` to fold in the **data-disk declarations** (count + each `size_gb`, in
+  spec order) and the OS-drive `size_gb`. Any input that changes the artifact
+  *set* the build produces must move the hash (ADR-0007, extended).
+- Define the per-role artifact naming scheme as a pure helper:
+  `_built_<config_hash>__os`, `_built_<config_hash>__data0`,
+  `_built_<config_hash>__data1`, … (replaces the `_post_install_<hash>` single
+  name). A VM's build is cached iff **all** its disk artifacts are present.
+
+**Done**: unit tests assert the hash is stable across re-renders, moves when a
+data disk's `size_gb` or count changes, and moves when `os_drive.size_gb`
+changes. Artifact-name helper is table-tested. No orchestrator changes yet;
+suite green.
+
+### Phase B1 — Driver disk primitives (additive)
+
+Add the new surface without removing the old, so everything stays green.
+
+- `HypervisorDriver` ABC: add
+  `create_blank_volume(ref, size_gb) -> VolumeRef` (blank sized volume, for data
+  disks at build; installer-based OS disks later) and
+  `resize_volume(ref, size_gb) -> VolumeRef` (grow a volume in place, for the
+  image-based OS disk before the build boot). Leave `create_disk_from_base` in
+  place for now.
+- `volume_suffix` kinds: add `data_disk`; keep the rest. (The `install_*` kinds
+  get renamed in B2.)
+- `MockDriver`: implement both new methods against its on-disk pool model
+  (blank = sized placeholder file; resize = truncate/grow + record). Proxmox:
+  implement or stub against the PVE volume API to the same contract.
+
+**Done**: driver unit tests (`test_drivers_base`, `test_mock_driver`) cover the
+two new primitives; nothing calls them yet; suite green.
+
+### Phase B2 — Build phase (rename + reshape)
+
+The big one. Rename and rewire the former install phase.
+
+- **Rename** install→build across the tree: `PHASE_INSTALL`→`PHASE_BUILD`,
+  `install_phase`→`build_phase`, `install_one_vm`→`build_one_vm`,
+  `install_timeout_s`→`build_timeout_s`, `install_uplink`→`build_uplink`,
+  `_install_switch`→`_build_switch`, the `INSTALL_*` consts, and
+  `ctx.post_install_paths`→`ctx.built_disk_paths` (now a map to a per-role disk
+  set, not one path). The cache prefix becomes `_built_` (B0).
+- **Probe before infra (ADR-0010 §2):** resolve each base + compute each
+  `config_hash` + probe the full artifact set *first*. Collect misses. Only if
+  ≥1 miss, stand up the build pool/switch/sidecar; loop over only the missing
+  VMs.
+- **One ephemeral build pool (§9):** create a single dedicated build pool
+  (namespace, ADR-0008 §5) instead of the user's declared pools.
+- **Per-VM push, no sharing (§3, §6):** for each missing VM —
+  `upload_to_pool(os_disk_ref, base_path)` straight onto the VM's own OS disk
+  ref, then `resize_volume(os_disk_ref, os_drive.size_gb)`; for each
+  `HardDrive`, `create_blank_volume(data_disk_ref_n, size_gb)`. Render the seed
+  (`render_seed`) and `write_to_pool` it. `create_vm` with the OS disk + all
+  data disks + seed attached; `start_vm`; `wait_for_shutoff`.
+- **Capture every writable disk (§4):** `download_from_pool` the OS disk and
+  each data disk; `cache.add` each under its `_built_…__{os,dataN}` name; if an
+  HTTP tier is configured, `manager.push` each (§5).
+- **Delete everything (§3):** destroy the build VM + its disks + seed
+  immediately after capture; at phase end tear down the build sidecar, network,
+  switch, **and the build pool** (the former `teardown_install_phase`, extended
+  to include the pool).
+- Drop `ensure_base_in_pool` from the build path (still used by the run path +
+  sidecar until B3).
+
+**Done**: a mock-driver integration test runs `build_phase` on a plan with one
+data disk; asserts N+1 artifacts land in the cache, the build VM booted with all
+disks attached, and the backend (pool included) is empty afterward. A second
+`build_phase` is a full cache hit and creates **no** backend resources at all.
+
+### Phase B3 — Run phase (reshape) + remove the old primitive
+
+- **Run creates the user's pools (§9):** `run_phase` now creates `hyp.pools`
+  itself (build no longer leaves them behind).
+- **Push built disks per VM (§3):** for each VM, `upload_to_pool` each cached
+  built disk (OS + each data) onto the VM's own volume refs — no
+  `ensure_base_in_pool`, no clone. `create_vm` with `seed_iso_ref=None` and all
+  disks attached; `start_vm`.
+- **Sidecar materialization** (`materialize_sidecar_for`): push the Alpine base
+  straight onto the sidecar's disk ref via `upload_to_pool` (no clone). Sidecars
+  carry no data disks.
+- **Remove the dead primitives:** delete `create_disk_from_base` from the ABC +
+  all drivers, and delete `ensure_base_in_pool` from `provision.py`. No pool→pool
+  copy exists anymore; every disk arrives by host→pool upload.
+
+**Done**: `run_phase` brings the range up from a warm cache (OS + data disks
+present and attached); `create_disk_from_base` / `ensure_base_in_pool` are gone
+from the codebase; suite green. Mock integration test asserts data-disk content
+survives build→cache→run.
+
+### Phase B4 — Sidecar readiness gate
+
+- **All sidecars require a native guest agent (§8):** documented invariant; the
+  Alpine sidecar image already bakes `qemu-guest-agent`. The orchestrator drives
+  sidecars only through the driver's native guest channel — never by routing IP
+  traffic to them.
+- Add a readiness gate after `materialize_sidecar_for` in `run_phase`: a sidecar
+  is **ready** when its native guest agent answers **and** the orchestrator can
+  read back the config files it delivered (`dnsmasq.conf`, the leases path,
+  etc.). Block the phase on all sidecars being ready **before** starting any
+  user VM, so DHCP is being served before a guest can ask for a lease.
+- `discover_ip` keeps its lease-file poll but no longer has to absorb the
+  agent-not-up race as its primary job.
+
+**Done**: a mock integration test asserts the run phase waits for sidecar
+readiness (agent reachable + config readback) before the first user
+`create_vm`; a sidecar whose agent never answers fails loud with a clear error
+inside the readiness timeout.
+
+### Phase B5 — CLI split + auto-build
+
+- `testrange build <plan>`: run preflight + `build_phase` only; warm the cache
+  (local + HTTP if configured); run **no** tests; tear down build infra. Exit 0
+  on a fully-warmed cache.
+- `testrange run <plan>`: **auto-builds** any missing artifacts (it is
+  `build_phase` over only the missing VMs, then `run_phase`) so it works against
+  a cold cache, then runs tests. `--require-cache` makes a miss fail fast
+  (preflight-style) instead of building — for CI that wants build and run as
+  distinct, auditable invocations.
+- `Orchestrator` composes both phases; `build`/`run` are thin CLI entry points
+  over `build_phase` / (`build_phase`-on-miss + `run_phase`).
+- Keep the existing flags (`--leak-on-failure`, `--fail-fast`, `--log-level`)
+  wired to `run`.
+
+**Done**: `testrange build examples/<plan>.py` warms the cache and exits without
+creating run VMs; a subsequent `testrange run` is a pure warm-cache bring-up;
+`testrange run` against a cold cache auto-builds then runs; `testrange run
+--require-cache` against a cold cache exits non-zero with a "build first"
+message. CLI unit tests cover all four paths.
+
+### Phase B6 — Docs, examples, cross-refs
+
+- `docs/dev/architecture.md`: replace the install/run narrative with build/run;
+  document the two CLI verbs and auto-build.
+- `docs/user/`: a build-vs-run guide; a data-disk example in
+  `writing-a-plan.md`.
+- `examples/`: one plan exercising a `HardDrive` populated during build (the
+  canonical "data disk seeded at build, served at run" shape).
+- Add an `extending/drivers.md` note on the new disk primitives
+  (`create_blank_volume`, `resize_volume`) and the removal of
+  `create_disk_from_base`.
+- Cross-reference: annotate ADR-0007 and ADR-0005 as extended by ADR-0010.
+
+**Done**: docs describe build/run as two phases/verbs; the data-disk example
+runs green end-to-end on the mock driver; no doc still references "install
+phase", `create_disk_from_base`, or `ensure_base_in_pool`.
+
+### Deferred (named, not built)
+
+- **Installer-based OS-disk origin** (ESXi Kickstart, Windows autounattend):
+  blank OS disk + boot media, OS-disk origin behind a builder-owned method.
+  Named in ADR-0010 §6; lands with the second builder and supersedes §6's
+  image-based hard-coding. No abstraction built now.
+- **Parallel build** of independent VMs (still sequential per ADR /
+  decision 16).
+- **Backend-side dedup / COW overlays** — explicitly rejected for v0 (§3);
+  revisit only if redundant pushes become a measured bottleneck.
