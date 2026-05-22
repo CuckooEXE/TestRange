@@ -1,4 +1,4 @@
-"""qga: one libvirt VM reached over the QEMU Guest Agent instead of SSH.
+"""native_agent: one VM reached over the hypervisor's native guest agent, not SSH.
 
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
@@ -7,8 +7,8 @@ Prerequisites:
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
 
 Usage:
-    testrange describe examples/qga.py
-    testrange run examples/qga.py
+    testrange describe examples/native_agent.py
+    testrange run examples/native_agent.py
 """
 
 from __future__ import annotations

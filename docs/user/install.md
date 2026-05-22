@@ -1,14 +1,16 @@
 # Installing testrange
 
-`testrange` is a Python library + CLI. To run tests it needs at least one
-hypervisor backend installed; see [driver install](drivers/index.md) for
-backend prerequisites.
+`testrange` is a Python library + CLI. See [driver setup](drivers/index.md)
+for the backend matrix and per-backend prerequisites.
 
 ## Requirements
 
 - Python 3.11 or later.
-- A hypervisor backend (only [libvirt + KVM](drivers/libvirt.md) is shipped
-  today; ESXi / Proxmox / Hyper-V drivers are on the long-term roadmap).
+- A hypervisor backend. The in-memory `MockDriver` reference backend needs
+  nothing and is what the test suite drives the full lifecycle against; a clean
+  live `run` of a plan needs a real backend (Proxmox is in progress;
+  libvirt/ESXi/Hyper-V are on the roadmap), each with its own prereqs — see
+  [driver setup](drivers/index.md).
 
 ## Install the package
 
@@ -23,25 +25,31 @@ pip install -e '.[all,dev]'
 
 The available extras:
 
-`libvirt`
-: `libvirt-python` — required to talk to libvirtd.
-
 `ssh`
-: `paramiko` — required for `SSHCommunicator` (the only built-in
-  communicator today).
+: `paramiko` — required for `SSHCommunicator` (the only network communicator
+  today; `NativeCommunicator` rides the driver's guest agent and needs no
+  extra).
 
 `cloudinit`
 : `pycdlib` + `pyyaml` — required for `CloudInitBuilder` (the only
   built-in builder today).
 
+`http`
+: `requests` — required for the shared HTTP cache tier (`--cache`).
+
+`proxmox`
+: `proxmoxer` + `requests` + `paramiko` — required for the Proxmox driver
+  (in progress).
+
 `docs`
-: `sphinx` + `furo` + `myst-parser` — to rebuild this documentation.
+: `sphinx` + `furo` + `myst-parser` + `sphinx-copybutton` — to rebuild this
+  documentation.
 
 `dev`
 : dev-only tools (pytest, ruff, mypy, type stubs).
 
 `all`
-: shorthand for `libvirt,ssh,cloudinit`.
+: shorthand for `ssh,cloudinit,http,proxmox`.
 
 For a typical install you'll want `'.[all,dev]'`.
 
@@ -52,7 +60,7 @@ testrange --version
 testrange describe examples/hello_world.py
 ```
 
-`describe` runs without touching libvirt. The `CacheEntry` references will
+`describe` runs without touching any backend. The `CacheEntry` references will
 show "⚠ not in cache" until you populate the cache. That's the next step
 in the per-driver setup pages.
 

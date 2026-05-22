@@ -14,9 +14,8 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.utils import SSHKey
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
-from testrange.devices.network import DHCPAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
@@ -27,8 +26,7 @@ from testrange.vms import VMRecipe, VMSpec
 _KEY = SSHKey.generate(comment="hello")
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
+    MockHypervisor(
         build_uplink="eth0",
         networks=[
             Switch(
@@ -50,7 +48,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", addr=DHCPAddr()),
+                        NetworkIface("netA", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -122,9 +120,9 @@ A NIC's run-phase address mode is set with `addr=`, which takes one of
 three values:
 
 ```python
-LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.150"))  # static
-LibvirtNetworkIface("netA", addr=DHCPAddr())                  # DHCP lease
-LibvirtNetworkIface("netA")                                   # addr=None: unconfigured
+NetworkIface("netA", addr=StaticAddr("172.31.0.150"))  # static
+NetworkIface("netA", addr=DHCPAddr())                  # DHCP lease
+NetworkIface("netA")                                   # addr=None: unconfigured
 ```
 
 The default is `addr=None` — **unconfigured**, *not* DHCP. The guest's
@@ -151,11 +149,10 @@ validation to skip — there is no static address to range-check.
 
 The build phase needs internet access so `apt` / `pip` can pull
 packages into the VM's disks. Declare the physical NIC on
-the libvirtd host that gives that egress:
+the hypervisor host that gives that egress:
 
 ```python
-LibvirtHypervisor(
-    connection="qemu:///system",
+MockHypervisor(
     build_uplink="eth0",
     ...
 )
@@ -224,19 +221,20 @@ VMSpec(
     devices=[
         CPU(2), Memory(1024), OSDrive("pool1", 8),
         # Communicator binds to this address (first addressed NIC):
-        LibvirtNetworkIface("mgmt", addr=StaticAddr("10.0.0.10")),
+        NetworkIface("mgmt", addr=StaticAddr("10.0.0.10")),
         # Also up on the guest, but not used by the communicator:
-        LibvirtNetworkIface("data", addr=DHCPAddr()),
+        NetworkIface("data", addr=DHCPAddr()),
     ],
 )
 ```
 
 If the bound NIC is a `StaticAddr`, the orchestrator skips DHCP-lease
 lookup and binds to that address directly. If it is a `DHCPAddr`, the
-orchestrator polls the driver for the lease keyed on the stable MAC.
+orchestrator reads the lease — keyed on the VM's stable MAC — from the
+Switch's sidecar dnsmasq lease file over the driver's native guest agent.
 
 The addressed-NIC rule applies only to communicators that reach the VM over
-the network (SSH). `QGACommunicator` rides the hypervisor's native
+the network (SSH). `NativeCommunicator` rides the hypervisor's native
 guest agent — an in-band channel with no IP — so NIC ordering is
 irrelevant to it.
 
@@ -263,11 +261,12 @@ A VM's `communicator` is how test code talks to it. Two are built in:
 - **`SSHCommunicator("user")`** — connects over SSH to the VM's first
   addressed NIC (or the NIC at `nic_idx=`; see above). Needs a `PosixCred` with a matching username on the
   builder. The default for VMs on a reachable network.
-- **`QGACommunicator()`** — rides the hypervisor's native guest agent
-  (QEMU Guest Agent on libvirt): no network, no credentials, no IP
-  discovery. Takes no constructor arguments — the VM *is* the agent's
-  identity. The guest must have `qemu-guest-agent` installed and
-  running, which you declare yourself in the builder:
+- **`NativeCommunicator()`** — rides the hypervisor's native guest agent
+  (QEMU Guest Agent on QEMU-based backends; VMware Tools / Hyper-V
+  integration on others): no network, no credentials, no IP discovery for
+  QGA. Takes no constructor arguments — the VM *is* the agent's identity. For
+  agent backends the guest must have the agent installed and running, which
+  you declare yourself in the builder:
 
   ```python
   builder=CloudInitBuilder(
@@ -275,13 +274,13 @@ A VM's `communicator` is how test code talks to it. Two are built in:
       packages=[Apt("qemu-guest-agent")],
       post_install_commands=("systemctl enable --now qemu-guest-agent",),
   ),
-  communicator=QGACommunicator(),
+  communicator=NativeCommunicator(),
   ```
 
-  Reach for `QGACommunicator` when a VM has no reachable NIC (air-gapped
+  Reach for `NativeCommunicator` when a VM has no reachable NIC (air-gapped
   with no management network), when you don't want SSH on the guest at
   all, or when you need an out-of-band path independent of guest
-  networking. See `examples/qga.py`.
+  networking. See `examples/native_agent.py`.
 
 ## API recipes
 

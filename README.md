@@ -3,14 +3,17 @@
 Declarative Python plans → VM test-ranges → user test functions.
 
 Write a plan that declares networks, storage pools, and VMs against a
-libvirt host; declare test functions; run them. Use case: CI/CD
+hypervisor backend; declare test functions; run them. Use case: CI/CD
 against specific OS versions and varied network topologies; authorized
 pentest test-ranges.
+
+The driver layer is multi-backend (ADR-0008). `MockDriver` is the in-memory
+**reference backend** the examples and tests run against; a Proxmox driver is
+in progress, and a libvirt driver is planned (rebuilt against the same ABC).
 
 ## Quickstart
 
 ```sh
-# Prereqs: libvirt + KVM + group membership (see docs/user/drivers/libvirt.md)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e '.[all,dev]'
 
@@ -22,16 +25,24 @@ testrange cache add \
 # Inspect a plan without touching the backend
 testrange describe examples/hello_world.py
 
-# Bring up the range, run the tests, tear down
+# Warm the cache (build every VM, run no tests)
+testrange build examples/hello_world.py
+
+# Bring up the range, run the tests, tear down (auto-builds on a cache miss)
 testrange run examples/hello_world.py
 ```
+
+The example plans target `MockHypervisor` and are the authoritative shape for
+writing your own. `testrange describe` works against them with no backend; the
+full bring-up lifecycle is exercised against `MockDriver` by the test suite. A
+clean live `run` needs a real backend (Proxmox is in progress; libvirt later),
+which carries its own connection prereqs — see `docs/user/drivers/`.
 
 ## Plan shape
 
 ```python
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
+    MockHypervisor(
         networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24")],
         pools=[StoragePool("pool1", 32)],
         vms=[
@@ -58,7 +69,8 @@ testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
 testrange cache list / del / rename / forget-name
 testrange cache push / pull <sha-or-name> --cache <url>
 testrange describe <plan.py>
-testrange run <plan.py> [--fail-fast] [--leak-on-failure]
+testrange build <plan.py>
+testrange run <plan.py> [--fail-fast] [--leak-on-failure] [--require-cache]
 testrange repl <plan.py>
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]

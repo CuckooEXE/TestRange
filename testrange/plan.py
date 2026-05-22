@@ -26,13 +26,13 @@ class Plan:
                 f"Plan() currently supports exactly one hypervisor; got {len(hypervisors)}."
             )
         # The plan name namespaces every derived resource: stable MACs
-        # (compose_mac), backend resource names, and post-install cache keys.
+        # (compose_mac), backend resource names, and build cache keys.
         # An unnamed plan would silently share that namespace with any other
         # unnamed plan, so require it rather than defaulting.
         if not name:
             raise ValueError(
                 "Plan(name=...) is required; it namespaces stable MACs, "
-                "backend resource names, and the post-install cache"
+                "backend resource names, and the build cache"
             )
         object.__setattr__(self, "hypervisors", tuple(hypervisors))
         object.__setattr__(self, "name", name)

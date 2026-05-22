@@ -1,7 +1,7 @@
 # Architecture Decision Records
 
 Load-bearing decisions for `testrange`. Each ADR captures the
-context, the decision, and the consequences. Listed newest-first.
+context, the decision, and the consequences. Listed oldest-first.
 
 ```{toctree}
 :maxdepth: 1

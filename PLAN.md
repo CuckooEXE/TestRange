@@ -37,7 +37,7 @@ VMRecipe(
             Memory(4096),                       # MB
             OSDrive("pool1", 64),               # GB; exactly one per spec
             HardDrive("pool2", 128),            # data disk; many allowed
-            LibvirtNetworkIface("netB", driver="e1000"),
+            NetworkIface("netB"),
         ],
     ),
     builder=CloudInitBuilder(
@@ -60,11 +60,14 @@ is a long-term TODO that does not break the call shape.
 
 ### 3. Top-level Hypervisor is its own class, NOT a VM
 
-For v0, `LibvirtHypervisor(connection=..., networks=..., pools=..., vms=...)`
-is the top-level Plan entry. It is the *host*, not a VM. The driver is
-inferred from the Hypervisor type (`LibvirtHypervisor` → `LibvirtDriver`).
-Nested hypervisors are explicitly **out of scope for v0**. When nesting
-lands, it lands as a separate class shape — designed fresh.
+A backend-specific Hypervisor dataclass (e.g. `MockHypervisor(...)`, the
+reference backend; `ProxmoxHypervisor`, in progress) is the top-level Plan
+entry, carrying `networks=`, `pools=`, `vms=` plus per-backend connection
+config. It is the *host*, not a VM. The driver is inferred from the Hypervisor
+type via the driver registry (`testrange/drivers/_registry.py`):
+`MockHypervisor` → `MockDriver`. Nested hypervisors are explicitly **out of
+scope for v0**. When nesting lands, it lands as a separate class shape —
+designed fresh.
 
 ### 4. State schema future-proofs for resume + nested; feature deferred
 
@@ -84,7 +87,7 @@ class SSHCommunicator(Communicator):
     def __init__(self, username: str, *, nic_idx: int | None = None): ...
     def bind(self, *, host: str, credential: PosixCred) -> None: ...
 
-class QGACommunicator(Communicator):
+class NativeCommunicator(Communicator):
     def __init__(self): ...
     def bind(self, *, execute, read_file, write_file) -> None: ...  # three callables
 ```
@@ -98,9 +101,9 @@ stovepipe rule):
   position in the device list — the only thing that disambiguates multiple
   NICs on one network), or, when `nic_idx is None`, the first NIC that carries
   an address. The communicator holds only the `nic_idx` int — never a NIC.
-- For `QGACommunicator`: orchestrator passes the driver-supplied
-  `execute`/`read_file`/`write_file` callables that wrap the libvirt domain
-  ref in closures. QGA itself never sees a libvirt type.
+- For `NativeCommunicator`: orchestrator passes the driver-supplied
+  `execute`/`read_file`/`write_file` callables that wrap the driver's VM-bound
+  ref in closures. The communicator never sees a backend type (ADR-0008 §7).
 
 Single-use guard on each concrete so a Communicator reused across two VMs
 fails loud. No `clone()`, no install-phase binding — install is
@@ -127,7 +130,7 @@ per attempt: `pkey=` when present, else `password=`. Deterministic.
 
 ```python
 devices=[CPU(2), Memory(4096), OSDrive("pool1", 64),
-         HardDrive("pool2", 128), LibvirtNetworkIface("netB")]
+         HardDrive("pool2", 128), NetworkIface("netB")]
 ```
 
 Exactly one `OSDrive` per `VMSpec` (runtime check). `HardDrive` is a data
@@ -200,29 +203,29 @@ materialized only when `switch.needs_sidecar` (= `dhcp or dns or nat`).
 Per-run config is delivered as a tiny ISO9660 (label `TR_SIDECAR_CFG`)
 carrying `dnsmasq.conf`, `interfaces`, `nftables.nft`, `sysctl.conf`.
 
-**NAT topology** (`nat=True, uplink="eth0"`): testrange creates TWO
-bridges — an isolated switch bridge (guests + sidecar's eth0 at `.1`,
-plus the host's `.2` if `mgmt`) and a separate uplink bridge enslaving
-the physical NIC (sidecar's eth1, DHCP from upstream LAN). The
-sidecar's `nftables` ruleset MASQUERADEs eth0→eth1. Without `nat`, an
-uplinked switch is one bridge (guests bridge directly to LAN with
-their own MACs).
+**NAT topology** (`nat=True, uplink="eth0"`): the driver realizes TWO L2
+segments — an isolated switch segment (guests + sidecar's eth0 at `.1`, plus
+the host's `.2` if `mgmt`) and a separate uplink segment enslaving the
+physical NIC (sidecar's eth1, DHCP from upstream LAN). The sidecar's
+`nftables` ruleset MASQUERADEs eth0→eth1. Without `nat`, an uplinked switch is
+one segment (guests bridge directly to LAN with their own MACs).
 
-**Libvirt driver**: pyroute2 creates the bridges (`create_bridge` /
-`create_isolated_bridge`); libvirt's `<network>` XML references them in
-`<forward mode='bridge'/>`. No libvirt-native NAT/DHCP/DNS anywhere
-(install phase or otherwise) — the sidecar owns those uniformly.
+**Driver owns L2 (ADR-0008 §1):** the driver realizes the full topology for a
+Switch via `create_switch(switch, backend_name)` (and the uplink-facing
+segment when `switch.uplink and switch.nat`); `create_network` attaches a
+network to an already-created switch. The orchestrator never names a bridge —
+all bridge/vSwitch/SDN mechanics live inside the driver. No backend-native
+NAT/DHCP/DNS anywhere — the sidecar owns those uniformly across backends.
 
-**Install phase** uses the same machinery: a transient
-`Switch("__install", Network("install"), cidr="10.97.99.0/24",
-uplink=hyp.install_uplink, dhcp=True, dns=True, nat=True)` synthesized
-from `LibvirtHypervisor.install_uplink`. Brought up before install VMs
-boot, torn down LIFO before the run phase begins.
+**Build phase** uses the same machinery: a transient build switch
+(`cidr="10.97.99.0/24", uplink=hyp.build_uplink, dhcp=True, dns=True,
+nat=True`) synthesized from `hyp.build_uplink`, brought up before build VMs
+boot and torn down LIFO at build-phase end (ADR-0010 §9).
 
-**Known limits** (TODO.md): pyroute2 is local-netlink only —
-`Switch.uplink` and `nat` are unsupported on remote libvirt URIs
-(`remote_uplink_unsupported` preflight finding). Multi-Network mgmt
-collapses naturally now that Switches own one CIDR.
+**Known limits** (TODO.md): host-local L2 (e.g. netlink-based bridge mgmt) is
+local-only — `Switch.uplink`/`nat` over a remote backend connection are caught
+by preflight (`remote_uplink_unsupported`). Multi-Network mgmt collapses
+naturally now that Switches own one CIDR.
 
 ### 11. ISOs / base disks referenced ONLY via `CacheEntry`
 
@@ -259,7 +262,7 @@ best-effort. Plans never reference HTTP URLs directly.
 ```
 
 Format detection (qcow2 vs raw vs vmdk) is a driver concern, not a cache
-concern. The libvirt driver inspects the resolved path when it needs to;
+concern. The driver inspects the resolved path when it needs to;
 the cache layer treats every entry as opaque bytes.
 
 ### 12. CacheEntry miss fails at preflight, not bring-up
@@ -295,10 +298,10 @@ per-test snapshot/revert.
 ### 15. No `subprocess` in v0
 
 `subprocess` is forbidden project-wide in v0. Every v0 operation has a
-Python library option: `libvirt-python` for the hypervisor, `paramiko`
-for SSH, `pycdlib` for cloud-init seed ISO authoring, `requests` for
-HTTP. Day-1: ruff rule + CI gate that rejects `import subprocess`
-anywhere in the package.
+Python library option: `proxmoxer` / `libvirt-python` for the hypervisor,
+`paramiko` for SSH, `pycdlib` for cloud-init seed ISO authoring, `requests`
+for HTTP. Enforced by a ruff rule + CI gate that rejects `import subprocess`
+anywhere in the package (see `tests/unit/test_subprocess_ban.py`).
 
 If a future feature requires a subprocess (`qemu-img` for cross-format
 disk conversion, etc.), it gets its own ADR and a single sanctioned
@@ -443,74 +446,62 @@ preflight → install → run → **bind** → **wait-ready** → hand off
 - `docs/` — readiness is the orchestrator's job; no `cloud-init status
   --wait` test needed.
 
-### 20. QGA communicator: driver owns the wire protocol, communicator is a shim
+### 20. Native communicator: driver owns the wire protocol, communicator is a shim
 
 `SSHCommunicator` is not always usable: an air-gapped VM with no
 management network has no IP to reach, and even on a networked VM SSH
 is not up until late in boot. Every hypervisor with a native in-guest
-agent (libvirt/QGA, ESXi/VMware Tools, Proxmox/QGA) offers an in-band
-exec channel that sidesteps both problems.
+agent (libvirt/QGA, ESXi/VMware Tools, Proxmox/QGA, Hyper-V integration)
+offers an in-band exec channel that sidesteps both problems.
 
 **Decision: the driver owns the agent wire protocol; the communicator
 is a thin shim over loose callables.** The driver exposes three
 optional-capability accessors —
 `native_guest_execute`/`native_guest_read_file`/`native_guest_write_file`
-— each returning a VM-bound callable typed as the matching `guest_io`
-Protocol (`GuestExec`/`GuestReadFile`/`GuestWriteFile`). `QGACommunicator`
-takes those three callables in `bind` and delegates; it imports nothing
-driver-side. The orchestrator is the broker — it pulls the callables
-off the driver and hands them over.
+(each takes an optional `credential=`, for backends whose agent needs guest
+creds — ADR-0008 §2) — returning a VM-bound callable typed as the matching
+`guest_io` Protocol (`GuestExec`/`GuestReadFile`/`GuestWriteFile`).
+`NativeCommunicator` (ADR-0008 §7: renamed from `QGACommunicator`, since the
+shim is backend-agnostic) takes those three callables in `bind` and delegates;
+it imports nothing driver-side. The orchestrator is the broker — it pulls the
+callables off the driver and hands them over. The driver declares which ops it
+supports via `native_guest_capabilities()`, and preflight fails loud on a gap
+(ADR-0008 §3).
 
-Loose callables, not a bundle object: a future native agent might not
-expose every operation, and three independent callables leave room for
-that without a rigid all-or-nothing Protocol. Nothing optional is built
-now — all three are required at `bind`.
+Loose callables, not a bundle object: a backend might not expose every
+operation, and three independent callables leave room for that without a rigid
+all-or-nothing Protocol.
 
-#### Libvirt concretes
+#### Per-backend wire protocol (driver-internal)
 
-- `_import_libvirt_qemu()` — lazy import mirroring `_import_libvirt`
-  (`libvirt_qemu` ships inside `libvirt-python`; same `.[libvirt]`
-  extra, no new dependency).
-- `_LibvirtGuestAgent` — VM-bound, re-resolves the domain per call,
-  speaks the QGA JSON protocol over `libvirt_qemu.qemuAgentCommand`
-  (`guest-exec` + `guest-exec-status` poll; `guest-file-open/read/
-  write/close`; `cwd` shimmed via `sh -c`). Tolerates a not-yet-up
-  agent with a bounded retry, the same shape as
-  `SSHCommunicator._ensure_connected`. Wraps libvirt errors and QGA
-  `{"error": ...}` responses into `GuestAgentError`.
-- Every libvirt domain renders an `org.qemu.guest_agent.0` virtio
-  `<channel>` unconditionally — inert without the guest package,
-  and it avoids a cross-stovepipe `isinstance` in the driver.
+The wire protocol lives entirely inside each driver. The reference is
+`MockDriver`'s in-memory native transport. The libvirt concrete (QGA JSON over
+`libvirt_qemu.qemuAgentCommand`, an unconditional `org.qemu.guest_agent.0`
+virtio `<channel>`) ships with the libvirt rebuild (ADR-0008); Proxmox QGA,
+VMware Tools, and Hyper-V PowerShell-Direct follow the same contract.
 
 #### `qemu-guest-agent` is user-declared
 
-The guest needs `qemu-guest-agent` installed and running.
-`CloudInitBuilder` is *not* changed to auto-inject it — that would be
-the builder peeking at the communicator type. The plan author declares
-`Apt("qemu-guest-agent")` + a `systemctl enable --now` line. A plan
-that forgets it fails at the first `execute` with a clear
-`GuestAgentError`.
+For agent-based backends the guest needs the agent installed and running.
+`CloudInitBuilder` is *not* changed to auto-inject it — that would be the
+builder peeking at the communicator type. The plan author declares
+`Apt("qemu-guest-agent")` + a `systemctl enable --now` line (see
+`examples/native_agent.py`). A plan that forgets it fails at the first
+`execute` with a clear `GuestAgentError`.
 
 #### Error type
 
-`GuestAgentError(DriverError)`. A brought-up VM whose agent never
-answers surfaces here.
+`GuestAgentError(DriverError)`. A brought-up VM whose agent never answers
+surfaces here.
 
-#### Files touched
+#### Where it lives (landed)
 
-- `testrange/guest_io.py` — the shared Protocols (also used by §19).
-- `testrange/exceptions.py` — `GuestAgentError`.
-- `testrange/drivers/base.py` — the three `native_guest_*` accessors.
-- `testrange/drivers/libvirt.py` — `_import_libvirt_qemu`,
-  `_LibvirtGuestAgent`, the accessors, the QGA `<channel>`.
-- `testrange/communicators/qga.py` — `QGACommunicator`.
-- `testrange/communicators/__init__.py` — re-export.
-- `testrange/orchestrator/runtime.py` — QGA branch in
-  `_bind_communicators`.
-- `examples/qga.py`, `tests/integration/test_libvirt_qga.py`,
-  `tests/unit/test_qga_communicator.py`,
-  `tests/unit/test_libvirt_driver_unit.py`,
-  `tests/unit/test_drivers_base.py` — example + coverage.
+`testrange/guest_io.py` (shared Protocols, also §19), `exceptions.py`
+(`GuestAgentError`), `drivers/base.py` (the `native_guest_*` accessors +
+`native_guest_capabilities`), `drivers/mock.py` (reference transport),
+`communicators/native.py` (`NativeCommunicator`), the orchestrator bind branch
+in `run_phase`, plus `examples/native_agent.py` and unit coverage
+(`test_native_communicator.py`, `test_mock_driver.py`, `test_drivers_base.py`).
 
 ## v0 example (target shape)
 
@@ -523,11 +514,10 @@ that.
 ```python
 from testrange import Plan, OrchestratorHandle, run_tests
 from testrange.cache import CacheEntry
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Switch, Network
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.devices.network import DHCPAddr
+from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.vms import VMSpec, VMRecipe
 from testrange.builders import CloudInitBuilder
 from testrange.credentials import PosixCred
@@ -538,9 +528,8 @@ from testrange.utils import SSHKey
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
-        install_uplink="eth0",
+    MockHypervisor(
+        build_uplink="eth0",
         networks=[
             Switch(
                 "switch1",
@@ -556,7 +545,7 @@ PLAN = Plan(
                     name="web",
                     devices=[
                         CPU(2), Memory(1024), OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", driver="virtio", addr=DHCPAddr()),
+                        NetworkIface("netA", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -579,48 +568,51 @@ Key shape invariants this demonstrates:
 - `Switch(name, *networks, cidr=..., ...)` — networks are positional after the
   name; infra knobs (`cidr`, `uplink`, `mgmt`, `dhcp`, `dns`, `nat`) are
   keyword-only on the Switch (not on Networks). Per §10.
-- `install_uplink="eth0"` on the Hypervisor — drives the transient install
-  Switch's NAT path (§10).
+- `build_uplink="eth0"` on the Hypervisor — drives the transient build
+  Switch's NAT path (§10, ADR-0010 §9).
 - `SSHKey.generate(...)` returns `.auth_line` (single-line `authorized_keys`
   format) for `pubkey=` and `.priv` (OpenSSH PEM) for `privkey=`.
-- `LibvirtNetworkIface` lives under `testrange.devices.network.libvirt`, not
-  the top-level `testrange.devices`; the address modes (`DHCPAddr`,
-  `StaticAddr`) are exported from both `testrange.devices.network` and
-  top-level `testrange.devices`.
+- `NetworkIface` is exported from `testrange.devices.network` (and re-exported
+  from top-level `testrange.devices`), as are the address modes (`DHCPAddr`,
+  `StaticAddr`). Backend-specific NIC subtypes, if a backend needs one, live
+  under that backend's device module.
 
 ## v0 phases
 
 Each phase has explicit state transitions so that an interrupted run can
 be cleaned up via state-file-driven `testrange cleanup`.
 
-1. **Pre-Flight** — read-only. Driver-side host checks (libvirt-python
-   reachable, pool writable, disk capacity). Plan-side checks (subnet
-   overlap, static-IP-out-of-CIDR, name uniqueness, singleton-device
+1. **Pre-Flight** — read-only. Driver-side host checks (backend reachable,
+   pool minimum-capacity floor, native-guest capability gap). Plan-side checks
+   (subnet overlap, static-IP-out-of-CIDR, name uniqueness, singleton-device
    counts, CacheEntry resolvable). Returns
    `PreflightReport(errors, warnings)`. Errors abort; warnings advisory.
 
-2. **Install** — per-VM, builder-driven, cache-aware:
-   - Compute `builder.config_hash(spec, recipe)` — deterministic 16-char
-     hex. Pure (no I/O, no `run_id`).
-   - Cache hit on `config_hash` → skip to phase 3.
-   - Cache miss: builder produces a **self-terminating install payload**
-     (cloud-init seed whose final `runcmd` is `poweroff`). Orchestrator
-     creates a transient install VM on a transient internet-connected
-     install network, boots it, and **polls driver-level power-state** —
-     no communicator — until the VM signals install-done by shutting
-     down. On done: snapshot the post-install disk into the cache; tear
-     down the install VM and network.
-   - **All install resources recorded in state.json BEFORE create-call.**
+2. **Build** (was "Install" — renamed in ADR-0010) — per-VM, builder-driven,
+   cache-aware. The cache is probed *before* any infra comes up:
+   - Compute `builder.config_hash(...)` — deterministic 16-char hex, keying the
+     whole **disk set** (OS + each data disk; ADR-0007/0010). Pure (no `run_id`).
+   - Probe each VM's full artifact set (`_built_<hash>__{os,dataN}`). Collect
+     misses; only if ≥1 miss stand up the ephemeral build pool/switch/sidecar.
+   - For each missing VM: push the base onto the VM's own OS disk + resize,
+     `create_blank_volume` each data disk, render + attach the self-terminating
+     seed, boot, **poll driver-level power-state** until shutoff, then
+     `download_from_pool` every writable disk and `cache.add` each (push
+     upstream if an HTTP tier is configured). Delete the build VM + disks.
+   - At phase end tear down the build pool/switch/sidecar.
+   - **All build resources recorded in state.json BEFORE create-call.**
 
-   Communicators are not used during install. The builder owns the
-   install lifecycle end-to-end via its own seed configuration plus
-   driver-level probes (power state).
+   Communicators are not used during build. The builder owns the lifecycle
+   end-to-end via its own seed plus driver-level power-state probes.
 
 3. **Run**:
-   - User-declared networks and pools come up.
-   - For each VM: clone the cached post-install disk into the run pool;
-     define + start the run VM (no seed ISO attached); communicator
-     binds.
+   - The run phase creates the user's declared networks and pools (build no
+     longer leaves pools behind — ADR-0010 §9).
+   - Sidecars are materialized and gated on readiness (native agent answers +
+     config readback) before any user VM starts (ADR-0010 §8).
+   - For each VM: push every cached built disk (OS + each data) onto the VM's
+     own volume refs — no clone; define + start the run VM (no seed attached);
+     communicator binds; `wait_ready` gates per-VM guest liveness.
 
 4. **Test** — sequential, continue-on-failure default. Each test gets an
    `OrchestratorHandle` exposing `.vms[name]`, `.networks[name]`,
@@ -644,7 +636,9 @@ testrange cache rename <hash-or-name> <new-name>
 testrange cache forget-name <name>
 
 testrange describe <plan.py>                       # passive; cache warnings only
-testrange run <plan.py>                            # bring up + tests + cleanup
+testrange build <plan.py>                          # warm the cache; run NO tests
+testrange run <plan.py>                            # auto-build on miss + tests + cleanup
+testrange run --require-cache <plan.py>            # fail fast on a cache miss (no build)
 testrange run --leak-on-failure <plan.py>
 testrange run --fail-fast <plan.py>
 
@@ -656,379 +650,104 @@ testrange cleanup --all --dry-run
 Exit codes: 0 = success; 1 = test failure; 2 = preflight failure;
 3 = cleanup failure; ≥ 64 = unexpected internal error.
 
-## File layout (v0)
+## File layout
+
+Reflects the tree as built (regenerated 2026-05-22). The device subpackages
+collapsed to `base.py` per device (no `generic.py`/`libvirt.py` split — that
+predated the multi-backend ABC and the libvirt deletion, ADR-0008). The
+orchestrator is split into per-phase modules (the planned single `phases.py`).
 
 ```
 docs/
-    user/                       # user-facing guides
-    dev/                        # contributor docs
-    adr/                        # architecture decision records
-    Architecture-and-Design.md
+    user/                       # user-facing guides (+ user/drivers/)
+    dev/                        # contributor docs (+ dev/extending/)
+    adr/                        # architecture decision records (0001–0010)
+    index.md, conf.py           # Sphinx site
 examples/
-    hello_world.py
+    hello_world.py  data_disk.py  native_agent.py
+    network_modes.py  private_public.py
 testrange/
     builders/
-        base.py                 # Builder ABC
+        base.py                 # Builder ABC (+ wait_ready)
         cloudinit.py            # CloudInitBuilder
+        sidecar_iso.py          # sidecar config-ISO authoring
     cache/
-        __init__.py             # CacheEntry exposed here
+        __init__.py  entry.py   # CacheEntry
         local.py                # LocalCache (file-based, sidecar JSON)
         http.py                 # HttpCache (best-effort)
         manager.py              # CacheManager (local + http tiers)
+        _names.py
     communicators/
-        base.py                 # Communicator ABC: execute / read_file / write_file
+        base.py                 # Communicator ABC + ExecResult
         ssh.py                  # SSHCommunicator (paramiko)
+        native.py               # NativeCommunicator (driver-agent shim)
     credentials/
         base.py                 # Credential ABC (pure data)
         posix.py                # PosixCred
     devices/
-        cpu/{base.py, generic.py, libvirt.py}
-        memory/{base.py, generic.py, libvirt.py}
-        disk/{base.py, generic.py, libvirt.py}    # OSDrive + HardDrive
-        network/{base.py, generic.py, libvirt.py} # iface, network, switch
-        pool/{base.py, generic.py, libvirt.py}    # StoragePool
+        base.py  __init__.py    # Device ABC + re-exports
+        cpu/  memory/  disk/  network/  pool/   # each: base.py + __init__.py
     drivers/
         base.py                 # HypervisorDriver ABC
-        libvirt.py              # LibvirtDriver + LibvirtHypervisor
+        mock.py                 # MockDriver + MockHypervisor (reference backend)
+        _registry.py            # Hypervisor-type → driver dispatch
+        proxmox/                # _client.py, _naming.py, _sdn.py (in progress)
     networks/
-        base.py                 # Network, Switch ABC
-        libvirt.py              # libvirt concretes
+        base.py                 # Network, Switch, NetworkAddressing
+        sidecar.py              # per-Switch dnsmasq/nftables sidecar render
+        validate.py             # subnet/addressing validation
+        _addressing_consts.py   # the .1/.2/.10–.99/.100–.254 pinning
     orchestrator/
         runtime.py              # Orchestrator, OrchestratorHandle, VMHandle
-        phases.py               # preflight / install / run / test / cleanup
+        context.py              # RunContext broker
+        build_phase.py  build.py  run_phase.py  provision.py
+        runner.py               # test runner (run_tests, build_range)
+        teardown.py  artifacts.py
     packages/
-        base.py
-        apt.py
-        pip.py
+        base.py  apt.py  pip.py
     state/
         store.py                # state.json + state.pid; atomic-rename writes
         schema.py               # version 1 dataclasses
         cleanup.py              # state-file-driven teardown (PID-checked)
+    utils/
+        sshkey.py               # SSHKey.generate
     vms/
-        spec.py                 # VMSpec
-        recipe.py               # VMRecipe
-        handle.py               # VMHandle (runtime view)
-    _log.py                     # stdlib logging w/ run_id LoggerAdapter
-    cli.py                      # argparse → subcommands
-    exceptions.py
+        spec.py  recipe.py  handle.py
+    cli.py  exceptions.py  guest_io.py  preflight.py  plan.py  _log.py
 tests/
-    unit/
-    integration/                # gated by pytest -m libvirt
+    unit/                       # 404 tests
+    integration/                # gated by pytest mark
 ```
 
 Stubs for proxmox / esxi / winrm are NOT exported until they work (no
 Hyrum's-law re-exports of `NotImplementedError` shims).
 
-## v0 Engineering Phases
+## Implementation status (2026-05-22)
 
-Goal: walk from empty repo to `examples/hello_world.py` passing
-end-to-end. Each phase ends with a green test suite (unit + the
-integration tests that phase enables); no half-finished state crosses
-a phase boundary. TDD per phase — tests land before/alongside the code
-they cover. Dependency chain is linear: 0 → 1 → 2 → 3 → 4 → 5 → 6.
+The v0 build-out and the ADR-0008 / ADR-0010 reshape are **landed**. The
+step-by-step engineering-phase walkthroughs that used to fill this section
+(v0 Phases 0-6 to a first green `hello_world`, then Build/Run Phases B0-B6 for
+the install->build split) have been executed and are dropped; their decisions
+live in the ADRs and the design sections above. Current state:
 
-Risk-front-loading rationale: phases 2–4 are where libvirt-specific
-surprises live (pool semantics, disk snapshot APIs, MAC handling,
-cloud-init quirks). Knocking those out before SSH/test-runner means if
-libvirt blows up, we discover it early without having built a test
-runner against vapor.
+- **Suite green:** 404 unit tests pass; `ruff` + `mypy --strict` clean.
+- **Reference backend:** `MockDriver` / `MockHypervisor` implement the full
+  `HypervisorDriver` ABC (ADR-0008). The Proxmox driver is in progress on
+  `feature/proxmox`; the libvirt driver is deleted pending a rebuild against
+  the same ABC.
+- **Build/run split (ADR-0010) complete:** `build_phase` warms the cache and
+  nothing else; `run_phase` creates the user's pools, gates sidecar readiness,
+  pushes every built disk (OS + each data disk) per VM, and runs tests.
+  `testrange build` and `testrange run` (auto-build on miss; `--require-cache`
+  to fail fast) are distinct CLI verbs.
+- **Disks are cache artifacts:** `config_hash` keys the whole disk set;
+  `create_blank_volume` + `resize_volume` replaced `create_disk_from_base`;
+  data disks are built, cached, and restored.
+- **Examples** cover the shapes: `hello_world`, `data_disk`, `native_agent`,
+  `network_modes`, `private_public` — all on `MockHypervisor`.
 
-### Phase 0 — Skeleton & Plan-time data types
-
-- `pyproject.toml` with deps (`libvirt-python`, `paramiko`, `pycdlib`,
-  `requests`); `ruff` + `mypy --strict` config; custom ruff rule that
-  forbids `import subprocess`; `pytest` with a `libvirt` mark.
-- `_log.py` (stdlib `logging` + run-id `LoggerAdapter`),
-  `exceptions.py`, `cli.py` argparse skeleton (subcommands print
-  "not implemented").
-- All the pure-data classes `hello_world.py` imports: `Plan`,
-  `LibvirtHypervisor`, `Switch`, `Network`, `StoragePool`, `CPU`,
-  `Memory`, `OSDrive`, `HardDrive`, `LibvirtNetworkIface`, `VMSpec`,
-  `VMRecipe`, `CloudInitBuilder` (data only), `CacheEntry`, `PosixCred`,
-  `SSHCommunicator` (unbound), `Apt`, `SSHKey.generate`.
-- Singleton-device runtime checks (`VMSpec.__post_init__`).
-- Pretty-print `testrange describe examples/hello_world.py` walks
-  the tree.
-
-**Done**: `python examples/hello_world.py` imports cleanly; `testrange
-describe` prints topology (CacheEntry shows ⚠ since cache doesn't
-exist yet); 100% unit coverage of the data classes.
-
-### Phase 1 — Cache layer + cache CLI
-
-- `LocalCache` with `<sha>.bin` + `<sha>.json` sidecar layout, atomic
-  writes via `.partial` + `os.replace`.
-- `CacheManager` (local tier only; HTTP tier deferred).
-- CLI: `cache add <path-or-url> [--name <pretty>]`, `cache list`,
-  `cache del`, `cache rename`, `cache forget-name`.
-- `CacheEntry` resolves via the manager.
-- `describe` shows CacheEntry resolution status.
-
-**Done**: `testrange cache add https://cloud.debian.org/...qcow2 --name
-debian-13` followed by `testrange describe hello_world.py` shows the
-entry resolved with size + origin. Unit tests cover add/list/del/rename/
-forget-name + sha computation + sidecar round-trip.
-
-### Phase 2 — Libvirt driver foundation + state machinery
-
-- `HypervisorDriver` ABC: `connect`, `disconnect`,
-  `preflight(plan) → PreflightReport`, network/pool CRUD,
-  `compose_resource_name`, `compose_mac(plan, vm, nic_idx)`.
-- `LibvirtDriver`: `connect` via libvirt-python, `preflight` (read-only
-  checks: subnet overlap, pool writable, name uniqueness, CacheEntry
-  resolvable, etc.), network + pool create/destroy.
-- State layer: `state.json` + `state.pid`, atomic-rename writes,
-  record-before-create discipline, PID-checked cleanup.
-- CLI: `cleanup <run-id>`, `cleanup --all`, `cleanup --all --dry-run`.
-
-**Done**: an integration test (`-m libvirt`) creates a libvirt network
-and pool through the driver, asserts they exist via libvirt's API,
-then `testrange cleanup <run-id>` removes them and the state dir.
-Preflight returns clean for `hello_world.py`.
-
-### Phase 3 — VM CRUD + CloudInitBuilder seed
-
-- `LibvirtDriver`: VM define, attach disk, attach NIC, start, shutdown
-  (graceful → destroy on timeout), destroy. Stable MAC via
-  `compose_mac`.
-- `Builder` ABC.
-- `CloudInitBuilder`: render user-data + meta-data + network-config;
-  build seed ISO via `pycdlib`; `config_hash` (pure, deterministic).
-- Packages (`Apt`, `Pip`) and `post_install_commands` plumbed into the
-  cloud-init render.
-
-**Done**: an integration test boots a VM by hand (driver + builder, no
-orchestrator yet) with a known base disk and a seed ISO; asserts via
-libvirt's domain APIs that the VM reaches `running` and then `shutoff`
-after cloud-init's `poweroff`. `config_hash` is stable across two
-renders of the same recipe.
-
-### Phase 4 — Orchestrator: install + run phases
-
-- `Orchestrator` class: `__enter__` / `__exit__`, phase sequencing
-  (preflight → install → run → cleanup).
-- Install phase: build seed → define install VM on a transient
-  internet-NAT network → start → poll driver power-state until
-  `shutoff` → snapshot post-install disk into cache (keyed by
-  `config_hash`) → tear down install VM + transient network. All
-  resources recorded in `state.json` before each create-call.
-- Run phase: cache hit → clone overlay from cached base → define run
-  VM with no seed → start.
-- `LibvirtDriver`: disk snapshot (libvirt volume APIs), disk
-  clone-overlay.
-- Cleanup phase: LIFO teardown from `state.json`.
-
-**Done**: `testrange run examples/hello_world.py` brings the range up,
-lets cloud-init complete, tears it down (no tests executed yet — just
-the bring-up/teardown loop). Second run hits the cache and skips the
-install VM entirely.
-
-### Phase 5 — SSH communicator + test runner
-
-- `Communicator` ABC (`execute`, `read_file`, `write_file`, `close`;
-  no `bind` in ABC — per-type).
-- `SSHCommunicator.bind(host, credential)`: paramiko connect with
-  retry (sshd takes time after boot); `execute(argv, timeout)` returns
-  `ExecResult(exit_code, stdout, stderr, duration)`; `read_file` /
-  `write_file` via SFTP; single-use guard.
-- `VMHandle` runtime view (`.communicator`, convenience pass-throughs).
-- `OrchestratorHandle` (`.vms`, `.networks`, `.pools`, `.run_id`).
-- Test runner: import `plan.py`, discover `PLAN` + `TESTS`, run
-  preflight/install/run, execute tests sequentially with
-  continue-on-failure, return `list[TestResult]`. `run_tests` entry
-  point.
-
-**Done**: `testrange run examples/hello_world.py` brings up, runs all
-three tests, all three pass, tears down. `python examples/hello_world.py`
-exits 0.
-
-### Phase 6 — Polish, signal handling, docs
-
-- `--leak-on-failure`, `--fail-fast`, `--log-level`.
-- SIGINT / SIGTERM handler that transitions through cleanup before
-  exit (vs `atexit`, which doesn't run on signals reliably).
-- `cleanup --dry-run` listing.
-- README with quickstart; `docs/user/install.md`,
-  `docs/user/writing-a-plan.md`; `docs/Architecture-and-Design.md`.
-- Minimal ADR set: subprocess ban, no asyncio, state-schema v1,
-  CacheEntry-only, OSDrive distinct, driver-level stable MAC.
-
-**Done**: README quickstart copy-pasteable on a clean machine works
-first try (libvirt + KVM prerequisites assumed). Ctrl-C mid-run leaves
-the host clean.
-
-## Build/Run Split — Engineering Phases (ADR-0010)
-
-Implements [ADR-0010](docs/adr/0010-build-run-split.md). This **supersedes the
-install-phase parts** of the v0 phases above (the original "Install" phase
-becomes the "Build" phase) and amends the driver disk surface from
-[ADR-0008](docs/adr/0008-driver-abc-multi-backend.md). The reference backend is
-`MockDriver` (libvirt is deleted; Proxmox is in progress) — driver work targets
-the ABC + `MockDriver`, with Proxmox following the same contract.
-
-What changes, in one breath: rename install→build; the build phase warms the
-cache and nothing else; every writable disk (OS **and** each data disk) is a
-build artifact; nothing is shared or cloned on the backend (push per VM, delete
-everything); `run` auto-builds on a cache miss; sidecars must answer a native
-guest agent before any user VM starts; and `testrange build` / `testrange run`
-become separate CLI verbs.
-
-Ordering is Mikado-style: additive driver primitives first (suite stays green),
-then rewire the orchestrator onto them, then delete the old primitives, then the
-CLI seam. Dependency chain is linear: B0 → B1 → B2 → B3 → B4 → B5 → B6. Each
-phase ends with a green suite (unit + the mock-driver integration tests it
-enables); TDD per phase.
-
-### Phase B0 — `config_hash` keys the disk *set* (pure, no backend)
-
-Leaf work, no I/O — safe to land first.
-
-- Extend `CloudInitBuilder.config_hash(spec, recipe, *, addressing, base_sha,
-  macs)` to fold in the **data-disk declarations** (count + each `size_gb`, in
-  spec order) and the OS-drive `size_gb`. Any input that changes the artifact
-  *set* the build produces must move the hash (ADR-0007, extended).
-- Define the per-role artifact naming scheme as a pure helper:
-  `_built_<config_hash>__os`, `_built_<config_hash>__data0`,
-  `_built_<config_hash>__data1`, … (replaces the `_post_install_<hash>` single
-  name). A VM's build is cached iff **all** its disk artifacts are present.
-
-**Done**: unit tests assert the hash is stable across re-renders, moves when a
-data disk's `size_gb` or count changes, and moves when `os_drive.size_gb`
-changes. Artifact-name helper is table-tested. No orchestrator changes yet;
-suite green.
-
-### Phase B1 — Driver disk primitives (additive)
-
-Add the new surface without removing the old, so everything stays green.
-
-- `HypervisorDriver` ABC: add
-  `create_blank_volume(ref, size_gb) -> VolumeRef` (blank sized volume, for data
-  disks at build; installer-based OS disks later) and
-  `resize_volume(ref, size_gb) -> VolumeRef` (grow a volume in place, for the
-  image-based OS disk before the build boot). Leave `create_disk_from_base` in
-  place for now.
-- `volume_suffix` kinds: add `data_disk`; keep the rest. (The `install_*` kinds
-  get renamed in B2.)
-- `MockDriver`: implement both new methods against its on-disk pool model
-  (blank = sized placeholder file; resize = truncate/grow + record). Proxmox:
-  implement or stub against the PVE volume API to the same contract.
-
-**Done**: driver unit tests (`test_drivers_base`, `test_mock_driver`) cover the
-two new primitives; nothing calls them yet; suite green.
-
-### Phase B2 — Build phase (rename + reshape)
-
-The big one. Rename and rewire the former install phase.
-
-- **Rename** install→build across the tree: `PHASE_INSTALL`→`PHASE_BUILD`,
-  `install_phase`→`build_phase`, `install_one_vm`→`build_one_vm`,
-  `install_timeout_s`→`build_timeout_s`, `install_uplink`→`build_uplink`,
-  `_install_switch`→`_build_switch`, the `INSTALL_*` consts, and
-  `ctx.post_install_paths`→`ctx.built_disk_paths` (now a map to a per-role disk
-  set, not one path). The cache prefix becomes `_built_` (B0).
-- **Probe before infra (ADR-0010 §2):** resolve each base + compute each
-  `config_hash` + probe the full artifact set *first*. Collect misses. Only if
-  ≥1 miss, stand up the build pool/switch/sidecar; loop over only the missing
-  VMs.
-- **One ephemeral build pool (§9):** create a single dedicated build pool
-  (namespace, ADR-0008 §5) instead of the user's declared pools.
-- **Per-VM push, no sharing (§3, §6):** for each missing VM —
-  `upload_to_pool(os_disk_ref, base_path)` straight onto the VM's own OS disk
-  ref, then `resize_volume(os_disk_ref, os_drive.size_gb)`; for each
-  `HardDrive`, `create_blank_volume(data_disk_ref_n, size_gb)`. Render the seed
-  (`render_seed`) and `write_to_pool` it. `create_vm` with the OS disk + all
-  data disks + seed attached; `start_vm`; `wait_for_shutoff`.
-- **Capture every writable disk (§4):** `download_from_pool` the OS disk and
-  each data disk; `cache.add` each under its `_built_…__{os,dataN}` name; if an
-  HTTP tier is configured, `manager.push` each (§5).
-- **Delete everything (§3):** destroy the build VM + its disks + seed
-  immediately after capture; at phase end tear down the build sidecar, network,
-  switch, **and the build pool** (the former `teardown_install_phase`, extended
-  to include the pool).
-- Drop `ensure_base_in_pool` from the build path (still used by the run path +
-  sidecar until B3).
-
-**Done**: a mock-driver integration test runs `build_phase` on a plan with one
-data disk; asserts N+1 artifacts land in the cache, the build VM booted with all
-disks attached, and the backend (pool included) is empty afterward. A second
-`build_phase` is a full cache hit and creates **no** backend resources at all.
-
-### Phase B3 — Run phase (reshape) + remove the old primitive
-
-- **Run creates the user's pools (§9):** `run_phase` now creates `hyp.pools`
-  itself (build no longer leaves them behind).
-- **Push built disks per VM (§3):** for each VM, `upload_to_pool` each cached
-  built disk (OS + each data) onto the VM's own volume refs — no
-  `ensure_base_in_pool`, no clone. `create_vm` with `seed_iso_ref=None` and all
-  disks attached; `start_vm`.
-- **Sidecar materialization** (`materialize_sidecar_for`): push the Alpine base
-  straight onto the sidecar's disk ref via `upload_to_pool` (no clone). Sidecars
-  carry no data disks.
-- **Remove the dead primitives:** delete `create_disk_from_base` from the ABC +
-  all drivers, and delete `ensure_base_in_pool` from `provision.py`. No pool→pool
-  copy exists anymore; every disk arrives by host→pool upload.
-
-**Done**: `run_phase` brings the range up from a warm cache (OS + data disks
-present and attached); `create_disk_from_base` / `ensure_base_in_pool` are gone
-from the codebase; suite green. Mock integration test asserts data-disk content
-survives build→cache→run.
-
-### Phase B4 — Sidecar readiness gate
-
-- **All sidecars require a native guest agent (§8):** documented invariant; the
-  Alpine sidecar image already bakes `qemu-guest-agent`. The orchestrator drives
-  sidecars only through the driver's native guest channel — never by routing IP
-  traffic to them.
-- Add a readiness gate after `materialize_sidecar_for` in `run_phase`: a sidecar
-  is **ready** when its native guest agent answers **and** the orchestrator can
-  read back the config files it delivered (`dnsmasq.conf`, the leases path,
-  etc.). Block the phase on all sidecars being ready **before** starting any
-  user VM, so DHCP is being served before a guest can ask for a lease.
-- `discover_ip` keeps its lease-file poll but no longer has to absorb the
-  agent-not-up race as its primary job.
-
-**Done**: a mock integration test asserts the run phase waits for sidecar
-readiness (agent reachable + config readback) before the first user
-`create_vm`; a sidecar whose agent never answers fails loud with a clear error
-inside the readiness timeout.
-
-### Phase B5 — CLI split + auto-build
-
-- `testrange build <plan>`: run preflight + `build_phase` only; warm the cache
-  (local + HTTP if configured); run **no** tests; tear down build infra. Exit 0
-  on a fully-warmed cache.
-- `testrange run <plan>`: **auto-builds** any missing artifacts (it is
-  `build_phase` over only the missing VMs, then `run_phase`) so it works against
-  a cold cache, then runs tests. `--require-cache` makes a miss fail fast
-  (preflight-style) instead of building — for CI that wants build and run as
-  distinct, auditable invocations.
-- `Orchestrator` composes both phases; `build`/`run` are thin CLI entry points
-  over `build_phase` / (`build_phase`-on-miss + `run_phase`).
-- Keep the existing flags (`--leak-on-failure`, `--fail-fast`, `--log-level`)
-  wired to `run`.
-
-**Done**: `testrange build examples/<plan>.py` warms the cache and exits without
-creating run VMs; a subsequent `testrange run` is a pure warm-cache bring-up;
-`testrange run` against a cold cache auto-builds then runs; `testrange run
---require-cache` against a cold cache exits non-zero with a "build first"
-message. CLI unit tests cover all four paths.
-
-### Phase B6 — Docs, examples, cross-refs
-
-- `docs/dev/architecture.md`: replace the install/run narrative with build/run;
-  document the two CLI verbs and auto-build.
-- `docs/user/`: a build-vs-run guide; a data-disk example in
-  `writing-a-plan.md`.
-- `examples/`: one plan exercising a `HardDrive` populated during build (the
-  canonical "data disk seeded at build, served at run" shape).
-- Add an `extending/drivers.md` note on the new disk primitives
-  (`create_blank_volume`, `resize_volume`) and the removal of
-  `create_disk_from_base`.
-- Cross-reference: annotate ADR-0007 and ADR-0005 as extended by ADR-0010.
-
-**Done**: docs describe build/run as two phases/verbs; the data-disk example
-runs green end-to-end on the mock driver; no doc still references "install
-phase", `create_disk_from_base`, or `ensure_base_in_pool`.
+The detailed phase history is recoverable from git (the ADR commits plus the
+`wip(claude)` checkpoints). Forward-looking work lives in `TODO.md`.
 
 ### Deferred (named, not built)
 

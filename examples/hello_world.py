@@ -1,4 +1,4 @@
-"""hello_world: one libvirt VM, cloud-init bootstraps SSH + nginx, smoke-test it.
+"""hello_world: one VM, cloud-init bootstraps SSH + nginx, smoke-test it.
 
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \

@@ -76,8 +76,9 @@ all tests run sequentially and the runner continues on failure; pass
 
 ## What a communicator exposes
 
-Two are built in — `SSHCommunicator` and `QGACommunicator` (QEMU Guest
-Agent). Both implement the same four-method surface:
+Two are built in — `SSHCommunicator` and `NativeCommunicator` (the
+hypervisor's native guest agent). Both implement the same four-method
+surface:
 
 `execute(argv, *, timeout=60.0, cwd=None) -> ExecResult`
 : Run a command in the guest. `argv` is a list; no shell, no quoting
@@ -86,7 +87,8 @@ Agent). Both implement the same four-method surface:
   (`exit_code == 0`).
 
 `read_file(path) -> bytes`
-: Read a guest-side file (SFTP for SSH; `guest-file-*` for QGA).
+: Read a guest-side file (SFTP for SSH; the driver's native guest-file
+  channel for `NativeCommunicator`).
 
 `write_file(path, data)`
 : Write a guest-side file.
@@ -96,7 +98,7 @@ Agent). Both implement the same four-method surface:
   reconnects — useful after a driver-level reboot.
 
 `SSHCommunicator` additionally exposes `host: str | None` — the bound
-IP, set by the orchestrator during bring-up. `QGACommunicator` has no
+IP, set by the orchestrator during bring-up. `NativeCommunicator` has no
 address; it reaches the VM through the hypervisor's guest-agent
 channel. See [Writing a plan](writing-a-plan.md#communicators) for when
 to pick which.
@@ -117,7 +119,7 @@ def reboot_persists_then_revert(orch: OrchestratorHandle) -> None:
         # destructive work, ideally hermetic
         vm.communicator.execute(["touch", "/home/myuser/oops"])
     finally:
-        # libvirt requires the VM to be inactive before reverting a
+        # A backend may require the VM to be inactive before reverting a
         # disk-only snapshot. shutdown_vm() waits for power-off.
         driver.shutdown_vm(vm_be, timeout=60.0)
         driver.restore_snapshot(vm_be, "pre-test")
@@ -142,9 +144,9 @@ testrange run --leak-on-failure plan.py
 ```
 
 If any test fails, teardown is skipped. The CLI prints the `run_id`.
-SSH into the VMs at the discovered IPs to investigate (`virsh
-domifaddr <vm-backend-name>` if you don't remember the IP). When
-done, tear down:
+SSH into the VMs at the discovered IPs to investigate — the bound IP is
+logged during bring-up, and for DHCP NICs it is the sidecar lease the
+orchestrator read over the native guest agent. When done, tear down:
 
 ```sh
 testrange cleanup <run_id>

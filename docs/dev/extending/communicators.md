@@ -62,21 +62,21 @@ orchestrator dispatches by communicator type at run-phase bring-up.
    `SSHCommunicator._ensure_connected`). A shim over driver callables
    (`NativeCommunicator`) has nothing to connect — it just delegates.
 
-3. **Wire orchestrator dispatch.** In `Orchestrator._bind_communicators`
-   (`testrange/orchestrator/runtime.py`), add a branch to the
+3. **Wire orchestrator dispatch.** In `bind_communicators`
+   (`testrange/orchestrator/run_phase.py`), add a branch to the
    `isinstance` ladder:
 
    ```python
    elif isinstance(comm, WinRMCommunicator):
-       ip = self._discover_ip(vm)
-       cred = self._lookup_credential(vm)
+       ip = discover_ip(ctx, vm)
+       cred = lookup_credential(vm)
        comm.bind(host=ip, credential=cred)
    ```
 
-   The orchestrator already has the driver, the VM's backend name
-   (`driver.compose_resource_name(self.run_id, "vm", vm.name)`), and
-   the discovered IP available at bind time. It is the only broker —
-   the communicator never reaches into the driver itself.
+   The `RunContext` already carries the driver, and the VM's backend name
+   (`ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)`) and the
+   discovered IP are available at bind time. The orchestrator is the only
+   broker — the communicator never reaches into the driver itself.
 
 4. **Native-agent communicators: use `testrange.guest_io`.** If your
    transport rides a hypervisor's native in-guest agent rather than the
