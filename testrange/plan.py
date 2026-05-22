@@ -7,7 +7,7 @@ doesn't change the public call shape.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -15,8 +15,11 @@ from typing import Any
 class Plan:
     """The top-level declaration: one or more Hypervisor entries."""
 
-    hypervisors: tuple[Any, ...] = field(default_factory=tuple)
-    name: str = ""
+    # No field defaults: the hand-written __init__ below owns construction
+    # (it requires at least one hypervisor and a non-empty name). These
+    # declarations exist only to drive the frozen dataclass's __eq__/__repr__.
+    hypervisors: tuple[Any, ...]
+    name: str
 
     def __init__(self, *hypervisors: Any, name: str = "") -> None:
         if len(hypervisors) == 0:
