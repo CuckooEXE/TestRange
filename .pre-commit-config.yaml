@@ -25,11 +25,13 @@ repos:
       - id: gitleaks
 
   # --- project-local checks: run in the project venv (real deps + stubs) ---
+  # Pinned to the venv interpreters so `git commit` from a shell where
+  # `.venv` isn't activated still resolves the real deps + stubs (CI-3).
   - repo: local
     hooks:
       - id: mypy
         name: mypy (strict)
-        entry: mypy
+        entry: .venv/bin/mypy
         language: system
         types: [python]
         pass_filenames: false
@@ -37,7 +39,7 @@ repos:
 
       - id: pytest
         name: pytest (not proxmox)
-        entry: pytest -m "not proxmox"
+        entry: .venv/bin/pytest -m "not proxmox"
         language: system
         types: [python]
         pass_filenames: false
