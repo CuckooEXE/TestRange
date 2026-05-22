@@ -2,7 +2,7 @@
 
 Public surface: the ``HypervisorDriver`` ABC plus one concrete driver per
 supported hypervisor. Each driver module also exposes a Plan-time
-hypervisor data type (e.g., ``LibvirtHypervisor``) used as the top-level
+hypervisor data type (e.g., ``MockHypervisor``) used as the top-level
 entry of a ``Plan``.
 
 Driver modules are imported here so they register themselves with the
@@ -13,7 +13,7 @@ below.
 from __future__ import annotations
 
 # Side-effect imports: each driver module calls register() at module scope.
-from testrange.drivers import libvirt as _libvirt  # noqa: F401
+from testrange.drivers import mock as _mock  # noqa: F401
 from testrange.drivers._registry import driver_for, driver_for_name, register
 from testrange.drivers.base import HypervisorDriver
 

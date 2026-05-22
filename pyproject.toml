@@ -15,10 +15,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-libvirt = ["libvirt-python>=10", "pyroute2>=0.7"]
 ssh = ["paramiko>=3"]
 cloudinit = ["pycdlib>=1.14", "pyyaml>=6"]
 http = ["requests>=2.31"]
+# proxmoxer's `https` backend rides on requests; the driver opens its own
+# paramiko SFTP channel for download_from_pool (PVE has no REST byte-download).
+proxmox = ["proxmoxer>=2", "requests>=2.31", "paramiko>=3"]
 docs = [
     "sphinx>=8",
     "furo>=2024.8",
@@ -37,10 +39,10 @@ dev = [
     "pyyaml>=6",
     "paramiko>=3",
     "requests>=2.31",
-    "pyroute2>=0.7",
+    "proxmoxer>=2",
 ]
 all = [
-    "testrange[libvirt,ssh,cloudinit,http]",
+    "testrange[ssh,cloudinit,http,proxmox]",
 ]
 
 [project.scripts]
@@ -88,12 +90,12 @@ warn_unused_configs = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["libvirt", "libvirt.*", "libvirt_qemu", "pycdlib", "pycdlib.*", "pyroute2", "pyroute2.*"]
+module = ["pycdlib", "pycdlib.*", "proxmoxer", "proxmoxer.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "libvirt: requires a working libvirt + KVM setup; skipped otherwise",
-]
 addopts = "-ra"
+markers = [
+    "proxmox: integration tests against a live Proxmox VE host (needs TESTRANGE_PVE_HOST)",
+]

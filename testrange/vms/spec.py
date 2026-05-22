@@ -28,8 +28,8 @@ class VMSpec:
     devices: tuple[Device, ...] = field(default_factory=tuple)
 
     def __init__(self, *, name: str, devices: Sequence[Device]) -> None:
-        # Backend-agnostic check only; libvirt-specific charset rules are
-        # enforced at the LibvirtHypervisor boundary.
+        # Backend-agnostic check only; name-charset rules are enforced at the
+        # Hypervisor boundary (validate_hypervisor_plan) and per-driver.
         if not name:
             raise ValueError("VMSpec.name must be a non-empty string")
         devs = tuple(devices)

@@ -10,8 +10,7 @@ preflight validates that.
 from __future__ import annotations
 
 from testrange.devices import CPU, Memory, OSDrive
-from testrange.devices.network import DHCPAddr, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks.base import Network, Switch
 from testrange.networks.sidecar import sidecar_nic_specs
 from testrange.vms.spec import VMSpec
@@ -53,7 +52,7 @@ def _sidecar_spec(switch: Switch, pool_name: str) -> VMSpec:
     # eth0 is the static sidecar address; eth1 (uplink, when nat) DHCPs from
     # the upstream LAN — both are run-phase address modes now.
     nics = [
-        LibvirtNetworkIface(name, addr=StaticAddr(ip) if ip is not None else DHCPAddr())
+        NetworkIface(name, addr=StaticAddr(ip) if ip is not None else DHCPAddr())
         for (name, ip) in nic_specs
     ]
     return VMSpec(

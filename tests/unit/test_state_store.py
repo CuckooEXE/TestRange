@@ -58,7 +58,7 @@ class TestStateStore:
         s = store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         assert s.run_id == "r1"
@@ -72,14 +72,14 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         with pytest.raises(StateError):
             store.initialize(
                 run_id="r1",
                 plan_name="hello",
-                driver_class="LibvirtDriver",
+                driver_class="MockDriver",
                 driver_uri="qemu:///session",
             )
 
@@ -88,7 +88,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         store.record_intent(kind="network", backend_name="tr_a_b", plan_name="netA")
@@ -104,7 +104,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         with pytest.raises(StateError):
@@ -115,7 +115,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         store.record_intent(kind="pool", backend_name="bn", plan_name="pool1")
@@ -127,7 +127,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///system",
         )
         # No torn-write residue, and the written state.json is well-formed.
@@ -141,7 +141,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         with pytest.raises(StateLockedError):
@@ -152,7 +152,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         # Simulate the owner exiting
@@ -164,7 +164,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///system",
         )
         store.set_phase(PHASE_DONE)
@@ -175,7 +175,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         store.remove()

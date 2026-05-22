@@ -6,7 +6,7 @@ from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.cache.entry import CacheEntry
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.devices.network import NetworkIface
 from testrange.networks import Network, Switch
 from testrange.networks.sidecar import (
     SIDECAR_SWITCH_NIC,
@@ -22,7 +22,7 @@ from testrange.vms.recipe import VMRecipe
 from testrange.vms.spec import VMSpec
 
 
-def _vm(name: str, *nics: LibvirtNetworkIface) -> VMRecipe:
+def _vm(name: str, *nics: NetworkIface) -> VMRecipe:
     return VMRecipe(
         spec=VMSpec(
             name=name,
@@ -95,19 +95,19 @@ class TestRenderDnsmasqConf:
 
     def test_static_nic_gets_host_record(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", dns=True)
-        vms = [_vm("v1", LibvirtNetworkIface("a", addr=StaticAddr("10.0.0.100")))]
+        vms = [_vm("v1", NetworkIface("a", addr=StaticAddr("10.0.0.100")))]
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "host-record=v1.a,10.0.0.100" in conf
 
     def test_dhcp_nic_gets_dhcp_host(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", dhcp=True)
-        vms = [_vm("v1", LibvirtNetworkIface("a", addr=DHCPAddr()))]
+        vms = [_vm("v1", NetworkIface("a", addr=DHCPAddr()))]
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "dhcp-host=52:54:00:aa:bb:00,v1" in conf
 
     def test_ignores_nics_on_other_switches(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", dns=True)
-        vms = [_vm("v1", LibvirtNetworkIface("b", addr=StaticAddr("10.0.0.50")))]
+        vms = [_vm("v1", NetworkIface("b", addr=StaticAddr("10.0.0.50")))]
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "host-record" not in conf
 

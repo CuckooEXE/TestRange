@@ -14,7 +14,6 @@ from testrange.devices import (
     StaticAddr,
     StoragePool,
 )
-from testrange.devices.network.libvirt import LibvirtNetworkIface
 
 
 class TestCPU:
@@ -59,27 +58,22 @@ class TestDisks:
 
 
 class TestNICs:
-    def test_libvirt_iface(self) -> None:
-        n = LibvirtNetworkIface("netA")
+    def test_iface_defaults(self) -> None:
+        n = NetworkIface("netA")
         assert n.network == "netA"
-        assert n.driver == "virtio"
         assert n.addr is None  # default: unconfigured, not DHCP
         assert isinstance(n, NetworkIface)
 
-    def test_libvirt_iface_with_driver(self) -> None:
-        n = LibvirtNetworkIface("netA", driver="e1000")
-        assert n.driver == "e1000"
-
     def test_invalid_network(self) -> None:
         with pytest.raises(ValueError):
-            LibvirtNetworkIface("")
+            NetworkIface("")
 
     def test_dhcp_addr(self) -> None:
-        n = LibvirtNetworkIface("netA", addr=DHCPAddr())
+        n = NetworkIface("netA", addr=DHCPAddr())
         assert n.addr == DHCPAddr()
 
     def test_static_addr(self) -> None:
-        n = LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50"))
+        n = NetworkIface("netA", addr=StaticAddr("172.31.0.50"))
         assert n.addr == StaticAddr("172.31.0.50")
 
     def test_static_addr_base(self) -> None:

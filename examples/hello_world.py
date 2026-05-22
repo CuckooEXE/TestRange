@@ -27,9 +27,8 @@ from testrange.devices import (
     OSDrive,
     StoragePool,
 )
-from testrange.devices.network import StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.devices.network import NetworkIface, StaticAddr
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
@@ -40,8 +39,7 @@ UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
+    MockHypervisor(
         install_uplink=UPLINK,
         networks=[
             Switch(
@@ -50,7 +48,7 @@ PLAN = Plan(
                 Network("netB"),
                 cidr="172.31.0.0/24",
                 uplink=UPLINK,
-                mgmt=True,
+                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
                 dhcp=True,
                 dns=True,
                 nat=True,
@@ -65,8 +63,8 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface(
-                            "netA", driver="virtio", addr=StaticAddr("172.31.0.150")
+                        NetworkIface(
+                            "netA", addr=StaticAddr("172.31.0.150")
                         ),
                     ],
                 ),

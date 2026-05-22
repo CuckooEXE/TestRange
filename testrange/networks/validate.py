@@ -14,9 +14,11 @@ sidecar's dnsmasq config can never drift apart.
 from __future__ import annotations
 
 import ipaddress
+import re
 from collections.abc import Iterable
 
 from testrange.devices.network import StaticAddr
+from testrange.devices.pool.base import StoragePool
 from testrange.networks._addressing_consts import (
     DHCP_RANGE_HI,
     DHCP_RANGE_LO,
@@ -25,6 +27,93 @@ from testrange.networks._addressing_consts import (
 )
 from testrange.networks.base import Switch
 from testrange.vms.recipe import VMRecipe
+
+# Names flow verbatim into the sidecar's dnsmasq.conf (host-record/dhcp-host/
+# domain lines) where `, = # \n` would break or inject a directive, and into
+# each backend's resource layer. The shared rule allows a DNS-label-safe set
+# (`[A-Za-z0-9_.-]`, starting with a letter/digit/underscore); a backend with
+# stricter limits (Proxmox vnet length, libvirt XML) layers its own check on
+# top at its own boundary. A leading `_` is allowed for value objects, but the
+# `__` prefix is reserved against *user* names (orchestrator internals use it).
+_SAFE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+
+
+def validate_name(value: str, kind: str) -> str:
+    """Return ``value`` unchanged, or raise ``ValueError`` if unsafe.
+
+    ``kind`` names the field for the error message (e.g. ``"Network.name"``).
+    """
+    if not value:
+        raise ValueError(f"{kind} must be a non-empty string")
+    if not _SAFE_NAME.fullmatch(value):
+        raise ValueError(
+            f"{kind} {value!r} has illegal characters: allowed are letters, digits, "
+            "'_', '.', '-', starting with a letter, digit, or underscore. These names "
+            "are interpolated into dnsmasq.conf and backend resource identifiers."
+        )
+    return value
+
+
+def validate_hypervisor_plan(
+    networks: Iterable[Switch],
+    pools: Iterable[StoragePool],
+    vms: Iterable[VMRecipe],
+) -> None:
+    """Backend-agnostic plan validation a Hypervisor runs at construction.
+
+    Checks structural coherence (every VM NIC/OSDrive references a declared
+    network/pool), uniqueness (no duplicate VM or network names), name safety
+    (:func:`validate_name`), the reserved ``__`` prefix, and then per-NIC
+    addressing via :func:`validate_addressing`. Raises ``ValueError`` on the
+    first structural problem; addressing problems are accumulated together.
+    """
+    switches = tuple(networks)
+    ps = tuple(pools)
+    rs = tuple(vms)
+
+    net_names = {n.name for s in switches for n in s.networks}
+    pool_names = {p.name for p in ps}
+    all_nets = [n.name for s in switches for n in s.networks]
+    vm_names = [r.name for r in rs]
+
+    dup_vms = {n for n in vm_names if vm_names.count(n) > 1}
+    if dup_vms:
+        raise ValueError(f"hypervisor vms have duplicate names: {sorted(dup_vms)}")
+    dup_nets = {n for n in all_nets if all_nets.count(n) > 1}
+    if dup_nets:
+        raise ValueError(f"hypervisor networks have duplicate names: {sorted(dup_nets)}")
+
+    for s in switches:
+        validate_name(s.name, "Switch.name")
+    for n in all_nets:
+        validate_name(n, "Network.name")
+    for r in rs:
+        validate_name(r.name, "VMSpec.name")
+
+    # The orchestrator synthesizes internal switches/networks/VMs under a `__`
+    # prefix (__install, __uplink__<sw>, __sidecar_<sw>); reserve it.
+    reserved = sorted(
+        {n for n in (*(s.name for s in switches), *all_nets, *vm_names) if n.startswith("__")}
+    )
+    if reserved:
+        raise ValueError(
+            f"names starting with '__' are reserved for testrange internals; rename: {reserved}"
+        )
+
+    for r in rs:
+        for nic in r.spec.nics:
+            if nic.network not in net_names:
+                raise ValueError(
+                    f"VM {r.name!r} references unknown network {nic.network!r}; "
+                    f"declared networks: {sorted(net_names)}"
+                )
+        if r.spec.os_drive.pool not in pool_names:
+            raise ValueError(
+                f"VM {r.name!r} OSDrive references unknown pool {r.spec.os_drive.pool!r}; "
+                f"declared pools: {sorted(pool_names)}"
+            )
+
+    validate_addressing(switches, rs)
 
 
 def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> None:
@@ -113,4 +202,4 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
         raise ValueError(f"plan has {len(problems)} addressing problem(s):\n  - {joined}")
 
 
-__all__ = ["validate_addressing"]
+__all__ = ["validate_addressing", "validate_hypervisor_plan", "validate_name"]

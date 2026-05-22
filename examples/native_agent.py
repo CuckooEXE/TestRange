@@ -19,11 +19,10 @@ import sys
 from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
-from testrange.communicators import QGACommunicator
+from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
-from testrange.devices.network import DHCPAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.devices.network import DHCPAddr, NetworkIface
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
@@ -31,8 +30,7 @@ from testrange.vms import VMRecipe, VMSpec
 UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
+    MockHypervisor(
         install_uplink=UPLINK,
         networks=[
             Switch(
@@ -54,7 +52,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", driver="virtio", addr=DHCPAddr()),
+                        NetworkIface("netA", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -62,7 +60,7 @@ PLAN = Plan(
                     packages=[Apt("nginx"), Apt("qemu-guest-agent")],
                     post_install_commands=("systemctl enable --now qemu-guest-agent",),
                 ),
-                communicator=QGACommunicator(),
+                communicator=NativeCommunicator(),
             ),
         ],
     ),

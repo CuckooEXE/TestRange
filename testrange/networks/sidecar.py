@@ -13,7 +13,7 @@ on it) into the four text files the sidecar's config ISO carries:
 
 …and parses the lease file back.
 
-Nothing here touches libvirt or runs anything. MAC computation is the
+Nothing here touches the hypervisor or runs anything. MAC computation is the
 driver's job (``compose_mac``); :func:`render_dnsmasq_conf` takes a
 ``mac_for`` callable the orchestrator injects, so this module never
 reaches into the driver stovepipe.
@@ -152,9 +152,9 @@ def render_dnsmasq_conf(
         for net in switch.networks:
             lines.append(f"domain={net.name},{switch.cidr}")
 
-    # VM and network names are interpolated raw below; they are safe because
-    # validate_name (testrange._names) rejects `, = # \n` and XML metachars at
-    # the LibvirtHypervisor boundary, so they can't break a dnsmasq directive.
+    # VM and network names are interpolated raw below. Each driver enforces
+    # its own name-charset rules at its boundary (dnsmasq-directive metachars
+    # like `, = # \n` must be rejected there) so they can't break a directive.
     for vm in vms:
         for idx, nic in enumerate(vm.spec.nics):
             if nic.network not in networks_on_switch:

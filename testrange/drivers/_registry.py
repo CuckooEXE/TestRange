@@ -3,13 +3,13 @@
 Concrete drivers register themselves at module import time. The orchestrator
 and cleanup paths look up drivers by either:
 
-- the user-facing Hypervisor data type from the Plan (``LibvirtHypervisor``
-  -> ``LibvirtDriver``), or
-- the driver class name recorded in state.json (``"LibvirtDriver"``).
+- the user-facing Hypervisor data type from the Plan (``MockHypervisor``
+  -> ``MockDriver``), or
+- the driver class name recorded in state.json (``"MockDriver"``).
 
 This is the only place where Hypervisor-type or driver-name dispatch lives;
-no other module should know that ``LibvirtHypervisor`` maps to
-``LibvirtDriver``.
+no other module should know that, e.g., ``MockHypervisor`` maps to
+``MockDriver``.
 """
 
 from __future__ import annotations

@@ -13,8 +13,8 @@ from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StoragePool
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.devices.network import NetworkIface
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Switch
 from testrange.orchestrator import Orchestrator, run_tests
 from testrange.vms import VMRecipe, VMSpec
@@ -60,8 +60,7 @@ def setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CacheManager:
 
 def _plan() -> Plan:
     return Plan(
-        LibvirtHypervisor(
-            connection="qemu:///session",
+        MockHypervisor(
             networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -72,7 +71,7 @@ def _plan() -> Plan:
                             CPU(1),
                             Memory(512),
                             OSDrive("pool1", 8),
-                            LibvirtNetworkIface("netA", addr=DHCPAddr()),
+                            NetworkIface("netA", addr=DHCPAddr()),
                         ],
                     ),
                     builder=CloudInitBuilder(
@@ -88,9 +87,9 @@ def _plan() -> Plan:
 
 
 def _install_fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    from tests.unit.test_orchestrator import _FakeDriver
+    from testrange.drivers.mock import MockDriver
 
-    driver = _FakeDriver(pool_root=tmp_path / "pools")
+    driver = MockDriver(pool_root=tmp_path / "pools")
     monkeypatch.setattr(Orchestrator, "_build_driver", lambda self: driver)
     return driver
 

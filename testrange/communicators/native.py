@@ -1,4 +1,4 @@
-"""QGACommunicator — guest I/O through a hypervisor's native guest agent."""
+"""NativeCommunicator — guest I/O through a hypervisor's native guest agent."""
 
 from __future__ import annotations
 
@@ -16,13 +16,16 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
 
 
-class QGACommunicator(Communicator):
-    """Communicator backed by a hypervisor's native guest agent.
+class NativeCommunicator(Communicator):
+    """Communicator backed by a hypervisor's native in-guest agent.
 
-    Constructed with no Plan-time arguments — the agent's identity is the
-    VM itself. At run-phase bring-up the orchestrator binds it with three
-    VM-bound callables pulled from the driver; this class is a thin shim
-    that delegates to them and never sees a driver type.
+    Backend-agnostic by design: it fronts whatever native agent the driver
+    exposes — QEMU Guest Agent (libvirt, Proxmox), VMware Tools guest-ops,
+    Hyper-V integration / PowerShell Direct. Constructed with no Plan-time
+    arguments — the agent's identity is the VM itself. At run-phase bring-up
+    the orchestrator binds it with three VM-bound callables pulled from the
+    driver; this class is a thin shim that delegates to them and never sees a
+    driver type or backend wire protocol.
     """
 
     def __init__(self) -> None:
@@ -48,11 +51,11 @@ class QGACommunicator(Communicator):
         """Bind to a live VM's guest agent. Called by the orchestrator."""
         if self._closed:
             raise CommunicatorClosedError(
-                "QGACommunicator has been closed; construct a fresh instance per VM"
+                "NativeCommunicator has been closed; construct a fresh instance per VM"
             )
         if self._execute is not None:
             raise CommunicatorAlreadyBoundError(
-                "QGACommunicator already bound; construct a fresh instance per VM"
+                "NativeCommunicator already bound; construct a fresh instance per VM"
             )
         self._execute = execute
         self._read_file = read_file
@@ -83,11 +86,11 @@ class QGACommunicator(Communicator):
         """Raise the right error for a closed or never-bound communicator."""
         if self._closed:
             raise CommunicatorClosedError(
-                "QGACommunicator has been closed; construct a fresh instance per VM"
+                "NativeCommunicator has been closed; construct a fresh instance per VM"
             )
         if self._execute is None:
             raise CommunicatorError(
-                "QGACommunicator is not bound; the orchestrator must call .bind() first"
+                "NativeCommunicator is not bound; the orchestrator must call .bind() first"
             )
 
     def close(self) -> None:

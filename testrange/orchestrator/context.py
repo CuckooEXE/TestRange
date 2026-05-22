@@ -46,8 +46,7 @@ class RunContext:
     # Resource ledger — written during bring-up, read at teardown.
     pool_backends: dict[str, str] = field(default_factory=dict)  # plan_name -> backend
     network_backends: dict[str, str] = field(default_factory=dict)  # plan_name -> backend
-    switch_bridge: dict[str, str] = field(default_factory=dict)  # switch -> iso/switch bridge
-    switch_uplink_bridge: dict[str, str] = field(default_factory=dict)  # switch -> uplink bridge
+    switch_backends: dict[str, str] = field(default_factory=dict)  # switch -> switch backend
     sidecar_backends: dict[str, str] = field(default_factory=dict)  # switch -> sidecar VM backend
     post_install_paths: dict[str, Path] = field(default_factory=dict)  # vm -> cached disk path
     uploaded_bases: set[tuple[str, str]] = field(default_factory=set)  # (pool_backend, vol_name)

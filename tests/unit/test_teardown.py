@@ -39,7 +39,7 @@ def _ctx(store: StateStore, driver: _FakeDriver) -> RunContext:
 
 def _store_with_resources(tmp_path: Path) -> StateStore:
     store = StateStore(tmp_path / "run")
-    store.initialize(run_id="r1", plan_name="p", driver_class="LibvirtDriver", driver_uri="x")
+    store.initialize(run_id="r1", plan_name="p", driver_class="MockDriver", driver_uri="x")
     store.record_intent(kind="vm", backend_name="tr_vm_a")
     store.record_intent(kind="network", backend_name="tr_net_a")
     return store

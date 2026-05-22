@@ -1,4 +1,4 @@
-"""QGACommunicator — thin shim that delegates to driver-supplied callables."""
+"""NativeCommunicator — thin shim that delegates to driver-supplied callables."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from testrange.communicators import QGACommunicator
+from testrange.communicators import NativeCommunicator
 from testrange.exceptions import (
     CommunicatorAlreadyBoundError,
     CommunicatorClosedError,
@@ -35,16 +35,16 @@ class _Recorder:
         self.write_calls.append((path, data))
 
 
-def _bound() -> tuple[QGACommunicator, _Recorder]:
+def _bound() -> tuple[NativeCommunicator, _Recorder]:
     rec = _Recorder()
-    c = QGACommunicator()
+    c = NativeCommunicator()
     c.bind(execute=rec.execute, read_file=rec.read_file, write_file=rec.write_file)
     return c, rec
 
 
 class TestBind:
     def test_unbound_by_default(self) -> None:
-        assert QGACommunicator().is_bound is False
+        assert NativeCommunicator().is_bound is False
 
     def test_bind_marks_bound(self) -> None:
         c, _ = _bound()
@@ -82,15 +82,15 @@ class TestDelegation:
 class TestNotBound:
     def test_execute_unbound_raises(self) -> None:
         with pytest.raises(CommunicatorError, match="not bound"):
-            QGACommunicator().execute(["echo"])
+            NativeCommunicator().execute(["echo"])
 
     def test_read_file_unbound_raises(self) -> None:
         with pytest.raises(CommunicatorError, match="not bound"):
-            QGACommunicator().read_file("/x")
+            NativeCommunicator().read_file("/x")
 
     def test_write_file_unbound_raises(self) -> None:
         with pytest.raises(CommunicatorError, match="not bound"):
-            QGACommunicator().write_file("/x", b"y")
+            NativeCommunicator().write_file("/x", b"y")
 
 
 class TestClose:

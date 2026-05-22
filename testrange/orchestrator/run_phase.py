@@ -12,7 +12,7 @@ import time
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
-from testrange.communicators.qga import QGACommunicator
+from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
 from testrange.devices.network import StaticAddr
@@ -87,14 +87,14 @@ def bind_communicators(ctx: RunContext) -> None:
             cred = lookup_credential(vm)
             comm.bind(host=ip, credential=cred)
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
-        elif isinstance(comm, QGACommunicator):
+        elif isinstance(comm, NativeCommunicator):
             backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
             comm.bind(
                 execute=ctx.driver.native_guest_execute(backend),
                 read_file=ctx.driver.native_guest_read_file(backend),
                 write_file=ctx.driver.native_guest_write_file(backend),
             )
-            _log.info("vm %s: bound QGACommunicator via %s", vm.name, backend)
+            _log.info("vm %s: bound NativeCommunicator via %s", vm.name, backend)
         else:
             _log.debug(
                 "vm %s: communicator %s not bindable; skipping",
@@ -131,9 +131,10 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
     :class:`StaticAddr`: return the declared host address directly — the
     staged run-phase netplan applies it on the first run-phase boot.
 
-    :class:`DHCPAddr`: the per-Switch sidecar — not libvirt — serves DHCP, so
-    the lease lives in the sidecar's dnsmasq lease file. Poll that file over
-    QGA for the lease keyed on the stable MAC derived from
+    :class:`DHCPAddr`: the per-Switch sidecar — not the hypervisor — serves
+    DHCP, so the lease lives in the sidecar's dnsmasq lease file. Poll that file
+    over the native guest agent for the lease keyed on the stable MAC derived
+    from
     ``(plan_name, vm_name, nic_idx)`` until ``lease_timeout_s`` elapses. The
     orchestrator brokers: it combines the driver's guest-file read transport
     with the sidecar's lease-file path and parser.

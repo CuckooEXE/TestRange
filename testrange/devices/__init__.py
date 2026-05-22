@@ -1,8 +1,8 @@
 """Device types attached to a VMSpec.
 
 Each device kind lives in its own subpackage. Generic device shapes are
-exported here; driver-specific variants (e.g., ``LibvirtNetworkIface``) live
-under their driver-named submodule and are imported directly from there.
+exported here; any driver-specific variant lives under its driver-named
+submodule and is imported directly from there.
 """
 
 from __future__ import annotations

@@ -20,6 +20,8 @@ _ABSTRACT_METHODS = (
     "compose_resource_name",
     "compose_mac",
     "compose_volume_ref",
+    "create_switch",
+    "destroy_switch",
     "create_network",
     "destroy_network",
     "create_pool",
@@ -92,21 +94,21 @@ class TestDestroyDispatcher:
         attrs["destroy_network"] = _record("destroy_network")
         attrs["destroy_pool"] = _record("destroy_pool")
         attrs["destroy_vm"] = _record("destroy_vm")
-        attrs["destroy_bridge"] = _record("destroy_bridge")
+        attrs["destroy_switch"] = _record("destroy_switch")
         attrs["delete_volume"] = _record("delete_volume")
         attrs["compose_volume_ref"] = lambda self, p, v: f"{p}/{v}"
         cls = type("_RecDriver", (HypervisorDriver,), attrs)
         return cls(), calls
 
-    def test_install_bridge_dispatches_to_destroy_bridge(self) -> None:
+    def test_install_switch_dispatches_to_destroy_switch(self) -> None:
         d, calls = self._driver_recording()
-        d.destroy("install_bridge", "tr-abc1234567")
-        assert calls == [("destroy_bridge", "tr-abc1234567")]
+        d.destroy("install_switch", "tr_switch_install")
+        assert calls == [("destroy_switch", "tr_switch_install")]
 
-    def test_bridge_dispatches_to_destroy_bridge(self) -> None:
+    def test_switch_dispatches_to_destroy_switch(self) -> None:
         d, calls = self._driver_recording()
-        d.destroy("bridge", "tr-deadbeef01")
-        assert calls == [("destroy_bridge", "tr-deadbeef01")]
+        d.destroy("switch", "tr_switch_sw1")
+        assert calls == [("destroy_switch", "tr_switch_sw1")]
 
     def test_install_network_dispatches_to_destroy_network(self) -> None:
         d, calls = self._driver_recording()

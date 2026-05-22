@@ -13,15 +13,10 @@ materialized at ``.1`` of the Switch's subnet. ``mgmt=True`` puts a
 host adapter at ``.2``. ``uplink="<nic>"`` asks the driver to bridge
 the Switch to a physical NIC.
 
-``uplink`` is a physical NIC name on the hypervisor host; what the driver
-does with it is backend-specific:
-
-    ========  ==========================================================
-    Driver    ``uplink`` semantics
-    ========  ==========================================================
-    libvirt   create a host bridge and enslave the NIC via pyroute2
-    ESXi      the NIC is a ``vmnic`` attached to a vSwitch (planned)
-    ========  ==========================================================
+``uplink`` is a physical NIC name on the hypervisor host; the driver owns
+what it does with it (host bridge + NIC enslavement for libvirt, a ``vmnic``
+on a vSwitch for ESXi, a vmbr port for Proxmox, an External VMSwitch for
+Hyper-V). The orchestrator never realizes L2 itself.
 """
 
 from __future__ import annotations
@@ -49,8 +44,8 @@ class Network:
 
     def __post_init__(self) -> None:
         # Only the backend-agnostic check here: a name must be non-empty.
-        # Charset rules (dnsmasq/XML safety) are libvirt-specific and live at
-        # the LibvirtHypervisor boundary, so other backends can set their own.
+        # Backend charset rules (dnsmasq/XML/vnet-length safety) are the
+        # driver's concern and live at each driver's boundary.
         if not self.name:
             raise ValueError("Network.name must be a non-empty string")
 
@@ -102,10 +97,10 @@ class Switch:
     - ``cidr`` — the IPv4 subnet for every Network on this Switch.
       Strict network form (``192.168.10.0/24``); host-form raises.
     - ``uplink`` — physical NIC on the hypervisor host. When set, the
-      driver bridges the Switch to that NIC. Without ``nat``, guests
+      driver attaches the Switch to that NIC. Without ``nat``, guests
       egress with their own MACs and IPs (pure L2 to the LAN). With
-      ``nat``, the bridge stays isolated and the sidecar MASQUERADEs
-      out a second NIC on a separate uplink bridge.
+      ``nat``, the guest segment stays isolated and the sidecar
+      MASQUERADEs out a second NIC on a driver-provided uplink segment.
     - ``mgmt`` — host adapter at ``.2`` on the Switch's subnet. Just an
       adapter — no NAT, no forwarding, no router semantics.
     - ``dns`` — sidecar serves DNS at ``.1`` (one ``<vmname>.<networkname>``
@@ -185,15 +180,3 @@ class Switch:
     def needs_sidecar(self) -> bool:
         """Whether this Switch requires a sidecar VM (DHCP, DNS, or NAT)."""
         return self.dhcp or self.dns or self.nat
-
-    @property
-    def needs_bridge(self) -> bool:
-        """Whether the driver must create a testrange-managed host bridge.
-
-        True whenever the driver has to assign IPs or shape topology that
-        libvirt's own bridge management cannot reach: any uplink (NIC
-        enslavement), or ``mgmt`` (host IP on the bridge — libvirt's
-        ``<ip>`` element doesn't compose with bridge-mode forwards, so the
-        driver owns the bridge in either case for uniformity).
-        """
-        return self.uplink is not None or self.mgmt

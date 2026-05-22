@@ -11,7 +11,7 @@ from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.cache.entry import CacheEntry
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.devices.network import NetworkIface
 from testrange.networks import Network, NetworkAddressing, Switch
 from testrange.networks.validate import validate_addressing
 from testrange.vms.recipe import VMRecipe
@@ -29,7 +29,7 @@ class TestNetwork:
 
     def test_charset_not_policed_at_value_object(self) -> None:
         # Network is backend-agnostic: it only checks non-empty. The
-        # libvirt-specific charset rule is enforced at LibvirtHypervisor
+        # libvirt-specific charset rule is enforced at MockHypervisor
         # (see tests/unit/test_plan.py), so a comma is fine here.
         assert Network("net,a").name == "net,a"
 
@@ -84,12 +84,6 @@ class TestSwitch:
         assert Switch("s", Network("a"), dns=True).needs_sidecar is True
         assert Switch("s", Network("a"), nat=True, uplink="eth0").needs_sidecar is True
 
-    def test_needs_bridge_flags(self) -> None:
-        assert Switch("s", Network("a")).needs_bridge is False
-        assert Switch("s", Network("a"), mgmt=True).needs_bridge is True
-        assert Switch("s", Network("a"), uplink="eth0").needs_bridge is True
-        assert Switch("s", Network("a"), dhcp=True).needs_bridge is False
-
     def test_empty_name(self) -> None:
         with pytest.raises(ValueError):
             Switch("", Network("a"))
@@ -126,7 +120,7 @@ class TestNetworkAddressing:
             addr.cidr = "10.0.0.0/24"  # type: ignore[misc]
 
 
-def _vm(name: str, *nics: LibvirtNetworkIface) -> VMRecipe:
+def _vm(name: str, *nics: NetworkIface) -> VMRecipe:
     return VMRecipe(
         spec=VMSpec(
             name=name,
@@ -140,66 +134,66 @@ def _vm(name: str, *nics: LibvirtNetworkIface) -> VMRecipe:
 class TestValidateAddressing:
     def test_dhcp_clean(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", dhcp=True)
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=DHCPAddr()))]
+        vms = [_vm("v1", NetworkIface("netA", addr=DHCPAddr()))]
         validate_addressing([sw], vms)
 
     def test_static_clean(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.100")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100")))]
         validate_addressing([sw], vms)
 
     def test_ipv4_out_of_cidr(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("10.0.0.5")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("10.0.0.5")))]
         with pytest.raises(ValueError, match="not in subnet"):
             validate_addressing([sw], vms)
 
     def test_ipv4_is_network_address(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.0")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.0")))]
         with pytest.raises(ValueError, match="network address"):
             validate_addressing([sw], vms)
 
     def test_ipv4_is_broadcast(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.255")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.255")))]
         with pytest.raises(ValueError, match="broadcast"):
             validate_addressing([sw], vms)
 
     def test_ipv4_collides_with_sidecar(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", dhcp=True)
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.1")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.1")))]
         with pytest.raises(ValueError, match="sidecar"):
             validate_addressing([sw], vms)
 
     def test_ipv4_collides_with_mgmt(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", mgmt=True)
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.2")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.2")))]
         with pytest.raises(ValueError, match="mgmt"):
             validate_addressing([sw], vms)
 
     def test_ipv4_in_dhcp_pool(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", dhcp=True)
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
         with pytest.raises(ValueError, match="DHCP pool"):
             validate_addressing([sw], vms)
 
     def test_ipv4_in_dhcp_pool_ok_when_dhcp_off(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
         validate_addressing([sw], vms)
 
     def test_unknown_network(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netB", addr=StaticAddr("172.31.0.100")))]
+        vms = [_vm("v1", NetworkIface("netB", addr=StaticAddr("172.31.0.100")))]
         with pytest.raises(ValueError, match="unknown network"):
             validate_addressing([sw], vms)
 
     def test_duplicate_ipv4_same_network(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
         vms = [
-            _vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
-            _vm("v2", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
+            _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
+            _vm("v2", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
         ]
         with pytest.raises(ValueError, match="duplicate"):
             validate_addressing([sw], vms)
@@ -208,14 +202,14 @@ class TestValidateAddressing:
         # No DHCP and no static IP is fine: the NIC's behavior is the guest
         # OS's call, not the plan validator's. Must not raise.
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", LibvirtNetworkIface("netA"))]
+        vms = [_vm("v1", NetworkIface("netA"))]
         validate_addressing([sw], vms)
 
     def test_accumulates_multiple_problems(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", dhcp=True)
         vms = [
-            _vm("v1", LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.1"))),
-            _vm("v2", LibvirtNetworkIface("netA", addr=StaticAddr("10.0.0.5"))),
+            _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.1"))),
+            _vm("v2", NetworkIface("netA", addr=StaticAddr("10.0.0.5"))),
         ]
         with pytest.raises(ValueError) as ei:
             validate_addressing([sw], vms)
@@ -229,8 +223,8 @@ class TestValidateAddressing:
         vms = [
             _vm(
                 "v1",
-                LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.100")),
-                LibvirtNetworkIface("netB", addr=DHCPAddr()),
+                NetworkIface("netA", addr=StaticAddr("172.31.0.100")),
+                NetworkIface("netB", addr=DHCPAddr()),
             ),
         ]
         validate_addressing([sw_a, sw_b], vms)

@@ -20,6 +20,7 @@ from testrange.exceptions import (
     OrchestratorError,
 )
 from testrange.networks.base import Switch
+from testrange.networks.sidecar import _uplink_network_name
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.install import _install_switch
 from testrange.orchestrator.provision import (
@@ -212,7 +213,7 @@ def wait_for_shutoff(ctx: RunContext, backend_name: str, vm_name: str) -> None:
 
 
 def teardown_install_phase(ctx: RunContext, install_switch: Switch) -> None:
-    """Destroy install-phase sidecar VM, networks, bridges (LIFO)."""
+    """Destroy install-phase sidecar VM, networks, and switch (LIFO)."""
     sidecar = ctx.sidecar_backends.pop(install_switch.name, None)
     if sidecar is not None:
         ctx.driver.destroy_vm(sidecar)
@@ -222,19 +223,13 @@ def teardown_install_phase(ctx: RunContext, install_switch: Switch) -> None:
         if backend is not None:
             ctx.driver.destroy_network(backend)
             ctx.store.forget(backend)
-    uplink_net_name = f"__uplink__{install_switch.name}"
-    uplink_backend = ctx.network_backends.pop(uplink_net_name, None)
-    if uplink_backend is not None:
-        ctx.driver.destroy_network(uplink_backend)
-        ctx.store.forget(uplink_backend)
-    uplink_bridge = ctx.switch_uplink_bridge.pop(install_switch.name, None)
-    if uplink_bridge is not None:
-        ctx.driver.destroy_bridge(uplink_bridge)
-        ctx.store.forget(uplink_bridge)
-    switch_bridge = ctx.switch_bridge.pop(install_switch.name, None)
-    if switch_bridge is not None:
-        ctx.driver.destroy_bridge(switch_bridge)
-        ctx.store.forget(switch_bridge)
+    # The uplink-facing segment (when nat) is owned by the switch; drop the
+    # ledger entry, destroy_switch tears down the actual segment.
+    ctx.network_backends.pop(_uplink_network_name(install_switch), None)
+    switch_backend = ctx.switch_backends.pop(install_switch.name, None)
+    if switch_backend is not None:
+        ctx.driver.destroy_switch(switch_backend)
+        ctx.store.forget(switch_backend)
 
 
 __all__ = [

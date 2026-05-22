@@ -14,7 +14,7 @@ from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.devices.network import NetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
 from testrange.networks import Network, NetworkAddressing, Switch
@@ -59,7 +59,7 @@ def _spec(name: str = "web") -> VMSpec:
             CPU(1),
             Memory(512),
             OSDrive("p1", 8),
-            LibvirtNetworkIface("netA", addr=DHCPAddr()),
+            NetworkIface("netA", addr=DHCPAddr()),
         ],
     )
 
@@ -351,7 +351,7 @@ class TestRenderSeed:
 # ----------------------------------------------------------------------------
 
 
-def _static_spec(*nics: LibvirtNetworkIface) -> VMSpec:
+def _static_spec(*nics: NetworkIface) -> VMSpec:
     return VMSpec(
         name="web",
         devices=[CPU(1), Memory(512), OSDrive("p1", 8), *nics],
@@ -368,7 +368,7 @@ class TestRunPhaseNetplanStaging:
         assert "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg" not in paths
 
     def test_static_nic_writes_netplan_and_disable_cfg(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -379,7 +379,7 @@ class TestRunPhaseNetplanStaging:
 
     def test_staged_netplan_has_secure_permissions(self) -> None:
         # netplan 0.106+ warns on world-readable netplan files.
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -387,7 +387,7 @@ class TestRunPhaseNetplanStaging:
         assert wf["/etc/netplan/50-cloud-init.yaml"]["owner"] == "root:root"
 
     def test_disable_drop_in_content(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -397,7 +397,7 @@ class TestRunPhaseNetplanStaging:
         assert cfg == {"network": {"config": "disabled"}}
 
     def test_staged_netplan_content_single_static(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -411,8 +411,8 @@ class TestRunPhaseNetplanStaging:
     def test_staged_netplan_first_static_gets_default_route(self) -> None:
         # Two static NICs: only the first declares the default route.
         spec = _static_spec(
-            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")),
-            LibvirtNetworkIface("netB", addr=StaticAddr("10.10.10.50")),
+            NetworkIface("netA", addr=StaticAddr("172.31.0.50")),
+            NetworkIface("netB", addr=StaticAddr("10.10.10.50")),
         )
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
@@ -425,8 +425,8 @@ class TestRunPhaseNetplanStaging:
     def test_staged_netplan_mixed_static_dhcp(self) -> None:
         # NIC0 static, NIC1 DHCP — netplan reflects both branches.
         spec = _static_spec(
-            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")),
-            LibvirtNetworkIface("netB", addr=DHCPAddr()),
+            NetworkIface("netA", addr=StaticAddr("172.31.0.50")),
+            NetworkIface("netB", addr=DHCPAddr()),
         )
         b = CloudInitBuilder(base=CacheEntry("x"))
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
@@ -439,7 +439,7 @@ class TestRunPhaseNetplanStaging:
     def test_install_network_config_stays_dhcp(self) -> None:
         # The install-time network-config must remain DHCP-only even when a
         # NIC has a static ipv4 — install runs on a different subnet.
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         b = CloudInitBuilder(base=CacheEntry("x"))
         netcfg = yaml.safe_load(
             b.render_network_config(spec, _recipe(b, spec), addressing=DEFAULT_ADDR)
@@ -450,16 +450,16 @@ class TestRunPhaseNetplanStaging:
 
     def test_config_hash_sensitive_to_ipv4(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_a = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        spec_b = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.60")))
+        spec_a = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec_b = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.60")))
         h_a = b.config_hash(spec_a, _recipe(b, spec_a), addressing=DEFAULT_ADDR, base_sha="z")
         h_b = b.config_hash(spec_b, _recipe(b, spec_b), addressing=DEFAULT_ADDR, base_sha="z")
         assert h_a != h_b
 
     def test_config_hash_static_vs_dhcp_differs(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_dhcp = _static_spec(LibvirtNetworkIface("netA", addr=DHCPAddr()))
-        spec_static = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec_dhcp = _static_spec(NetworkIface("netA", addr=DHCPAddr()))
+        spec_static = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         h_dhcp = b.config_hash(
             spec_dhcp, _recipe(b, spec_dhcp), addressing=DEFAULT_ADDR, base_sha="z"
         )
@@ -479,7 +479,7 @@ class TestRunPhaseNetplanTriState:
 
     def _netplan(
         self,
-        nic: LibvirtNetworkIface,
+        nic: NetworkIface,
         addressing: Mapping[str, NetworkAddressing] = DEFAULT_ADDR,
     ) -> dict[str, Any]:
         # Render directly — bypasses the single-NIC-all-DHCP write_files skip so
@@ -494,14 +494,14 @@ class TestRunPhaseNetplanTriState:
         # addr=None: the NIC exists but takes no address. Must NOT emit
         # dhcp4: true (the bug) — leave it to the OS so boot doesn't block
         # waiting for a lease nothing serves.
-        eth = self._netplan(LibvirtNetworkIface("netA", addr=None))
+        eth = self._netplan(NetworkIface("netA", addr=None))
         assert eth["dhcp4"] is False
         assert eth["dhcp6"] is False
         assert eth["optional"] is True
         assert "addresses" not in eth
 
     def test_staged_netplan_explicit_dhcp(self) -> None:
-        eth = self._netplan(LibvirtNetworkIface("netA", addr=DHCPAddr()))
+        eth = self._netplan(NetworkIface("netA", addr=DHCPAddr()))
         assert eth["dhcp4"] is True
         assert eth["dhcp6"] is False
         assert "addresses" not in eth
@@ -510,7 +510,7 @@ class TestRunPhaseNetplanTriState:
         # StaticAddr with no prefix/gw/dns on a managed (nat+dns) switch:
         # prefix/gateway/dns all derived from the Switch's NetworkAddressing.
 
-        eth = self._netplan(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        eth = self._netplan(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
         assert eth["addresses"] == ["172.31.0.50/24"]
         assert eth["nameservers"] == {"addresses": ["172.31.0.1"]}
         assert eth["routes"] == [{"to": "default", "via": "172.31.0.1"}]
@@ -525,7 +525,7 @@ class TestRunPhaseNetplanTriState:
             )
         }
         eth = self._netplan(
-            LibvirtNetworkIface(
+            NetworkIface(
                 "netA",
                 addr=StaticAddr("192.168.5.124/24", gw="192.168.5.123", dns=("192.168.5.123",)),
             ),

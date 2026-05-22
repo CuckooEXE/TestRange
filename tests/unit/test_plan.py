@@ -1,4 +1,4 @@
-"""Tests for the top-level Plan + LibvirtHypervisor + cross-reference checks."""
+"""Tests for the top-level Plan + MockHypervisor + cross-reference checks."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.devices.network import NetworkIface
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
@@ -25,7 +25,7 @@ def _basic_recipe(name: str = "web", net: str = "netA", pool: str = "pool1") -> 
                 CPU(1),
                 Memory(512),
                 OSDrive(pool, 8),
-                LibvirtNetworkIface(net),
+                NetworkIface(net),
             ],
         ),
         builder=CloudInitBuilder(
@@ -39,8 +39,7 @@ def _basic_recipe(name: str = "web", net: str = "netA", pool: str = "pool1") -> 
 
 class TestPlan:
     def test_single_hypervisor(self) -> None:
-        hyp = LibvirtHypervisor(
-            connection="qemu:///session",
+        hyp = MockHypervisor(
             networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe()],
@@ -53,26 +52,25 @@ class TestPlan:
             Plan()
 
     def test_name_required(self) -> None:
-        hyp = LibvirtHypervisor(connection="qemu:///session")
+        hyp = MockHypervisor()
         with pytest.raises(ValueError, match="required"):
             Plan(hyp)
 
     def test_multi_hypervisor_not_supported(self) -> None:
-        hyp = LibvirtHypervisor(connection="qemu:///session")
+        hyp = MockHypervisor()
         with pytest.raises(NotImplementedError):
             Plan(hyp, hyp)
 
 
-class TestLibvirtHypervisor:
+class TestMockHypervisor:
     def test_empty_ok(self) -> None:
-        hyp = LibvirtHypervisor(connection="qemu:///session")
+        hyp = MockHypervisor()
         assert hyp.networks == ()
         assert hyp.vms == ()
 
     def test_vm_references_unknown_network(self) -> None:
         with pytest.raises(ValueError, match="unknown network"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe(net="netZZ")],
@@ -80,8 +78,7 @@ class TestLibvirtHypervisor:
 
     def test_vm_references_unknown_pool(self) -> None:
         with pytest.raises(ValueError, match="unknown pool"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe(pool="poolZZ")],
@@ -89,8 +86,7 @@ class TestLibvirtHypervisor:
 
     def test_duplicate_vm_names(self) -> None:
         with pytest.raises(ValueError, match="duplicate names"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe("web"), _basic_recipe("web")],
@@ -98,8 +94,7 @@ class TestLibvirtHypervisor:
 
     def test_duplicate_network_names(self) -> None:
         with pytest.raises(ValueError, match="duplicate names"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[
                     Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True),
                     Switch("sw2", Network("netA"), cidr="10.0.1.0/24", dhcp=True),
@@ -111,8 +106,7 @@ class TestLibvirtHypervisor:
     def test_reserved_double_underscore_switch_rejected(self) -> None:
         # `__`-prefixed names belong to the orchestrator (__install, __uplink__*).
         with pytest.raises(ValueError, match="reserved"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("__install", Network("netA"), cidr="10.0.0.0/24")],
                 pools=[StoragePool("pool1", 32)],
                 vms=[],
@@ -120,8 +114,7 @@ class TestLibvirtHypervisor:
 
     def test_reserved_double_underscore_network_rejected(self) -> None:
         with pytest.raises(ValueError, match="reserved"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw1", Network("__uplink__sw1"), cidr="10.0.0.0/24")],
                 pools=[StoragePool("pool1", 32)],
                 vms=[],
@@ -130,8 +123,7 @@ class TestLibvirtHypervisor:
     def test_illegal_network_name_rejected(self) -> None:
         # Libvirt-specific charset rule is enforced here, not on Network().
         with pytest.raises(ValueError, match="illegal characters"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw1", Network("net,a"), cidr="10.0.0.0/24")],
                 pools=[StoragePool("pool1", 32)],
                 vms=[],
@@ -139,8 +131,7 @@ class TestLibvirtHypervisor:
 
     def test_illegal_switch_name_rejected(self) -> None:
         with pytest.raises(ValueError, match="illegal characters"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw=1", Network("netA"), cidr="10.0.0.0/24")],
                 pools=[StoragePool("pool1", 32)],
                 vms=[],
@@ -148,8 +139,7 @@ class TestLibvirtHypervisor:
 
     def test_illegal_vm_name_rejected(self) -> None:
         with pytest.raises(ValueError, match="illegal characters"):
-            LibvirtHypervisor(
-                connection="qemu:///session",
+            MockHypervisor(
                 networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe("bad,name")],

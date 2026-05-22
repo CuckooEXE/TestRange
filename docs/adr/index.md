@@ -13,4 +13,6 @@ context, the decision, and the consequences. Listed newest-first.
 0005-osdrive-distinct
 0006-driver-stable-mac
 0007-deterministic-config-hash
+0008-driver-abc-multi-backend
+0009-mgmt-switch-semantics
 ```

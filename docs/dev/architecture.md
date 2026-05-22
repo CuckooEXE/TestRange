@@ -8,17 +8,18 @@ functions, and tears the range down.
 ## High-level shape
 
 ```
-Plan(LibvirtHypervisor(connection=, networks=, pools=, vms=[VMRecipe(...)]), name=)
-                                                       │
-                                                       ▼
+Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
+                                            │
+                                            ▼
                           Orchestrator
                           │
               ┌───────────┼───────────┐
               ▼           ▼           ▼
        CacheManager   HypervisorDriver  StateStore
-       (local-only,   (registry; only   (state.json
-        for now)       LibvirtDriver     + state.pid)
-                       today)
+       (local-only,   (registry; MockDriver  (state.json
+        for now)       in-memory today;       + state.pid)
+                       libvirt/Proxmox/ESXi/
+                       Hyper-V planned)
 ```
 
 ## Key components
@@ -26,9 +27,10 @@ Plan(LibvirtHypervisor(connection=, networks=, pools=, vms=[VMRecipe(...)]), nam
 - **`Plan(*hypervisors, name=)`** — the top-level user declaration.
   Currently exactly one hypervisor; the variadic shape is locked in for
   future multi-hypervisor without changing the call shape.
-- **`LibvirtHypervisor(connection=, install_uplink=, networks=, pools=, vms=)`** —
-  the libvirt-flavored top-level entry (all arguments keyword-only). The
-  driver is constructed from this type via the driver registry
+- **`MockHypervisor(networks=, pools=, vms=, install_uplink=, ...)`** —
+  the top-level entry selecting the in-memory `MockDriver` (the reference
+  backend until the real ones are written). Each backend ships its own such
+  dataclass; the driver is constructed from its class via the driver registry
   (`testrange.drivers.driver_for`). `install_uplink` is the host NIC the
   install-phase sidecar egresses through (see the install phase below).
 - **`VMSpec`** — hardware-only (`name`, `devices=[CPU, Memory,
@@ -45,19 +47,19 @@ Plan(LibvirtHypervisor(connection=, networks=, pools=, vms=[VMRecipe(...)]), nam
 - **`CacheManager` / `LocalCache`** — `$XDG_CACHE_HOME/testrange/isos/`
   with `<sha>.bin` + sidecar `<sha>.json`. Atomic writes via
   `.partial` + `os.replace`.
-- **`HypervisorDriver`** ABC — connect, preflight, network/pool/VM CRUD,
-  bridge management (`compose_bridge_name`, `create_bridge`,
-  `create_isolated_bridge`, `destroy_bridge` — default-implemented to
-  raise so a backend without bridge needs doesn't have to override),
-  stable MAC derivation, an optional native-guest transport
-  (`native_guest_execute` / `native_guest_read_file` /
-  `native_guest_write_file`), and volume transport (see Pool I/O below).
+- **`HypervisorDriver`** ABC — connect, preflight, switch/network/pool/VM
+  CRUD, stable MAC derivation, an optional native-guest transport
+  (`native_guest_capabilities` + `native_guest_execute` /
+  `native_guest_read_file` / `native_guest_write_file`), and volume transport
+  (see Pool I/O below). **The driver owns L2**: `create_switch` /
+  `destroy_switch` realize the whole fabric (host bridge, vSwitch, vmbr+SDN,
+  VMSwitch) and `create_network` attaches port-groups to it — the orchestrator
+  never names a bridge (see [ADR-0008](../adr/0008-driver-abc-multi-backend.md)).
   DHCP lease lookup is deliberately *not* a driver method: the per-Switch
-  sidecar owns DHCP, so a lease lives in the sidecar's `dnsmasq` lease
-  file, which the orchestrator reads over the native-guest transport — not
-  in anything the hypervisor manages. Concretes register themselves with
-  the driver registry at import time. Today: `LibvirtDriver` (uses
-  pyroute2 for bridges; local-netlink only).
+  sidecar owns DHCP, so a lease lives in the sidecar's `dnsmasq` lease file,
+  which the orchestrator reads over the native-guest transport — not in
+  anything the hypervisor manages. Concretes register themselves with the
+  driver registry at import time. Today: `MockDriver` (in-memory).
 - **Per-Switch sidecar VM** — a pre-built Alpine image with
   `dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
   (`tools/build-sidecar-image/build.sh`). The orchestrator
@@ -66,19 +68,20 @@ Plan(LibvirtHypervisor(connection=, networks=, pools=, vms=[VMRecipe(...)]), nam
   (`TR_SIDECAR_CFG`) carrying `dnsmasq.conf`, `interfaces`,
   `nftables.nft`, and `sysctl.conf` rendered by
   `testrange/networks/sidecar.py`. The sidecar IS the gateway when
-  `nat=True`; no libvirt-native NAT/DHCP/DNS is used anywhere
+  `nat=True`; no hypervisor-native NAT/DHCP/DNS is used anywhere
   (install or run phase).
 - **Pool I/O** — `upload_to_pool` (host file → in-pool volume) and
-  `download_from_pool` (in-pool volume → host file) both flow through
-  the driver's stream API. The orchestrator never opens pool files
-  directly. Cached disks are self-contained because `create_disk_from_base`
-  produces a flat full-copy (under the dir-pool driver, libvirt's
-  `createXMLFrom` invokes `qemu-img convert`); `download_from_pool` then
-  requires that self-contained source and just streams it — it does not
-  flatten a backing chain itself. The pool root is
-  driver-chosen and may be URI-aware (LibvirtDriver picks
-  `/var/lib/libvirt/images/testrange` for `qemu:///system`,
-  `~/.local/share/testrange/pools/` for `/session`).
+  `download_from_pool` (in-pool volume → host file) move bytes between the
+  runner host and the backend; the orchestrator never opens pool files
+  directly. Caching lives on the runner, never on the backend, so every driver
+  must provide *some* transfer channel here — SDK-native where possible (libvirt
+  stream, ESXi `/folder` HTTPS), or an out-of-band side channel (Proxmox over
+  SSH, Hyper-V over SMB/WinRM). Cached disks are self-contained because
+  `create_disk_from_base` produces a flat full-copy; `download_from_pool`
+  requires that self-contained source and just streams it — it does not flatten
+  a backing chain itself. A "pool" is a named namespace inside pre-existing
+  backing storage (a libvirt pool, a datastore subdirectory, a host dir/share),
+  not storage the driver provisions.
 - **`StateStore`** — `$XDG_STATE_HOME/testrange/runs/<run_id>/state.json`.
   Each resource is recorded with `intent_at` (before backend call)
   and `outcome_at` (after backend confirms). Metadata is stamped at
@@ -97,19 +100,19 @@ Plan(LibvirtHypervisor(connection=, networks=, pools=, vms=[VMRecipe(...)]), nam
    Errors abort before any state.json write.
 2. **Install** — per-VM, builder-driven, cache-aware. Cache hit on
    `builder.config_hash(...)` skips the build. Cache miss synthesizes
-   a transient install Switch from `LibvirtHypervisor.install_uplink`
+   a transient install Switch from the hypervisor's `install_uplink`
    (dhcp + dns + nat), brings up the per-Switch sidecar VM to serve
    DHCP and MASQUERADE outbound, runs each install VM against it,
    polls power-state until the VM self-terminates via
    `runcmd: [..., poweroff]`, snapshots the post-install disk into
-   the cache, and tears down the install sidecar + bridges LIFO.
-3. **Run** — for every user Switch: `_provision_switch` creates the
-   right bridges (one for `uplink` only, two for `nat + uplink`, an
-   isolated one when only `mgmt` or `needs_sidecar`), defines the
-   libvirt networks pointing at those bridges, and `_materialize_sidecar_for`
-   stands up the per-Switch sidecar VM when `dhcp|dns|nat` is set.
-   Then each user VM gets a fresh overlay off the cached post-install
-   disk; defined + started with no seed.
+   the cache, and tears down the install sidecar + switch LIFO.
+3. **Run** — for every user Switch: `provision_switch` calls
+   `driver.create_switch` (the driver realizes the fabric — bridge / vSwitch /
+   vmbr / VMSwitch — and, for `nat + uplink`, the uplink-facing segment for the
+   sidecar's `eth1`), attaches each Network with `driver.create_network`, and
+   `materialize_sidecar_for` stands up the per-Switch sidecar VM when
+   `dhcp|dns|nat` is set. Then each user VM gets a fresh overlay off the cached
+   post-install disk; defined + started with no seed.
 4. **Test** — communicators are bound (discovered IP per VM), then
    each builder's `wait_ready` runs: the orchestrator hands the
    builder the bound communicator's `execute` callable (a `GuestExec`
@@ -165,15 +168,13 @@ CacheEntry("debian-13") in Plan
 ## Subprocess discipline
 
 `testrange` itself runs no subprocesses. Every operation has a Python
-library (libvirt-python, paramiko, pycdlib, urllib, cryptography).
+library (the backend SDK, paramiko, pycdlib, urllib, cryptography).
 Ruff's `flake8-tidy-imports` banned-api blocks `import subprocess` at
 lint time and a CI test enforces the same.
 
-libvirtd itself invokes `qemu`, `qemu-img`, `dnsmasq`, etc. — that's
-libvirtd's business. In particular, `LibvirtDriver.create_disk_from_base`
-flattens via `pool.createXMLFrom`, which internally runs
-`qemu-img convert` inside libvirtd. The ban is on `subprocess` from
-`testrange/` code, not on what libvirtd does on our behalf.
+What a backend's own service does on our behalf (e.g. libvirtd invoking
+`qemu-img`, a hypervisor flattening a disk during a full clone) is that
+service's business — the ban is on `subprocess` from `testrange/` code.
 
 If a future feature requires a subprocess directly from Python (cross-
 format disk conversion when ESXi/Hyper-V land, for example), it gets

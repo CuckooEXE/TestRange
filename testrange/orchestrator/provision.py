@@ -15,8 +15,9 @@ from testrange.cache.entry import CacheEntry
 from testrange.drivers.base import VolumeRef
 from testrange.exceptions import OrchestratorError
 from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
-from testrange.networks.base import Network, Switch
+from testrange.networks.base import Switch
 from testrange.networks.sidecar import (
+    _uplink_network_name,
     render_dnsmasq_conf,
     render_nftables_ruleset,
     render_sidecar_interfaces,
@@ -55,90 +56,32 @@ def mac_for(ctx: RunContext, vm_name: str, idx: int) -> str:
     return ctx.driver.compose_mac(ctx.plan_name, vm_name, idx)
 
 
-def mgmt_cidr(switch: Switch) -> str:
-    return f"{switch.mgmt_ip}/{switch.network.prefixlen}"
-
-
-def make_bridge(
-    ctx: RunContext,
-    switch: Switch,
-    *,
-    suffix: str,
-    uplink: str | None,
-    mgmt_cidr: str | None,
-    kind: str,
-) -> str:
-    bridge_name = ctx.driver.compose_bridge_name(ctx.run_id, f"{switch.name}-{suffix}")
-    ctx.store.record_intent(kind=kind, backend_name=bridge_name, plan_name=switch.name)
-    if uplink is None:
-        ctx.driver.create_isolated_bridge(bridge_name, mgmt_cidr=mgmt_cidr)
-    else:
-        ctx.driver.create_bridge(uplink, bridge_name, mgmt_cidr=mgmt_cidr)
-    ctx.store.confirm(bridge_name)
-    if suffix == "iso":
-        ctx.switch_bridge[switch.name] = bridge_name
-    else:
-        ctx.switch_uplink_bridge[switch.name] = bridge_name
-    return bridge_name
-
-
 def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") -> None:
-    """Stand up the bridges + libvirt network(s) for one Switch.
+    """Realize one Switch and its Network(s) via the driver.
 
-    Topology cases:
+    The driver owns all L2 topology — the orchestrator names no bridges. It
+    calls :meth:`HypervisorDriver.create_switch` (the driver decides bridge vs
+    vSwitch vs vmbr vs VMSwitch, assigns the ``mgmt`` adapter, and — for a
+    ``uplink+nat`` Switch — provisions the uplink-facing segment the sidecar's
+    ``eth1`` rides), then attaches each Network with
+    :meth:`HypervisorDriver.create_network`.
 
-    - ``uplink and not nat`` → one uplink bridge (enslaves the physical
-      NIC; assigns ``.2`` if ``mgmt``). The libvirt network references
-      this bridge by name.
-    - ``uplink and nat`` → TWO bridges. An isolated switch bridge
-      (assigns ``.2`` if ``mgmt``) holding guests + sidecar's eth0,
-      plus a separate uplink bridge enslaving the physical NIC for
-      the sidecar's eth1. A hidden ``__uplink__<switch>`` libvirt
-      network exposes the uplink bridge to the sidecar VM.
-    - ``mgmt`` or ``needs_sidecar`` without uplink → one isolated
-      bridge (with ``.2`` if ``mgmt``).
-    - bare → no testrange bridge; libvirt's default bridge.
-
-    Records every created bridge / network in state for LIFO teardown.
-    Network backend names are stashed in ``ctx.network_backends``.
+    Records the switch + each network in state for LIFO teardown. Network
+    backend names (including the driver-owned uplink segment, keyed under the
+    synthetic ``__uplink__<switch>`` name) are stashed in
+    ``ctx.network_backends`` for the sidecar and VM NIC wiring.
     """
-    bridge_name: str | None = None
-    uplink_bridge_name: str | None = None
-    if switch.uplink is not None and switch.nat:
-        bridge_name = make_bridge(
-            ctx,
-            switch,
-            suffix="iso",
-            uplink=None,
-            mgmt_cidr=mgmt_cidr(switch) if switch.mgmt else None,
-            kind=f"{kind_prefix}bridge",
-        )
-        uplink_bridge_name = make_bridge(
-            ctx,
-            switch,
-            suffix="upl",
-            uplink=switch.uplink,
-            mgmt_cidr=None,
-            kind=f"{kind_prefix}bridge",
-        )
-    elif switch.uplink is not None:
-        bridge_name = make_bridge(
-            ctx,
-            switch,
-            suffix="upl",
-            uplink=switch.uplink,
-            mgmt_cidr=mgmt_cidr(switch) if switch.mgmt else None,
-            kind=f"{kind_prefix}bridge",
-        )
-    elif switch.mgmt or switch.needs_sidecar:
-        bridge_name = make_bridge(
-            ctx,
-            switch,
-            suffix="iso",
-            uplink=None,
-            mgmt_cidr=mgmt_cidr(switch) if switch.mgmt else None,
-            kind=f"{kind_prefix}bridge",
-        )
+    switch_backend = ctx.driver.compose_resource_name(
+        ctx.run_id, f"{kind_prefix}switch", switch.name
+    )
+    ctx.store.record_intent(
+        kind=f"{kind_prefix}switch",
+        backend_name=switch_backend,
+        plan_name=switch.name,
+    )
+    uplink_net_backend = ctx.driver.create_switch(switch, switch_backend)
+    ctx.store.confirm(switch_backend)
+    ctx.switch_backends[switch.name] = switch_backend
 
     for net in switch.networks:
         backend = ctx.driver.compose_resource_name(ctx.run_id, f"{kind_prefix}network", net.name)
@@ -147,39 +90,16 @@ def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") 
             backend_name=backend,
             plan_name=net.name,
         )
-        ctx.driver.create_network(net, switch, backend, bridge_name=bridge_name)
+        ctx.driver.create_network(net, switch, backend, switch_backend_name=switch_backend)
         ctx.store.confirm(backend)
         ctx.network_backends[net.name] = backend
 
-    if uplink_bridge_name is not None:
-        uplink_net_name = f"__uplink__{switch.name}"
-        uplink_backend = ctx.driver.compose_resource_name(
-            ctx.run_id, f"{kind_prefix}network", uplink_net_name
-        )
-        # Synthetic Switch: exposes the uplink bridge as a libvirt network
-        # so the sidecar's eth1 can attach. The renderer takes the
-        # bridge-mode branch on `uplink is not None` and references
-        # `uplink_bridge_name` directly; the cidr is a shim to satisfy
-        # Switch's strict-form validator and is otherwise unused.
-        uplink_switch = Switch(
-            f"__uplink__{switch.name}",
-            Network(uplink_net_name),
-            cidr=switch.cidr,
-            uplink=switch.uplink,
-        )
-        ctx.store.record_intent(
-            kind=f"{kind_prefix}network",
-            backend_name=uplink_backend,
-            plan_name=uplink_net_name,
-        )
-        ctx.driver.create_network(
-            Network(uplink_net_name),
-            uplink_switch,
-            uplink_backend,
-            bridge_name=uplink_bridge_name,
-        )
-        ctx.store.confirm(uplink_backend)
-        ctx.network_backends[uplink_net_name] = uplink_backend
+    if uplink_net_backend is not None:
+        # The uplink-facing segment is owned by the switch (created inside
+        # create_switch, torn down by destroy_switch). Expose it under the
+        # synthetic uplink network name so the sidecar's eth1 can attach; it
+        # is not separately recorded in state.
+        ctx.network_backends[_uplink_network_name(switch)] = uplink_net_backend
 
 
 def materialize_sidecar_for(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") -> None:
@@ -252,8 +172,6 @@ def materialize_sidecar_for(ctx: RunContext, switch: Switch, *, kind_prefix: str
 __all__ = [
     "ensure_base_in_pool",
     "mac_for",
-    "make_bridge",
     "materialize_sidecar_for",
-    "mgmt_cidr",
     "provision_switch",
 ]

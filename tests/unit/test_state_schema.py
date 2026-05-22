@@ -59,7 +59,7 @@ class TestState:
         s = State(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
             phase=PHASE_DONE,
             created_at="2026-05-11T00:00:00Z",

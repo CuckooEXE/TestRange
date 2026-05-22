@@ -162,7 +162,7 @@ class CloudInitBuilder(Builder):
         """
         del recipe  # not used yet; reserved for future per-recipe hooks
         # NOTE: any plaintext password below is baked into the cloud-init seed
-        # ISO, which lives in the libvirt storage pool in cleartext — anyone
+        # ISO, which lives in the backend storage pool in cleartext — anyone
         # with read access to the pool can recover it. Acceptable only for
         # ephemeral, isolated test guests; prefer ssh-key-only PosixCreds for
         # anything sensitive.

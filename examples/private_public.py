@@ -27,9 +27,8 @@ from testrange.devices import (
     OSDrive,
     StoragePool,
 )
-from testrange.devices.network import DHCPAddr, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
+from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
@@ -44,22 +43,21 @@ _CLIENT_PRIVATE_IP = "10.20.0.101"
 
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
+    MockHypervisor(
         install_uplink=UPLINK,
         networks=[
             Switch(
                 "priv-sw",
                 Network("private-net"),
                 cidr="10.20.0.0/24",
-                mgmt=True,
+                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
             ),
             Switch(
                 "pub-sw",
                 Network("public-net"),
                 cidr="10.30.0.0/24",
                 uplink=UPLINK,
-                mgmt=True,
+                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
                 dhcp=True,
                 dns=True,
                 nat=True,
@@ -74,7 +72,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("private-net", addr=StaticAddr(_PRIVATE_WEB_IP)),
+                        NetworkIface("private-net", addr=StaticAddr(_PRIVATE_WEB_IP)),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -103,7 +101,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("public-net", addr=DHCPAddr()),
+                        NetworkIface("public-net", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -132,8 +130,8 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("private-net", addr=StaticAddr(_CLIENT_PRIVATE_IP)),
-                        LibvirtNetworkIface("public-net", addr=DHCPAddr()),
+                        NetworkIface("private-net", addr=StaticAddr(_CLIENT_PRIVATE_IP)),
+                        NetworkIface("public-net", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(

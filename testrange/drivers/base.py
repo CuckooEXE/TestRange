@@ -103,43 +103,61 @@ class HypervisorDriver(ABC):
         """
 
     @abstractmethod
+    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
+        """Realize a Switch's L2 fabric on the backend.
+
+        The driver owns *all* L2 topology — the orchestrator never names a
+        bridge. How the fabric is realized is backend-specific:
+
+        - libvirt: a host bridge (via pyroute2) that networks attach to
+        - ESXi: a vSwitch; networks become port-groups on it
+        - Proxmox: an SDN zone (or vmbr); networks become vnets
+        - Hyper-V: a VMSwitch; networks become per-vNIC VLANs
+
+        When ``switch.uplink and switch.nat`` the driver also provisions an
+        uplink-facing segment for the sidecar's second NIC and returns its
+        backend network name; the orchestrator attaches the sidecar's
+        ``eth1`` to it. Returns ``None`` when there is no uplink segment.
+        ``destroy_switch`` tears the whole fabric down, including any uplink
+        segment created here.
+        """
+
+    @abstractmethod
+    def destroy_switch(self, backend_name: str) -> None:
+        """Tear down a Switch's L2 fabric (and any uplink segment it owns)."""
+
+    @abstractmethod
     def create_network(
         self,
         network: Network,
         switch: Switch,
         backend_name: str,
         *,
-        bridge_name: str | None = None,
+        switch_backend_name: str,
     ) -> Any:
-        """Define + start a backend network for one Network on a Switch.
+        """Attach one Network (port-group) to an already-created Switch.
 
-        ``bridge_name`` is set by the orchestrator when the Switch requires
-        a testrange-managed host bridge (uplink, nat, or mgmt-isolated).
-        Drivers reference it in their forward-mode-bridge XML so the
-        backend network is wired to the right kernel bridge.
+        ``switch_backend_name`` is the handle from the earlier
+        ``create_switch`` call for ``switch``; the driver wires this network
+        onto that fabric (ESXi port-group on the vSwitch, libvirt network in
+        bridge mode against the switch's bridge, Proxmox vnet in the zone,
+        Hyper-V VLAN on the VMSwitch).
         """
 
     @abstractmethod
     def destroy_network(self, backend_name: str) -> None: ...
 
-    def compose_bridge_name(self, run_id: str, switch_name: str) -> str:
-        """Deterministic kernel bridge name. Override for backend-specific limits."""
-        raise DriverError(f"{type(self).__name__}: no bridge management")
-
-    def create_bridge(self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
-        """Create the host bridge and enslave ``uplink``. Optional mgmt IP."""
-        raise DriverError(f"{type(self).__name__}: no bridge management")
-
-    def create_isolated_bridge(self, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
-        """Create an isolated host bridge (no enslaved NIC). Optional mgmt IP."""
-        raise DriverError(f"{type(self).__name__}: no bridge management")
-
-    def destroy_bridge(self, bridge_name: str) -> None:
-        """Remove the host bridge. Idempotent."""
-        raise DriverError(f"{type(self).__name__}: no bridge management")
-
     @abstractmethod
-    def create_pool(self, pool: StoragePool, backend_name: str) -> Any: ...
+    def create_pool(self, pool: StoragePool, backend_name: str) -> Any:
+        """Create a named storage namespace inside pre-existing backing storage.
+
+        Not provisioning: the backing store (libvirt pool filesystem,
+        Proxmox storage, ESXi datastore, Hyper-V volume/share) is static
+        driver config. This carves a per-run namespace within it (a libvirt
+        pool, a datastore subdirectory, a host directory). ``pool.size_gb``
+        is a *minimum-capacity precondition* the driver verifies in
+        ``preflight`` — not a quota it imposes here.
+        """
 
     @abstractmethod
     def destroy_pool(self, backend_name: str) -> None: ...
@@ -252,10 +270,27 @@ class HypervisorDriver(ABC):
     # orchestrator reads it over the native guest-file transport below.
 
     # --- Native guest agent (optional capability) ---------------------
-    # A backend with a native in-guest agent (libvirt/QGA, future
-    # ESXi/VMware Tools) overrides these three to return VM-bound
-    # callables. They are non-abstract: the default for a backend with
-    # no native agent is a clean DriverError, not a missing method.
+    # A backend with a native in-guest agent (QEMU Guest Agent, VMware
+    # Tools, Hyper-V integration) overrides these to return VM-bound
+    # callables and declares which ops it supports via
+    # ``native_guest_capabilities``. They are non-abstract: the default for
+    # a backend with no native agent is an empty capability set and a clean
+    # DriverError, not a missing method.
+    #
+    # NOTE: backends whose guest channel requires per-call guest OS
+    # credentials (VMware Tools, Hyper-V PowerShell Direct) will add an
+    # optional ``credential`` keyword to these accessors when that driver
+    # lands (see ADR-0008); QGA-style agents need none, so the parameter is
+    # deliberately not introduced before a backend exercises it.
+
+    def native_guest_capabilities(self) -> frozenset[str]:
+        """The native-agent ops this backend supports.
+
+        A subset of ``{"execute", "read_file", "write_file"}``. Preflight
+        checks it against each VM's communicator so a missing op fails loud
+        before run, not mid-run. Default: none.
+        """
+        return frozenset()
 
     def native_guest_execute(self, backend_name: str) -> GuestExec:
         """A VM-bound callable that runs a command in the guest via the
@@ -338,10 +373,7 @@ class HypervisorDriver(ABC):
                     f"destroy({kind!r}): missing pool_backend metadata for volume kind"
                 )
             self.delete_volume(self.compose_volume_ref(str(pool_backend), backend_name))
-        elif kind in ("bridge", "install_bridge"):
-            destroy_bridge = getattr(self, "destroy_bridge", None)
-            if destroy_bridge is None:
-                raise NotImplementedError(f"destroy({kind!r}): driver has no destroy_bridge")
-            destroy_bridge(backend_name)
+        elif kind in ("switch", "install_switch"):
+            self.destroy_switch(backend_name)
         else:
             raise NotImplementedError(f"destroy({kind!r}) not implemented")
