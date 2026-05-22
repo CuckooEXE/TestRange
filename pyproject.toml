@@ -30,7 +30,7 @@ docs = [
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.6",
+    "ruff>=0.15",
     "mypy>=1.10",
     "types-paramiko",
     "types-pyyaml",
