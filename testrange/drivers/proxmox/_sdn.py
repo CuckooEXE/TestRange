@@ -42,7 +42,9 @@ def _ensure_zone(client: ProxmoxClient, zone: str) -> None:
         _log.info("created per-run SDN simple zone %s", zone)
 
 
-def create_switch(client: ProxmoxClient, zone: str, switch: Switch, backend_name: str) -> str | None:
+def create_switch(
+    client: ProxmoxClient, zone: str, switch: Switch, backend_name: str
+) -> str | None:
     vid = vnet_id(backend_name)
     _ensure_zone(client, zone)
     existing = {v["vnet"] for v in client.api.cluster.sdn.vnets.get()}
@@ -66,9 +68,7 @@ def destroy_switch(client: ProxmoxClient, backend_name: str) -> None:
     client.api.cluster.sdn.vnets(vid).delete()
     # Drop the per-run zone once it holds no more vnets (self-discovering, so a
     # from_uri-rebuilt teardown driver needs no run_id).
-    if zone is not None and not any(
-        v.get("zone") == zone and v["vnet"] != vid for v in vnets
-    ):
+    if zone is not None and not any(v.get("zone") == zone and v["vnet"] != vid for v in vnets):
         client.api.cluster.sdn.zones(zone).delete()
         _log.info("destroyed per-run SDN zone %s (last vnet removed)", zone)
     _apply(client)

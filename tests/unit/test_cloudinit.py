@@ -336,14 +336,20 @@ class TestConfigHash:
         spec_a = VMSpec(
             name="web",
             devices=[
-                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10),
+                CPU(1),
+                Memory(512),
+                OSDrive("p1", 8),
+                HardDrive("p1", 10),
                 NetworkIface("netA", addr=DHCPAddr()),
             ],
         )
         spec_b = VMSpec(
             name="web",
             devices=[
-                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 20),
+                CPU(1),
+                Memory(512),
+                OSDrive("p1", 8),
+                HardDrive("p1", 20),
                 NetworkIface("netA", addr=DHCPAddr()),
             ],
         )
@@ -356,14 +362,21 @@ class TestConfigHash:
         spec_one = VMSpec(
             name="web",
             devices=[
-                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10),
+                CPU(1),
+                Memory(512),
+                OSDrive("p1", 8),
+                HardDrive("p1", 10),
                 NetworkIface("netA", addr=DHCPAddr()),
             ],
         )
         spec_two = VMSpec(
             name="web",
             devices=[
-                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10), HardDrive("p1", 10),
+                CPU(1),
+                Memory(512),
+                OSDrive("p1", 8),
+                HardDrive("p1", 10),
+                HardDrive("p1", 10),
                 NetworkIface("netA", addr=DHCPAddr()),
             ],
         )
@@ -378,20 +391,28 @@ class TestConfigHash:
         spec_ab = VMSpec(
             name="web",
             devices=[
-                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 10), HardDrive("p1", 20),
+                CPU(1),
+                Memory(512),
+                OSDrive("p1", 8),
+                HardDrive("p1", 10),
+                HardDrive("p1", 20),
                 NetworkIface("netA", addr=DHCPAddr()),
             ],
         )
         spec_ba = VMSpec(
             name="web",
             devices=[
-                CPU(1), Memory(512), OSDrive("p1", 8), HardDrive("p1", 20), HardDrive("p1", 10),
+                CPU(1),
+                Memory(512),
+                OSDrive("p1", 8),
+                HardDrive("p1", 20),
+                HardDrive("p1", 10),
                 NetworkIface("netA", addr=DHCPAddr()),
             ],
         )
-        assert b.config_hash(spec_ab, _recipe(b, spec_ab), addressing=DEFAULT_ADDR) != b.config_hash(
-            spec_ba, _recipe(b, spec_ba), addressing=DEFAULT_ADDR
-        )
+        assert b.config_hash(
+            spec_ab, _recipe(b, spec_ab), addressing=DEFAULT_ADDR
+        ) != b.config_hash(spec_ba, _recipe(b, spec_ba), addressing=DEFAULT_ADDR)
 
 
 class TestRenderSeed:

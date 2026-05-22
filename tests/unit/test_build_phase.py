@@ -109,9 +109,7 @@ def _built_names(cache: CacheManager) -> list[str]:
 
 
 class TestBuildPhase:
-    def test_captures_every_writable_disk(
-        self, env: tuple[CacheManager, MockDriver]
-    ) -> None:
+    def test_captures_every_writable_disk(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=1)
         build_phase(_ctx(plan, driver, cache))
@@ -122,17 +120,13 @@ class TestBuildPhase:
         assert any(n.endswith("__os") for n in names)
         assert any(n.endswith("__data0") for n in names)
 
-    def test_build_vm_booted_with_all_disks(
-        self, env: tuple[CacheManager, MockDriver]
-    ) -> None:
+    def test_build_vm_booted_with_all_disks(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=2)
         build_phase(_ctx(plan, driver, cache))
 
         # The build VM's create_vm carried two data-disk refs (the 4th arg).
-        build_creates = [
-            c for c in driver.calls if c[0] == "create_vm" and "build_vm" in c[1][0]
-        ]
+        build_creates = [c for c in driver.calls if c[0] == "create_vm" and "build_vm" in c[1][0]]
         assert len(build_creates) == 1
         data_refs = build_creates[0][1][2]
         assert len(data_refs) == 2
@@ -140,9 +134,7 @@ class TestBuildPhase:
         assert sum(1 for c in driver.calls if c[0] == "create_blank_volume") == 2
         assert any(c[0] == "resize_volume" for c in driver.calls)
 
-    def test_backend_is_empty_after_build(
-        self, env: tuple[CacheManager, MockDriver]
-    ) -> None:
+    def test_backend_is_empty_after_build(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=1)
         build_phase(_ctx(plan, driver, cache))
@@ -153,9 +145,7 @@ class TestBuildPhase:
         assert driver._switches == {}
         assert any(c[0] == "destroy_pool" for c in driver.calls)
 
-    def test_second_build_is_full_cache_hit(
-        self, env: tuple[CacheManager, MockDriver]
-    ) -> None:
+    def test_second_build_is_full_cache_hit(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=1)
         build_phase(_ctx(plan, driver, cache))
@@ -173,9 +163,7 @@ class TestBuildPhase:
 class TestBuildToRunDataDisk:
     """Data-disk content survives build -> cache -> run (ADR-0010 §4)."""
 
-    def test_data_disk_content_round_trips(
-        self, env: tuple[CacheManager, MockDriver]
-    ) -> None:
+    def test_data_disk_content_round_trips(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=1)
         ctx = _ctx(plan, driver, cache)
@@ -193,9 +181,7 @@ class TestBuildToRunDataDisk:
         run_uploads = [
             c
             for c in driver.calls
-            if c[0] == "upload_to_pool"
-            and "tr_vm_" in c[1][0]
-            and c[1][0].endswith("-data0.qcow2")
+            if c[0] == "upload_to_pool" and "tr_vm_" in c[1][0] and c[1][0].endswith("-data0.qcow2")
         ]
         assert len(run_uploads) == 1
         run_disk_path = Path(run_uploads[0][1][0])
@@ -228,9 +214,7 @@ class TestSidecarReadinessGate:
         )
         assert first_readiness < first_user_vm
 
-    def test_unreachable_agent_fails_loud(
-        self, env: tuple[CacheManager, MockDriver]
-    ) -> None:
+    def test_unreachable_agent_fails_loud(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=0)
         ctx = _ctx(plan, driver, cache)
@@ -252,6 +236,4 @@ class TestSidecarReadinessGate:
         with pytest.raises(OrchestratorError, match="not ready"):
             run_phase(ctx)
         # The user VM never started — the gate blocked first.
-        assert not any(
-            c[0] == "create_vm" and c[1][0].startswith("tr_vm_") for c in driver.calls
-        )
+        assert not any(c[0] == "create_vm" and c[1][0].startswith("tr_vm_") for c in driver.calls)

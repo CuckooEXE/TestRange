@@ -226,9 +226,7 @@ class MockDriver(HypervisorDriver):
         switch_backend_name: str,
     ) -> Any:
         self._networks[backend_name] = switch_backend_name
-        self._record(
-            "create_network", backend_name, network.name, switch.name, switch_backend_name
-        )
+        self._record("create_network", backend_name, network.name, switch.name, switch_backend_name)
         return f"net:{backend_name}"
 
     def destroy_network(self, backend_name: str) -> None:

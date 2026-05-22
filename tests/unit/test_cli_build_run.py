@@ -24,7 +24,7 @@ from testrange.orchestrator.runtime import Orchestrator
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
-_PLAN_SRC = '''
+_PLAN_SRC = """
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
@@ -58,7 +58,7 @@ def test_ok(orch):
     pass
 
 TESTS = [test_ok]
-'''
+"""
 
 
 @pytest.fixture(autouse=True)
@@ -117,9 +117,7 @@ class TestBuildVerb:
         assert _build_vm_creates(driver) == 1
         assert _run_vm_creates(driver) == 0
 
-    def test_build_then_run_is_warm_hit(
-        self, env: tuple[MockDriver, str]
-    ) -> None:
+    def test_build_then_run_is_warm_hit(self, env: tuple[MockDriver, str]) -> None:
         driver, plan_path = env
         assert cli.main(["build", plan_path]) == 0
         driver.calls = []
@@ -130,9 +128,7 @@ class TestBuildVerb:
 
 
 class TestRunAutoBuild:
-    def test_run_cold_cache_auto_builds(
-        self, env: tuple[MockDriver, str]
-    ) -> None:
+    def test_run_cold_cache_auto_builds(self, env: tuple[MockDriver, str]) -> None:
         driver, plan_path = env
         # Cold cache (no `build` first): run must auto-build then bring up.
         rc = cli.main(["run", plan_path])
@@ -151,9 +147,7 @@ class TestRunAutoBuild:
         assert _build_vm_creates(driver) == 0
         assert _run_vm_creates(driver) == 0
 
-    def test_require_cache_warm_succeeds(
-        self, env: tuple[MockDriver, str]
-    ) -> None:
+    def test_require_cache_warm_succeeds(self, env: tuple[MockDriver, str]) -> None:
         driver, plan_path = env
         assert cli.main(["build", plan_path]) == 0
         driver.calls = []
@@ -175,9 +169,7 @@ class TestDataDiskExample:
         run_data_uploads = [
             c
             for c in driver.calls
-            if c[0] == "upload_to_pool"
-            and "tr_vm_" in c[1][0]
-            and c[1][0].endswith("-data0.qcow2")
+            if c[0] == "upload_to_pool" and "tr_vm_" in c[1][0] and c[1][0].endswith("-data0.qcow2")
         ]
         assert len(run_data_uploads) == 1
 

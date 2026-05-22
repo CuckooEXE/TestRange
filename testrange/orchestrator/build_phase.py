@@ -335,14 +335,10 @@ def wait_for_shutoff(ctx: RunContext, backend_name: str, vm_name: str) -> None:
         if state == "shutoff":
             return
         time.sleep(2.0)
-    raise BuildTimeoutError(
-        f"vm {vm_name!r} did not power off within {ctx.build_timeout_s:.0f}s"
-    )
+    raise BuildTimeoutError(f"vm {vm_name!r} did not power off within {ctx.build_timeout_s:.0f}s")
 
 
-def teardown_build_phase(
-    ctx: RunContext, build_switch: Switch, build_pool_backend: str
-) -> None:
+def teardown_build_phase(ctx: RunContext, build_switch: Switch, build_pool_backend: str) -> None:
     """Destroy build-phase sidecar VM, networks, switch, and the build pool (LIFO)."""
     sidecar = ctx.sidecar_backends.pop(build_switch.name, None)
     if sidecar is not None:

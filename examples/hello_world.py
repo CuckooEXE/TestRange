@@ -63,9 +63,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        NetworkIface(
-                            "netA", addr=StaticAddr("172.31.0.150")
-                        ),
+                        NetworkIface("netA", addr=StaticAddr("172.31.0.150")),
                     ],
                 ),
                 builder=CloudInitBuilder(

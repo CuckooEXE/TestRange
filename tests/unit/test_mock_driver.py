@@ -60,8 +60,12 @@ class TestSwitchOwnership:
     def test_no_bridge_methods_on_abc_or_driver(self) -> None:
         # L2 is the driver's business via create_switch; the orchestrator
         # never names a bridge, so the bridge API is gone entirely.
-        for name in ("create_bridge", "create_isolated_bridge", "destroy_bridge",
-                     "compose_bridge_name"):
+        for name in (
+            "create_bridge",
+            "create_isolated_bridge",
+            "destroy_bridge",
+            "compose_bridge_name",
+        ):
             assert not hasattr(HypervisorDriver, name)
             assert not hasattr(MockDriver(), name)
 
@@ -174,11 +178,13 @@ class TestMgmtGating:
     def test_no_mgmt_is_clean(self) -> None:
         assert mgmt_unsupported_findings(_plan()) == ()
 
-    def test_preflight_reports_mgmt_error(self, monkeypatch: pytest.MonkeyPatch,
-                                          tmp_path: Path) -> None:
+    def test_preflight_reports_mgmt_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         report = MockDriver().preflight(
-            self._mgmt_plan(), cache_manager=CacheManager(),
+            self._mgmt_plan(),
+            cache_manager=CacheManager(),
             build_switch=_build_switch(None),
         )
         assert bool(report) is False
@@ -186,8 +192,9 @@ class TestMgmtGating:
 
 
 class TestPoolCapacityPreflight:
-    def _preflight(self, driver: MockDriver, plan: Plan, monkeypatch: pytest.MonkeyPatch,
-                   tmp_path: Path) -> object:
+    def _preflight(
+        self, driver: MockDriver, plan: Plan, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> object:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         return driver.preflight(
             plan, cache_manager=CacheManager(), build_switch=_build_switch(None)
@@ -197,7 +204,9 @@ class TestPoolCapacityPreflight:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         driver = MockDriver(backing_capacity_gb=16)  # plan asks for a 32 GiB pool
-        report = self._preflight(driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path)
+        report = self._preflight(
+            driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path
+        )
         assert not report  # error-level finding -> falsy report
         assert any(f.code == "pool-capacity" for f in report.errors)  # type: ignore[attr-defined]
 
@@ -205,5 +214,7 @@ class TestPoolCapacityPreflight:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         driver = MockDriver(backing_capacity_gb=128)
-        report = self._preflight(driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path)
+        report = self._preflight(
+            driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path
+        )
         assert report  # no error-level findings
