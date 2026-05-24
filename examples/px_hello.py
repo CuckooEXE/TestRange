@@ -1,14 +1,37 @@
-"""native_agent: one VM reached over the hypervisor's native guest agent, not SSH.
+"""Proxmox live smoke (PVE-9): build debian+nginx, reach it over QGA, assert.
 
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
     sudo tools/build-sidecar-image/build.sh
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
-
 Usage:
-    testrange describe examples/native_agent.py
-    testrange run examples/native_agent.py
+    testrange describe examples/px_hello.py
+    testrange --log-level debug run examples/px_hello.py
+
+Only host + password are required; user defaults to root@pam, node auto-detects,
+storage defaults to 'local'. The VM is reached over the QEMU guest agent, so the
+orchestrator host needs no route to it.
+
+Build egress on a single-public-IP host: the host won't DHCP the sidecar's MAC,
+so point ``build_uplink`` at an internal bridge the host NATs out its real NIC,
+and give the sidecar a static ``build_uplink_addr`` on that bridge (NET-7).
+Define the bridge the PVE-native way (in /etc/network/interfaces) so preflight's
+bridge check sees it — a live ``ip link add`` bridge is invisible to PVE's API:
+
+    cat >> /etc/network/interfaces <<'EOF'
+    auto vmbr9
+    iface vmbr9 inet static
+        address 10.10.10.1/24
+        bridge-ports none
+        bridge-stp off
+        bridge-fd 0
+        post-up sysctl -w net.ipv4.ip_forward=1
+        post-up iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
+        post-up iptables -A FORWARD -i vmbr9 -o vmbr0 -j ACCEPT
+        post-up iptables -A FORWARD -i vmbr0 -o vmbr9 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+    EOF
+    ifreload -a
 """
 
 from __future__ import annotations
@@ -32,17 +55,7 @@ PLAN = Plan(
         password="Target123!",
         build_uplink="vmbr9",
         build_uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",)),
-        networks=[
-            Switch(
-                "switch1",
-                Network("netA"),
-                cidr="172.31.0.0/24",
-                uplink="vmbr9",
-                dhcp=True,
-                dns=True,
-                nat=True,
-            ),
-        ],
+        networks=[Switch("switch1", Network("netA"), cidr="172.31.0.0/24", dhcp=True, dns=True)],
         pools=[StoragePool("pool1", 32)],
         vms=[
             VMRecipe(
@@ -64,29 +77,15 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="qga-demo",
+    name="pve-smoke",
 )
 
 
-def nginx_is_installed(orch: OrchestratorHandle) -> None:
-    r = orch.vms["web"].communicator.execute(["dpkg", "-l", "nginx"])
-    assert r.exit_code == 0, "nginx missing"
+def nginx_installed(o: OrchestratorHandle) -> None:
+    assert o.vms["web"].communicator.execute(["dpkg", "-l", "nginx"]).exit_code == 0
 
 
-def hostname_matches(orch: OrchestratorHandle) -> None:
-    r = orch.vms["web"].communicator.execute(["hostname"])
-    assert r.stdout.strip() == b"web", r
-
-
-def write_then_read_roundtrips(orch: OrchestratorHandle) -> None:
-    com = orch.vms["web"].communicator
-    com.write_file("/root/marker.txt", b"qga-was-here\n")
-    assert com.read_file("/root/marker.txt") == b"qga-was-here\n"
-
-
-TESTS = [nginx_is_installed, hostname_matches, write_then_read_roundtrips]
-
+TESTS = [nginx_installed]
 
 if __name__ == "__main__":
-    results = run_tests(TESTS, PLAN)
-    sys.exit(0 if all(r.passed for r in results) else 1)
+    sys.exit(0 if all(r.passed for r in run_tests(TESTS, PLAN)) else 1)

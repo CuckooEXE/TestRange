@@ -13,7 +13,10 @@ below.
 from __future__ import annotations
 
 # Side-effect imports: each driver module calls register() at module scope.
+# The proxmox package imports cleanly without proxmoxer installed — the SDK
+# import is lazy (only on connect()), so registration costs nothing at import.
 from testrange.drivers import mock as _mock  # noqa: F401
+from testrange.drivers import proxmox as _proxmox  # noqa: F401
 from testrange.drivers._registry import driver_for, driver_for_name, register
 from testrange.drivers.base import HypervisorDriver
 

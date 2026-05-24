@@ -32,7 +32,7 @@ class TestDescribe:
         rc = cli.main(["describe", str(EXAMPLES / "hello_world.py")])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Plan (MockHypervisor)" in out
+        assert "Plan (ProxmoxHypervisor)" in out
         assert "switch1" in out
         assert "netA" in out
         assert "pool1" in out

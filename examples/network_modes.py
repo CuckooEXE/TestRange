@@ -16,7 +16,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 
 from testrange import OrchestratorHandle, Plan, run_tests
@@ -26,12 +25,10 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface, StaticAddr
-from testrange.drivers.mock import MockHypervisor
+from testrange.drivers.proxmox import ProxmoxHypervisor
 from testrange.networks import Network, Switch
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
-
-UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
 
 _KEY = SSHKey.generate(comment="testrange-network-modes")
 
@@ -64,8 +61,11 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
 
 
 PLAN = Plan(
-    MockHypervisor(
-        build_uplink=UPLINK,
+    ProxmoxHypervisor(
+        host="40.160.34.83",
+        password="Target123!",
+        build_uplink="vmbr9",
+        build_uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",)),
         networks=[
             Switch("bare-sw", Network("bare-net"), cidr="10.50.0.0/24"),
             Switch(
@@ -78,7 +78,8 @@ PLAN = Plan(
                 "uplink-sw",
                 Network("uplink-net"),
                 cidr="10.52.0.0/24",
-                uplink=UPLINK,
+                uplink="vmbr9",
+                uplink_addr=StaticAddr("10.10.10.3/24", gw="10.10.10.1", dns=("1.1.1.1",)),
                 dhcp=True,
                 dns=True,
                 nat=True,
@@ -87,7 +88,8 @@ PLAN = Plan(
                 "both-sw",
                 Network("both-net"),
                 cidr="10.53.0.0/24",
-                uplink=UPLINK,
+                uplink="vmbr9",
+                uplink_addr=StaticAddr("10.10.10.4/24", gw="10.10.10.1", dns=("1.1.1.1",)),
                 # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
                 dhcp=True,
                 dns=True,

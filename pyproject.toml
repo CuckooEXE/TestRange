@@ -20,7 +20,19 @@ cloudinit = ["pycdlib>=1.14", "pyyaml>=6"]
 http = ["requests>=2.31"]
 # proxmoxer's `https` backend rides on requests; the driver opens its own
 # paramiko SFTP channel for download_from_pool (PVE has no REST byte-download).
-proxmox = ["proxmoxer>=2", "requests>=2.31", "paramiko>=3"]
+# requests-toolbelt lets proxmoxer *stream* multipart uploads — without it the
+# backend buffers in memory and caps uploads at 2 GiB, too small for a captured
+# OS disk (run-phase upload_to_pool / create_vm import source).
+# websocket-client reads the build-result serial console: PVE serves serial0
+# only over termproxy->vncwebsocket (a websocket proxmoxer can't speak), the
+# second sanctioned transport exception (PVE-17, ADR-0012).
+proxmox = [
+    "proxmoxer>=2",
+    "requests>=2.31",
+    "requests-toolbelt>=1",
+    "paramiko>=3",
+    "websocket-client>=1.7",
+]
 docs = [
     "sphinx>=8",
     "furo>=2024.8",
@@ -90,7 +102,7 @@ warn_unused_configs = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["pycdlib", "pycdlib.*", "proxmoxer", "proxmoxer.*"]
+module = ["pycdlib", "pycdlib.*", "proxmoxer", "proxmoxer.*", "websocket", "websocket.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -13,7 +13,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 
 from testrange import OrchestratorHandle, Plan, run_tests
@@ -28,26 +27,27 @@ from testrange.devices import (
     StoragePool,
 )
 from testrange.devices.network import NetworkIface, StaticAddr
-from testrange.drivers.mock import MockHypervisor
+from testrange.drivers.proxmox import ProxmoxHypervisor
 from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
-UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
-
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
-    MockHypervisor(
-        build_uplink=UPLINK,
+    ProxmoxHypervisor(
+        host="40.160.34.83",
+        password="Target123!",
+        build_uplink="vmbr9",
+        build_uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",)),
         networks=[
             Switch(
                 "switch1",
                 Network("netA"),
                 Network("netB"),
                 cidr="172.31.0.0/24",
-                uplink=UPLINK,
+                uplink="vmbr9",
                 # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
                 dhcp=True,
                 dns=True,

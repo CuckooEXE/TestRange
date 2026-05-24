@@ -1,17 +1,29 @@
 """L2 fabric for the Proxmox backend — per-run SDN zone + per-switch vnet.
 
-Each test run gets its **own** ``simple`` SDN zone (``z<run-hash>``), created on
-the first ``create_switch`` and torn down when the run's last switch goes. One
-vnet per Switch lives in that zone; all Networks on a Switch share the vnet (one
-wire, multiple labels). SDN config is staged then applied cluster-wide with a
-single ``PUT /cluster/sdn`` — vnets/zones are inert until applied.
+Each test run gets its **own** ``simple`` SDN zone (``tr<hex>``, 8 chars — PVE's
+SDN-id limit), minted once on the :class:`ProxmoxDriver` instance (one driver ==
+one run) and passed in here. It is created on the first ``create_switch`` and
+torn down when the run's last switch goes. One vnet per Switch lives in that
+zone; all Networks on a Switch share the vnet (one wire, multiple labels). SDN
+config is staged then applied cluster-wide with a single ``PUT /cluster/sdn`` —
+vnets/zones are inert until applied.
 
-Teardown is self-discovering: ``destroy_switch`` reads a vnet's ``zone`` before
-deleting it, then drops the zone once it holds no vnets — so a crash-recovery
-driver rebuilt ``from_uri`` (which never saw ``run_id``) still cleans the zone.
+The zone is **not** an author knob and is never recomputed: teardown is
+self-discovering — ``destroy_switch`` reads a vnet's ``zone`` before deleting
+it, then drops the zone once it holds no vnets — so a crash-recovery driver
+rebuilt ``from_uri`` (a fresh instance with a *different* minted zone, and which
+never saw ``run_id``) still cleans the right zone.
 
-v1 realises **isolated** switches only. ``uplink``+``nat`` is rejected at
-preflight, so ``create_switch`` never returns an uplink segment — always ``None``.
+The isolated guest segment is always the per-Switch SDN vnet. For an
+``uplink``+``nat`` Switch the sidecar's ``eth1`` needs a segment with upstream
+connectivity to MASQUERADE out of; on Proxmox that is an **existing host
+bridge** (e.g. ``vmbr0``, the one carrying the default gateway), named by
+``switch.uplink``. The driver does not create or destroy that bridge — it is
+static, operator-owned config — it just hands the name back so the orchestrator
+wires the sidecar's ``eth1`` onto it. So on Proxmox ``switch.uplink`` /
+``hyp.build_uplink`` name an **existing bridge**, not a raw NIC (the generic
+"physical NIC" semantics in PLAN §10 specialise per backend). Preflight verifies
+the bridge exists.
 """
 
 from __future__ import annotations
@@ -52,8 +64,13 @@ def create_switch(
         client.api.cluster.sdn.vnets.post(vnet=vid, zone=zone, alias=backend_name)
     _apply(client)
     _log.info("created SDN vnet %s (switch %s) in zone %s", vid, backend_name, zone)
-    # v1: isolated only. uplink+nat is rejected in preflight, so there is never
-    # an uplink-facing segment to hand back for the sidecar's eth1.
+    # For uplink+nat, hand back the existing host bridge named by switch.uplink
+    # so the orchestrator attaches the sidecar's eth1 to it (the sidecar then
+    # MASQUERADEs the isolated vnet out through it). The bridge is static,
+    # operator-owned config — not created here, not torn down in destroy_switch.
+    # A bare/isolated switch has no uplink segment.
+    if switch.uplink is not None and switch.nat:
+        return switch.uplink
     return None
 
 
