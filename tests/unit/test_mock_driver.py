@@ -21,7 +21,7 @@ from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, Storag
 from testrange.devices.network import NetworkIface
 from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.mock import MockDriver, MockHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import _build_switch
 from testrange.preflight import mgmt_unsupported_findings, native_capability_findings
 from testrange.vms import VMRecipe, VMSpec
@@ -46,7 +46,9 @@ def _vm(name: str = "web", *, addr: _Addr = None, comm: Communicator | None = No
 def _plan(*, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
     return Plan(
         MockHypervisor(
-            networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+            networks=[
+                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
             pools=[StoragePool("pool1", 32)],
             vms=[_vm(addr=addr, comm=comm)],
         ),
@@ -73,7 +75,11 @@ class TestSwitchOwnership:
     def test_create_switch_returns_uplink_segment_for_nat(self) -> None:
         d = MockDriver()
         nat_switch = Switch(
-            "s", Network("a"), cidr="10.0.0.0/24", uplink="eth0", nat=True, dhcp=True
+            "s",
+            Network("a"),
+            cidr="10.0.0.0/24",
+            uplink="eth0",
+            sidecar=Sidecar(dhcp=True, nat=True),
         )
         assert d.create_switch(nat_switch, "tr_switch_s") == "tr_switch_s__uplink"
 

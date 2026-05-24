@@ -115,8 +115,9 @@ class HypervisorDriver(ABC):
         - Proxmox: an SDN zone (or vmbr); networks become vnets
         - Hyper-V: a VMSwitch; networks become per-vNIC VLANs
 
-        When ``switch.uplink and switch.nat`` the driver also provisions an
-        uplink-facing segment for the sidecar's second NIC and returns its
+        When ``switch.uplink`` is set and the switch's ``Sidecar`` has ``nat``,
+        the driver also provisions an uplink-facing segment for the sidecar's
+        second NIC and returns its
         backend network name; the orchestrator attaches the sidecar's
         ``eth1`` to it. Returns ``None`` when there is no uplink segment.
         ``destroy_switch`` tears the whole fabric down, including any uplink

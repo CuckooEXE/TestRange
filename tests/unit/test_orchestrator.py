@@ -27,7 +27,7 @@ from testrange.exceptions import (
     OrchestratorError,
     PreflightError,
 )
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.networks.sidecar import LEASEFILE
 from testrange.orchestrator import Orchestrator
 from testrange.packages import Apt
@@ -39,7 +39,9 @@ def _plan(name: str = "hello") -> Plan:
     return Plan(
         MockHypervisor(
             networks=[
-                Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True),
+                Switch(
+                    "sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)
+                ),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -71,7 +73,9 @@ def _qga_plan(name: str = "hello") -> Plan:
     return Plan(
         MockHypervisor(
             networks=[
-                Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True),
+                Switch(
+                    "sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)
+                ),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -278,7 +282,9 @@ class TestEnterAndExit:
         mgr, _ = populated_cache
         plan = Plan(
             MockHypervisor(
-                networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[
                     VMRecipe(
@@ -344,7 +350,7 @@ def _static_plan(ipv4: str) -> Plan:
     return Plan(
         MockHypervisor(
             networks=[
-                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", dhcp=True),
+                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -377,7 +383,7 @@ def _two_static_nic_plan(nic_idx: int | None) -> Plan:
     return Plan(
         MockHypervisor(
             networks=[
-                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", dhcp=True),
+                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[

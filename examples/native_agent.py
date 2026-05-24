@@ -22,7 +22,7 @@ from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
@@ -38,9 +38,7 @@ PLAN = Plan(
                 Network("netA"),
                 cidr="172.31.0.0/24",
                 uplink="vmbr9",
-                dhcp=True,
-                dns=True,
-                nat=True,
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],

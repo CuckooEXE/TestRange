@@ -26,7 +26,7 @@ from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, Storage
 from testrange.devices.network import NetworkIface
 from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import BuildFailedError, OrchestratorError
-from testrange.networks import Network, NetworkAddressing, Switch
+from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.build_phase import build_phase
 from testrange.orchestrator.context import RunContext
@@ -42,7 +42,11 @@ def _plan(*, data_disks: int = 1) -> Plan:
     devices.append(NetworkIface("netA", addr=DHCPAddr()))
     return Plan(
         MockHypervisor(
-            networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True)],
+            networks=[
+                Switch(
+                    "sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)
+                )
+            ],
             pools=[StoragePool("pool1", 32)],
             vms=[
                 VMRecipe(

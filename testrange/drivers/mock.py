@@ -218,11 +218,12 @@ class MockDriver(HypervisorDriver):
     # -- switches & networks (driver owns L2) ------------------------------
 
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:
+        nat = switch.sidecar is not None and switch.sidecar.nat
         uplink_network: str | None = None
-        if switch.uplink is not None and switch.nat:
+        if switch.uplink is not None and nat:
             uplink_network = f"{backend_name}__uplink"
         self._switches[backend_name] = _Switch(backend_name, uplink_network)
-        self._record("create_switch", backend_name, switch.name, switch.uplink, switch.nat)
+        self._record("create_switch", backend_name, switch.name, switch.uplink, nat)
         return uplink_network
 
     def destroy_switch(self, backend_name: str) -> None:

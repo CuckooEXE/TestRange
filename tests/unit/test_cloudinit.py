@@ -17,7 +17,7 @@ from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StaticA
 from testrange.devices.network import NetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
-from testrange.networks import Network, NetworkAddressing, Switch
+from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.packages import Apt, Pip
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
@@ -32,19 +32,15 @@ _SW_A = Switch(
     "swA",
     Network("netA"),
     cidr="172.31.0.0/24",
-    dhcp=True,
-    dns=True,
-    nat=True,
     uplink="lo",
+    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
 )
 _SW_B = Switch(
     "swB",
     Network("netB"),
     cidr="10.10.10.0/24",
-    dhcp=True,
-    dns=True,
-    nat=True,
     uplink="lo",
+    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
 )
 DEFAULT_ADDR: Mapping[str, NetworkAddressing] = {
     "netA": NetworkAddressing.from_switch(_SW_A),

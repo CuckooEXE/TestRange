@@ -199,7 +199,7 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
                 if addr == mgmt:
                     problems.append(f"{origin}: address collides with mgmt slot {mgmt!s}")
                     continue
-            if switch.dhcp:
+            if switch.sidecar is not None and switch.sidecar.dhcp:
                 lo = subnet.network_address + DHCP_RANGE_LO
                 hi = subnet.network_address + DHCP_RANGE_HI
                 if lo <= addr <= hi:

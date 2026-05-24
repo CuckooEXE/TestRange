@@ -247,9 +247,16 @@ class ProxmoxDriver(HypervisorDriver):
         bridge would otherwise surface as an opaque create-time failure.
         """
         wanted: set[str] = {
-            sw.uplink for sw in plan.hypervisor.all_switches if sw.uplink and sw.nat
+            sw.uplink
+            for sw in plan.hypervisor.all_switches
+            if sw.uplink and sw.sidecar is not None and sw.sidecar.nat
         }
-        if build_switch is not None and build_switch.uplink and build_switch.nat:
+        if (
+            build_switch is not None
+            and build_switch.uplink
+            and build_switch.sidecar is not None
+            and build_switch.sidecar.nat
+        ):
             wanted.add(build_switch.uplink)
         if not wanted:
             return ()

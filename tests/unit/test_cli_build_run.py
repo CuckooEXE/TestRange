@@ -31,12 +31,12 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers.mock import MockHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
     MockHypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True)],
+        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))],
         pools=[StoragePool("pool1", 32)],
         vms=[VMRecipe(
             spec=VMSpec(name="web", devices=[
@@ -71,12 +71,12 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers.mock import MockHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
     MockHypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True)],
+        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))],
         pools=[StoragePool("pool1", 64)],
         vms=[VMRecipe(
             spec=VMSpec(name="fileserver", devices=[

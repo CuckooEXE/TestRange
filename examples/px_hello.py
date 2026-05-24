@@ -45,7 +45,7 @@ from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
@@ -55,7 +55,14 @@ PLAN = Plan(
         password="Target123!",
         build_uplink="vmbr9",
         build_uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",)),
-        networks=[Switch("switch1", Network("netA"), cidr="172.31.0.0/24", dhcp=True, dns=True)],
+        networks=[
+            Switch(
+                "switch1",
+                Network("netA"),
+                cidr="172.31.0.0/24",
+                sidecar=Sidecar(dhcp=True, dns=True),
+            )
+        ],
         pools=[StoragePool("pool1", 32)],
         vms=[
             VMRecipe(

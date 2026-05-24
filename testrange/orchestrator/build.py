@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
-from testrange.networks.base import Network, Switch
+from testrange.networks.base import Network, Sidecar, Switch
 from testrange.networks.sidecar import sidecar_nic_specs
 from testrange.vms.spec import VMSpec
 
@@ -26,21 +26,17 @@ def _build_switch(uplink: str | None, uplink_addr: StaticAddr | None = None) -> 
             BUILD_SWITCH_NAME,
             Network(BUILD_NETWORK_NAME),
             cidr=BUILD_CIDR,
-            dhcp=True,
-            dns=True,
+            sidecar=Sidecar(dhcp=True, dns=True),
         )
     return Switch(
         BUILD_SWITCH_NAME,
         Network(BUILD_NETWORK_NAME),
         cidr=BUILD_CIDR,
         uplink=uplink,
-        dhcp=True,
-        dns=True,
-        nat=True,
         # When the host won't DHCP the sidecar's uplink MAC (single-public-IP /
         # host-NAT'd bridge), the Hypervisor supplies a static uplink address
         # (NET-7); otherwise eth1 DHCPs from the upstream LAN.
-        uplink_addr=uplink_addr,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True, addr=uplink_addr),
     )
 
 

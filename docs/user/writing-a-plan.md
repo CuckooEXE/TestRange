@@ -16,7 +16,7 @@ from testrange.utils import SSHKey
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.drivers.mock import MockHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
@@ -34,9 +34,7 @@ PLAN = Plan(
                 Network("netA"),
                 cidr="10.0.1.0/24",
                 uplink="eth0",
-                dhcp=True,
-                dns=True,
-                nat=True,
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],
@@ -105,9 +103,11 @@ Switch(
     cidr="10.0.1.0/24",       # strict network form; host-form raises
     uplink="eth0",            # physical NIC on the host (vSwitch model)
     mgmt=True,                # host reachable at .2 on this segment
-    dhcp=True,                # sidecar serves DHCP at .1
-    dns=True,                 # sidecar serves DNS at .1
-    nat=True,                 # sidecar MASQUERADEs out the uplink
+    sidecar=Sidecar(          # services at .1; omit for a bare L2 wire
+        dhcp=True,            # sidecar serves DHCP at .1
+        dns=True,             # sidecar serves DNS at .1
+        nat=True,             # sidecar MASQUERADEs out the uplink
+    ),
 )
 ```
 
@@ -128,7 +128,7 @@ NetworkIface("netA")                                   # addr=None: unconfigured
 The default is `addr=None` — **unconfigured**, *not* DHCP. The guest's
 netplan renders `dhcp4: false` and the OS decides what to do (link-local,
 its own client, or nothing). Use `DHCPAddr()` to request a lease (the
-Switch must have `dhcp=True` for anything to answer) and `StaticAddr(...)`
+Switch needs a `Sidecar(dhcp=True)` for anything to answer) and `StaticAddr(...)`
 to pin an address.
 
 Plan-time validation runs at Hypervisor construction and reports every
@@ -136,10 +136,10 @@ problem at once. For a `StaticAddr`:
 
 - the address must be inside the owning Switch's CIDR.
 - it cannot equal the subnet's network or broadcast address.
-- it cannot collide with the pinned sidecar slot (`.1`, present iff
-  `dhcp|dns|nat`) or the mgmt slot (`.2`, present iff `mgmt`).
-- it cannot fall inside the DHCP pool (`.10`–`.99`) when `dhcp=True`.
-  Pick something in `.100`–`.254`.
+- it cannot collide with the pinned sidecar slot (`.1`, present iff the
+  Switch has a `sidecar`) or the mgmt slot (`.2`, present iff `mgmt`).
+- it cannot fall inside the DHCP pool (`.10`–`.99`) when the sidecar serves
+  `dhcp`. Pick something in `.100`–`.254`.
 - duplicate static addresses within the same Network across VMs are rejected.
 
 A NIC with `addr=None` or `addr=DHCPAddr()` is left for plan-level

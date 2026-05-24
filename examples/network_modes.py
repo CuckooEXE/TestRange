@@ -26,7 +26,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
@@ -79,21 +79,25 @@ PLAN = Plan(
                 Network("uplink-net"),
                 cidr="10.52.0.0/24",
                 uplink="vmbr9",
-                uplink_addr=StaticAddr("10.10.10.3/24", gw="10.10.10.1", dns=("1.1.1.1",)),
-                dhcp=True,
-                dns=True,
-                nat=True,
+                sidecar=Sidecar(
+                    dhcp=True,
+                    dns=True,
+                    nat=True,
+                    addr=StaticAddr("10.10.10.3/24", gw="10.10.10.1", dns=("1.1.1.1",)),
+                ),
             ),
             Switch(
                 "both-sw",
                 Network("both-net"),
                 cidr="10.53.0.0/24",
                 uplink="vmbr9",
-                uplink_addr=StaticAddr("10.10.10.4/24", gw="10.10.10.1", dns=("1.1.1.1",)),
                 # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
-                dhcp=True,
-                dns=True,
-                nat=True,
+                sidecar=Sidecar(
+                    dhcp=True,
+                    dns=True,
+                    nat=True,
+                    addr=StaticAddr("10.10.10.4/24", gw="10.10.10.1", dns=("1.1.1.1",)),
+                ),
             ),
         ],
         pools=[StoragePool("pool1", 32)],

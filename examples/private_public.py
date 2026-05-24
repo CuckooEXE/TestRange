@@ -28,7 +28,7 @@ from testrange.devices import (
 )
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
@@ -57,11 +57,13 @@ PLAN = Plan(
                 Network("public-net"),
                 cidr="10.30.0.0/24",
                 uplink="vmbr9",
-                uplink_addr=StaticAddr("10.10.10.3/24", gw="10.10.10.1", dns=("1.1.1.1",)),
                 # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
-                dhcp=True,
-                dns=True,
-                nat=True,
+                sidecar=Sidecar(
+                    dhcp=True,
+                    dns=True,
+                    nat=True,
+                    addr=StaticAddr("10.10.10.3/24", gw="10.10.10.1", dns=("1.1.1.1",)),
+                ),
             ),
         ],
         pools=[StoragePool("pool1", 32)],

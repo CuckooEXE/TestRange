@@ -12,7 +12,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers.mock import MockHypervisor
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
@@ -40,7 +40,9 @@ def _basic_recipe(name: str = "web", net: str = "netA", pool: str = "pool1") -> 
 class TestPlan:
     def test_single_hypervisor(self) -> None:
         hyp = MockHypervisor(
-            networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+            networks=[
+                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe()],
         )
@@ -71,7 +73,9 @@ class TestMockHypervisor:
     def test_vm_references_unknown_network(self) -> None:
         with pytest.raises(ValueError, match="unknown network"):
             MockHypervisor(
-                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+                ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe(net="netZZ")],
             )
@@ -79,7 +83,9 @@ class TestMockHypervisor:
     def test_vm_references_unknown_pool(self) -> None:
         with pytest.raises(ValueError, match="unknown pool"):
             MockHypervisor(
-                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+                ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe(pool="poolZZ")],
             )
@@ -87,7 +93,9 @@ class TestMockHypervisor:
     def test_duplicate_vm_names(self) -> None:
         with pytest.raises(ValueError, match="duplicate names"):
             MockHypervisor(
-                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+                ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe("web"), _basic_recipe("web")],
             )
@@ -96,8 +104,8 @@ class TestMockHypervisor:
         with pytest.raises(ValueError, match="duplicate names"):
             MockHypervisor(
                 networks=[
-                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True),
-                    Switch("sw2", Network("netA"), cidr="10.0.1.0/24", dhcp=True),
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)),
+                    Switch("sw2", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True)),
                 ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[],
@@ -140,7 +148,9 @@ class TestMockHypervisor:
     def test_illegal_vm_name_rejected(self) -> None:
         with pytest.raises(ValueError, match="illegal characters"):
             MockHypervisor(
-                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+                ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe("bad,name")],
             )
@@ -151,7 +161,11 @@ class TestMockHypervisor:
         for bad in ("web-data0", "WEB-DATA1", "fs_data2", "node.data10"):
             with pytest.raises(ValueError, match="data<N>"):
                 MockHypervisor(
-                    networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                    networks=[
+                        Switch(
+                            "sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)
+                        )
+                    ],
                     pools=[StoragePool("pool1", 32)],
                     vms=[_basic_recipe(bad)],
                 )
@@ -159,7 +173,9 @@ class TestMockHypervisor:
     def test_vm_name_non_marker_data_allowed(self) -> None:
         # Only a *trailing* -data<N> marker is reserved; 'data' elsewhere is fine.
         MockHypervisor(
-            networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+            networks=[
+                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe("metadata-server"), _basic_recipe("data0-loader")],
         )

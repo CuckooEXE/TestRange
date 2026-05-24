@@ -192,18 +192,22 @@ def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
         print("Switches:")
         for sw in switches:
             assert isinstance(sw, Switch)
-            attrs = [
-                attr
-                for attr, on in [
-                    ("mgmt", sw.mgmt),
-                    ("dhcp", sw.dhcp),
-                    ("dns", sw.dns),
-                    ("nat", sw.nat),
-                ]
-                if on
-            ]
+            attrs = []
+            if sw.mgmt:
+                attrs.append("mgmt")
             if sw.uplink:
                 attrs.append(f"uplink={sw.uplink}")
+            if sw.sidecar is not None:
+                services = [
+                    name
+                    for name, on in [
+                        ("dhcp", sw.sidecar.dhcp),
+                        ("dns", sw.sidecar.dns),
+                        ("nat", sw.sidecar.nat),
+                    ]
+                    if on
+                ]
+                attrs.append(f"sidecar={'+'.join(services)}")
             attr_str = f" [{', '.join(attrs)}]" if attrs else ""
             print(f"  {sw.name}: {sw.cidr}{attr_str}")
             for n in sw.networks:

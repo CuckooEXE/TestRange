@@ -63,12 +63,12 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
 - **Per-Switch sidecar VM** — a pre-built Alpine image with
   `dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
   (`tools/build-sidecar-image/build.sh`). The orchestrator
-  materializes one per Switch with `needs_sidecar` (= `dhcp or dns or
-  nat`). Per-run config is delivered as a tiny ISO9660
+  materializes one per Switch with `needs_sidecar` (= `switch.sidecar is
+  not None`). Per-run config is delivered as a tiny ISO9660
   (`TR_SIDECAR_CFG`) carrying `dnsmasq.conf`, `interfaces`,
   `nftables.nft`, and `sysctl.conf` rendered by
-  `testrange/networks/sidecar.py`. The sidecar IS the gateway when
-  `nat=True`; no hypervisor-native NAT/DHCP/DNS is used anywhere
+  `testrange/networks/sidecar.py`. The sidecar IS the gateway when its
+  `Sidecar` has `nat`; no hypervisor-native NAT/DHCP/DNS is used anywhere
   (build or run phase).
 - **Pool I/O** — `upload_to_pool` (host file → in-pool volume) and
   `download_from_pool` (in-pool volume → host file) move bytes between the

@@ -69,7 +69,7 @@ def create_switch(
     # MASQUERADEs the isolated vnet out through it). The bridge is static,
     # operator-owned config — not created here, not torn down in destroy_switch.
     # A bare/isolated switch has no uplink segment.
-    if switch.uplink is not None and switch.nat:
+    if switch.uplink is not None and switch.sidecar is not None and switch.sidecar.nat:
         return switch.uplink
     return None
 

@@ -141,48 +141,59 @@ disk.
 `VMSpec.__post_init__` enforces: exactly one CPU, exactly one Memory,
 exactly one OSDrive, ≥ zero HardDrives, ≥ zero NetworkIfaces.
 
-### 10. Switch owns all networking-infrastructure knobs (ESXi-shaped)
+### 10. Switch owns L2 topology; Sidecar owns the services (ESXi-shaped)
 
-A Switch is one L2 broadcast domain *and* the place every infrastructure
-decision lives (`cidr`, `uplink`, `mgmt`, `dns`, `dhcp`, `nat`). A
-Network is a logical label (port-group) within a Switch — VMs attach by
-name. All Networks on a Switch share `switch.cidr`; multiple Networks
-are organizational labels on one wire.
+A Switch is one L2 broadcast domain and the place the *topology* decisions
+live (`cidr`, `uplink`, `mgmt`). The *services* a sidecar VM serves at `.1`
+(`dhcp`, `dns`, `nat`) are bundled into an optional `Sidecar` the Switch
+carries — see [ADR-0013](docs/adr/0013-switch-sidecar-split.md). A Network is
+a logical label (port-group) within a Switch — VMs attach by name. All
+Networks on a Switch share `switch.cidr`; multiple Networks are
+organizational labels on one wire.
 
 ```python
+Sidecar(
+    dhcp: bool = False,               # sidecar serves DHCP at .1
+    dns:  bool = False,               # sidecar serves DNS at .1
+    nat:  bool = False,               # sidecar MASQUERADEs out the uplink at .1
+    addr: StaticAddr | None = None,   # NET-7: static sidecar eth1 (else DHCP)
+)
+
 Switch(
     name: str,
     *networks: Network,
     cidr: str = "192.168.10.0/24",   # strict network form; host-form raises
     uplink: str | None = None,        # physical NIC; testrange creates bridge(s)
     mgmt: bool = False,               # host adapter at .2 (NOT a router)
-    dns: bool = False,                # sidecar serves DNS at .1
-    dhcp: bool = False,               # sidecar serves DHCP at .1
-    nat: bool = False,                # sidecar MASQUERADEs out uplink at .1
-    uplink_addr: StaticAddr | None = None,  # NET-7: static sidecar eth1 (else DHCP)
+    sidecar: Sidecar | None = None,   # services at .1, or None for a bare wire
 )
 ```
 
-`nat=True` requires `uplink=` (the sidecar needs a physical NIC to
-MASQUERADE traffic out of). Otherwise the flags are orthogonal; the
-bare Switch is a pure L2 wire.
+`sidecar=None` is the bare switch (pure L2 wire, incl. the pure-bridge mode:
+`uplink=` with no sidecar). An all-off `Sidecar()` is forbidden — there is one
+spelling of "no services". `needs_sidecar` is exactly `sidecar is not None`.
 
-`uplink_addr` (NET-7) pins the sidecar's MASQUERADE NIC (`eth1`) to a **static**
-address + gateway + DNS instead of DHCP-from-the-upstream-LAN. It requires
-`nat=True` and must carry an explicit prefix (the uplink is its own subnet, not
-the Switch CIDR). Use it when the host won't DHCP the sidecar's MAC — e.g. a
-single-public-IP box where `uplink` is an internal bridge the **host** NATs out
-its real NIC. The build phase takes the same config from the Hypervisor's
-`build_uplink_addr`. With a static uplink the sidecar's `eth1` never populates
-`resolv.conf`, so its dnsmasq is pointed at `uplink_addr.dns` explicitly
-(`no-resolv` + `server=`).
+Validation splits along the concern boundary. **Intrinsic to the services**
+(`Sidecar.__post_init__`): at-least-one-service; `addr` requires `nat=True`;
+`addr` needs an explicit prefix. **Spanning both halves** (`Switch.__init__`):
+`Sidecar(nat=True)` requires `uplink=` — the sidecar needs a physical NIC to
+MASQUERADE out of, and the Switch is the only object seeing both topology and
+services, so it owns that one cross-cutting rule.
+
+`addr` (NET-7) pins the sidecar's MASQUERADE NIC (`eth1`) to a **static**
+address + gateway + DNS instead of DHCP-from-the-upstream-LAN. Use it when the
+host won't DHCP the sidecar's MAC — e.g. a single-public-IP box where `uplink`
+is an internal bridge the **host** NATs out its real NIC. The build phase takes
+the same config from the Hypervisor's `build_uplink_addr`. With a static uplink
+the sidecar's `eth1` never populates `resolv.conf`, so its dnsmasq is pointed at
+`addr.dns` explicitly (`no-resolv` + `server=`).
 
 **Addressing pinning** (`testrange/networks/_addressing_consts.py`):
 
-- `.1` — sidecar (iff `dhcp|dns|nat`); is the gateway when `nat=True`.
+- `.1` — sidecar (iff `sidecar is not None`); is the gateway when `nat`.
 - `.2` — host mgmt adapter (iff `mgmt=True`).
 - `.3`–`.9` — reserved.
-- `.10`–`.99` — DHCP lease pool (iff `dhcp=True`).
+- `.10`–`.99` — DHCP lease pool (iff the sidecar has `dhcp`).
 - `.100`–`.254` — user statics.
 
 **NIC addressing** (`testrange/devices/network/base.py`): the *Switch* owns
@@ -210,32 +221,33 @@ internet); the run-phase netplan is staged separately via cloud-init
 `testrange/builders/sidecar_iso.py`): a pre-built Alpine image with
 `dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
 (`tools/build-sidecar-image/build.sh`). Per-Switch instance —
-materialized only when `switch.needs_sidecar` (= `dhcp or dns or nat`).
+materialized only when `switch.needs_sidecar` (= `switch.sidecar is not None`).
 Per-run config is delivered as a tiny ISO9660 (label `TR_SIDECAR_CFG`)
 carrying `dnsmasq.conf`, `interfaces`, `nftables.nft`, `sysctl.conf`.
 
-**NAT topology** (`nat=True, uplink="eth0"`): the driver realizes TWO L2
-segments — an isolated switch segment (guests + sidecar's eth0 at `.1`, plus
-the host's `.2` if `mgmt`) and a separate uplink segment enslaving the
+**NAT topology** (`Sidecar(nat=True)` + `uplink="eth0"`): the driver realizes
+TWO L2 segments — an isolated switch segment (guests + sidecar's eth0 at `.1`,
+plus the host's `.2` if `mgmt`) and a separate uplink segment enslaving the
 physical NIC (sidecar's eth1, DHCP from upstream LAN). The sidecar's
-`nftables` ruleset MASQUERADEs eth0→eth1. Without `nat`, an uplinked switch is
-one segment (guests bridge directly to LAN with their own MACs).
+`nftables` ruleset MASQUERADEs eth0→eth1. Without a NAT sidecar, an uplinked
+switch is one segment (guests bridge directly to LAN with their own MACs).
 
 **Driver owns L2 (ADR-0008 §1):** the driver realizes the full topology for a
 Switch via `create_switch(switch, backend_name)` (and the uplink-facing
-segment when `switch.uplink and switch.nat`); `create_network` attaches a
-network to an already-created switch. The orchestrator never names a bridge —
-all bridge/vSwitch/SDN mechanics live inside the driver. No backend-native
-NAT/DHCP/DNS anywhere — the sidecar owns those uniformly across backends.
+segment when `switch.uplink and switch.sidecar` has `nat`); `create_network`
+attaches a network to an already-created switch. The orchestrator never names
+a bridge — all bridge/vSwitch/SDN mechanics live inside the driver. No
+backend-native NAT/DHCP/DNS anywhere — the sidecar owns those uniformly across
+backends.
 
 **Build phase** uses the same machinery: a transient build switch
-(`cidr="10.97.99.0/24", uplink=hyp.build_uplink, dhcp=True, dns=True,
-nat=True`) synthesized from `hyp.build_uplink`, brought up before build VMs
-boot and torn down LIFO at build-phase end (ADR-0010 §9).
+(`cidr="10.97.99.0/24", uplink=hyp.build_uplink, sidecar=Sidecar(dhcp=True,
+dns=True, nat=True)`) synthesized from `hyp.build_uplink`, brought up before
+build VMs boot and torn down LIFO at build-phase end (ADR-0010 §9).
 
 **Known limits** (TODO.md): host-local L2 (e.g. netlink-based bridge mgmt) is
-local-only — `Switch.uplink`/`nat` over a remote backend connection are caught
-by preflight (`remote_uplink_unsupported`). Multi-Network mgmt collapses
+local-only — a `Switch.uplink` or a NAT sidecar over a remote backend
+connection are caught by preflight (`remote_uplink_unsupported`). Multi-Network mgmt collapses
 naturally now that Switches own one CIDR.
 
 ### 11. ISOs / base disks referenced ONLY via `CacheEntry`
@@ -759,7 +771,8 @@ PLAN = Plan(
                 "switch1",
                 Network("netA"),
                 cidr="172.31.0.0/24",
-                uplink="eth0", mgmt=True, dhcp=True, dns=True, nat=True,
+                uplink="eth0", mgmt=True,
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],

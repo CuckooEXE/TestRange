@@ -23,7 +23,7 @@ from testrange.drivers import driver_for, driver_for_name
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import ProxmoxDriver, ProxmoxHypervisor
 from testrange.drivers.proxmox._client import ProxmoxConn
-from testrange.networks import Network, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
 _Addr = DHCPAddr | StaticAddr | None
@@ -226,7 +226,7 @@ class TestConstruction:
         hyp = ProxmoxHypervisor(host="h", build_uplink="vmbr9", build_uplink_addr=addr)
         assert hyp.build_uplink_addr is addr
         sw = _build_switch(hyp.build_uplink, hyp.build_uplink_addr)
-        assert sw.uplink_addr is addr and sw.nat is True
+        assert sw.sidecar is not None and sw.sidecar.addr is addr and sw.sidecar.nat is True
 
 
 class TestLifecycle:
@@ -418,7 +418,9 @@ class TestL2:
         # The sidecar's eth1 attaches to the existing host bridge named by uplink.
         c = _FakeClient()
         d = _driver(c)
-        sw = Switch("sw1", Network("a"), cidr="10.0.0.0/24", uplink="vmbr0", nat=True)
+        sw = Switch(
+            "sw1", Network("a"), cidr="10.0.0.0/24", uplink="vmbr0", sidecar=Sidecar(nat=True)
+        )
         assert d.create_switch(sw, "tr-switch-x") == "vmbr0"
         # The bridge is operator-owned: not created as a vnet, not torn down.
         d.destroy_switch("tr-switch-x")
@@ -474,19 +476,25 @@ class TestPreflight:
     def test_uplink_nat_ok_when_bridge_exists(self) -> None:
         # vmbr0 is the existing host bridge the fake reports; uplink+nat is now
         # supported (sidecar eth1 bridges to it).
-        sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", uplink="vmbr0", nat=True)
+        sw = Switch(
+            "sw1", Network("netA"), cidr="10.0.0.0/24", uplink="vmbr0", sidecar=Sidecar(nat=True)
+        )
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")))
         assert bool(report), report.render()
 
     def test_uplink_bridge_missing_is_rejected(self) -> None:
-        sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", uplink="vmbr9", nat=True)
+        sw = Switch(
+            "sw1", Network("netA"), cidr="10.0.0.0/24", uplink="vmbr9", sidecar=Sidecar(nat=True)
+        )
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")))
         assert "proxmox-uplink-bridge-missing" in {f.code for f in report.errors}
 
     def test_build_switch_uplink_bridge_is_checked(self) -> None:
         # The transient build switch's uplink (hyp.build_uplink) is verified too.
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24")
-        build = Switch("build", Network("b"), cidr="10.97.99.0/24", uplink="vmbr9", nat=True)
+        build = Switch(
+            "build", Network("b"), cidr="10.97.99.0/24", uplink="vmbr9", sidecar=Sidecar(nat=True)
+        )
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")), build_switch=build)
         assert "proxmox-uplink-bridge-missing" in {f.code for f in report.errors}
 
@@ -503,7 +511,7 @@ class TestPreflight:
 
     def test_dhcp_addressing_ok_with_qga(self) -> None:
         # read_file capability (QGA) lets the sidecar lease file be read.
-        sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)
+        sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
         report = self._run(_plan(sw, addr=DHCPAddr()))
         assert bool(report), report.render()
 
