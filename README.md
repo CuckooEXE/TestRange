@@ -8,8 +8,9 @@ against specific OS versions and varied network topologies; authorized
 pentest test-ranges.
 
 The driver layer is multi-backend (ADR-0008). `MockDriver` is the in-memory
-**reference backend** the examples and tests run against; a Proxmox driver is
-in progress, and a libvirt driver is planned (rebuilt against the same ABC).
+**reference backend** the examples and tests run against; the **Proxmox driver
+is green end-to-end** (single-node PVE 9.x — see `examples/px_hello.py`), and a
+libvirt driver is planned (rebuilt against the same ABC).
 
 ## Quickstart
 
@@ -35,8 +36,9 @@ testrange run examples/hello_world.py
 The example plans target `MockHypervisor` and are the authoritative shape for
 writing your own. `testrange describe` works against them with no backend; the
 full bring-up lifecycle is exercised against `MockDriver` by the test suite. A
-clean live `run` needs a real backend (Proxmox is in progress; libvirt later),
-which carries its own connection prereqs — see `docs/user/drivers/`.
+clean live `run` needs a real backend (Proxmox is green on single-node PVE;
+libvirt later), which carries its own connection prereqs — see
+`docs/user/drivers/`.
 
 ## Plan shape
 

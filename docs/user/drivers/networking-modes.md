@@ -147,7 +147,7 @@ names a bridge). The sidecar-served `dhcp`/`dns`/`nat` story is uniform — one
 Alpine image, one config-ISO contract, no per-driver branching. Only the L2
 realization (`create_switch`/`create_network`) is driver-specific.
 
-| Flag       | MockDriver (reference)        | Proxmox (in progress)         | ESXi / Hyper-V (future)            |
+| Flag       | MockDriver (reference)        | Proxmox (single-node)         | ESXi / Hyper-V (future)            |
 |------------|-------------------------------|-------------------------------|------------------------------------|
 | `uplink`   | Simulated segment record      | Create SDN zone + vnet, attach physical | vSwitch + vmnic / external vSwitch |
 | `mgmt`     | Simulated `.2` adapter        | Bridge IP via SDN             | vmkernel adapter / share with mgmt OS |

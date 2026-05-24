@@ -12,8 +12,12 @@ torn down at phase end (ADR-0010 §3).
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import tempfile
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +27,7 @@ from testrange.cache.entry import CacheEntry
 from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import VolumeRef
 from testrange.exceptions import (
+    BuildFailedError,
     BuildTimeoutError,
     CacheError,
     CacheMissError,
@@ -43,6 +48,12 @@ from testrange.state.schema import PHASE_BUILD
 from testrange.vms.recipe import VMRecipe
 
 _log = get_logger(__name__)
+
+# Build VMs' serial console output is streamed here, one line per record, as it
+# arrives — run with ``--log-level debug`` to watch a build provision live. A
+# dedicated child logger so it can be silenced/routed independently of the
+# phase's own INFO progress lines.
+_console = get_logger(f"{__name__}.console")
 
 # The single ephemeral build pool's plan-level name (ADR-0010 §9). Cosmetic —
 # the backend name is composed via the driver; this only labels the synthesized
@@ -76,7 +87,10 @@ def build_phase(ctx: RunContext) -> None:
 
     # At least one miss: stand up the ephemeral build infra (ADR-0010 §2/§9).
     build_pool_backend = _create_build_pool(ctx, misses)
-    build_switch = _build_switch(getattr(ctx.plan.hypervisor, "build_uplink", None))
+    build_switch = _build_switch(
+        getattr(ctx.plan.hypervisor, "build_uplink", None),
+        getattr(ctx.plan.hypervisor, "build_uplink_addr", None),
+    )
     provision_switch(ctx, build_switch, kind_prefix="build_")
     build_net_backend = ctx.network_backends[build_switch.networks[0].name]
     materialize_sidecar_for(
@@ -278,7 +292,14 @@ def build_one_vm(
     )
     ctx.store.confirm(build_vm_backend)
     ctx.driver.start_vm(build_vm_backend)
-    wait_for_shutoff(ctx, build_vm_backend, vm.name)
+    # The guest reports an explicit result over the serial console; ``ok`` is
+    # the *only* success signal. A ``fail`` record or a power-off without ``ok``
+    # raises before capture, so a corrupt disk is never silently cached (ADR §21).
+    wait_for_build_result(ctx, build_vm_backend, vm.name)
+    # ``ok`` says it succeeded; the guest then runs ``poweroff``. Wait for the VM
+    # to actually reach shutoff before reading its disk — otherwise capture races
+    # qemu's final writes / file release on a live backend (torn read).
+    wait_for_poweroff(ctx, build_vm_backend, vm.name)
 
     # --- Capture every writable disk into the cache (ADR-0010 §4/§5).
     refs_by_role: dict[str, VolumeRef] = {"os": os_disk_ref}
@@ -316,9 +337,13 @@ def _capture_disk(
     best-effort when one is configured (ADR-0010 §5).
     """
     cache_name = built_artifact_name(config_hash, role)
+    # CORE-4: stage the download on the cache filesystem, not the system
+    # tempdir — a multi-GiB OS disk ENOSPCs on a small tmpfs /tmp, and a
+    # same-fs temp keeps the subsequent cache ingest a cheap intra-fs copy.
     with tempfile.NamedTemporaryFile(
         prefix=f"tr_built_{vm_name}_{role}_",
         suffix=ctx.driver.volume_suffix("build_disk"),
+        dir=ctx.cache.staging,
         delete=False,
     ) as tmp:
         tmp_path = Path(tmp.name)
@@ -332,18 +357,227 @@ def _capture_disk(
     return info.path
 
 
-def wait_for_shutoff(ctx: RunContext, backend_name: str, vm_name: str) -> None:
+# --- Build-result protocol (backend-independent) --------------------------
+#
+# The builder emits a framed record to the guest serial console; the driver's
+# build-result sink streams those bytes back host-side and the orchestrator
+# parses them here. The positive ``ok`` token is the *only* success signal —
+# a guest that powers off without it crashed mid-provision (ADR §21). This
+# parser is intentionally backend-independent: every backend's sink delivers
+# the same serial bytes, only the transport differs.
+#
+#     TESTRANGE-RESULT: ok
+#     # --- or ---
+#     TESTRANGE-RESULT: fail rc=100 cmd="apt-get update"
+#     TESTRANGE-LOG-BEGIN
+#     <base64 of the relevant log>
+#     TESTRANGE-LOG-END
+
+_RESULT_MARKER = b"TESTRANGE-RESULT:"
+_LOG_BEGIN = b"TESTRANGE-LOG-BEGIN"
+_LOG_END = b"TESTRANGE-LOG-END"
+_RC_RE = re.compile(r"\brc=(\d+)")
+_CMD_RE = re.compile(r'\bcmd="(.*)"')
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    """A parsed ``TESTRANGE-RESULT:`` record."""
+
+    ok: bool
+    rc: int | None = None
+    cmd: str | None = None
+    log: bytes = b""
+
+
+def parse_build_result(data: bytes, *, final: bool = False) -> BuildResult | None:
+    """Scan accumulated serial bytes for a complete build-result record.
+
+    Returns the parsed :class:`BuildResult` once a *complete* record is
+    present, else ``None`` so the caller keeps reading. The record can be
+    interleaved with boot chatter — only the framing markers matter.
+
+    ``final=True`` is the end-of-stream pass (the console closed): a ``fail``
+    line whose log block never finished is still returned with whatever log
+    was captured, rather than discarded, so a guest that died after announcing
+    the failure still yields a diagnostic.
+    """
+    idx = data.find(_RESULT_MARKER)
+    if idx == -1:
+        return None
+    rest = data[idx + len(_RESULT_MARKER) :]
+    nl = rest.find(b"\n")
+    if nl == -1:
+        if not final:
+            return None  # the result line itself is not fully arrived yet
+        line = rest
+    else:
+        line = rest[:nl]
+    text = line.decode("utf-8", "replace").strip()
+
+    if text.startswith("ok"):
+        return BuildResult(ok=True)
+    if text.startswith("fail"):
+        rc_m = _RC_RE.search(text)
+        cmd_m = _CMD_RE.search(text)
+        log, complete = _extract_log(data[idx:])
+        if not complete and not final:
+            return None  # wait for the framed log to finish arriving
+        return BuildResult(
+            ok=False,
+            rc=int(rc_m.group(1)) if rc_m else None,
+            cmd=cmd_m.group(1) if cmd_m else None,
+            log=log,
+        )
+    # A complete marker line carrying an unrecognized token: treat as failure
+    # rather than hang (we have a whole line: nl != -1, or this is the final
+    # pass). Anything that isn't the explicit ``ok`` token is not success.
+    return BuildResult(ok=False)
+
+
+def _extract_log(segment: bytes) -> tuple[bytes, bool]:
+    """Decode the framed ``TESTRANGE-LOG-BEGIN``/``END`` base64 block.
+
+    Returns ``(decoded_bytes, complete)``. ``complete`` is ``False`` until
+    both markers are present so the caller can wait for the rest.
+    """
+    begin = segment.find(_LOG_BEGIN)
+    if begin == -1:
+        return b"", False
+    content_start = segment.find(b"\n", begin)
+    if content_start == -1:
+        return b"", False
+    end = segment.find(_LOG_END, content_start)
+    if end == -1:
+        return b"", False
+    raw = segment[content_start + 1 : end]
+    try:
+        return base64.b64decode(b"".join(raw.split())), True
+    except (binascii.Error, ValueError):
+        return raw.strip(), True  # not valid base64 — hand back the raw tail
+
+
+class _ConsoleStreamer:
+    """Mirrors a build VM's serial console to the log, one line at a time.
+
+    Fed the growing serial buffer after each chunk; emits each newly-completed
+    line to :data:`_console` at DEBUG so a build's provisioning is watchable
+    live (``--log-level debug``). Skips the protocol's own framing — the
+    ``TESTRANGE-RESULT:`` record line and the base64 ``TESTRANGE-LOG-BEGIN`` /
+    ``…-END`` block — so the log shows build chatter, not the wire format (the
+    failure log is surfaced *decoded* in :class:`BuildFailedError` regardless).
+
+    Scans only the unseen tail of the buffer each call (no full-buffer copy),
+    so feeding it once per chunk stays linear in total console output.
+    """
+
+    def __init__(self, vm_name: str) -> None:
+        self._vm_name = vm_name
+        self._pos = 0  # how far into the buffer we've split lines
+        self._in_log_block = False
+
+    def feed(self, buffer: bytearray) -> None:
+        while True:
+            nl = buffer.find(b"\n", self._pos)
+            if nl == -1:
+                return
+            line = bytes(buffer[self._pos : nl])
+            self._pos = nl + 1
+            if _LOG_BEGIN in line:
+                self._in_log_block = True
+                continue
+            if _LOG_END in line:
+                self._in_log_block = False
+                continue
+            if self._in_log_block or _RESULT_MARKER in line:
+                continue  # framing, not build output
+            text = line.decode("utf-8", "replace").rstrip("\r")
+            if text:
+                _console.debug("[%s] %s", self._vm_name, text)
+
+
+def wait_for_build_result(ctx: RunContext, backend_name: str, vm_name: str) -> None:
+    """Live-tail the build VM's serial console until it reports a result.
+
+    Replaces the old power-off-as-success poll. Opens the driver's
+    build-result sink right after ``start_vm`` and reads until:
+
+    - an ``ok`` record arrives -> return (the disk is safe to capture);
+    - a ``fail`` record arrives -> raise :class:`BuildFailedError` with the
+      failing command, rc, and decoded log (real-time fast-fail);
+    - the console closes without ``ok`` -> raise :class:`BuildFailedError`
+      ("powered off without a result" — the silent-corrupt-cache guard);
+    - the build-timeout elapses -> raise :class:`BuildTimeoutError` (the
+      watchdog, now only for a true wedge that never reports *and* never
+      powers off).
+
+    Console output is mirrored to the ``…build_phase.console`` logger at DEBUG
+    as it streams (see :class:`_ConsoleStreamer`), so a build's provisioning is
+    watchable live with ``--log-level debug``.
+    """
     deadline = time.monotonic() + ctx.build_timeout_s
-    last_state = "?"
+    buffer = bytearray()
+    streamer = _ConsoleStreamer(vm_name)
+    # ``closing`` runs the generator's ``finally`` (releasing the driver's
+    # transport) even when we break out early on a record.
+    with closing(ctx.driver.read_build_result_sink(backend_name)) as stream:
+        for chunk in stream:
+            # Process the chunk *before* the deadline check: a chunk carrying the
+            # result must never be discarded just because it landed at the timeout
+            # boundary. The watchdog fires only with no result in hand (a chunk
+            # that parsed to nothing, or a b"" heartbeat).
+            if chunk:
+                buffer.extend(chunk)
+                streamer.feed(buffer)  # mirror console lines to the log live
+                result = parse_build_result(bytes(buffer))
+                if result is not None:
+                    _raise_or_return(result, vm_name)
+                    return
+            if time.monotonic() >= deadline:
+                raise BuildTimeoutError(
+                    f"vm {vm_name!r} produced no build result within {ctx.build_timeout_s:.0f}s"
+                )
+    # Stream closed: parse one last time, leniently. No ``ok`` => failure.
+    final = parse_build_result(bytes(buffer), final=True)
+    if final is not None and final.ok:
+        return
+    raise BuildFailedError(
+        vm_name,
+        rc=final.rc if final else None,
+        cmd=final.cmd if final else None,
+        log=final.log if final else bytes(buffer[-4096:]),
+        detail=None if final else "powered off without reporting a build result",
+    )
+
+
+def wait_for_poweroff(ctx: RunContext, backend_name: str, vm_name: str) -> None:
+    """Block until the build VM is actually ``shutoff`` (safe to capture).
+
+    The serial ``ok`` token means provisioning *succeeded*; it is emitted just
+    before the guest's ``poweroff``, so at that instant the VM is still running
+    and the backend still holds its disk image open. Capturing then would SFTP a
+    torn read out from under a live qemu (and miss any final shutdown writes).
+    This is the short, bounded wait for the guest's own ``poweroff`` to land —
+    distinct from :func:`wait_for_build_result`, which decides success/failure.
+    A guest that reports ``ok`` but never powers off is a wedge; the build
+    timeout catches it.
+    """
+    deadline = time.monotonic() + ctx.build_timeout_s
     while time.monotonic() < deadline:
-        state = ctx.driver.get_vm_power_state(backend_name)
-        if state != last_state:
-            _log.info("vm %s state: %s", vm_name, state)
-            last_state = state
-        if state == "shutoff":
+        if ctx.driver.get_vm_power_state(backend_name) == "shutoff":
             return
         time.sleep(2.0)
-    raise BuildTimeoutError(f"vm {vm_name!r} did not power off within {ctx.build_timeout_s:.0f}s")
+    raise BuildTimeoutError(
+        f"vm {vm_name!r} reported build ok but did not power off within {ctx.build_timeout_s:.0f}s"
+    )
+
+
+def _raise_or_return(result: BuildResult, vm_name: str) -> None:
+    """Return on success; raise :class:`BuildFailedError` on a ``fail`` record."""
+    if result.ok:
+        _log.info("vm %s: build reported success", vm_name)
+        return
+    raise BuildFailedError(vm_name, rc=result.rc, cmd=result.cmd, log=result.log)
 
 
 def teardown_build_phase(ctx: RunContext, build_switch: Switch, build_pool_backend: str) -> None:
@@ -371,9 +605,12 @@ def teardown_build_phase(ctx: RunContext, build_switch: Switch, build_pool_backe
 
 __all__ = [
     "BUILD_POOL_NAME",
+    "BuildResult",
     "build_one_vm",
     "build_phase",
+    "parse_build_result",
     "probe_misses",
     "teardown_build_phase",
-    "wait_for_shutoff",
+    "wait_for_build_result",
+    "wait_for_poweroff",
 ]

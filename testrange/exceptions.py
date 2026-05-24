@@ -67,6 +67,45 @@ class OrchestratorError(TestRangeError):
     """Orchestrator-level failure (phase sequencing, lifecycle)."""
 
 
+class BuildFailedError(BuilderError):
+    """A build VM reported (or implied) a provisioning failure.
+
+    Raised by the orchestrator when the build-result sink yields a ``fail``
+    record, or when the build VM powers off without emitting the positive
+    ``ok`` token (a guest that crashed mid-provision). Carries the failing
+    command + its exit code and the decoded build log so the user sees *what*
+    failed and *why*, instead of a silently-cached corrupt disk.
+
+    Distinct from :class:`BuildTimeoutError`, which is the watchdog for a true
+    wedge (a guest that never emits a record *and* never powers off).
+    """
+
+    def __init__(
+        self,
+        vm: str,
+        *,
+        rc: int | None = None,
+        cmd: str | None = None,
+        log: bytes = b"",
+        detail: str | None = None,
+    ) -> None:
+        self.vm = vm
+        self.rc = rc
+        self.cmd = cmd
+        self.log = log
+        parts = [f"vm {vm!r}: build failed"]
+        if detail is not None:
+            parts.append(detail)
+        elif cmd is not None:
+            parts.append(f"command {cmd!r} exited {rc}")
+        elif rc is not None:
+            parts.append(f"exit code {rc}")
+        message = "; ".join(parts)
+        if log:
+            message += "\n--- build log ---\n" + log.decode("utf-8", "replace")
+        super().__init__(message)
+
+
 class BuildTimeoutError(OrchestratorError):
     """Build VM did not power off within the configured timeout."""
 

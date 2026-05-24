@@ -44,6 +44,11 @@ class CacheManager:
     def root(self) -> Path:
         return self.local.root
 
+    @property
+    def staging(self) -> Path:
+        """Scratch dir on the cache filesystem (see :attr:`LocalCache.staging`)."""
+        return self.local.staging
+
     # ---- resolution ------------------------------------------------------
 
     def resolve(self, ref: str | CacheEntry, *, fetch: bool = True) -> CacheEntryInfo:

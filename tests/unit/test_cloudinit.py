@@ -72,6 +72,20 @@ def _recipe(builder: CloudInitBuilder, spec: VMSpec | None = None) -> VMRecipe:
     )
 
 
+def _provision_script(body: dict[str, Any]) -> str:
+    """Extract the bash provisioning script from the single ``runcmd`` entry.
+
+    All provisioning now runs inside one ``["bash", "-c", <script>]`` entry so
+    it executes fail-fast under an ERR trap that emits the build-result record
+    (ADR §21).
+    """
+    runcmd = body["runcmd"]
+    assert len(runcmd) == 1
+    entry = runcmd[0]
+    assert entry[:2] == ["bash", "-c"]
+    return str(entry[2])
+
+
 def _basic_builder() -> CloudInitBuilder:
     return CloudInitBuilder(
         base=CacheEntry("debian-13"),
@@ -135,30 +149,41 @@ class TestRenderUserData:
         assert users["u"] == {"name": "u", "type": "text", "password": "upass"}
         assert body["chpasswd"]["expire"] is False
 
-    def test_apt_packages(self) -> None:
+    def test_apt_installed_fail_fast_in_script(self) -> None:
+        # apt lives in the trapped script (not cloud-init's `packages:`
+        # directive) so a failed install aborts and reports, not silently
+        # caches a half-provisioned disk (ADR §21).
         b = _basic_builder()
         spec = _spec()
         recipe = _recipe(b, spec)
         body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        assert body["packages"] == ["nginx", "curl"]
-        assert body["package_update"] is True
+        assert "packages" not in body
+        assert "package_update" not in body
+        script = _provision_script(body)
+        assert "apt-get update" in script
+        assert "apt-get install -y nginx curl" in script
 
-    def test_runcmd_ends_with_poweroff(self) -> None:
+    def test_script_is_fail_fast_emits_result_and_powers_off(self) -> None:
         b = _basic_builder()
         spec = _spec()
         recipe = _recipe(b, spec)
         body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        assert body["runcmd"][-1] == "poweroff"
-        assert "echo hi > /tmp/hi" in body["runcmd"]
+        script = _provision_script(body)
+        assert "set -eE" in script
+        assert "trap __tr_emit_fail ERR" in script
+        assert "TESTRANGE-RESULT: ok" in script  # the success token
+        assert "TESTRANGE-RESULT: fail" in script  # the trap's failure record
+        assert "echo hi > /tmp/hi" in script  # post_install_commands run inline
+        assert script.rstrip().endswith("poweroff")  # self-terminating
 
-    def test_pip_packages_via_runcmd(self) -> None:
+    def test_pip_packages_via_script(self) -> None:
         b = _basic_builder()
         spec = _spec()
         recipe = _recipe(b, spec)
         body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        joined = "\n".join(body["runcmd"])
-        assert "pip3 install" in joined
-        assert "requests" in joined
+        script = _provision_script(body)
+        assert "pip3 install" in script
+        assert "requests" in script
 
     def test_no_credentials_no_chpasswd(self) -> None:
         b = CloudInitBuilder(
@@ -221,7 +246,7 @@ class TestPipInsecure:
             packages=[Pip("requests"), Pip("rich")],
         )
         body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        pip_lines = [ln for ln in _provision_script(body).splitlines() if "pip3 install" in ln]
         assert len(pip_lines) == 1
         assert "--trusted-host" not in pip_lines[0]
         assert "requests" in pip_lines[0] and "rich" in pip_lines[0]
@@ -235,7 +260,7 @@ class TestPipInsecure:
             ],
         )
         body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        pip_lines = [ln for ln in _provision_script(body).splitlines() if "pip3 install" in ln]
         assert len(pip_lines) == 2
         secure_line = next(line for line in pip_lines if "--trusted-host" not in line)
         insecure_line = next(line for line in pip_lines if "--trusted-host" in line)
@@ -252,7 +277,7 @@ class TestPipInsecure:
             packages=[Pip("internal-pkg", insecure=True)],
         )
         body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        pip_lines = [ln for ln in _provision_script(body).splitlines() if "pip3 install" in ln]
         assert len(pip_lines) == 1
         assert "--trusted-host" in pip_lines[0]
 

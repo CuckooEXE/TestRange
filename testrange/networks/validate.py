@@ -24,6 +24,8 @@ from testrange.networks._addressing_consts import (
     DHCP_RANGE_LO,
     MGMT_OFFSET,
     SIDECAR_OFFSET,
+    USER_STATIC_HI,
+    USER_STATIC_LO,
 )
 from testrange.networks.base import Switch
 from testrange.vms.recipe import VMRecipe
@@ -36,6 +38,17 @@ from testrange.vms.recipe import VMRecipe
 # top at its own boundary. A leading `_` is allowed for value objects, but the
 # `__` prefix is reserved against *user* names (orchestrator internals use it).
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
+
+# The orchestrator names a VM's i-th data disk ``<vm>-data<i>`` (see
+# ``orchestrator/artifacts.py``), while its OS disk is just ``<vm>``. So a VM
+# whose name ends in a ``-data<N>`` marker would produce an OS-disk volume ref
+# identical to some *other* VM's data-disk ref — two distinct disks colliding on
+# one backend locator (silent clobber on upload, mis-resolution on capture —
+# PVE-30). The marker is backend-agnostic (it's the orchestrator's, not a
+# driver's), so the guard lives here. ``[-_.]`` covers the separators a backend
+# may fold to ``-`` when sanitizing (e.g. Proxmox lowercases and maps ``_``/``.``
+# to ``-``), case-insensitively.
+_DATA_DISK_MARKER = re.compile(r"[-_.]data\d+$", re.IGNORECASE)
 
 
 def validate_name(value: str, kind: str) -> str:
@@ -98,6 +111,14 @@ def validate_hypervisor_plan(
     if reserved:
         raise ValueError(
             f"names starting with '__' are reserved for testrange internals; rename: {reserved}"
+        )
+
+    data_marked = sorted(n for n in vm_names if _DATA_DISK_MARKER.search(n))
+    if data_marked:
+        raise ValueError(
+            "VM names ending in a '-data<N>' marker are reserved (the orchestrator "
+            "names a VM's i-th data disk '<vm>-data<i>', so such a name would collide "
+            f"with another VM's data-disk volume ref); rename: {data_marked}"
         )
 
     for r in rs:
@@ -185,8 +206,8 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
                     problems.append(
                         f"{origin}: address falls inside the DHCP pool "
                         f"({lo!s}-{hi!s}); pick something in "
-                        f"{subnet.network_address + 100!s}-"
-                        f"{subnet.network_address + 254!s}"
+                        f"{subnet.network_address + USER_STATIC_LO!s}-"
+                        f"{subnet.network_address + USER_STATIC_HI!s}"
                     )
                     continue
 

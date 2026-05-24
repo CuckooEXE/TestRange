@@ -16,7 +16,12 @@ from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
 from testrange.devices.network import StaticAddr
-from testrange.exceptions import BuildNotReadyError, GuestAgentError, OrchestratorError
+from testrange.exceptions import (
+    BuildNotReadyError,
+    CommunicatorError,
+    GuestAgentError,
+    OrchestratorError,
+)
 from testrange.networks.base import Switch
 from testrange.networks.sidecar import LEASEFILE, SIDECAR_DNSMASQ_CONF, parse_dnsmasq_leases
 from testrange.orchestrator.artifacts import data_disk_role
@@ -168,6 +173,39 @@ def _wait_one_sidecar_ready(ctx: RunContext, switch_name: str, sidecar_backend: 
     )
 
 
+def wait_communicators_ready(ctx: RunContext) -> None:
+    """Wait until each user VM's bound communicator can execute a command.
+
+    At run-phase boot the native guest agent (or SSH) comes up a few seconds
+    *after* the VM powers on. The first real exec — the builder's readiness
+    probe (``wait_builder_ready``) — must not race that, or it hits e.g. PVE's
+    ``QEMU guest agent is not running``. This is the user-VM analogue of
+    :func:`wait_sidecars_ready`: poll a trivial exec until the communicator
+    answers, then hand off. A VM whose communicator never answers fails loud.
+    """
+    for vm in ctx.plan.hypervisor.vms:
+        _wait_one_communicator_ready(ctx, vm)
+
+
+def _wait_one_communicator_ready(ctx: RunContext, vm: VMRecipe) -> None:
+    deadline = time.monotonic() + ctx.agent_ready_timeout_s
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            vm.communicator.execute(("true",), timeout=10.0)
+        except (GuestAgentError, CommunicatorError) as e:
+            last_err = e  # agent / SSH not up yet
+        else:
+            _log.info("communicator for vm %s ready", vm.name)
+            return
+        time.sleep(2.0)
+    detail = f": {last_err}" if last_err is not None else ""
+    raise OrchestratorError(
+        f"vm {vm.name!r} communicator not ready within "
+        f"{ctx.agent_ready_timeout_s:.0f}s (native guest agent or SSH unreachable){detail}"
+    )
+
+
 def wait_builder_ready(ctx: RunContext) -> None:
     """Drive each builder's readiness check via the bound communicator.
 
@@ -292,5 +330,6 @@ __all__ = [
     "lookup_credential",
     "run_phase",
     "wait_builder_ready",
+    "wait_communicators_ready",
     "wait_sidecars_ready",
 ]

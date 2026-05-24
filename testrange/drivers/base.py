@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NewType
 
@@ -321,6 +321,47 @@ class HypervisorDriver(ABC):
         """A VM-bound callable that writes a file into the guest via the
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")
+
+    # --- Build-result sink (hypervisor capability, not agent-level) -------
+    # The build phase keys success on a structured ``TESTRANGE-RESULT:``
+    # record the builder writes to the guest's serial console; the
+    # orchestrator reads it back host-side through this accessor. It is a
+    # *hypervisor* capability — distinct from the native guest agent above —
+    # because a guest may ship no QGA/VMware-Tools (OpenBSD, a bare installer)
+    # yet still write to a 16550 UART, the most portable virtual device there
+    # is. Absence of a native agent does not affect it; presence of one is no
+    # substitute. The per-backend read mechanism differs (PVE termproxy ->
+    # vncwebsocket, libvirt pty/file, ESXi datastore file), but it is serial
+    # everywhere, so the builder emits to the console only and this hides the
+    # host-side read.
+
+    def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:
+        """Open a live byte-stream of the build VM's serial console.
+
+        Returns a generator of console ``bytes`` chunks the orchestrator tails
+        for the ``TESTRANGE-RESULT:`` record. Two contract points let the
+        orchestrator enforce its own build-timeout watchdog without being held
+        hostage by a silent guest:
+
+        - The generator MUST yield control periodically even when no new bytes
+          are available; an empty ``b""`` chunk is the idiom for "nothing yet,
+          check your deadline and call me again." A blocking transport honors
+          this with a recv timeout; a file-backed sink polls and yields ``b""``
+          between reads. Pacing is the sink's job — the orchestrator loops
+          immediately on a heartbeat, so a tight ``b""`` loop busy-spins.
+        - Iteration ends when the console closes — the build VM powered off or
+          the transport hung up. A guest that powered off without emitting
+          ``ok`` is a failure (crashed mid-provision).
+
+        The orchestrator wraps the generator in ``contextlib.closing`` so a
+        transport the driver opened (a Proxmox ``vncwebsocket``, a libvirt pty)
+        is released via the generator's ``finally`` even when the loop breaks
+        early on a record. Default: the backend exposes no serial sink and
+        therefore cannot verify a build — a clean :class:`DriverError`, not a
+        missing method, so a new backend that forgets to implement it fails
+        loud at build time rather than silently caching an unverified disk.
+        """
+        raise DriverError(f"{type(self).__name__}: no build-result sink")
 
     @abstractmethod
     def create_snapshot(

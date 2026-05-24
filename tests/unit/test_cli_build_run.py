@@ -22,8 +22,6 @@ from testrange.drivers.mock import MockDriver
 from testrange.orchestrator import run_tests
 from testrange.orchestrator.runtime import Orchestrator
 
-EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
-
 _PLAN_SRC = """
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
@@ -52,6 +50,46 @@ PLAN = Plan(
         )],
     ),
     name="hello",
+)
+
+def test_ok(orch):
+    pass
+
+TESTS = [test_ok]
+"""
+
+# A VM with a data disk, on the Mock backend, for the build->capture->run-import
+# lifecycle assertions. Kept inline (not loaded from examples/data_disk.py, which
+# now targets ProxmoxHypervisor) so the Mock coverage doesn't depend on an
+# example's backend.
+_DATA_DISK_PLAN_SRC = """
+from testrange import Plan
+from testrange.builders import CloudInitBuilder
+from testrange.cache import CacheEntry
+from testrange.communicators import SSHCommunicator
+from testrange.credentials import PosixCred
+from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
+from testrange.devices.network import NetworkIface
+from testrange.drivers.mock import MockHypervisor
+from testrange.networks import Network, Switch
+from testrange.vms import VMRecipe, VMSpec
+
+PLAN = Plan(
+    MockHypervisor(
+        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True)],
+        pools=[StoragePool("pool1", 64)],
+        vms=[VMRecipe(
+            spec=VMSpec(name="fileserver", devices=[
+                CPU(1), Memory(512), OSDrive("pool1", 8), HardDrive("pool1", 16),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ]),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+            ),
+            communicator=SSHCommunicator("u"),
+        )],
+    ),
+    name="data-disk-mock",
 )
 
 def test_ok(orch):
@@ -156,12 +194,15 @@ class TestRunAutoBuild:
         assert _run_vm_creates(driver) == 1
 
 
-class TestDataDiskExample:
-    """The canonical data-disk example brings up green on the mock driver."""
+class TestDataDiskLifecycle:
+    """A data-disk plan brings up green on the mock driver: blank-at-build,
+    captured, re-imported at run."""
 
-    def test_example_runs_green(self, env: tuple[MockDriver, str]) -> None:
+    def test_data_disk_lifecycle(self, env: tuple[MockDriver, str], tmp_path: Path) -> None:
         driver, _plan_path = env
-        plan, tests = cli._load_plan_module(str(EXAMPLES / "data_disk.py"))
+        plan_path = tmp_path / "data_disk_mock.py"
+        plan_path.write_text(_DATA_DISK_PLAN_SRC)
+        plan, tests = cli._load_plan_module(str(plan_path))
         results = run_tests(tests, plan, cache_manager=CacheManager())
         assert results and all(r.passed for r in results)
         # The data disk was built blank, captured, and pushed back at run.

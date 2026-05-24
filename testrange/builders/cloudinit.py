@@ -2,9 +2,19 @@
 
 The seed is an ISO9660 image labeled ``cidata`` containing ``user-data``,
 ``meta-data``, and ``network-config``. The install VM mounts it on first
-boot and applies it. Seeds end with ``poweroff`` in ``runcmd`` so the
-install VM self-terminates and the orchestrator snapshots the disk as the
-cached post-install artifact.
+boot and applies it.
+
+Build-result contract (ADR §21)
+-------------------------------
+All provisioning — apt, pip, and ``post_install_commands`` — runs inside a
+single **fail-fast** ``bash`` script with an ``ERR`` trap. On success the
+script emits ``TESTRANGE-RESULT: ok`` to ``/dev/ttyS0`` then powers off; on
+the first failing command the trap emits ``TESTRANGE-RESULT: fail rc=… cmd=…``
+plus a base64'd tail of ``/var/log/cloud-init-output.log``, then powers off.
+The orchestrator treats the ``ok`` token as the *only* success signal, so a
+failed ``apt-get update`` no longer powers off "successfully" and caches a
+corrupt disk. Package installs live in the trapped script (not cloud-init's
+``packages:`` directive) precisely so a package failure is caught fail-fast.
 
 Network rendering uses **interface-name matching** (``match: name: ...``)
 so the cached disk doesn't bake in the install VM's MAC.
@@ -190,11 +200,6 @@ class CloudInitBuilder(Builder):
         apt_pkgs = [p.name for p in self.packages if isinstance(p, Apt)]
         pips = [p for p in self.packages if isinstance(p, Pip)]
 
-        runcmd: list[str] = []
-        runcmd.extend(_render_pip_install_lines(pips))
-        runcmd.extend(self.post_install_commands)
-        runcmd.append("poweroff")  # self-terminating install
-
         body: dict[str, Any] = {
             "ssh_pwauth": True,
             "users": users or [{"name": "root", "lock_passwd": False}],
@@ -210,10 +215,14 @@ class CloudInitBuilder(Builder):
                 "users": chpasswd_users,
                 "expire": False,
             }
-        if apt_pkgs:
-            body["package_update"] = True
-            body["packages"] = apt_pkgs
-        body["runcmd"] = runcmd
+        # All provisioning runs inside one fail-fast bash script that emits the
+        # build-result record to the serial console and powers off (see module
+        # docstring). apt lives here — not in cloud-init's `packages:` directive
+        # — so a failed install aborts the script and reports `fail` instead of
+        # powering off "successfully" with a half-provisioned disk.
+        body["runcmd"] = [
+            ["bash", "-c", _render_provision_script(apt_pkgs, pips, self.post_install_commands)]
+        ]
 
         yaml_text = yaml.safe_dump(
             body,
@@ -431,6 +440,69 @@ def _render_insecure_write_files(*, insecure_apt: bool, insecure_dnf: bool) -> l
             }
         )
     return entries
+
+
+# The guest serial device the build-result record is written to. Linux exposes
+# the first 16550 UART here; the BSDs/Windows use com0/COM1, handled by their
+# own builders. The build VM's virtual hardware must carry this UART — a driver
+# concern (the build-result sink reads the host side of the same port).
+_SERIAL_DEVICE = "/dev/ttyS0"
+
+# How much of the cloud-init output log to ship back on failure. A bounded tail
+# keeps a runaway log from flooding the serial console; it is base64'd so a
+# binary payload survives the channel intact.
+_FAIL_LOG_TAIL_BYTES = 16384
+
+# The fail-fast preamble: define the ERR trap that frames the failing command
+# (rc + $BASH_COMMAND) and a base64 log tail onto the serial console, arm it,
+# then `set -eE` so any nonzero exit fires it. `-E` propagates the trap into
+# shell functions/subshells.
+_PROVISION_PREAMBLE = f"""\
+__tr_serial={_SERIAL_DEVICE}
+__tr_emit_fail() {{
+    __tr_rc=$?
+    __tr_cmd=$BASH_COMMAND
+    {{
+        printf 'TESTRANGE-RESULT: fail rc=%s cmd="%s"\\n' "$__tr_rc" "$__tr_cmd"
+        printf 'TESTRANGE-LOG-BEGIN\\n'
+        tail -c {_FAIL_LOG_TAIL_BYTES} /var/log/cloud-init-output.log 2>/dev/null | base64
+        printf 'TESTRANGE-LOG-END\\n'
+    }} > "$__tr_serial" 2>/dev/null
+    poweroff -f
+}}
+trap __tr_emit_fail ERR
+set -eE
+export DEBIAN_FRONTEND=noninteractive"""
+
+# The success footer: `sync` flushes provisioning writes to the virtual disk
+# *before* announcing `ok`, because the orchestrator captures the disk the
+# moment it reads the token.
+_PROVISION_FOOTER = f"""\
+sync
+printf 'TESTRANGE-RESULT: ok\\n' > "{_SERIAL_DEVICE}" 2>/dev/null
+poweroff"""
+
+
+def _render_provision_script(
+    apt_pkgs: Sequence[str], pips: Sequence[Pip], post_install_commands: Sequence[str]
+) -> str:
+    """Render the fail-fast bash provisioning script (build-result contract).
+
+    Runs apt (update + install), pip installs, then ``post_install_commands``
+    in order under ``set -eE`` + an ``ERR`` trap, and frames the build-result
+    record onto the serial console (success footer or trap). Returned as a
+    single string to hand to ``bash -c`` via a cloud-init ``runcmd`` list entry
+    (exec'd directly, so the whole script runs under bash — needed for the
+    ``ERR`` trap and ``$BASH_COMMAND``, which POSIX ``sh`` lacks).
+    """
+    lines = [_PROVISION_PREAMBLE]
+    if apt_pkgs:
+        lines.append("apt-get update")
+        lines.append(f"apt-get install -y {' '.join(apt_pkgs)}")
+    lines.extend(_render_pip_install_lines(pips))
+    lines.extend(post_install_commands)
+    lines.append(_PROVISION_FOOTER)
+    return "\n".join(lines) + "\n"
 
 
 def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:

@@ -20,7 +20,7 @@ BUILD_NETWORK_NAME = "build"
 BUILD_SWITCH_NAME = "__build"
 
 
-def _build_switch(uplink: str | None) -> Switch:
+def _build_switch(uplink: str | None, uplink_addr: StaticAddr | None = None) -> Switch:
     if uplink is None:
         return Switch(
             BUILD_SWITCH_NAME,
@@ -37,6 +37,10 @@ def _build_switch(uplink: str | None) -> Switch:
         dhcp=True,
         dns=True,
         nat=True,
+        # When the host won't DHCP the sidecar's uplink MAC (single-public-IP /
+        # host-NAT'd bridge), the Hypervisor supplies a static uplink address
+        # (NET-7); otherwise eth1 DHCPs from the upstream LAN.
+        uplink_addr=uplink_addr,
     )
 
 

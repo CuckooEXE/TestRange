@@ -10,6 +10,8 @@ The build phase warms the cache and leaves the backend empty:
 
 from __future__ import annotations
 
+import base64
+import logging
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -23,7 +25,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers.mock import MockDriver, MockHypervisor
-from testrange.exceptions import OrchestratorError
+from testrange.exceptions import BuildFailedError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Switch
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.build_phase import build_phase
@@ -145,6 +147,22 @@ class TestBuildPhase:
         assert driver._switches == {}
         assert any(c[0] == "destroy_pool" for c in driver.calls)
 
+    def test_capture_temp_lands_on_cache_filesystem(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        # CORE-4: the captured disk is downloaded to a temp file before it is
+        # ingested. That temp must sit on the cache's filesystem — not the
+        # system tempdir (often a small tmpfs /tmp), where a multi-GiB OS disk
+        # ENOSPCs. Assert every download target is under the cache root.
+        cache, driver = env
+        plan = _plan(data_disks=1)
+        build_phase(_ctx(plan, driver, cache))
+
+        downloads = [Path(c[1][1]) for c in driver.calls if c[0] == "download_from_pool"]
+        assert downloads, "expected at least one disk capture"
+        for dest in downloads:
+            assert cache.local.root in dest.parents, f"capture temp escaped cache fs: {dest}"
+
     def test_second_build_is_full_cache_hit(self, env: tuple[CacheManager, MockDriver]) -> None:
         cache, driver = env
         plan = _plan(data_disks=1)
@@ -185,6 +203,84 @@ class TestBuildPhase:
         assert any(c[0] == "create_vm" and "build_vm" in c[1][0] for c in driver.calls)
         # ...and the rebuilt disks land under a *new* config_hash.
         assert set(_built_names(cache)) - first_names
+
+
+class TestBuildResultSignaling:
+    """ADR §21: success keys on the serial ``ok`` token, not power-off.
+
+    These paths were untestable before the build-result sink — a mock VM that
+    powered off always looked like success. Now the orchestrator reads the
+    guest's explicit result and a failure raises before any disk is cached.
+    """
+
+    def test_success_reads_sink_then_gates_capture_on_shutoff(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        # Success is keyed on the serial sink (not power-off-as-success), but
+        # capture is still gated on the VM reaching shutoff so a live backend
+        # doesn't read a disk out from under a still-running qemu (ORCH-7).
+        cache, driver = env
+        build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        kinds = [c[0] for c in driver.calls]
+        assert "read_build_result_sink" in kinds  # the success signal
+        assert driver.power_state_calls > 0  # capture gated on a shutoff poll
+        # The result is read before the disk is captured.
+        assert kinds.index("read_build_result_sink") < kinds.index("download_from_pool")
+
+    def test_fail_record_raises_with_command_and_log(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        cache, driver = env
+        log = b"E: Unable to fetch some archives\n"
+        driver.build_result_stream = [
+            b'TESTRANGE-RESULT: fail rc=100 cmd="apt-get update"\n'
+            b"TESTRANGE-LOG-BEGIN\n" + base64.b64encode(log) + b"\nTESTRANGE-LOG-END\n"
+        ]
+        with pytest.raises(BuildFailedError) as ei:
+            build_phase(_ctx(_plan(data_disks=1), driver, cache))
+        err = ei.value
+        assert err.rc == 100
+        assert err.cmd == "apt-get update"
+        assert err.log == log
+        assert log.decode() in str(err)  # the captured log is in the message
+
+    def test_failed_build_caches_nothing(self, env: tuple[CacheManager, MockDriver]) -> None:
+        # The corrupt-cache guard: a failed build must not leave a `_built_`
+        # artifact behind for the run phase to pick up.
+        cache, driver = env
+        driver.build_result_stream = [b'TESTRANGE-RESULT: fail rc=1 cmd="false"\n']
+        with pytest.raises(BuildFailedError):
+            build_phase(_ctx(_plan(data_disks=1), driver, cache))
+        assert _built_names(cache) == []
+
+    def test_power_off_without_token_is_failure(self, env: tuple[CacheManager, MockDriver]) -> None:
+        # Guest powered off (serial stream EOFs) without ever emitting `ok` —
+        # a mid-provision crash. Must be a loud failure, not a silent success.
+        cache, driver = env
+        driver.build_result_stream = [b"[ booting ] cloud-init crashed\n"]
+        with pytest.raises(BuildFailedError, match="without reporting a build result"):
+            build_phase(_ctx(_plan(data_disks=0), driver, cache))
+
+    def test_console_output_streams_to_log(
+        self, env: tuple[CacheManager, MockDriver], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Build chatter is mirrored to the console logger live; the protocol's
+        # own framing (the RESULT line, the base64 log block) is not.
+        cache, driver = env
+        log = base64.b64encode(b"secret log bytes")
+        driver.build_result_stream = [
+            b"Cloud-init v. 24.1 running 'modules:final'\n",
+            b"Setting up nginx (1.24.0-1)\n",
+            b'TESTRANGE-RESULT: fail rc=1 cmd="false"\n'
+            b"TESTRANGE-LOG-BEGIN\n" + log + b"\nTESTRANGE-LOG-END\n",
+        ]
+        with caplog.at_level(logging.DEBUG, logger="testrange.orchestrator.build_phase.console"):
+            with pytest.raises(BuildFailedError):
+                build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        streamed = [r.getMessage() for r in caplog.records if r.name.endswith(".console")]
+        assert any("Setting up nginx" in m for m in streamed)  # build chatter shown
+        assert not any("TESTRANGE-RESULT" in m for m in streamed)  # framing hidden
+        assert not any(log.decode() in m for m in streamed)  # base64 block hidden
 
 
 class TestBuildToRunDataDisk:

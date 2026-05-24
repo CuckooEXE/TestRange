@@ -45,6 +45,11 @@ class RunContext:
     # How long the run phase waits for each sidecar's native guest agent to
     # answer + apply its config before failing loud (ADR-0010 §8).
     sidecar_ready_timeout_s: float = 120.0
+    # How long the run phase waits for each user VM's bound communicator to
+    # answer (native agent or SSH) after boot, before the first readiness
+    # probe — the agent starts a few seconds after power-on and must not be
+    # raced. Same budget shape as the sidecar wait.
+    agent_ready_timeout_s: float = 120.0
 
     # Resource ledger — written during bring-up, read at teardown.
     pool_backends: dict[str, str] = field(default_factory=dict)  # plan_name -> backend

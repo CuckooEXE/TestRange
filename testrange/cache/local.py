@@ -67,6 +67,20 @@ class LocalCache:
         self.isos = self.root / "isos"
         self.isos.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def staging(self) -> Path:
+        """Scratch dir on the cache filesystem for in-flight downloads/captures.
+
+        Callers that stream large content (a captured build disk) need a temp
+        file on the *same* filesystem as ``isos/`` — the system tempdir is
+        often a small tmpfs ``/tmp`` that ENOSPCs on a multi-GiB disk (CORE-4),
+        and a same-filesystem temp also keeps the subsequent ingest a cheap
+        intra-fs copy. Created on first access.
+        """
+        d = self.root / "staging"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def add(
         self,
         source: str | Path,

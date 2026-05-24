@@ -24,6 +24,7 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass, field
 
+from testrange.devices.network import StaticAddr
 from testrange.networks._addressing_consts import (
     MGMT_OFFSET,
     SIDECAR_OFFSET,
@@ -118,6 +119,7 @@ class Switch:
     dns: bool = False
     dhcp: bool = False
     nat: bool = False
+    uplink_addr: StaticAddr | None = None
 
     def __init__(
         self,
@@ -129,6 +131,7 @@ class Switch:
         dns: bool = False,
         dhcp: bool = False,
         nat: bool = False,
+        uplink_addr: StaticAddr | None = None,
     ) -> None:
         if not name:
             raise ValueError("Switch.name must be a non-empty string")
@@ -150,6 +153,25 @@ class Switch:
                 f"Switch({name!r}, nat=True) requires uplink=<nic-name> — the "
                 "sidecar needs a physical NIC to MASQUERADE traffic out of."
             )
+        if uplink_addr is not None:
+            # The sidecar's uplink NIC (eth1) gets a static address instead of
+            # DHCP from the upstream LAN (NET-7) — for hosts that won't lease the
+            # sidecar's MAC (single-public-IP / MAC-filtered boxes, where the
+            # uplink bridge is host-NAT'd). It only exists on the NAT egress NIC,
+            # and it sits on the uplink's subnet, not the Switch CIDR — so it must
+            # carry its own prefix.
+            if not nat:
+                raise ValueError(
+                    f"Switch({name!r}, uplink_addr=...) requires nat=True — the "
+                    "static address configures the sidecar's MASQUERADE uplink NIC."
+                )
+            if "/" not in uplink_addr.addr:
+                raise ValueError(
+                    f"Switch({name!r}).uplink_addr needs an explicit prefix "
+                    f"(e.g. StaticAddr('10.10.10.2/24', gw=...)); got {uplink_addr.addr!r} "
+                    "— the uplink is its own subnet, not the Switch CIDR, so the "
+                    "netmask cannot be derived."
+                )
 
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "networks", tuple(networks))
@@ -159,6 +181,7 @@ class Switch:
         object.__setattr__(self, "dns", bool(dns))
         object.__setattr__(self, "dhcp", bool(dhcp))
         object.__setattr__(self, "nat", bool(nat))
+        object.__setattr__(self, "uplink_addr", uplink_addr)
 
     @property
     def network(self) -> ipaddress.IPv4Network:

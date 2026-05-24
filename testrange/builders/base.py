@@ -1,9 +1,27 @@
 """Builder ABC.
 
 The Builder drives the install lifecycle end to end: it produces a
-self-terminating install payload (e.g., a cloud-init seed that ends with
-``poweroff``), and the orchestrator polls driver-level power state until
-the VM shuts off.
+self-terminating install payload, and the orchestrator reads back an explicit
+result over the guest's serial console.
+
+**Build-result contract (ADR §21).** Every Builder MUST render provisioning
+that (a) runs **fail-fast** — the first failing step aborts the rest, (b)
+emits a framed ``TESTRANGE-RESULT:`` record to the guest's serial console,
+and (c) powers the guest off. The positive ``ok`` token is the *only* success
+signal the orchestrator accepts; a guest that powers off without it is treated
+as a crashed build, never a cached disk. This contract lives *above* the
+Builder ABC so it fits every dialect — cloud-init ``runcmd``, ESXi Kickstart
+``%post``, Windows ``SetupComplete.cmd`` — each concrete renders it natively::
+
+    TESTRANGE-RESULT: ok
+    # --- or, on failure ---
+    TESTRANGE-RESULT: fail rc=100 cmd="apt-get update"
+    TESTRANGE-LOG-BEGIN
+    <base64 of the relevant log>
+    TESTRANGE-LOG-END
+
+The record goes to the **serial console only** (the most portable virtual
+device); the driver's build-result sink hides the per-backend host-side read.
 
 Builders are hypervisor-agnostic. When a builder needs per-network
 addressing facts (CIDR, prefix, gateway, DHCP flag) to render guest config,
@@ -71,6 +89,10 @@ class Builder(ABC):
         macs: Sequence[str] = (),
     ) -> bytes:
         """Render the install payload (e.g., a cloud-init seed ISO) as bytes.
+
+        Per the build-result contract (module docstring), the rendered payload
+        MUST run fail-fast, emit the framed ``TESTRANGE-RESULT:`` record to the
+        guest serial console, and power off.
 
         ``macs`` (one per NIC in spec order) lets concretes bake
         positional NIC config (run-phase netplan match-by-MAC etc.) into

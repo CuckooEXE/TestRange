@@ -8,8 +8,9 @@ for the backend matrix and per-backend prerequisites.
 - Python 3.11 or later.
 - A hypervisor backend. The in-memory `MockDriver` reference backend needs
   nothing and is what the test suite drives the full lifecycle against; a clean
-  live `run` of a plan needs a real backend (Proxmox is in progress;
-  libvirt/ESXi/Hyper-V are on the roadmap), each with its own prereqs — see
+  live `run` of a plan needs a real backend (Proxmox is supported on
+  single-node PVE; libvirt/ESXi/Hyper-V are on the roadmap), each with its own
+  prereqs — see
   [driver setup](drivers/index.md).
 
 ## Install the package

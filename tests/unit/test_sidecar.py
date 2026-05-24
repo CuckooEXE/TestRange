@@ -48,6 +48,18 @@ class TestSidecarNicSpecs:
         specs = sidecar_nic_specs(sw)
         assert specs == [("a", "10.0.0.1"), ("__uplink__sw", None)]
 
+    def test_static_uplink_addr_pins_eth1_ip(self) -> None:
+        # NET-7: a static uplink address pins eth1's IP instead of DHCP (None).
+        sw = Switch(
+            "sw",
+            Network("a"),
+            cidr="10.0.0.0/24",
+            nat=True,
+            uplink="eth0",
+            uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1"),
+        )
+        assert sidecar_nic_specs(sw) == [("a", "10.0.0.1"), ("__uplink__sw", "10.10.10.2")]
+
 
 class TestRenderSidecarInterfaces:
     def test_basic_static_eth0(self) -> None:
@@ -63,6 +75,24 @@ class TestRenderSidecarInterfaces:
         cfg = render_sidecar_interfaces(sw)
         assert f"auto {SIDECAR_UPLINK_NIC}" in cfg
         assert f"iface {SIDECAR_UPLINK_NIC} inet dhcp" in cfg
+
+    def test_static_uplink_addr_renders_static_eth1(self) -> None:
+        # NET-7: eth1 becomes a static stanza (address/netmask/gateway) instead
+        # of `inet dhcp`, for host-NAT'd uplinks that won't lease the sidecar.
+        sw = Switch(
+            "sw",
+            Network("a"),
+            cidr="10.0.0.0/24",
+            nat=True,
+            uplink="vmbr9",
+            uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1"),
+        )
+        cfg = render_sidecar_interfaces(sw)
+        assert f"iface {SIDECAR_UPLINK_NIC} inet static" in cfg
+        assert "address 10.10.10.2" in cfg
+        assert "netmask 255.255.255.0" in cfg
+        assert "gateway 10.10.10.1" in cfg
+        assert "inet dhcp" not in cfg
 
 
 class TestRenderDnsmasqConf:
@@ -92,6 +122,24 @@ class TestRenderDnsmasqConf:
         conf = render_dnsmasq_conf(sw, [], _mac_for)
         assert "option:router,10.0.0.1" in conf
         assert "dhcp-option=3" not in conf
+
+    def test_static_uplink_dns_adds_upstream_forwarder(self) -> None:
+        # NET-7: a static eth1 won't populate resolv.conf, so dnsmasq must be
+        # pointed explicitly at the uplink's DNS to forward (no-resolv + server=).
+        sw = Switch(
+            "sw",
+            Network("a"),
+            cidr="10.0.0.0/24",
+            dhcp=True,
+            dns=True,
+            nat=True,
+            uplink="vmbr9",
+            uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1", "9.9.9.9")),
+        )
+        conf = render_dnsmasq_conf(sw, [], _mac_for)
+        assert "no-resolv" in conf
+        assert "server=1.1.1.1" in conf
+        assert "server=9.9.9.9" in conf
 
     def test_static_nic_gets_host_record(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", dns=True)

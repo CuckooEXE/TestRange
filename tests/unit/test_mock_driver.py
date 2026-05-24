@@ -7,6 +7,7 @@ minimum-capacity preflight check.
 
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -155,6 +156,50 @@ class TestNativeCapabilities:
         plan = _plan(addr=DHCPAddr())  # SSH comm, DHCP NIC -> needs lease read
         findings = native_capability_findings(plan, frozenset({"execute", "write_file"}))
         assert any(f.code == "dhcp-discovery-unsupported" for f in findings)
+
+
+class TestBuildResultSink:
+    """CORE-5: the reference build-result sink (live byte generator)."""
+
+    def _drain(self, driver: MockDriver, backend: str = "tr_build_vm_x") -> bytes:
+        out = bytearray()
+        with closing(driver.read_build_result_sink(backend)) as stream:
+            for chunk in stream:
+                if not chunk:
+                    break  # heartbeat — a wedge would loop forever otherwise
+                out.extend(chunk)
+        return bytes(out)
+
+    def test_default_stream_is_ok(self) -> None:
+        # No knob set: a clean build reports the success token by default, so
+        # the existing build-phase happy path keeps working.
+        assert self._drain(MockDriver()) == b"TESTRANGE-RESULT: ok\n"
+
+    def test_records_the_call_eagerly(self) -> None:
+        # Recorded at call time, not lazily on first iteration — so a teardown
+        # driver / call-sequence assertion sees it even if never drained.
+        d = MockDriver()
+        d.read_build_result_sink("tr_build_vm_x")
+        assert ("read_build_result_sink", ("tr_build_vm_x",), {}) in d.calls
+
+    def test_injected_fail_stream(self) -> None:
+        d = MockDriver()
+        d.build_result_stream = [b'TESTRANGE-RESULT: fail rc=3 cmd="x"\n']
+        assert b"fail rc=3" in self._drain(d)
+
+    def test_wedge_emits_only_heartbeats(self) -> None:
+        d = MockDriver()
+        d.build_result_wedge = True
+        # No record, just heartbeats: _drain breaks on the first b"" tick.
+        assert self._drain(d) == b""
+
+    def test_stream_is_closeable(self) -> None:
+        # The orchestrator wraps the generator in contextlib.closing; closing
+        # an unfinished stream must run its finally (here: a clean no-op).
+        d = MockDriver()
+        stream = d.read_build_result_sink("tr_build_vm_x")
+        with closing(stream):
+            assert next(stream) == b"TESTRANGE-RESULT: ok\n"
 
 
 class TestMgmtGating:

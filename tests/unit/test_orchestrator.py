@@ -242,7 +242,9 @@ class TestEnterAndExit:
         populated_cache: tuple[CacheManager, Path],
     ) -> None:
         mgr, _ = populated_cache
-        fake_driver.shutoff_after_calls = 99_999  # never goes to shutoff
+        # A true wedge: the serial sink never emits a result record and never
+        # closes (heartbeats forever), so only the watchdog can fire.
+        fake_driver.build_result_wedge = True
         # Tiny timeout so the test isn't slow
         with pytest.raises(BuildTimeoutError):
             with Orchestrator(_plan(), cache_manager=mgr, build_timeout_s=0.01):

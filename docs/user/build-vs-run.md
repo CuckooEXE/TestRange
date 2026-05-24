@@ -68,6 +68,18 @@ A `run --require-cache` against a cold cache exits non-zero with a "run
 - **The backend is pure scratch space.** Nothing testrange-owned survives
   between phases — no shared base images, no overlays, no leftover pools.
 
+## One run at a time
+
+A plan's run is owned by a single `testrange` process from build through
+teardown. Running two `testrange` invocations against the **same** plan
+concurrently is unsupported: a run's `state.json` is written only by its
+owning process, and `testrange cleanup` refuses to touch a run whose owning
+PID is still alive (it reports `PID <X> still alive`). There is no
+cross-process lock beyond that liveness check.
+
+To run things in parallel, use **separate** plans — each gets its own
+`run_id`, state directory, and backend resources.
+
 ## Exit codes
 
 | Code | Meaning |

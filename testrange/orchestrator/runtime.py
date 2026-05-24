@@ -30,6 +30,7 @@ from testrange.orchestrator.run_phase import (
     bind_communicators,
     run_phase,
     wait_builder_ready,
+    wait_communicators_ready,
 )
 from testrange.orchestrator.teardown import teardown
 from testrange.plan import Plan
@@ -143,7 +144,7 @@ class Orchestrator:
             run_id=self.ctx.run_id,
             plan_name=self.ctx.plan_name,
             driver_class=self.ctx.driver.DRIVER_NAME,
-            driver_uri=getattr(self.plan.hypervisor, "connection", ""),
+            driver_uri=getattr(self.plan.hypervisor, "driver_uri", ""),
         )
 
     def build(self) -> None:
@@ -189,6 +190,7 @@ class Orchestrator:
                 run_phase(self.ctx)
                 self._handle = self._build_handle()
                 bind_communicators(self.ctx)
+                wait_communicators_ready(self.ctx)
                 wait_builder_ready(self.ctx)
             except Exception:
                 _log.exception("bring-up failed; tearing down")

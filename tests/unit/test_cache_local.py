@@ -32,6 +32,19 @@ class TestDefaultRoot:
         assert str(r).endswith("/.cache/testrange")
 
 
+class TestStaging:
+    def test_staging_is_on_cache_filesystem(self, tmp_path: Path) -> None:
+        # CORE-4: staging must be a sibling of isos/ under the cache root, so
+        # large captures stage on the same filesystem (not a small tmpfs /tmp).
+        cache = LocalCache(root=tmp_path / "c")
+        assert cache.staging.parent == cache.root
+        assert cache.staging != cache.isos
+
+    def test_staging_created_on_access(self, tmp_path: Path) -> None:
+        cache = LocalCache(root=tmp_path / "c")
+        assert cache.staging.is_dir()
+
+
 class TestLocalCacheAdd:
     def test_add_local_file(self, tmp_path: Path) -> None:
         cache = LocalCache(root=tmp_path / "c")

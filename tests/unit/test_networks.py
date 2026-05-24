@@ -73,6 +73,24 @@ class TestSwitch:
         with pytest.raises(ValueError, match="uplink"):
             Switch("sw1", Network("a"), uplink="")
 
+    def test_uplink_addr_ok_with_nat(self) -> None:
+        # NET-7: static address for the sidecar's MASQUERADE uplink NIC.
+        addr = StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",))
+        sw = Switch("sw1", Network("a"), nat=True, uplink="vmbr9", uplink_addr=addr)
+        assert sw.uplink_addr is addr
+
+    def test_uplink_addr_requires_nat(self) -> None:
+        with pytest.raises(ValueError, match=r"uplink_addr.*nat=True"):
+            Switch("sw1", Network("a"), uplink="vmbr9", uplink_addr=StaticAddr("10.10.10.2/24"))
+
+    def test_uplink_addr_requires_explicit_prefix(self) -> None:
+        # The uplink is its own subnet (not the Switch CIDR), so the netmask
+        # can't be derived — a bare address is rejected.
+        with pytest.raises(ValueError, match="prefix"):
+            Switch(
+                "sw1", Network("a"), nat=True, uplink="vmbr9", uplink_addr=StaticAddr("10.10.10.2")
+            )
+
     def test_pinned_addresses(self) -> None:
         sw = Switch("sw1", Network("a"), cidr="172.31.0.0/24")
         assert sw.sidecar_ip == "172.31.0.1"
@@ -177,6 +195,19 @@ class TestValidateAddressing:
         vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
         with pytest.raises(ValueError, match="DHCP pool"):
             validate_addressing([sw], vms)
+
+    def test_dhcp_pool_hint_tracks_user_static_consts(self) -> None:
+        # NET-1: the "pick something in X-Y" hint must be derived from
+        # USER_STATIC_LO/HI, not hardcoded — those constants are the single
+        # source of truth the hint exists to advertise.
+        from testrange.networks._addressing_consts import USER_STATIC_HI, USER_STATIC_LO
+
+        sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", dhcp=True)
+        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
+        with pytest.raises(ValueError) as ei:
+            validate_addressing([sw], vms)
+        msg = str(ei.value)
+        assert f"172.31.0.{USER_STATIC_LO}-172.31.0.{USER_STATIC_HI}" in msg
 
     def test_ipv4_in_dhcp_pool_ok_when_dhcp_off(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")

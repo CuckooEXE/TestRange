@@ -20,8 +20,10 @@ The driver layer is multi-backend (ADR-0008). What ships today:
   and is the substrate the test suite drives the full orchestration lifecycle
   against. (It simulates the backend, not a real guest, so a live `testrange
   run` of an example to green still needs a real backend.)
-- **Proxmox** — in progress (`proxmoxer` over the PVE REST API). When it lands
-  it gets its own setup page here, with the `pip install -e '.[proxmox]'`
-  extra and the connection/credential prereqs.
+- **Proxmox** — green end-to-end on a single-node PVE 9.x host (`proxmoxer`
+  over the PVE REST API; `pip install -e '.[proxmox]'`). See
+  `examples/px_hello.py` for a runnable plan and the connection/credential +
+  build-egress prereqs. A dedicated setup page is pending (PVE-34); multi-node
+  clusters and block storage are not yet supported (PVE-31, PVE-33).
 - **libvirt** — deleted and slated for a rebuild against the current ABC; ESXi
-  and Hyper-V are on the long-term roadmap. See `TODO.md` and ADR-0008.
+  and Hyper-V are on the long-term roadmap. See the `ktui` board and ADR-0008.

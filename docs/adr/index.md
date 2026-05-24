@@ -16,4 +16,6 @@ context, the decision, and the consequences. Listed oldest-first.
 0008-driver-abc-multi-backend
 0009-mgmt-switch-semantics
 0010-build-run-split
+0011-content-addressed-backend-image-cache
+0012-serial-build-result
 ```

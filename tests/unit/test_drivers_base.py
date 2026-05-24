@@ -73,6 +73,16 @@ class TestNativeGuestAccessors:
             d.native_guest_write_file("tr_vm_x")
 
 
+class TestBuildResultSinkDefault:
+    """CORE-5: a backend with no serial sink default-raises, so it fails loud
+    at build time rather than silently caching an unverified disk."""
+
+    def test_default_raises(self) -> None:
+        d = _NoAgentDriver()
+        with pytest.raises(DriverError, match="no build-result sink"):
+            d.read_build_result_sink("tr_build_vm_x")
+
+
 class TestDestroyDispatcher:
     """`destroy(kind, ...)` is the state-driven cleanup entry point.
 

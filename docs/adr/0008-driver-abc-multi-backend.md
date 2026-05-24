@@ -143,6 +143,26 @@ behind the dir/share). It is a precondition we verify, not a quota we impose.
   those drivers' config. "API only" is not universally achievable, and that is
   expected.
 
+  **Amendment (2026-05-24, PVE-17 / ADR-0012).** The Proxmox driver gains a
+  sanctioned non-proxmoxer transport beyond SFTP: a `vncwebsocket` connection
+  (`websocket-client`) for reading the build-result serial console. PVE serves
+  `serial0` only over `termproxy`→`vncwebsocket` (no REST GET), so the
+  build-result sink (ADR-0012) needs it. Accepted for the live fast-fail + live
+  build output it buys. Constraint: it requires password-ticket auth (termproxy
+  rejects API tokens), so it forecloses moving the driver to API-token auth
+  unless serial reverts to the documented disk-over-SFTP fallback (RESEARCH.md
+  "PVE-16 spike").
+
+  **Amendment (2026-05-24, PVE-23).** Volume **uploads** moved to SFTP too, so
+  *all* volume bytes now ride SFTP (both directions); proxmoxer is the control
+  plane only. PVE's REST `upload` endpoint returns `501 "for data too large"` on
+  large `import` disk images (hit on the first live run — proxmoxer already
+  streams >10 MiB, so it's a server-side endpoint limit, not client buffering).
+  `upload_to_pool`/`write_to_pool` `sftp_put` the file into the storage content
+  dir, where a `dir`/`nfs` store discovers it by scan — the same volid the REST
+  upload would have produced. The table row above ("upload via proxmoxer API")
+  is superseded for the disk path.
+
 ### 7. The native communicator is named for the concept, not QEMU
 
 `QGACommunicator` is renamed `NativeCommunicator` — a backend-agnostic shim

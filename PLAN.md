@@ -159,12 +159,23 @@ Switch(
     dns: bool = False,                # sidecar serves DNS at .1
     dhcp: bool = False,               # sidecar serves DHCP at .1
     nat: bool = False,                # sidecar MASQUERADEs out uplink at .1
+    uplink_addr: StaticAddr | None = None,  # NET-7: static sidecar eth1 (else DHCP)
 )
 ```
 
 `nat=True` requires `uplink=` (the sidecar needs a physical NIC to
 MASQUERADE traffic out of). Otherwise the flags are orthogonal; the
 bare Switch is a pure L2 wire.
+
+`uplink_addr` (NET-7) pins the sidecar's MASQUERADE NIC (`eth1`) to a **static**
+address + gateway + DNS instead of DHCP-from-the-upstream-LAN. It requires
+`nat=True` and must carry an explicit prefix (the uplink is its own subnet, not
+the Switch CIDR). Use it when the host won't DHCP the sidecar's MAC — e.g. a
+single-public-IP box where `uplink` is an internal bridge the **host** NATs out
+its real NIC. The build phase takes the same config from the Hypervisor's
+`build_uplink_addr`. With a static uplink the sidecar's `eth1` never populates
+`resolv.conf`, so its dnsmasq is pointed at `uplink_addr.dns` explicitly
+(`no-resolv` + `server=`).
 
 **Addressing pinning** (`testrange/networks/_addressing_consts.py`):
 
@@ -323,7 +334,19 @@ State-file safety:
   it first or wait for it"). Simpler than a FileLock and produces a
   meaningful error message.
 
-Parallel install pass and cross-process locking are long-term TODOs.
+**One invocation per plan at a time.** A given plan/run is owned by a
+single `testrange` process for the duration of build + run; concurrent
+invocations against the same run are not supported and not guarded
+beyond the `state.pid` liveness check above. The atomic `state.json`
+write protects against *torn* writes within the owning process, not
+against two processes racing the same run — that scenario is out of
+scope by construction. Consequently cross-process `state.json` locking
+(a `FileLock`, ORCH-5) is **not** built: with a single owner there is no
+legitimate concurrent writer to serialize. To parallelize across
+processes, run separate plans (distinct `run_id`s).
+
+Parallel build of independent VMs *within* a single run remains a
+long-term TODO (decision unchanged; see Deferred).
 
 ### 17. Cleanup-on-failure CLI flag: `--leak-on-failure`
 
@@ -334,6 +357,9 @@ Mutually exclusive with the future `--resume`.
 - `$XDG_STATE_HOME/testrange/runs/<run_id>/state.json` — run state.
 - `$XDG_CACHE_HOME/testrange/isos/<sha>.bin` + `<sha>.json` —
   content-addressed cache.
+- `$XDG_CACHE_HOME/testrange/staging/` — scratch for in-flight downloads and
+  build-disk captures, kept on the cache filesystem so multi-GiB captures
+  don't ENOSPC against a small tmpfs `/tmp` (CORE-4).
 
 State and cache are independently disposable.
 
@@ -503,6 +529,204 @@ surfaces here.
 in `run_phase`, plus `examples/native_agent.py` and unit coverage
 (`test_native_communicator.py`, `test_mock_driver.py`, `test_drivers_base.py`).
 
+### 21. Build result signaling: structured result over a universal serial sink
+
+Today the build phase keys success on a single out-of-band bit:
+`CloudInitBuilder` appends `poweroff` to `runcmd`, and `wait_for_shutoff`
+(`orchestrator/build_phase.py`) polls power state until `shutoff` or
+`build_timeout_s` (600s). That bit is both lossy and *wrong*:
+
+- It cannot distinguish **succeeded** from **a command failed but the guest
+  powered off anyway** — cloud-init `runcmd` runs under `sh` with no `set -e`,
+  so a failed `apt update` does not abort the script and `poweroff` still
+  runs. The orchestrator then **caches a corrupt post-install disk silently**.
+- A failure that wedges the guest (cloud-init dies before user scripts) never
+  powers off → the user pays the full `build_timeout_s` *and* gets **no
+  diagnostic output**.
+
+Two hard constraints on any replacement:
+
+1. **Builder-agnostic.** cloud-init is one of several builders; the contract
+   must also fit ESXi **Kickstart** (`%post`) and **Windows Unattended**
+   (`SetupComplete.cmd`). The signaling contract lives *above* the Builder ABC.
+2. **Must not require a native communicator.** Guests such as OpenBSD may ship
+   no QGA / VMware-Tools agent (`native_guest_*` absent; preflight refuses to
+   drive them — §20). So the result channel cannot depend on the communicator;
+   the communicator is at most an optional accelerant.
+
+**Decision: the guest reports an explicit, structured build result + captured
+log over a serial console; the orchestrator reads that sink, treats the
+positive token as the *only* success signal, and raises a typed
+`BuildFailedError` otherwise.** Serial is the lowest-common-denominator
+channel: a 16550 UART is the most portable virtual device there is — every
+target guest OS writes to it (Linux `ttyS0`, the BSDs `com0`, Windows `COM1`,
+the RHEL/ESXi installers `console=ttyS0`) and it is a property of the *virtual
+hardware*, not of any in-guest agent, so it satisfies constraint 2.
+
+#### The result protocol (builder-emitted, on the console)
+
+Provisioning runs **fail-fast**. The guest emits framed records that survive
+interleaving with boot chatter and tolerate binary payloads:
+
+```
+TESTRANGE-RESULT: ok
+# --- or ---
+TESTRANGE-RESULT: fail rc=100 cmd="apt-get update"
+TESTRANGE-LOG-BEGIN
+<base64 of the relevant log — the failing command's output, or a
+ /var/log/cloud-init-output.log tail>
+TESTRANGE-LOG-END
+```
+
+- **Success is the explicit `ok` token.** A guest that powers off *without*
+  emitting `ok` is a failure (crashed mid-provision) — this is what kills the
+  silent-corrupt-cache bug.
+- On failure the guest emits the `fail` record (failing command + rc) and the
+  framed log, then **powers off promptly** — so the failure path costs
+  `boot + time-to-failing-command`, not `build_timeout_s`. The timeout reverts
+  to a genuine watchdog for true wedges only.
+
+#### Builder responsibility (per-dialect, uniform contract)
+
+The Builder ABC gains the obligation to render provisioning that (a) runs
+fail-fast, (b) emits the `TESTRANGE-RESULT:` record + framed log to the
+console, (c) powers off. Each concrete implements it in its native dialect:
+
+- `CloudInitBuilder` — wrap `runcmd` in a shell trap (`set -e`; on `ERR`, echo
+  the `fail` record + base64'd `cloud-init-output.log` to `/dev/ttyS0`, then
+  `poweroff`; on clean completion echo `ok` then `poweroff`). Replaces the bare
+  `runcmd.append("poweroff")`.
+- Kickstart (future) — `%post --erroronfail` (or a trap) echoing to
+  `/dev/ttyS0`.
+- Windows Unattended (future) — `SetupComplete.cmd` checks `errorlevel`,
+  writes the record to `COM1`.
+
+#### Orchestrator responsibility
+
+`wait_for_shutoff` is replaced by `wait_for_build_result(ctx, backend, vm)`:
+
+- Open the build-result sink via the new driver capability (below) right after
+  `start_vm` and **live-tail** it concurrently with the build, short-circuiting
+  the moment a `fail`/`ok` record arrives — real-time fast-fail. (A
+  file-backed/degenerate sink polls instead of streams, but the orchestrator
+  flow is the same.)
+- Parse the record. `ok` → proceed to capture. `fail` /
+  powered-off-without-token / watchdog-timeout → raise
+  `BuildFailedError(vm, rc, cmd, log)`, decoding the framed log into the
+  exception so the user sees *which command failed and its output*.
+- Only on `ok` does `build_one_vm` proceed to `_capture_disk`.
+
+#### Driver capability (hypervisor-level, not agent-level)
+
+A new optional accessor on `HypervisorDriver` — provisionally
+`read_build_result_sink(backend_name)` returning a **live byte-stream** the
+orchestrator tails (a file-backed backend degenerates to polling; same caller
+flow). It abstracts the per-backend *host read* of the serial console:
+
+- **Proxmox** — read `serial0` live over **`termproxy`(POST) → `vncwebsocket`**
+  (PVE-16: this is the *only* serial path — there is no REST GET for serial).
+  proxmoxer issues the termproxy POST and holds the `PVEAuthCookie` ticket;
+  a websocket client (`websocket-client`) consumes the stream
+  (`vncwebsocket?port=&vncticket=`, first frame `user@realm:vncticket\n`),
+  unwrapping the termproxy/VNC framing. **This is a second sanctioned transport
+  exception beyond SFTP** — see the transport-policy note below. Requires
+  password-ticket auth (termproxy rejects API tokens). The
+  [[project_testrange_proxmox_transport]] disk fallback (ephemeral result disk
+  over `download_from_pool`) stays *documented* in `RESEARCH.md` → "PVE-16
+  spike" but is **not built** unless the websocket path proves unworkable.
+- **libvirt** (future) — serial pty / unix-socket / file; live-tail.
+- **Mock** — yields a canned stream; unit tests inject `ok` / `fail` records to
+  drive both the success and the (currently untestable) failure path end-to-end
+  on the reference backend.
+- **ESXi / Hyper-V** (future) — datastore-file-backed serial / named pipe; the
+  abstraction must not preclude these.
+
+This is a hypervisor capability, distinct from `native_guest_*`; absence of
+QGA does not affect it.
+
+The vector is universal: every target OS writes the `TESTRANGE-RESULT:` record
+to a UART (`/dev/ttyS0`, `COM1`, …), and every target backend can read that
+serial console host-side (the mechanism differs — websocket on PVE, pty/file on
+libvirt, datastore file on ESXi — but it's serial everywhere). So the builder
+emits the record to the **serial console only**; the driver capability hides
+the per-backend read.
+
+**Transport-policy amendment (accepted 2026-05-24).** The Proxmox driver was
+"proxmoxer-only, sole exception = SFTP `download_from_pool`". Reading serial
+adds a **second** exception: a `vncwebsocket` connection on :8006 via
+`websocket-client`. Accepted deliberately — it buys *live* fast-fail + live
+build output that the disk fallback can't. Constraint: it forecloses moving the
+driver to API-token auth (termproxy is password-ticket-only) unless serial
+reverts to the disk fallback. Update ADR-0008 §6 + a new ADR for this decision.
+
+#### Error type
+
+`BuildFailedError(BuilderError)` carrying `vm`, `rc`, `cmd`, and the decoded
+`log`. Distinct from `BuildTimeoutError` (the watchdog wedge case, which
+stays). CLI maps it to a build failure with the captured log on stderr.
+
+#### Files touched (landed 2026-05-24)
+
+- `testrange/drivers/base.py` — `read_build_result_sink` accessor returning a
+  `Generator[bytes, None, None]` (no bespoke sink type).
+- `testrange/drivers/mock.py` — canned result-sink generator + test hooks.
+- `testrange/drivers/proxmox/_client.py` + `_serial.py` — `serial0` reader over
+  `termproxy`→`vncwebsocket` (new dep `websocket-client`; transport-policy
+  amendment above), wired into `driver.py`.
+- `testrange/builders/base.py` — the emit-result obligation on the ABC
+  (serial console).
+- `testrange/builders/cloudinit.py` — trap-wrapped `runcmd` emitting the
+  record to `/dev/ttyS0`; drop the bare `poweroff`.
+- `testrange/orchestrator/build_phase.py` — `wait_for_build_result` (live-tail)
+  replaces `wait_for_shutoff`; capture gated on `ok`.
+- `testrange/exceptions.py` — `BuildFailedError`.
+- `pyproject.toml` — `websocket-client` under the `[proxmox]` extra.
+- `tests/unit/` — `test_orchestrator.py` build-failure path (now reachable on
+  the mock), `test_cloudinit.py` record rendering, driver serial tests.
+- `docs/adr/` — new ADR (serial as the universal build-result vector) + amend
+  ADR-0008 §6 for the second transport exception.
+
+#### PVE sink — decided (PVE-16 spike + transport decision, 2026-05-24)
+
+PVE reads `serial0` **live** over `termproxy`→`vncwebsocket` (`websocket-client`).
+This was the spike's open question: serial-over-REST has no plain GET, so it
+requires the websocket + a second transport — which the user accepted
+(2026-05-24) for the live fast-fail / live-output payoff. The disk-over-SFTP
+fallback remains documented (`RESEARCH.md` → "PVE-16 spike") but unbuilt. The
+protocol, builder contract, orchestrator flow, and mock backing are
+backend-independent and land first against the mock. Tickets: CORE-5
+(capability + mock), BUILD-3 (emit contract), ORCH-6 (`wait_for_build_result` +
+`BuildFailedError`), PVE-17 (serial-over-websocket reader).
+
+#### Landed — backend-independent core (2026-05-24, ADR-0012)
+
+CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
+`serial0` reader) is the remaining piece and is sequenced separately.
+
+- **CORE-5** — `HypervisorDriver.read_build_result_sink(backend_name)` returns
+  a `Generator[bytes, None, None]` (with the `b""` heartbeat contract so the
+  orchestrator owns the watchdog); the orchestrator tails it under
+  `contextlib.closing` so the driver's transport is released via the
+  generator's `finally` even on an early break — no bespoke sink type. Default
+  raises `DriverError("no build-result sink")`. `MockDriver` is the reference
+  sink: canned `ok` by default; `build_result_stream` injects a `fail` /
+  chatter stream and `build_result_wedge` emits heartbeats forever to exercise
+  the watchdog.
+- **BUILD-3** — the Builder ABC documents the emit-result obligation;
+  `CloudInitBuilder` renders one fail-fast `["bash","-c", …]` `runcmd` entry
+  (`set -eE` + `ERR` trap → framed `fail` record + base64 log tail on
+  `/dev/ttyS0`; success → `sync` + `ok` + `poweroff`). **apt moved out of the
+  `packages:`/`package_update:` directives into the trapped script** so a
+  package failure is fail-fast.
+- **ORCH-6** — `wait_for_build_result` (+ the backend-independent
+  `parse_build_result` / `BuildResult`) replaces `wait_for_shutoff`; capture is
+  gated on `ok`. `BuildFailedError(vm, rc, cmd, log)` is a `BuilderError`,
+  surfaced by the CLI on stderr; `BuildTimeoutError` stays as the wedge
+  watchdog. The orchestrator no longer polls `get_vm_power_state` during build.
+  Console output is mirrored line-by-line to a dedicated `…build_phase.console`
+  logger at DEBUG as it streams (framing suppressed), so a build is watchable
+  live with `--log-level debug`.
+
 ## v0 example (target shape)
 
 Canonical source: [`examples/hello_world.py`](examples/hello_world.py). Keep
@@ -598,14 +822,18 @@ be cleaned up via state-file-driven `testrange cleanup`.
      misses; only if ≥1 miss stand up the ephemeral build pool/switch/sidecar.
    - For each missing VM: push the base onto the VM's own OS disk + resize,
      `create_blank_volume` each data disk, render + attach the self-terminating
-     seed, boot, **poll driver-level power-state** until shutoff, then
-     `download_from_pool` every writable disk and `cache.add` each (push
-     upstream if an HTTP tier is configured). Delete the build VM + disks.
+     seed, boot, **read the serial build-result sink** (§21, ADR-0012) until the
+     guest reports `ok`, then `download_from_pool` every writable disk and
+     `cache.add` each (push upstream if an HTTP tier is configured). A `fail`
+     record or a power-off without `ok` raises `BuildFailedError` *before*
+     capture (no corrupt-disk caching); a true wedge trips `BuildTimeoutError`.
+     Delete the build VM + disks.
    - At phase end tear down the build pool/switch/sidecar.
    - **All build resources recorded in state.json BEFORE create-call.**
 
    Communicators are not used during build. The builder owns the lifecycle
-   end-to-end via its own seed plus driver-level power-state probes.
+   end-to-end via its own seed; success is the explicit serial `ok` token, not
+   a power-off (§21).
 
 3. **Run**:
    - The run phase creates the user's declared networks and pools (build no
@@ -732,11 +960,11 @@ step-by-step engineering-phase walkthroughs that used to fill this section
 the install->build split) have been executed and are dropped; their decisions
 live in the ADRs and the design sections above. Current state:
 
-- **Suite green:** 404 unit tests pass; `ruff` + `mypy --strict` clean.
+- **Suite green:** 434 unit tests pass; `ruff` + `mypy --strict` clean.
 - **Reference backend:** `MockDriver` / `MockHypervisor` implement the full
   `HypervisorDriver` ABC (ADR-0008). The Proxmox driver is in progress on
-  `feature/proxmox`; the libvirt driver is deleted pending a rebuild against
-  the same ABC.
+  `feature/proxmox` (keystone + L2 landed — see *Proxmox backend* below); the
+  libvirt driver is deleted pending a rebuild against the same ABC.
 - **Build/run split (ADR-0010) complete:** `build_phase` warms the cache and
   nothing else; `run_phase` creates the user's pools, gates sidecar readiness,
   pushes every built disk (OS + each data disk) per VM, and runs tests.
@@ -750,6 +978,217 @@ live in the ADRs and the design sections above. Current state:
 
 The detailed phase history is recoverable from git (the ADR commits plus the
 `wip(claude)` checkpoints). Forward-looking work lives in `TODO.md`.
+
+### Proxmox backend (in progress, `feature/proxmox`)
+
+Sequenced on the `ktui` board as the `PVE-*` series (`PVE-1`…`PVE-8` built;
+`PVE-9`…`PVE-24` the live-shakeout/finish work, **now closed** — see *Open work*
+below). **Green end-to-end as of 2026-05-24** (PVE-9): a full `testrange run` of
+`examples/px_hello.py` (debian + nginx, reached over QGA) built and ran to green
+against the live host
+(PVE **9.2.2**, single node `ns1001849`, one `dir` storage `local`, SDN present
+but empty).
+
+**Landed:**
+
+- **`PVE-1` — driver keystone.** `ProxmoxHypervisor` (the Plan entry: `host`/
+  `node` + connection config + `networks`/`pools`/`vms`/`build_uplink`) and
+  `ProxmoxDriver`, assembled in `drivers/proxmox/driver.py` and registered. It
+  delegates to the concern modules `_client` (proxmoxer REST + lazy paramiko
+  SFTP), `_naming` (pure deterministic names), `_sdn` (L2). `connect`/
+  `disconnect`, plan-side `preflight`, the naming surface, and L2 are
+  implemented; storage (`PVE-3`), VM lifecycle (`PVE-8`), the native agent
+  (`PVE-4`), and snapshots (`PVE-5`) raise `DriverError("PVE-x …")` until their
+  tickets land (the ABC is all-abstract, so the concrete must be instantiable).
+- **`PVE-2` — L2 via SDN, incl. the uplink path.** The isolated guest segment
+  is a per-Switch SDN `vnet` in a `simple` zone (staged, then a single
+  `PUT /cluster/sdn` to apply); networks share the switch's vnet.
+  `destroy_switch` is self-discovering so a `from_uri`-rebuilt teardown driver
+  needs no `run_id`. For an `uplink+nat` Switch, `create_switch` returns the
+  **existing host bridge** named by `switch.uplink` (e.g. `vmbr0`, the one
+  carrying the default gateway) as the segment the sidecar's `eth1` rides — so
+  on Proxmox `uplink`/`build_uplink` name an existing bridge, not a raw NIC, and
+  `testrange run` **auto-builds** end-to-end. Preflight verifies the bridge
+  exists (`proxmox-uplink-bridge-missing`). The SDK is lazily imported, so the
+  package registers with no `proxmoxer` installed; unit tests inject a
+  duck-typed fake client.
+
+- **`PVE-6` — stamped-name → vmid resolution.** `create_vm` stamps the composed
+  backend name into the VM's PVE `name`; `_vm.resolve_vmid` recovers the vmid by
+  scanning the node's guest list (no external map; a `from_uri` teardown driver
+  recovers handles unaided — ADR-0008 §6).
+- **`PVE-8` — VM lifecycle (`_vm`).** `create_vm` (import-from OS → `scsi0`, grow
+  to spec when a seed is present; blank vs import data disks; seed `ide2` CDROM;
+  `net<i>` on the backend bridge/vnet with stable MACs; `agent=1`) + start /
+  graceful-then-forced shutdown / stop+purge destroy / power-state (PVE
+  `stopped`→`shutoff`). **Live-validated** end-to-end against the host through
+  proxmoxer (upload→create→resolve→start→destroy). All proxmoxer; REST-native
+  sizing (`qm resize`), no `qemu-img`.
+- **`PVE-3` — pool + volume I/O (`_storage`).** Pools are a filename-prefix
+  namespace inside the static `dir` storage (no PVE object). Transport: the
+  control plane is proxmoxer; **volume bytes ride SFTP both directions** —
+  `upload_to_pool`/`write_to_pool` `sftp_put` into the storage content dir
+  (`import/` for disks, `template/iso/` for seeds), `download_from_pool`
+  `sftp_get`s. PVE's REST has no volume byte-egress *and* its `upload` endpoint
+  501s on large `import` images (PVE-23), so bytes don't ride REST (ADR-0008
+  §6). A `dir`/`nfs` store discovers an SFTP-dropped file by scan → the same
+  volid. The **disk model is "Option-2"**: the
+  orchestrator's one stable `VolumeRef` is the *staging* content volume for
+  `upload`/`write`/`delete`, but `download_from_pool` **re-resolves** it to the
+  live vm-scoped disk (`_vm.resolve_disk` → the VM's config `scsiN` volid) so it
+  captures what the build VM actually wrote, not the stale pre-boot upload.
+  `create_blank_volume`/`resize_volume` defer to `create_vm` (which has the spec
+  sizes and the vmid). Preflight requires the `import` content type
+  (`proxmox-import-content-missing`).
+- **`PVE-4` — QGA native transport (`_guest`).** `agent/exec` (pid + poll
+  `exec-status`), `file-read` (→ bytes), `file-write` (binary-safe via base64 +
+  `encode=0`, single-write cap raises). Flips `native_guest_capabilities()` to
+  the full set, unblocking `NativeCommunicator` + sidecar DHCP-lease readback.
+- **`PVE-5` — snapshots (`_vm`).** create (`vmstate=1` for memory), list
+  (excludes PVE's synthetic `current`, oldest-first), delete (no-op if absent),
+  rollback; duplicate/missing raise `DriverError`. **Live-validated.**
+- **`PVE-7` — integration suite.** `tests/integration/test_proxmox.py`, marked
+  `proxmox` (excluded from the default gate), gated on `TESTRANGE_PVE_HOST` and a
+  base qcow2; self-cleaning. **Ran green against the live host** (connect/
+  preflight, SDN round-trip, storage upload/delete, full VM lifecycle+snapshot).
+
+The Proxmox backend is **green end-to-end** (PVE-9, 2026-05-24): the first full
+`testrange run` surfaced a cluster of integration bugs (PVE-10…13, PVE-15, plus
+the build-result/serial work PVE-16…18 and the author-surface/realm/SFTP fixes
+PVE-20…24, ORCH-7, NET-7) — **all now fixed, unit-tested, and confirmed live**.
+The QGA *wire* (`PVE-4` exec/file ops) and the serial build-result sink
+(`PVE-17`) were exercised for real by that run (the run reaches the guest over a
+`NativeCommunicator` and keys build success on the serial `TESTRANGE-RESULT`
+record).
+
+**Scope of what is validated live vs. still unexercised.** The green run covered
+the *minimal* topology — one VM, one NIC, one Switch, no data disks, disk-only
+snapshot. The single-VM happy path is solid; the paths most likely to break next
+are multi-VM, multi-NIC, multi-data-disk (the `scsi<i+1>` + Option-2
+`resolve_disk` longest-match), multi-Switch (per-Switch vnet sharing the per-run
+zone + zone-GC on the last `destroy_switch`), `mem=True` snapshots, and
+**multi-node clusters** (node-scoping is currently baked in — single-node is the
+validated target). A fresh-eyes review of the driver (2026-05-24) also surfaced a
+handful of robustness gaps now filed as PVE-25…34 (see *Open work*). None block
+the single-node lab use case; they harden it.
+
+**Decisions made here:**
+
+- **proxmoxer for the control plane; volume bytes + serial are out-of-band.**
+  The driver goes through the proxmoxer REST API for everything PVE does over
+  REST. Three things can't ride REST and use sanctioned side channels: (1) **all
+  volume bytes over paramiko SFTP, both directions** — REST has no byte-egress
+  *and* its `upload` endpoint 501s on large `import` images (PVE-23), so
+  `sftp_put`/`sftp_get` write/read the file under the storage content dir; (2)
+  the **`vncwebsocket`** serial read for the build-result sink (no REST GET for
+  serial — PVE-17, ADR-0012). All three are ADR-0008 §6. No `subprocess`/no
+  `qemu-img`: disk sizing stays REST-native (`qm resize`, `scsiN=<storage>:<size>`).
+- **Disk lifecycle is "Option-2" (stateless re-resolution).** PVE allocates a
+  vm-scoped volid at `create_vm` (often via a *copying* `import-from`), so a ref
+  can't denote the same bytes before and after create. Rather than hold an
+  in-process ref→volid map, `download` re-derives the live disk from the VM's
+  stamped name each call — survives a process restart and keeps crash-teardown
+  correct (`destroy_vm` purges the disks). Heavily documented in `_storage` /
+  `_vm` at the user's request.
+- **SDN zone is per-run and fully TestRange-managed (PVE-20).** The driver mints
+  a `tr<hex>` zone (8 chars — PVE's SDN-id limit) once per instance (one driver
+  == one run), creates it on first `create_switch`, and self-discovers + drops
+  it on teardown. It is **not** an author knob (TestRange owns its lifecycle) and
+  needs no determinism (a `from_uri` teardown driver reads the zone off the vnet,
+  not from `run_id`). Per-run rather than a shared fixed zone avoids cross-run
+  commingling and is the shape multi-run will need.
+- **`dir`/`nfs` storage only**, so `compose_volume_ref` stays
+  filename-deterministic (ADR-0008 §6).
+- **Author surface is `host`/`user`/`password` kwargs + sane defaults (PVE-20,
+  revised PVE-22).** `ProxmoxHypervisor(host="10.0.0.5", password="…",
+  networks=…, pools=…, vms=…)` is the whole common case: `user` defaults to
+  `root@pam` (a bare `"root"` is normalised to `root@pam` — PVE's realm, PVE-21),
+  `node` auto-detects the single node at connect, `build_uplink` defaults to
+  `vmbr0`, `backing_storage` to `local`, SSH reuses the API creds. The
+  operational knobs stay optional. (A connection-URI surface was tried and
+  dropped — the `@realm` + special-char-password escaping made plain kwargs the
+  better fit.) The `proxmox://` URI survives only as the *internal* teardown
+  serialization: the orchestrator persists the resolved `hyp.driver_uri`
+  (storage/ssh/node) into state for `cleanup`.
+
+**Open work (board, as of 2026-05-24).** The PVE-9 live smoke test surfaced an
+integration-bug cluster; **the cluster is now closed and PVE-9 is green**. The
+remaining PVE work is hardening + breadth, filed as PVE-25…34, none blocking the
+single-node lab use case. The first review cluster (PVE-25/26/29) is **done +
+unit-tested** (2026-05-24); the rest are in *Ready*:
+
+- **`PVE-25`** *(bug, done)* — `upload_to_pool` now checks existence first and
+  skips the re-upload, honoring the ABC idempotency contract (no multi-GB
+  re-transfer on retry/resume).
+- **`PVE-26`** *(bug, done)* — `content_volume_exists` (lists + tests membership)
+  replaces the swallow-all probe; `delete_volume` establishes absence by that
+  check and lets a real present-volume delete error propagate (teardown no longer
+  forgets+leaks on a genuine failure).
+- **`PVE-27`** *(bug/design, done)* — `create_vm` decides build-vs-run data disks
+  from the orchestrator's intent (seed presence) instead of a backend probe, so a
+  stale staging volume from a crashed build can't be mis-imported. (Revisit when
+  installer-based OS origins land — BUILD-1 — which may carry no seed.)
+- **`PVE-28`** *(re-verified: not a bug)* — the claimed `_resize_os_disk`
+  double-resize doesn't occur (the `wait_task` poll-timeout message contains no
+  `timeout`/`lock` substring, so it's never classified transient). Residual LOW
+  nit: the classification matches free-form text rather than the task exitstatus.
+- **`PVE-29`** *(bug, done)* — serial sink: a keepalive-send failure now raises a
+  typed transport error instead of looking like a clean poweroff, and an empty
+  frame yields a `b""` heartbeat instead of busy-spinning the watchdog.
+- **`PVE-30`** *(bug, done)* — plan validation now reserves the `-data<N>` marker
+  in VM names (the collision class where a VM is named like another VM's data
+  disk and they share one volume ref); backend-agnostic guard in `validate.py`.
+- **`PVE-31`** *(feat, backgrounded — design pending ADR)* — multi-node clusters.
+  Concluded to be **two** concepts split by where the connection lives: a *native
+  cluster* (PVE cluster, vCenter — one endpoint, internal hosts, shared SDN/
+  storage) is a **driver-internal placement seam**, not a Plan type; a
+  *federation* (`Cluster(*hypervisors)`, N endpoints, no shared L2) is ORCH-2's
+  `AbstractHypervisor`. v1 scope: PVE is **single-node**; the near-term extract is
+  a single-node preflight guard. Needs an ADR fixing the scope + the split.
+- **`PVE-32`** *(test)* — live coverage beyond the minimal smoke (multi-VM /
+  -NIC / -data-disk / -switch / mem-snapshot). **The feature-complete gate.**
+- **`PVE-33`** *(feat)* — block-storage backends (lvm/zfs/ceph); today `dir`/`nfs`
+  only, failing loud on a block store. Out of v1 scope.
+
+Closed in this cluster (fixed + unit-tested, confirmed by the green run):
+
+- **`PVE-9`** — *done 2026-05-24: green end-to-end.* The full `testrange run` of
+  `examples/px_hello.py` built (sidecar NAT over a host-NAT internal bridge —
+  build-egress caveat below) and ran to green over QGA. Exercised SDN L2, SFTP
+  upload, import-from OS disk, the serial build-result sink (PVE-17), and the QGA
+  wire (PVE-4) against the live host.
+- **`PVE-10`** — *done.* proxmoxer's 5s default request timeout aborted
+  multi-hundred-MB uploads → session `timeout=600s` (`test_connect_uses_generous_http_timeout`).
+- **`PVE-11`** — *done.* `create_vm` wired `net<i>` to the composed network
+  *name*, but a PVE NIC needs the SDN *vnet id* → composed-name→vnet-id map in
+  `create_network`, translated in `create_vm` (`test_create_vm_translates_nic_bridge_to_vnet_id`).
+- **`PVE-12`** — *done.* `create_vm`'s import-from + resize hold the config
+  `lock`; the immediate `start_vm` raced it → `_wait_unlocked` polls the lock and
+  `_resize_os_disk` retries the transient file-lock race (`test_create_waits_for_config_lock_to_clear`).
+- **`PVE-13`** — *done.* without `requests-toolbelt` proxmoxer buffers uploads and
+  caps at 2 GiB → added to the `[proxmox]` extra.
+- **`PVE-15`** — *done.* large transfers went silent → `ProgressReporter`
+  (`_progress.py`) + actionable slow-host `DriverError`; `_ProgressFile(io.IOBase)`
+  keeps proxmoxer streaming (no OOM). `test_progress.py`.
+- **`PVE-17`** — *done.* the build-result sink reads `serial0` live over
+  `termproxy`→`vncwebsocket` (`websocket-client`): `_client.open_serial_websocket`
+  + `_serial.read_build_result_sink` (the `Generator[bytes]` the orchestrator
+  tails — raw PTY frames, `b""` heartbeat + `"2"` keepalive on idle, closes on
+  exit). Second sanctioned transport (ADR-0008 §6 amended, ADR-0012). Faked-ws
+  unit tests; live exercise rides PVE-9.
+- **`NET-1`** — *done.* `validate.py`'s DHCP-pool hint now derives from
+  `USER_STATIC_LO/HI` instead of hardcoded `+100/+254`.
+
+**Build-egress caveat (architectural, not a bug).** The sidecar's `eth1` bridges
+to `hyp.build_uplink` (an existing `vmbr`) and, by default, DHCPs from the
+upstream LAN to MASQUERADE the build network out. A hosting LAN may refuse an
+extra MAC or MAC-filter (confirmed live on a single-public-IP OVH-style box: the
+host's own IP egresses fine, but the sidecar's MAC gets no lease). **Resolved by
+NET-7 + host NAT:** point `build_uplink` at an internal bridge the host
+masquerades out its real NIC, and set `build_uplink_addr` so the sidecar's `eth1`
+is static on that bridge (no DHCP needed). The host-NAT bridge setup is a
+one-time operator step today (documented in `examples/px_hello.py`); a driver
+that provisions it automatically is possible future work.
 
 ### Deferred (named, not built)
 

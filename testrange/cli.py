@@ -18,6 +18,7 @@ from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
 from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.exceptions import (
+    BuildFailedError,
     BuildRequiredError,
     CacheError,
     CacheMissError,
@@ -70,6 +71,9 @@ def _build(args: argparse.Namespace) -> int:
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return 2
+    except BuildFailedError as e:
+        print(f"build failed: {e}", file=sys.stderr)
+        return 1
     except OrchestratorError as e:
         print(f"build failed: {e}", file=sys.stderr)
         return 1
@@ -98,6 +102,9 @@ def _run(args: argparse.Namespace) -> int:
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return 2
+    except BuildFailedError as e:
+        print(f"build failed: {e}", file=sys.stderr)
+        return 1
     except OrchestratorError as e:
         print(f"orchestrator failed: {e}", file=sys.stderr)
         return 1

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -91,6 +91,11 @@ class _Switch:
     uplink_network: str | None
 
 
+# Default serial output of a clean build: the positive token the orchestrator
+# treats as the only success signal.
+_DEFAULT_BUILD_RESULT = (b"TESTRANGE-RESULT: ok\n",)
+
+
 class MockDriver(HypervisorDriver):
     """In-memory driver. Tracks every call in ``calls`` for assertions."""
 
@@ -131,6 +136,13 @@ class MockDriver(HypervisorDriver):
         # When True, native guest-file reads raise GuestAgentError — simulates a
         # sidecar whose agent never answers, for the readiness-gate test.
         self.guest_agent_unreachable = False
+        # Build-result sink knobs. ``build_result_stream`` overrides the serial
+        # chunks the next read_build_result_sink replays (inject a ``fail``
+        # record, or boot chatter with no record to model a crash). ``None``
+        # replays the default ``ok``. ``build_result_wedge`` makes the sink
+        # heartbeat forever so the build-timeout watchdog is reachable.
+        self.build_result_stream: Sequence[bytes] | None = None
+        self.build_result_wedge = False
 
     # -- construction paths ------------------------------------------------
 
@@ -367,6 +379,25 @@ class MockDriver(HypervisorDriver):
             self._record("native_guest_write_file", backend_name, path)
 
         return _write_file
+
+    # -- build-result sink -------------------------------------------------
+
+    def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:
+        # Record eagerly (the generator body is lazy), then replay the canned
+        # chunks. A wedge emits no record at all (only heartbeats); a normal
+        # build replays the default success token.
+        self._record("read_build_result_sink", backend_name)
+        chunks = self.build_result_stream
+        if chunks is None:
+            chunks = () if self.build_result_wedge else _DEFAULT_BUILD_RESULT
+        wedge = self.build_result_wedge
+
+        def _stream() -> Generator[bytes, None, None]:
+            yield from chunks
+            while wedge:  # never emits a record, never EOFs -> watchdog
+                yield b""
+
+        return _stream()
 
     # -- snapshots ---------------------------------------------------------
 

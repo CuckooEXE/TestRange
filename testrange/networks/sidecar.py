@@ -26,6 +26,7 @@ source :mod:`testrange.networks.validate` reads, so the rendered
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Callable, Iterable
 
 from testrange.devices.network import DHCPAddr, StaticAddr
@@ -53,15 +54,17 @@ def sidecar_nic_specs(switch: Switch) -> list[tuple[str, str | None]]:
     First entry is always the switch-facing NIC at ``switch.sidecar_ip``,
     attached to the first Network on the Switch (all Networks on the
     Switch share the bridge, so any will do; first by declaration order).
-    When ``switch.nat`` is on, a second entry is appended with ``None``
-    for the IPv4 — the orchestrator wires it onto the uplink bridge and
-    the sidecar acquires an address via the upstream LAN's DHCP.
+    When ``switch.nat`` is on, a second entry is appended for the uplink NIC,
+    wired onto the uplink bridge: ``None`` for the IPv4 (the sidecar DHCPs from
+    the upstream LAN), or ``switch.uplink_addr.host`` when a static uplink
+    address is set (NET-7 — for host-NAT'd uplinks that won't DHCP the sidecar).
     """
     if not switch.networks:
         raise ValueError(f"switch {switch.name!r} has no Networks; cannot place a sidecar NIC")
     specs: list[tuple[str, str | None]] = [(switch.networks[0].name, switch.sidecar_ip)]
     if switch.nat:
-        specs.append((_uplink_network_name(switch), None))
+        uplink_ip = switch.uplink_addr.host if switch.uplink_addr is not None else None
+        specs.append((_uplink_network_name(switch), uplink_ip))
     return specs
 
 
@@ -74,8 +77,10 @@ def render_sidecar_interfaces(switch: Switch) -> str:
     """Render the sidecar's Alpine ``/etc/network/interfaces``.
 
     ``eth0`` is always a static address on the switch (``switch.sidecar_ip``).
-    When ``switch.nat`` is on, ``eth1`` is added as ``inet dhcp`` so the
-    sidecar can acquire an upstream address for MASQUERADE egress.
+    When ``switch.nat`` is on, ``eth1`` (the MASQUERADE uplink) is ``inet dhcp``
+    by default — the sidecar acquires an upstream address from the LAN. When
+    ``switch.uplink_addr`` is set (NET-7), ``eth1`` is a static stanza instead,
+    for hosts that won't DHCP the sidecar's MAC (the uplink bridge is host-NAT'd).
     """
     subnet = switch.network
     blocks = [
@@ -89,13 +94,27 @@ def render_sidecar_interfaces(switch: Switch) -> str:
         "",
     ]
     if switch.nat:
-        blocks.extend(
-            [
-                f"auto {SIDECAR_UPLINK_NIC}",
-                f"iface {SIDECAR_UPLINK_NIC} inet dhcp",
-                "",
-            ]
-        )
+        if switch.uplink_addr is not None:
+            iface = ipaddress.IPv4Interface(switch.uplink_addr.cidr(None))
+            blocks.extend(
+                [
+                    f"auto {SIDECAR_UPLINK_NIC}",
+                    f"iface {SIDECAR_UPLINK_NIC} inet static",
+                    f"    address {iface.ip}",
+                    f"    netmask {iface.network.netmask}",
+                ]
+            )
+            if switch.uplink_addr.gw is not None:
+                blocks.append(f"    gateway {switch.uplink_addr.gw}")
+            blocks.append("")
+        else:
+            blocks.extend(
+                [
+                    f"auto {SIDECAR_UPLINK_NIC}",
+                    f"iface {SIDECAR_UPLINK_NIC} inet dhcp",
+                    "",
+                ]
+            )
     return "\n".join(blocks)
 
 
@@ -138,6 +157,13 @@ def render_dnsmasq_conf(
 
     if not switch.dns:
         lines.append("port=0")
+
+    # With a static uplink (NET-7) the sidecar's eth1 doesn't DHCP, so nothing
+    # populates /etc/resolv.conf and dnsmasq has no upstream to forward to.
+    # Point it explicitly at the uplink's DNS server(s) and ignore resolv.conf.
+    if switch.dns and switch.uplink_addr is not None and switch.uplink_addr.dns:
+        lines.append("no-resolv")
+        lines.extend(f"server={s}" for s in switch.uplink_addr.dns)
 
     if switch.dhcp:
         subnet = switch.network

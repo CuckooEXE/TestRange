@@ -145,6 +145,25 @@ class TestMockHypervisor:
                 vms=[_basic_recipe("bad,name")],
             )
 
+    def test_vm_name_data_disk_marker_rejected(self) -> None:
+        # PVE-30: a VM named like another VM's data disk ('<vm>-data<i>') would
+        # collide on the same volume ref. Reserve the marker.
+        for bad in ("web-data0", "WEB-DATA1", "fs_data2", "node.data10"):
+            with pytest.raises(ValueError, match="data<N>"):
+                MockHypervisor(
+                    networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+                    pools=[StoragePool("pool1", 32)],
+                    vms=[_basic_recipe(bad)],
+                )
+
+    def test_vm_name_non_marker_data_allowed(self) -> None:
+        # Only a *trailing* -data<N> marker is reserved; 'data' elsewhere is fine.
+        MockHypervisor(
+            networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
+            pools=[StoragePool("pool1", 32)],
+            vms=[_basic_recipe("metadata-server"), _basic_recipe("data0-loader")],
+        )
+
 
 class TestVMRecipe:
     def test_credentials_lookup(self) -> None:
