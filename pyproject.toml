@@ -33,6 +33,13 @@ proxmox = [
     "paramiko>=3",
     "websocket-client>=1.7",
 ]
+# libvirt-python is the control plane (qemu:///system); pyroute2 builds the
+# isolated host bridges for L2 (the driver owns L2 per ADR-0008). Both import
+# lazily (only on connect / L2), so the package registers without them present.
+libvirt = [
+    "libvirt-python>=10",
+    "pyroute2>=0.7",
+]
 docs = [
     "sphinx>=8",
     "furo>=2024.8",
@@ -54,7 +61,7 @@ dev = [
     "proxmoxer>=2",
 ]
 all = [
-    "testrange[ssh,cloudinit,http,proxmox]",
+    "testrange[ssh,cloudinit,http,proxmox,libvirt]",
 ]
 
 [project.scripts]
@@ -102,7 +109,16 @@ warn_unused_configs = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["pycdlib", "pycdlib.*", "proxmoxer", "proxmoxer.*", "websocket", "websocket.*"]
+module = [
+    "pycdlib",
+    "pycdlib.*",
+    "proxmoxer",
+    "proxmoxer.*",
+    "websocket",
+    "websocket.*",
+    "libvirt",
+    "pyroute2",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -110,4 +126,5 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "proxmox: integration tests against a live Proxmox VE host (needs TESTRANGE_PVE_HOST)",
+    "libvirt: integration tests against a live local libvirt (qemu:///system; needs root)",
 ]
