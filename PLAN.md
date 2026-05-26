@@ -183,10 +183,12 @@ services, so it owns that one cross-cutting rule.
 `addr` (NET-7) pins the sidecar's MASQUERADE NIC (`eth1`) to a **static**
 address + gateway + DNS instead of DHCP-from-the-upstream-LAN. Use it when the
 host won't DHCP the sidecar's MAC — e.g. a single-public-IP box where `uplink`
-is an internal bridge the **host** NATs out its real NIC. The build phase takes
-the same config from the Hypervisor's `build_uplink_addr`. With a static uplink
-the sidecar's `eth1` never populates `resolv.conf`, so its dnsmasq is pointed at
-`addr.dns` explicitly (`no-resolv` + `server=`).
+is an internal bridge the **host** NATs out its real NIC. The build phase gets
+the same static `eth1` config from its `build_switch` — explicitly on a BYO
+`Switch`, or TestRange-assigned (on the manufactured egress subnet) for a
+`ManagedBuildSwitch` (ADR-0014). With a static uplink the sidecar's `eth1` never
+populates `resolv.conf`, so its dnsmasq is pointed at `addr.dns` explicitly
+(`no-resolv` + `server=`).
 
 **Addressing pinning** (`testrange/networks/_addressing_consts.py`):
 
@@ -240,10 +242,26 @@ a bridge — all bridge/vSwitch/SDN mechanics live inside the driver. No
 backend-native NAT/DHCP/DNS anywhere — the sidecar owns those uniformly across
 backends.
 
-**Build phase** uses the same machinery: a transient build switch
-(`cidr="10.97.99.0/24", uplink=hyp.build_uplink, sidecar=Sidecar(dhcp=True,
-dns=True, nat=True)`) synthesized from `hyp.build_uplink`, brought up before
-build VMs boot and torn down LIFO at build-phase end (ADR-0010 §9).
+**Build phase** uses the same machinery, with a **user-declared** build switch
+([ADR-0014](docs/adr/0014-managed-build-switch.md)). The Hypervisor carries a
+`build_switch: Switch | ManagedBuildSwitch | None`, folded by
+`resolve_build_switch` (`testrange/orchestrator/build.py`) into the transient
+Switch the build phase brings up and tears down LIFO (ADR-0010 §9):
+
+- `None` — an isolated `cidr="10.97.99.0/24"` switch, `Sidecar(dhcp=True,
+  dns=True)`, **no uplink and so no egress**. A build needing apt/pip must
+  declare a build switch (no magic default uplink — that's the deliberate
+  retirement of the old `build_uplink="vmbr0"` default).
+- `Switch(...)` — honored as declared (bring-your-own uplink + sidecar; the
+  sidecar may even be `None` for a builder carrying its own static L3).
+- `ManagedBuildSwitch(uplink, cidr=...)` — TestRange manufactures and fences the
+  egress segment: an always-present sidecar serves DHCP/DNS on the isolated
+  switch segment, and the driver (where `supports_managed_build_egress`) builds a
+  second egress segment its `eth1` rides — SNAT'd to the internet, fenced
+  default-deny (allow established + non-RFC1918; drop the rest). On Proxmox this
+  is an SDN `snat=1` vnet + VNet firewall; the sidecar's `eth1` is a static `.2`
+  on the manufactured subnet (gateway `.1`). This retires the former
+  `build_uplink` / `build_uplink_addr` env-knobs.
 
 **Known limits** (TODO.md): host-local L2 (e.g. netlink-based bridge mgmt) is
 local-only — a `Switch.uplink` or a NAT sidecar over a remote backend
@@ -765,7 +783,10 @@ _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
     MockHypervisor(
-        build_uplink="eth0",
+        build_switch=Switch(
+            "build", Network("build"), cidr="10.97.99.0/24", uplink="eth0",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "switch1",
@@ -805,8 +826,9 @@ Key shape invariants this demonstrates:
 - `Switch(name, *networks, cidr=..., ...)` — networks are positional after the
   name; infra knobs (`cidr`, `uplink`, `mgmt`, `dhcp`, `dns`, `nat`) are
   keyword-only on the Switch (not on Networks). Per §10.
-- `build_uplink="eth0"` on the Hypervisor — drives the transient build
-  Switch's NAT path (§10, ADR-0010 §9).
+- `build_switch=Switch(...)` on the Hypervisor — the user-declared transient
+  build network (here a BYO NAT Switch; `ManagedBuildSwitch(...)` on a real
+  backend, or omit for an isolated no-egress build). §10, ADR-0014, ADR-0010 §9.
 - `SSHKey.generate(...)` returns `.auth_line` (single-line `authorized_keys`
   format) for `pubkey=` and `.priv` (OpenSSH PEM) for `privkey=`.
 - `NetworkIface` is exported from `testrange.devices.network` (and re-exported
@@ -1005,7 +1027,7 @@ but empty).
 **Landed:**
 
 - **`PVE-1` — driver keystone.** `ProxmoxHypervisor` (the Plan entry: `host`/
-  `node` + connection config + `networks`/`pools`/`vms`/`build_uplink`) and
+  `node` + connection config + `networks`/`pools`/`vms`/`build_switch`) and
   `ProxmoxDriver`, assembled in `drivers/proxmox/driver.py` and registered. It
   delegates to the concern modules `_client` (proxmoxer REST + lazy paramiko
   SFTP), `_naming` (pure deterministic names), `_sdn` (L2). `connect`/
@@ -1020,10 +1042,16 @@ but empty).
   needs no `run_id`. For an `uplink+nat` Switch, `create_switch` returns the
   **existing host bridge** named by `switch.uplink` (e.g. `vmbr0`, the one
   carrying the default gateway) as the segment the sidecar's `eth1` rides — so
-  on Proxmox `uplink`/`build_uplink` name an existing bridge, not a raw NIC, and
-  `testrange run` **auto-builds** end-to-end. Preflight verifies the bridge
-  exists (`proxmox-uplink-bridge-missing`). The SDK is lazily imported, so the
-  package registers with no `proxmoxer` installed; unit tests inject a
+  on Proxmox a Switch/`ManagedBuildSwitch` `uplink` names an existing bridge, not
+  a raw NIC, and `testrange run` **auto-builds** end-to-end. Preflight verifies
+  the bridge exists (`proxmox-uplink-bridge-missing`). A `ManagedBuildSwitch`
+  build switch (ADR-0014, `supports_managed_build_egress=True`) instead
+  *manufactures* a second SDN vnet with a `snat=1` subnet + VNet-firewall fence
+  for `eth1` (`_sdn._create_egress_vnet` / `_fence_egress_vnet`; the VNet-firewall
+  surface + `snat=1` are live-confirmed on PVE 9.2.2 — PVE-37 — and PVE prepends
+  firewall rules at pos 0 ignoring an explicit `pos`, so the fence rules are
+  POSTed in reverse). The SDK is lazily imported, so
+  the package registers with no `proxmoxer` installed; unit tests inject a
   duck-typed fake client.
 
 - **`PVE-6` — stamped-name → vmid resolution.** `create_vm` stamps the composed
@@ -1116,8 +1144,9 @@ the single-node lab use case; they harden it.
   revised PVE-22).** `ProxmoxHypervisor(host="10.0.0.5", password="…",
   networks=…, pools=…, vms=…)` is the whole common case: `user` defaults to
   `root@pam` (a bare `"root"` is normalised to `root@pam` — PVE's realm, PVE-21),
-  `node` auto-detects the single node at connect, `build_uplink` defaults to
-  `vmbr0`, `backing_storage` to `local`, SSH reuses the API creds. The
+  `node` auto-detects the single node at connect, `build_switch` defaults to
+  `None` (isolated build network, no egress — ADR-0014), `backing_storage` to
+  `local`, SSH reuses the API creds. The
   operational knobs stay optional. (A connection-URI surface was tried and
   dropped — the `@realm` + special-char-password escaping made plain kwargs the
   better fit.) The `proxmox://` URI survives only as the *internal* teardown
@@ -1192,16 +1221,16 @@ Closed in this cluster (fixed + unit-tested, confirmed by the green run):
 - **`NET-1`** — *done.* `validate.py`'s DHCP-pool hint now derives from
   `USER_STATIC_LO/HI` instead of hardcoded `+100/+254`.
 
-**Build-egress caveat (architectural, not a bug).** The sidecar's `eth1` bridges
-to `hyp.build_uplink` (an existing `vmbr`) and, by default, DHCPs from the
-upstream LAN to MASQUERADE the build network out. A hosting LAN may refuse an
-extra MAC or MAC-filter (confirmed live on a single-public-IP OVH-style box: the
-host's own IP egresses fine, but the sidecar's MAC gets no lease). **Resolved by
-NET-7 + host NAT:** point `build_uplink` at an internal bridge the host
-masquerades out its real NIC, and set `build_uplink_addr` so the sidecar's `eth1`
-is static on that bridge (no DHCP needed). The host-NAT bridge setup is a
-one-time operator step today (documented in `examples/px_hello.py`); a driver
-that provisions it automatically is possible future work.
+**Build egress (resolved by ADR-0014 / NET-11).** A hosting LAN may refuse the
+sidecar's extra MAC for DHCP egress (confirmed live on a single-public-IP
+OVH-style box: the host's own IP egresses fine, but the sidecar's MAC gets no
+lease). The old workaround was a manual internal bridge + host NAT + a static
+`build_uplink_addr` (a one-time operator step). `ManagedBuildSwitch` now
+automates exactly that: `build_switch=ManagedBuildSwitch(uplink="vmbr0")` has the
+driver manufacture a `snat=1` SDN vnet + fence for the sidecar's static `eth1`,
+so no host-side bridge/NAT/DHCP fiddling is needed. (A plain `Switch` build
+switch with a static `Sidecar.addr` still expresses the manual recipe for
+operators who want to own the bridge themselves.)
 
 ### Deferred (named, not built)
 

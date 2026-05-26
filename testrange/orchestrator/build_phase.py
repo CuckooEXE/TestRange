@@ -41,7 +41,7 @@ from testrange.orchestrator.artifacts import (
     built_artifact_roles,
     data_disk_role,
 )
-from testrange.orchestrator.build import _build_switch
+from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.state.schema import PHASE_BUILD
@@ -87,11 +87,12 @@ def build_phase(ctx: RunContext) -> None:
 
     # At least one miss: stand up the ephemeral build infra (ADR-0010 §2/§9).
     build_pool_backend = _create_build_pool(ctx, misses)
-    build_switch = _build_switch(
-        getattr(ctx.plan.hypervisor, "build_uplink", None),
-        getattr(ctx.plan.hypervisor, "build_uplink_addr", None),
+    # managed_egress instructs the driver to manufacture + fence the egress
+    # segment for a ManagedBuildSwitch (ADR-0014); None for a plain/no build switch.
+    build_switch, managed_egress = resolve_build_switch(
+        getattr(ctx.plan.hypervisor, "build_switch", None)
     )
-    provision_switch(ctx, build_switch, kind_prefix="build_")
+    provision_switch(ctx, build_switch, kind_prefix="build_", managed_egress=managed_egress)
     build_net_backend = ctx.network_backends[build_switch.networks[0].name]
     materialize_sidecar_for(
         ctx,

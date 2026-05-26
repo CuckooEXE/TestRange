@@ -27,7 +27,13 @@ _KEY = SSHKey.generate(comment="hello")
 
 PLAN = Plan(
     MockHypervisor(
-        build_uplink="eth0",
+        build_switch=Switch(
+            "build",
+            Network("build"),
+            cidr="10.97.99.0/24",
+            uplink="eth0",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "sw1",
@@ -145,25 +151,35 @@ problem at once. For a `StaticAddr`:
 A NIC with `addr=None` or `addr=DHCPAddr()` is left for plan-level
 validation to skip — there is no static address to range-check.
 
-### `build_uplink` and the build phase
+### `build_switch` and the build phase
 
 The build phase needs internet access so `apt` / `pip` can pull
-packages into the VM's disks. Declare the physical NIC on
-the hypervisor host that gives that egress:
+packages into the VM's disks. You declare the build network on the
+hypervisor via `build_switch` (ADR-0014) — there is **no default uplink**,
+so without a `build_switch` the build network is isolated (no egress):
 
 ```python
 MockHypervisor(
-    build_uplink="eth0",
+    build_switch=Switch(
+        "build", Network("build"), cidr="10.97.99.0/24", uplink="eth0",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    ),
     ...
 )
 ```
 
-The orchestrator synthesizes a transient build Switch
-(`10.97.99.0/24`, dhcp + dns + nat) using that uplink, brings up a
-sidecar to serve DHCP and MASQUERADE outbound, runs each build VM
-against it, captures every built disk into the cache, and tears
-the whole build topology down LIFO before the run phase. Skip
-`build_uplink=` only if every VM already has a cache hit.
+The orchestrator brings up the declared build Switch (here: a
+sidecar serving DHCP/DNS and MASQUERADE out `eth0`), runs each build
+VM against it, captures every built disk into the cache, and tears
+the whole build topology down LIFO before the run phase. Omit
+`build_switch` only if every VM already has a cache hit.
+
+On a real backend, prefer `build_switch=ManagedBuildSwitch(uplink="vmbr0")`:
+TestRange manufactures and fences the egress segment for you (an SDN
+`snat=1` vnet on Proxmox), instead of you wiring an uplink and its NAT by
+hand. It is gated by the driver capability `supports_managed_build_egress`,
+so backends without a host-NAT primitive reject it at preflight — and the
+in-memory `MockHypervisor` shown here uses the plain-`Switch` form.
 
 ### Data disks (`HardDrive`)
 

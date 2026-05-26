@@ -238,3 +238,74 @@ class Switch:
     def needs_sidecar(self) -> bool:
         """Whether this Switch requires a sidecar VM (carries a :class:`Sidecar`)."""
         return self.sidecar is not None
+
+
+@dataclass(frozen=True)
+class ManagedBuildSwitch:
+    """A build switch whose internet-egress segment TestRange manufactures and fences.
+
+    A *sibling* of :class:`Switch` — deliberately **not** a subclass: it declares
+    an *intent* a driver realizes, not an L2 topology. The intent is "manufacture
+    an egress segment for the build sidecar's uplink NIC, SNAT it to the internet,
+    and fence it default-deny", gated by the driver capability
+    ``supports_managed_build_egress`` (preflight-rejected where unsupported). Used
+    as a Hypervisor's ``build_switch``, it automates the otherwise-manual "internal
+    bridge + host NAT + firewall" recipe uniformly across backends. See ADR-0014.
+
+    :func:`testrange.orchestrator.build.resolve_build_switch` turns it into the
+    concrete two-segment :class:`Switch` the build phase brings up — an ordinary
+    sidecar'd switch (the build VMs + sidecar at ``.1``) whose ``Sidecar`` carries
+    a static uplink :class:`~testrange.devices.network.StaticAddr` on the
+    manufactured egress subnet — plus a :class:`ManagedEgress` carrier. Only the
+    egress segment is "managed"; the switch segment is unremarkable.
+
+    - ``uplink`` — the existing host interface the manufactured egress segment
+      SNATs out of (a Proxmox ``vmbr``, a libvirt host NIC). Required and
+      non-empty; its existence is checked at preflight.
+    - ``cidr`` — the internal switch-segment subnet (build VMs + sidecar ``.1``).
+      ``None`` => TestRange's default build subnet. The *egress* segment's subnet
+      is TestRange-assigned and is intentionally not user-configurable.
+    """
+
+    uplink: str
+    cidr: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.uplink:
+            raise ValueError("ManagedBuildSwitch.uplink must be a non-empty string")
+        if self.cidr is not None:
+            try:
+                parsed = ipaddress.ip_network(self.cidr, strict=True)
+            except ValueError as e:
+                raise ValueError(
+                    f"ManagedBuildSwitch.cidr must be a valid IPv4 network in strict "
+                    f"form (network address, not a host address): got {self.cidr!r}: {e}"
+                ) from e
+            if not isinstance(parsed, ipaddress.IPv4Network):
+                raise ValueError(
+                    f"ManagedBuildSwitch.cidr must be IPv4 (v0 limitation); got {self.cidr!r}"
+                )
+
+
+@dataclass(frozen=True)
+class ManagedEgress:
+    """Driver instruction to manufacture and fence the build sidecar's egress segment.
+
+    Carried alongside the resolved build :class:`Switch` by
+    :func:`testrange.orchestrator.build.resolve_build_switch` when the declared
+    build switch is a :class:`ManagedBuildSwitch`. ``None`` selects the plain path
+    — bridge the sidecar's uplink NIC to a pre-existing interface, host owns NAT;
+    a non-``None`` instance selects the managed path — the driver creates the
+    egress segment itself, SNATs it to the internet, and fences it default-deny
+    (allow established/related + non-RFC1918 destinations; drop the rest).
+
+    Its *presence* is the signal that distinguishes managed from a plain static
+    uplink (both set the sidecar's NET-7 ``addr``, so ``addr`` alone cannot tell
+    them apart). ``egress_cidr`` is the TestRange-assigned subnet the driver
+    creates for the segment: ``.1`` = the backend SNAT gateway, ``.2`` = the
+    sidecar's ``eth1`` (the value mirrored into the resolved Switch's
+    ``Sidecar.addr``). Realization is per-driver and gated by
+    ``supports_managed_build_egress``. See ADR-0014.
+    """
+
+    egress_cidr: str

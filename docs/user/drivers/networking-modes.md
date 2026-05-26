@@ -247,22 +247,41 @@ Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="eth0")
 The shipped `examples/network_modes.py` exercises four of these in one
 plan (`bare-sw`, `mgmt-sw`, `uplink-sw`, `both-sw`).
 
-## Where to set `build_uplink`
+## The build switch (`build_switch`)
 
-The build phase needs internet for `apt` / `pip`. Set the physical
-uplink on the hypervisor:
+The build phase brings up its own transient switch so build VMs can reach the
+internet for `apt` / `pip`. It is **user-declared** on the hypervisor via
+`build_switch` (ADR-0014) — there is no default uplink, so **no `build_switch`
+means no build-time egress**. Three forms:
 
 ```python
-MockHypervisor(
-    build_uplink="eth0",
+# 1. Managed: TestRange manufactures + fences the egress (recommended).
+ProxmoxHypervisor(
+    build_switch=ManagedBuildSwitch(uplink="vmbr0"),
     networks=[...],
-    ...
 )
+
+# 2. Bring-your-own: a plain Switch you shape yourself.
+ProxmoxHypervisor(
+    build_switch=Switch(
+        "build", Network("build"), cidr="10.97.99.0/24", uplink="vmbr9",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True,
+                        addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",))),
+    ),
+    networks=[...],
+)
+
+# 3. None (default): isolated build network, no egress. Only viable when every
+#    VM is already a cache hit (the full _built_<config_hash>__* disk set is cached).
+ProxmoxHypervisor(networks=[...])
 ```
 
-The orchestrator synthesizes a transient build Switch
-(`uplink=build_uplink, sidecar=Sidecar(dhcp=True, dns=True, nat=True)`, CIDR
-`10.97.99.0/24`), brings up the sidecar, runs the build VMs, then
-tears it all down LIFO. Skip `build_uplink=` only if every VM
-already has a cache hit (i.e. the full `_built_<config_hash>__*` disk
-set is already in the cache).
+`ManagedBuildSwitch(uplink, cidr=...)` automates the otherwise-manual "internal
+bridge + host NAT + firewall" recipe: an always-present sidecar serves DHCP/DNS
+on the isolated switch segment, and the driver manufactures a separate egress
+segment the sidecar's `eth1` rides — SNAT'd to the internet and fenced
+default-deny (allow established + destinations outside RFC1918; drop the host
+LAN / other segments). It is gated by the driver capability
+`supports_managed_build_egress` (Proxmox: yes, via an SDN `snat=1` vnet + VNet
+firewall; backends without a host-NAT primitive reject it at preflight). The
+build switch is brought up before build VMs boot and torn down LIFO at phase end.

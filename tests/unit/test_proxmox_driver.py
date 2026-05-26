@@ -23,7 +23,7 @@ from testrange.drivers import driver_for, driver_for_name
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import ProxmoxDriver, ProxmoxHypervisor
 from testrange.drivers.proxmox._client import ProxmoxConn
-from testrange.networks import Network, Sidecar, Switch
+from testrange.networks import ManagedEgress, Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
 _Addr = DHCPAddr | StaticAddr | None
@@ -47,6 +47,9 @@ class _FakeApi:
     ) -> None:
         self.zones: dict[str, dict[str, Any]] = {}
         self.vnets: dict[str, dict[str, Any]] = {}
+        self.subnets: list[dict[str, Any]] = []
+        self.fw_options: list[dict[str, Any]] = []
+        self.fw_rules: list[dict[str, Any]] = []
         self.bridges = bridges
         self.content = content
         self.applied = 0
@@ -71,6 +74,17 @@ class _FakeApi:
             return [{"vnet": v, **d} for v, d in self.vnets.items()]
         if path == "cluster/sdn/vnets" and method == "post":
             self.vnets[kwargs["vnet"]] = {"zone": kwargs.get("zone"), "alias": kwargs.get("alias")}
+            return None
+        if path.endswith("/subnets") and method == "post":
+            self.subnets.append({"vnet": path.split("/")[3], **kwargs})
+            return None
+        if path.endswith("/firewall/options") and method == "put":
+            self.fw_options.append({"vnet": path.split("/")[3], **kwargs})
+            return None
+        if path.endswith("/firewall/rules") and method == "post":
+            # PVE prepends each posted rule at pos 0 (confirmed live, PVE-37), so
+            # fw_rules is kept in evaluation order (index 0 = first evaluated).
+            self.fw_rules.insert(0, {"vnet": path.split("/")[3], **kwargs})
             return None
         if path.startswith("cluster/sdn/vnets/") and method == "delete":
             self.vnets.pop(path.rsplit("/", 1)[1], None)
@@ -216,17 +230,19 @@ class TestConstruction:
         # No node => conn carries "" (the client resolves it at connect).
         assert ProxmoxHypervisor(host="pve.example").conn().node == ""
 
-    def test_build_uplink_addr_threads_into_build_switch(self) -> None:
-        # NET-7: a static build-uplink address on the hypervisor flows into the
-        # synthesized build switch's uplink_addr (so the build sidecar's eth1 is
-        # static — for host-NAT'd uplinks that won't DHCP the sidecar).
-        from testrange.orchestrator.build import _build_switch
+    def test_build_switch_is_resolved_for_the_build_phase(self) -> None:
+        # ADR-0014: the user-declared build_switch flows through resolve_build_switch
+        # into the Switch the build phase brings up. A ManagedBuildSwitch yields a
+        # NAT'd sidecar with a static eth1 + a ManagedEgress carrier.
+        from testrange.networks import ManagedBuildSwitch
+        from testrange.orchestrator.build import resolve_build_switch
 
-        addr = StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",))
-        hyp = ProxmoxHypervisor(host="h", build_uplink="vmbr9", build_uplink_addr=addr)
-        assert hyp.build_uplink_addr is addr
-        sw = _build_switch(hyp.build_uplink, hyp.build_uplink_addr)
-        assert sw.sidecar is not None and sw.sidecar.addr is addr and sw.sidecar.nat is True
+        hyp = ProxmoxHypervisor(host="h", build_switch=ManagedBuildSwitch(uplink="vmbr9"))
+        assert isinstance(hyp.build_switch, ManagedBuildSwitch)
+        sw, egress = resolve_build_switch(hyp.build_switch)
+        assert sw.uplink == "vmbr9"
+        assert sw.sidecar is not None and sw.sidecar.nat is True and sw.sidecar.addr is not None
+        assert egress is not None
 
 
 class TestLifecycle:
@@ -426,6 +442,85 @@ class TestL2:
         d.destroy_switch("tr-switch-x")
         assert c.api.vnets == {}
 
+    def _managed_build_switch(self) -> Switch:
+        return Switch(
+            "b",
+            Network("build"),
+            cidr="10.97.99.0/24",
+            uplink="vmbr0",
+            sidecar=Sidecar(
+                dhcp=True,
+                dns=True,
+                nat=True,
+                addr=StaticAddr("10.97.98.2/24", gw="10.97.98.1", dns=("1.1.1.1",)),
+            ),
+        )
+
+    def test_managed_egress_makes_egress_vnet_with_snat_subnet(self) -> None:
+        from testrange.drivers.proxmox._naming import egress_vnet_id, vnet_id
+
+        c = _FakeClient()
+        d = _driver(c)
+        ret = d.create_switch(
+            self._managed_build_switch(),
+            "tr-build-switch-x",
+            managed_egress=ManagedEgress(egress_cidr="10.97.98.0/24"),
+        )
+        egress_vid = egress_vnet_id("tr-build-switch-x")
+        # Two vnets: the isolated guest vnet (eth0) + the manufactured egress vnet
+        # (eth1, returned so the orchestrator attaches the sidecar to it).
+        assert ret == egress_vid
+        assert vnet_id("tr-build-switch-x") in c.api.vnets
+        assert egress_vid in c.api.vnets
+        # The egress vnet carries a snat=1 subnet with the .1 gateway.
+        assert c.api.subnets == [
+            {
+                "vnet": egress_vid,
+                "type": "subnet",
+                "subnet": "10.97.98.0/24",
+                "gateway": "10.97.98.1",
+                "snat": 1,
+            }
+        ]
+
+    def test_managed_egress_applies_default_deny_fence(self) -> None:
+        from testrange.drivers.proxmox._naming import egress_vnet_id
+
+        c = _FakeClient()
+        d = _driver(c)
+        d.create_switch(
+            self._managed_build_switch(),
+            "tr-build-switch-x",
+            managed_egress=ManagedEgress(egress_cidr="10.97.98.0/24"),
+        )
+        egress_vid = egress_vnet_id("tr-build-switch-x")
+        assert c.api.fw_options == [{"vnet": egress_vid, "enable": 1, "policy_forward": "DROP"}]
+        # fw_rules is in evaluation order (the fake models PVE's prepend, PVE-37).
+        # The intra-subnet ACCEPT MUST precede the 10/8 drop (egress_cidr is inside
+        # 10/8); the catch-all internet ACCEPT MUST come last (after the drops),
+        # else it would shadow them and the fence would be inert.
+        actions = [(r["action"], r.get("dest")) for r in c.api.fw_rules]
+        assert actions == [
+            ("ACCEPT", "10.97.98.0/24"),  # intra-subnet, first
+            ("DROP", "10.0.0.0/8"),  # deny host LAN / other segments
+            ("DROP", "172.16.0.0/12"),
+            ("DROP", "192.168.0.0/16"),
+            ("ACCEPT", None),  # internet egress (catch-all), last
+        ]
+
+    def test_managed_egress_destroy_removes_both_vnets(self) -> None:
+        c = _FakeClient()
+        d = _driver(c)
+        d.create_switch(
+            self._managed_build_switch(),
+            "tr-build-switch-x",
+            managed_egress=ManagedEgress(egress_cidr="10.97.98.0/24"),
+        )
+        assert len(c.api.vnets) == 2
+        d.destroy_switch("tr-build-switch-x")
+        assert c.api.vnets == {}
+        assert c.api.zones == {}  # zone dropped once both its vnets are gone
+
     def test_destroy_network_is_a_noop(self) -> None:
         # Networks own no backend object; the vnet dies with the switch.
         _driver().destroy_network("tr-net-a")
@@ -490,7 +585,7 @@ class TestPreflight:
         assert "proxmox-uplink-bridge-missing" in {f.code for f in report.errors}
 
     def test_build_switch_uplink_bridge_is_checked(self) -> None:
-        # The transient build switch's uplink (hyp.build_uplink) is verified too.
+        # The transient build switch's uplink (resolved from build_switch) is verified too.
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24")
         build = Switch(
             "build", Network("b"), cidr="10.97.99.0/24", uplink="vmbr9", sidecar=Sidecar(nat=True)

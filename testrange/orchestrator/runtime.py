@@ -23,7 +23,7 @@ from testrange.drivers import driver_for
 from testrange.drivers.base import HypervisorDriver
 from testrange.exceptions import BuildRequiredError, PreflightError
 from testrange.networks.base import NetworkAddressing, Switch
-from testrange.orchestrator.build import _build_switch
+from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import (
@@ -133,10 +133,11 @@ class Orchestrator:
 
     def _preflight_and_initialize(self) -> None:
         """Run read-only preflight (abort on error) and open the state file."""
+        build_switch, _ = resolve_build_switch(getattr(self.plan.hypervisor, "build_switch", None))
         report = self.ctx.driver.preflight(
             self.plan,
             cache_manager=self.ctx.cache,
-            build_switch=_build_switch(getattr(self.plan.hypervisor, "build_uplink", None)),
+            build_switch=build_switch,
         )
         if not report:
             raise PreflightError(report.render())

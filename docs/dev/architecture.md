@@ -27,12 +27,13 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
 - **`Plan(*hypervisors, name=)`** — the top-level user declaration.
   Currently exactly one hypervisor; the variadic shape is locked in for
   future multi-hypervisor without changing the call shape.
-- **`MockHypervisor(networks=, pools=, vms=, build_uplink=, ...)`** —
+- **`MockHypervisor(networks=, pools=, vms=, build_switch=, ...)`** —
   the top-level entry selecting the in-memory `MockDriver` (the reference
   backend until the real ones are written). Each backend ships its own such
   dataclass; the driver is constructed from its class via the driver registry
-  (`testrange.drivers.driver_for`). `build_uplink` is the host NIC the
-  build-phase sidecar egresses through (see the build phase below).
+  (`testrange.drivers.driver_for`). `build_switch` is the user-declared build
+  network (`Switch | ManagedBuildSwitch | None`, ADR-0014); `None` means an
+  isolated build network with no egress (see the build phase below).
 - **`VMSpec`** — hardware-only (`name`, `devices=[CPU, Memory,
   OSDrive, HardDrive, NetworkIface]`). Singleton-device runtime
   checks enforce exactly one CPU/Memory/OSDrive per spec.
@@ -111,7 +112,8 @@ tests (`--require-cache` makes a miss fail fast instead of building). The
    *disk set* (OS disk + every data disk, each named `_built_<hash>__{os,dataN}`);
    a VM is cached only if **all** its artifacts are present. **Only if at least
    one VM misses** does it stand up a single ephemeral build pool + a transient
-   build Switch (from `build_uplink`, dhcp + dns + nat) + the per-Switch sidecar,
+   build Switch (resolved from the Hypervisor's `build_switch` via
+   `resolve_build_switch`, ADR-0014) + the per-Switch sidecar,
    and loop over only the missing VMs. Each missing VM is provisioned as a unit:
    its base is `upload_to_pool`-ed straight onto its own OS-disk ref and
    `resize_volume`-d up; each `HardDrive` is a `create_blank_volume`; the seed is

@@ -92,6 +92,38 @@ def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
     )
 
 
+def managed_build_egress_findings(plan: Plan, *, supported: bool) -> tuple[PreflightFinding, ...]:
+    """Gate a ``ManagedBuildSwitch`` against the driver's egress capability.
+
+    A ``ManagedBuildSwitch`` build switch asks the driver to *manufacture* and
+    fence the build network's internet egress (ADR-0014). A backend with no
+    host-NAT primitive (e.g. ESXi) cannot, and must reject it at preflight rather
+    than silently bring up a build network with no way out. Shared across drivers
+    like :func:`mgmt_unsupported_findings`: each driver passes its
+    ``supports_managed_build_egress`` flag, and a backend that gains support drops
+    to ``supported=True``. At most one error finding.
+    """
+    from testrange.networks.base import ManagedBuildSwitch
+
+    build_switch = getattr(plan.hypervisor, "build_switch", None)
+    if supported or not isinstance(build_switch, ManagedBuildSwitch):
+        return ()
+    return (
+        PreflightFinding(
+            severity="error",
+            code="managed-build-egress-unsupported",
+            message=(
+                f"build_switch is a ManagedBuildSwitch(uplink={build_switch.uplink!r}), but this "
+                "backend cannot manufacture managed build egress"
+            ),
+            fix_hint=(
+                "use a plain Switch build_switch on an uplink that already has its own "
+                "NAT/route, or run on a backend that supports managed build egress (e.g. Proxmox)"
+            ),
+        ),
+    )
+
+
 def native_capability_findings(
     plan: Plan, capabilities: frozenset[str]
 ) -> tuple[PreflightFinding, ...]:

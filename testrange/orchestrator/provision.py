@@ -16,7 +16,7 @@ from testrange.builders.sidecar_iso import build_sidecar_config_iso
 from testrange.cache.entry import CacheEntry
 from testrange.exceptions import OrchestratorError
 from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
-from testrange.networks.base import Switch
+from testrange.networks.base import ManagedEgress, Switch
 from testrange.networks.sidecar import (
     _uplink_network_name,
     render_dnsmasq_conf,
@@ -33,7 +33,13 @@ def mac_for(ctx: RunContext, vm_name: str, idx: int) -> str:
     return ctx.driver.compose_mac(ctx.plan_name, vm_name, idx)
 
 
-def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") -> None:
+def provision_switch(
+    ctx: RunContext,
+    switch: Switch,
+    *,
+    kind_prefix: str = "",
+    managed_egress: ManagedEgress | None = None,
+) -> None:
     """Realize one Switch and its Network(s) via the driver.
 
     The driver owns all L2 topology — the orchestrator names no bridges. It
@@ -42,6 +48,11 @@ def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") 
     ``uplink+nat`` Switch — provisions the uplink-facing segment the sidecar's
     ``eth1`` rides), then attaches each Network with
     :meth:`HypervisorDriver.create_network`.
+
+    ``managed_egress`` (ADR-0014) is passed straight through to ``create_switch``
+    for a ``ManagedBuildSwitch``: it tells the driver to manufacture and fence the
+    egress segment rather than bridge ``eth1`` to a pre-existing uplink. Only the
+    build phase sets it.
 
     Records the switch + each network in state for LIFO teardown. Network
     backend names (including the driver-owned uplink segment, keyed under the
@@ -56,7 +67,9 @@ def provision_switch(ctx: RunContext, switch: Switch, *, kind_prefix: str = "") 
         backend_name=switch_backend,
         plan_name=switch.name,
     )
-    uplink_net_backend = ctx.driver.create_switch(switch, switch_backend)
+    uplink_net_backend = ctx.driver.create_switch(
+        switch, switch_backend, managed_egress=managed_egress
+    )
     ctx.store.confirm(switch_backend)
     ctx.switch_backends[switch.name] = switch_backend
 

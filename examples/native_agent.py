@@ -20,9 +20,9 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
-from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
+from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import Network, Sidecar, Switch
+from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
@@ -30,8 +30,7 @@ PLAN = Plan(
     ProxmoxHypervisor(
         host="40.160.34.83",
         password="Target123!",
-        build_uplink="vmbr9",
-        build_uplink_addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",)),
+        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[
             Switch(
                 "switch1",

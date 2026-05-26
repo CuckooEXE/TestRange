@@ -30,6 +30,7 @@ from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
+    managed_build_egress_findings,
     mgmt_unsupported_findings,
     native_capability_findings,
 )
@@ -38,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import Network, Switch
+    from testrange.networks.base import ManagedBuildSwitch, ManagedEgress, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
@@ -68,7 +69,9 @@ class MockHypervisor:
     networks: Sequence[Switch] = ()
     pools: Sequence[StoragePool] = ()
     vms: Sequence[VMRecipe] = ()
-    build_uplink: str | None = None
+    # User-declared build switch (ADR-0014); None => isolated build network, no
+    # egress. Replaces the former build_uplink knob.
+    build_switch: Switch | ManagedBuildSwitch | None = None
     pool_root: Path | None = None
     backing_capacity_gb: int | None = None
 
@@ -76,8 +79,7 @@ class MockHypervisor:
         object.__setattr__(self, "networks", tuple(self.networks))
         object.__setattr__(self, "pools", tuple(self.pools))
         object.__setattr__(self, "vms", tuple(self.vms))
-        if self.build_uplink is not None and not self.build_uplink:
-            raise ValueError("MockHypervisor.build_uplink must be a non-empty string or None")
+        # build_switch self-validates in Switch / ManagedBuildSwitch construction.
         validate_hypervisor_plan(self.networks, self.pools, self.vms)
 
     @property
@@ -176,6 +178,9 @@ class MockDriver(HypervisorDriver):
             return self.preflight_override
         findings: list[PreflightFinding] = list(native_capability_findings(plan, self._native_caps))
         findings.extend(mgmt_unsupported_findings(plan))
+        findings.extend(
+            managed_build_egress_findings(plan, supported=self.supports_managed_build_egress)
+        )
         findings.extend(self._pool_capacity_findings(plan))
         return PreflightReport(findings=tuple(findings))
 
@@ -217,13 +222,26 @@ class MockDriver(HypervisorDriver):
 
     # -- switches & networks (driver owns L2) ------------------------------
 
-    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
+    def create_switch(
+        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
+    ) -> str | None:
         nat = switch.sidecar is not None and switch.sidecar.nat
         uplink_network: str | None = None
-        if switch.uplink is not None and nat:
+        if managed_egress is not None:
+            # Simulate the manufactured + fenced egress segment the sidecar's
+            # eth1 rides (a real backend SNATs + fences it; the mock just names it).
+            uplink_network = f"{backend_name}__managed_egress"
+        elif switch.uplink is not None and nat:
             uplink_network = f"{backend_name}__uplink"
         self._switches[backend_name] = _Switch(backend_name, uplink_network)
-        self._record("create_switch", backend_name, switch.name, switch.uplink, nat)
+        self._record(
+            "create_switch",
+            backend_name,
+            switch.name,
+            switch.uplink,
+            nat,
+            managed_egress is not None,
+        )
         return uplink_network
 
     def destroy_switch(self, backend_name: str) -> None:

@@ -38,16 +38,16 @@ from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
+    managed_build_egress_findings,
     mgmt_unsupported_findings,
     native_capability_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
-    from testrange.devices.network import StaticAddr
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import Network, Switch
+    from testrange.networks.base import ManagedBuildSwitch, ManagedEgress, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
@@ -65,11 +65,16 @@ class ProxmoxHypervisor:
     Everything operational defaults sanely, because authors care that their
     tests run, not where: ``user="root@pam"`` (PVE's default realm — a bare
     ``"root"`` is normalised to ``root@pam``); ``node=""`` auto-detects the
-    host's single node; ``build_uplink="vmbr0"`` and ``backing_storage="local"``
-    are PVE's near-universal defaults; the SDN zone isn't a field at all
-    (TestRange mints one per run and tears it down). All stay as keyword
-    overrides for the less-common cases (a multi-node cluster, an NFS store, a
-    non-default bridge, a different realm).
+    host's single node; ``backing_storage="local"`` is PVE's near-universal
+    default; the SDN zone isn't a field at all (TestRange mints one per run and
+    tears it down). All stay as keyword overrides for the less-common cases (a
+    multi-node cluster, an NFS store, a different realm).
+
+    Build-time internet egress is **opt-in** (ADR-0014): set ``build_switch`` to
+    a ``Switch`` (bring-your-own uplink + sidecar) or a ``ManagedBuildSwitch``
+    (TestRange manufactures and fences the egress segment). Left unset, the build
+    network is isolated (DHCP+DNS only) — a build that needs apt/pip must declare
+    one.
 
     SSH (used only for ``download_from_pool``) reuses the API user/password by
     default, since ``root@pam`` is the host's system root.
@@ -82,12 +87,11 @@ class ProxmoxHypervisor:
     user: str = "root@pam"
     password: str = ""
     port: int = 8006
-    build_uplink: str | None = "vmbr0"
-    # Static address for the build sidecar's uplink NIC (NET-7). Set this when
-    # the host won't DHCP the sidecar's MAC on ``build_uplink`` — e.g. a
-    # single-public-IP box where ``build_uplink`` is an internal bridge the host
-    # NATs out its real NIC. ``None`` => the sidecar DHCPs from the uplink LAN.
-    build_uplink_addr: StaticAddr | None = None
+    # User-declared build switch (ADR-0014): a Switch (BYO uplink) or a
+    # ManagedBuildSwitch (TestRange manufactures + fences the egress segment).
+    # None => isolated build network, no internet egress. Replaces the former
+    # build_uplink / build_uplink_addr knobs.
+    build_switch: Switch | ManagedBuildSwitch | None = None
     node: str = ""  # "" => auto-detect the single node
     backing_storage: str = "local"
     verify_ssl: bool = False
@@ -101,8 +105,7 @@ class ProxmoxHypervisor:
         object.__setattr__(self, "vms", tuple(self.vms))
         if not self.host:
             raise ValueError("ProxmoxHypervisor.host must be a non-empty string (the PVE host/IP)")
-        if self.build_uplink is not None and not self.build_uplink:
-            raise ValueError("ProxmoxHypervisor.build_uplink must be a non-empty string or None")
+        # build_switch self-validates in Switch / ManagedBuildSwitch construction.
         validate_hypervisor_plan(self.networks, self.pools, self.vms)
 
     @property
@@ -150,6 +153,10 @@ class ProxmoxDriver(HypervisorDriver):
     """Proxmox VE backend. Holds exactly one :class:`ProxmoxClient`."""
 
     DRIVER_NAME = "ProxmoxDriver"
+
+    # Proxmox realizes ManagedBuildSwitch via an SDN snat=1 vnet + VNet firewall
+    # fence (ADR-0014; see _sdn._create_egress_vnet / _fence_egress_vnet).
+    supports_managed_build_egress = True
 
     def __init__(self, conn: ProxmoxConn, *, client: ProxmoxClient | None = None) -> None:
         self._conn = conn
@@ -207,6 +214,9 @@ class ProxmoxDriver(HypervisorDriver):
             native_capability_findings(plan, self.native_guest_capabilities())
         )
         findings.extend(mgmt_unsupported_findings(plan))
+        findings.extend(
+            managed_build_egress_findings(plan, supported=self.supports_managed_build_egress)
+        )
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))
@@ -242,9 +252,10 @@ class ProxmoxDriver(HypervisorDriver):
 
         On Proxmox the sidecar's ``eth1`` bridges to an existing host bridge
         (``switch.uplink``) to reach the upstream LAN for NAT egress — including
-        the transient build Switch (``build_switch.uplink = hyp.build_uplink``),
-        which is why ``testrange run`` can auto-build here. A typo or a missing
-        bridge would otherwise surface as an opaque create-time failure.
+        the transient build Switch (resolved from the Hypervisor's
+        ``build_switch``), which is why ``testrange run`` can auto-build here. A
+        typo or a missing bridge would otherwise surface as an opaque
+        create-time failure.
         """
         wanted: set[str] = {
             sw.uplink
@@ -272,8 +283,9 @@ class ProxmoxDriver(HypervisorDriver):
                     f"{self._client.node!r} (have: {sorted(bridges)})"
                 ),
                 fix_hint=(
-                    "on Proxmox, uplink/build_uplink names an existing host bridge with "
-                    "upstream connectivity (e.g. 'vmbr0', the one carrying the default gateway)"
+                    "on Proxmox, a Switch/ManagedBuildSwitch uplink names an existing host "
+                    "bridge with upstream connectivity (e.g. 'vmbr0', the one carrying the "
+                    "default gateway)"
                 ),
             )
             for name in sorted(wanted)
@@ -296,8 +308,12 @@ class ProxmoxDriver(HypervisorDriver):
 
     # -- switches & networks (driver owns L2; delegates to _sdn) -----------
 
-    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
-        return _sdn.create_switch(self._client, self._sdn_zone, switch, backend_name)
+    def create_switch(
+        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
+    ) -> str | None:
+        return _sdn.create_switch(
+            self._client, self._sdn_zone, switch, backend_name, managed_egress=managed_egress
+        )
 
     def destroy_switch(self, backend_name: str) -> None:
         _sdn.destroy_switch(self._client, backend_name)

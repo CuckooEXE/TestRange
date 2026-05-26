@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import Network, Switch
+    from testrange.networks.base import ManagedEgress, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -65,6 +65,13 @@ class HypervisorDriver(ABC):
 
     DRIVER_NAME: str = "HypervisorDriver"
 
+    # Whether this backend can realize a ManagedBuildSwitch — manufacture and
+    # fence the build network's internet-egress segment (ADR-0014). Default
+    # False: a backend opts in by overriding to True once it implements the
+    # egress path in create_switch. The orchestrator's preflight rejects a
+    # ManagedBuildSwitch where this is False (managed_build_egress_findings).
+    supports_managed_build_egress: bool = False
+
     @abstractmethod
     def connect(self) -> None: ...
 
@@ -82,10 +89,10 @@ class HypervisorDriver(ABC):
         """Read-only checks against the live backend.
 
         ``build_switch`` is the transient Switch the orchestrator will
-        bring up for the build phase (sidecar-served DHCP+DNS+NAT, with
-        the Hypervisor's ``build_uplink`` as the upstream NIC). Preflight
-        includes it in CIDR-overlap checks so a colliding user Switch is
-        caught here rather than blowing up at build time.
+        bring up for the build phase, resolved from the Hypervisor's
+        user-declared ``build_switch`` (ADR-0014). Preflight includes it in
+        CIDR-overlap checks so a colliding user Switch is caught here rather
+        than blowing up at build time.
         """
 
     @abstractmethod
@@ -104,7 +111,9 @@ class HypervisorDriver(ABC):
         """
 
     @abstractmethod
-    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
+    def create_switch(
+        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
+    ) -> str | None:
         """Realize a Switch's L2 fabric on the backend.
 
         The driver owns *all* L2 topology — the orchestrator never names a
@@ -117,11 +126,20 @@ class HypervisorDriver(ABC):
 
         When ``switch.uplink`` is set and the switch's ``Sidecar`` has ``nat``,
         the driver also provisions an uplink-facing segment for the sidecar's
-        second NIC and returns its
-        backend network name; the orchestrator attaches the sidecar's
-        ``eth1`` to it. Returns ``None`` when there is no uplink segment.
-        ``destroy_switch`` tears the whole fabric down, including any uplink
-        segment created here.
+        second NIC and returns its backend network name; the orchestrator
+        attaches the sidecar's ``eth1`` to it. Returns ``None`` when there is no
+        uplink segment.
+
+        ``managed_egress`` (ADR-0014) changes how that uplink-facing segment is
+        realized for a ``ManagedBuildSwitch``: rather than bridge ``eth1`` to a
+        pre-existing host interface, the driver *manufactures* the egress segment
+        on its ``egress_cidr`` (``.1`` gateway), SNATs it to the internet, and
+        fences it default-deny — then returns that segment's backend name. Only
+        ever set for the transient build switch, and only on drivers with
+        ``supports_managed_build_egress`` (preflight rejects it otherwise).
+
+        ``destroy_switch`` tears the whole fabric down, including any uplink or
+        managed-egress segment created here.
         """
 
     @abstractmethod
