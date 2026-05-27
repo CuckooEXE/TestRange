@@ -63,8 +63,8 @@ class _FakeDriver:
         self.connected = False
         self._record("disconnect")
 
-    def preflight(self, plan: Any, *, cache_manager: Any, install_network: Any) -> PreflightReport:
-        del plan, cache_manager, install_network
+    def preflight(self, plan: Any, *, cache_manager: Any, install_switch: Any) -> PreflightReport:
+        del plan, cache_manager, install_switch
         self._record("preflight")
         return self.preflight_report
 
@@ -77,12 +77,37 @@ class _FakeDriver:
     def compose_volume_ref(self, pool_backend: str, vol_name: str) -> VolumeRef:
         return VolumeRef(str(self.pool_root / pool_backend / vol_name))
 
-    def create_network(self, network: Any, switch: Any, backend_name: str) -> Any:
-        self._record("create_network", backend_name, network.name, switch.name)
+    def create_network(
+        self,
+        network: Any,
+        switch: Any,
+        backend_name: str,
+        *,
+        bridge_name: str | None = None,
+    ) -> Any:
+        self._record(
+            "create_network", backend_name, network.name, switch.name, bridge_name
+        )
         return f"net:{backend_name}"
 
     def destroy_network(self, backend_name: str) -> None:
         self._record("destroy_network", backend_name)
+
+    def compose_bridge_name(self, run_id: str, switch_name: str) -> str:
+        return f"tr-{run_id[:6]}-{switch_name}"[:15]
+
+    def create_bridge(
+        self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None
+    ) -> None:
+        self._record("create_bridge", uplink, bridge_name, mgmt_cidr)
+
+    def create_isolated_bridge(
+        self, bridge_name: str, *, mgmt_cidr: str | None = None
+    ) -> None:
+        self._record("create_isolated_bridge", bridge_name, mgmt_cidr)
+
+    def destroy_bridge(self, bridge_name: str) -> None:
+        self._record("destroy_bridge", bridge_name)
 
     def volume_suffix(self, kind: str) -> str:
         return {
@@ -90,6 +115,8 @@ class _FakeDriver:
             "run_disk": ".qcow2",
             "base_image": ".qcow2",
             "install_seed": ".iso",
+            "sidecar_disk": ".qcow2",
+            "sidecar_config": ".iso",
         }[kind]
 
     def create_pool(self, pool: Any, backend_name: str) -> Any:
@@ -204,10 +231,19 @@ class _FakeDriver:
             self.destroy_network(backend_name)
         elif kind == "pool":
             self.destroy_pool(backend_name)
-        elif kind in ("vm", "install_vm"):
+        elif kind in ("vm", "install_vm", "sidecar_vm"):
             self.destroy_vm(backend_name)
-        elif kind in ("install_disk", "install_seed", "run_disk", "base_image"):
+        elif kind in (
+            "install_disk",
+            "install_seed",
+            "run_disk",
+            "base_image",
+            "sidecar_disk",
+            "sidecar_config",
+        ):
             self.delete_volume(self.compose_volume_ref(metadata["pool_backend"], backend_name))
+        elif kind in ("install_bridge", "bridge"):
+            self.destroy_bridge(backend_name)
 
     def create_snapshot(
         self,
@@ -247,7 +283,7 @@ def _plan(name: str = "hello") -> Plan:
         LibvirtHypervisor(
             connection="qemu:///session",
             networks=[
-                Switch("sw1", Network("netA", "10.0.1.0/24", dhcp=True, dns=True)),
+                Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -280,7 +316,7 @@ def _qga_plan(name: str = "hello") -> Plan:
         LibvirtHypervisor(
             connection="qemu:///session",
             networks=[
-                Switch("sw1", Network("netA", "10.0.1.0/24", dhcp=True, dns=True)),
+                Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True, dns=True),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -329,6 +365,9 @@ def populated_cache(
     src = tmp_path / "fake-base.qcow2"
     src.write_bytes(b"FAKE-BASE-DISK" * 100)
     cache.add(src, name="debian-13")
+    sidecar = tmp_path / "fake-sidecar.qcow2"
+    sidecar.write_bytes(b"FAKE-SIDECAR-DISK" * 100)
+    cache.add(sidecar, name="testrange-sidecar")
     return CacheManager(local=cache), tmp_path
 
 
@@ -479,7 +518,7 @@ class TestEnterAndExit:
         plan = Plan(
             LibvirtHypervisor(
                 connection="qemu:///session",
-                networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
+                networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[
                     VMRecipe(
@@ -543,7 +582,7 @@ def _static_plan(ipv4: str) -> Plan:
         LibvirtHypervisor(
             connection="qemu:///session",
             networks=[
-                Switch("sw1", Network("netA", "172.31.0.0/24", dhcp=True)),
+                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", dhcp=True),
             ],
             pools=[StoragePool("pool1", 32)],
             vms=[
@@ -578,11 +617,11 @@ class TestStaticIPDiscovery:
         populated_cache: tuple[CacheManager, Path],
     ) -> None:
         mgr, _ = populated_cache
-        with Orchestrator(_static_plan("172.31.0.50"), cache_manager=mgr) as orch:
+        with Orchestrator(_static_plan("172.31.0.150"), cache_manager=mgr) as orch:
             web = orch.vms["web"]
             assert isinstance(web.communicator, SSHCommunicator)
             # SSHCommunicator stores the bound host on _host (post-bind).
-            assert web.communicator._host == "172.31.0.50"
+            assert web.communicator._host == "172.31.0.150"
         # get_lease_ip should not have been called at all — static short-circuits.
         names = [c[0] for c in fake_driver.calls]
         assert "get_lease_ip" not in names

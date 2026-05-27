@@ -23,10 +23,14 @@ from typing import Any
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
+from testrange.builders.sidecar_iso import build_sidecar_config_iso
+from testrange.cache.entry import CacheEntry
 from testrange.cache.manager import CacheManager
 from testrange.communicators.qga import QGACommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
+from testrange.devices import CPU, Memory, OSDrive
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers import driver_for
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import (
@@ -37,7 +41,15 @@ from testrange.exceptions import (
     OrchestratorError,
     PreflightError,
 )
+from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
 from testrange.networks.base import Network, NetworkAddressing, Switch
+from testrange.networks.sidecar import (
+    render_dnsmasq_conf,
+    render_nftables_ruleset,
+    render_sidecar_interfaces,
+    render_sysctl_conf,
+    sidecar_nic_specs,
+)
 from testrange.plan import Plan
 from testrange.state.schema import (
     PHASE_CLEANUP,
@@ -49,22 +61,54 @@ from testrange.state.schema import (
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms.handle import VMHandle
 from testrange.vms.recipe import VMRecipe
+from testrange.vms.spec import VMSpec
 
 _log = get_logger(__name__)
 
-# Per-VM install timeout. Cloud-init + apt install can be slow.
-_DEFAULT_INSTALL_TIMEOUT_S = 600.0
+# Transient install Switch — sidecar-served DHCP+DNS+NAT so install VMs can
+# reach the internet for apt/pip. Uplink is provided by the Hypervisor
+# (`install_uplink="..."`) and bound into the synthesized switch at
+# install-phase entry. Subnet must not collide with any user-declared
+# Switch; the driver's preflight validates that.
+INSTALL_CIDR = "10.97.99.0/24"
+INSTALL_NETWORK_NAME = "install"
+INSTALL_SWITCH_NAME = "__install"
 
-# Per-VM DHCP-lease timeout after the run VM starts.
-_DEFAULT_LEASE_TIMEOUT_S = 120.0
 
-# Transient install network. Subnet must not collide with any user-declared
-# network in the Plan; the driver's preflight validates that (the orchestrator
-# passes this constant in as a kwarg so the driver doesn't reach upward).
-# A single hardcoded subnet is fine for the single-run-per-host case; a
-# hashed-from-run-id derivation would be needed for concurrent runs sharing a
-# libvirtd.
-INSTALL_NETWORK = Network("install", "10.97.99.0/24", dhcp=True, dns=False)
+def _sidecar_spec(switch: Switch, pool_name: str) -> VMSpec:
+    """Synthesize the sidecar VM's spec for one Switch.
+
+    Always 1 vCPU + 256 MiB + 2 GiB OS disk. NICs in the order produced
+    by :func:`sidecar_nic_specs`: ``eth0`` on the switch network (static
+    ``.1``), and ``eth1`` on the hidden ``__uplink__<switch>`` network
+    (no static IP — sidecar DHCPs from the upstream LAN) when ``nat=True``.
+    """
+    nic_specs = sidecar_nic_specs(switch)
+    nics = [LibvirtNetworkIface(name, ipv4=ip) for (name, ip) in nic_specs]
+    return VMSpec(
+        name=f"__sidecar_{switch.name}",
+        devices=[CPU(1), Memory(256), OSDrive(pool_name, 2), *nics],
+    )
+
+
+def _install_switch(uplink: str | None) -> Switch:
+    if uplink is None:
+        return Switch(
+            INSTALL_SWITCH_NAME,
+            Network(INSTALL_NETWORK_NAME),
+            cidr=INSTALL_CIDR,
+            dhcp=True,
+            dns=True,
+        )
+    return Switch(
+        INSTALL_SWITCH_NAME,
+        Network(INSTALL_NETWORK_NAME),
+        cidr=INSTALL_CIDR,
+        uplink=uplink,
+        dhcp=True,
+        dns=True,
+        nat=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -118,8 +162,8 @@ class Orchestrator:
         *,
         cache_manager: CacheManager | None = None,
         run_id: str | None = None,
-        install_timeout_s: float = _DEFAULT_INSTALL_TIMEOUT_S,
-        lease_timeout_s: float = _DEFAULT_LEASE_TIMEOUT_S,
+        install_timeout_s: float = 600.0,
+        lease_timeout_s: float = 120.0,
     ) -> None:
         self.plan = plan
         self.cache = cache_manager or CacheManager()
@@ -133,20 +177,28 @@ class Orchestrator:
         self._plan_name = plan.name or "plan"
         self._pool_backends: dict[str, str] = {}  # plan_name -> backend_name
         self._network_backends: dict[str, str] = {}  # plan_name -> backend_name
+        self._switch_bridge: dict[str, str] = {}  # switch_name -> isolated/switch bridge name
+        self._switch_uplink_bridge: dict[str, str] = {}  # switch_name -> uplink bridge (nat case)
+        self._sidecar_backends: dict[str, str] = {}  # switch_name -> sidecar VM backend
         self._post_install_paths: dict[str, Path] = {}  # vm_name -> cached disk path
         self._uploaded_bases: set[tuple[str, str]] = set()  # (pool_backend, vol_name)
         # Builder-facing addressing map. The orchestrator brokers per the
         # stovepipe rule: builders never see a hypervisor type, they get the
         # one piece of info they need — per-network CIDR/prefix/gateway/dhcp.
         self._addressing: Mapping[str, NetworkAddressing] = {
-            n.name: NetworkAddressing.from_network(n) for n in self._all_user_networks()
+            n.name: NetworkAddressing.from_switch(s)
+            for s in self._all_switches()
+            for n in s.networks
         }
 
-    def _all_user_networks(self) -> Sequence[Network]:
-        all_networks = getattr(self.plan.hypervisor, "all_networks", None)
-        if all_networks is None:
+    def _all_switches(self) -> Sequence[Switch]:
+        switches = getattr(self.plan.hypervisor, "networks", None)
+        if switches is None:
             return ()
-        return tuple(all_networks)
+        return tuple(switches)
+
+    def _all_user_networks(self) -> Sequence[Network]:
+        return tuple(n for s in self._all_switches() for n in s.networks)
 
     def _build_driver(self) -> HypervisorDriver:
         return driver_for(self.plan.hypervisor)
@@ -158,7 +210,9 @@ class Orchestrator:
             report = self.driver.preflight(
                 self.plan,
                 cache_manager=self.cache,
-                install_network=INSTALL_NETWORK,
+                install_switch=_install_switch(
+                    getattr(self.plan.hypervisor, "install_uplink", None)
+                ),
             )
             if not report:
                 raise PreflightError(report.render())
@@ -242,27 +296,21 @@ class Orchestrator:
             self._store.confirm(backend)
             self._pool_backends[pool.name] = backend
 
-        # 2. Transient install network (internet=True for apt et al.).
-        install_net_backend = self.driver.compose_resource_name(
-            self.run_id, "install_network", "install"
-        )
-        install_net = INSTALL_NETWORK
-        install_switch = Switch("install", install_net, internet=True)
-        self._store.record_intent(
-            kind="install_network",
-            backend_name=install_net_backend,
-            plan_name="install",
-        )
-        self.driver.create_network(install_net, install_switch, install_net_backend)
-        self._store.confirm(install_net_backend)
+        # 2. Transient install Switch — sidecar-served DHCP+DNS+NAT so install
+        # VMs can reach the internet for apt/pip. The Hypervisor's
+        # `install_uplink` carries the physical NIC for upstream egress.
+        install_switch = _install_switch(getattr(hyp, "install_uplink", None))
+        self._provision_switch(install_switch, kind_prefix="install_")
+        install_net_backend = self._network_backends[install_switch.networks[0].name]
+        self._materialize_sidecar_for(install_switch, kind_prefix="install_")
 
         # 3. Per VM: cache hit -> skip; cache miss -> build install VM.
         for vm in hyp.vms:
             self._install_one_vm(vm, install_net_backend)
 
-        # 4. Tear down install network (run phase uses user networks).
-        self.driver.destroy_network(install_net_backend)
-        self._store.forget(install_net_backend)
+        # 4. Tear down the install-phase resources LIFO. Run phase materializes
+        # user Switches independently — no install-phase state bleeds through.
+        self._teardown_install_phase(install_switch)
 
     def _ensure_base_in_pool(self, pool_backend: str, source_path: Path) -> VolumeRef:
         """Upload a host-side base image into the pool, idempotent per run.
@@ -434,21 +482,226 @@ class Orchestrator:
             f"vm {vm_name!r} did not power off within {self.install_timeout_s:.0f}s"
         )
 
+    def _provision_switch(self, switch: Switch, *, kind_prefix: str = "") -> None:
+        """Stand up the bridges + libvirt network(s) for one Switch.
+
+        Topology cases:
+
+        - ``uplink and not nat`` → one uplink bridge (enslaves the physical
+          NIC; assigns ``.2`` if ``mgmt``). The libvirt network references
+          this bridge by name.
+        - ``uplink and nat`` → TWO bridges. An isolated switch bridge
+          (assigns ``.2`` if ``mgmt``) holding guests + sidecar's eth0,
+          plus a separate uplink bridge enslaving the physical NIC for
+          the sidecar's eth1. A hidden ``__uplink__<switch>`` libvirt
+          network exposes the uplink bridge to the sidecar VM.
+        - ``mgmt`` or ``needs_sidecar`` without uplink → one isolated
+          bridge (with ``.2`` if ``mgmt``).
+        - bare → no testrange bridge; libvirt's default bridge.
+
+        Records every created bridge / network in state for LIFO teardown.
+        Network backend names are stashed in ``self._network_backends``.
+        """
+        bridge_name: str | None = None
+        uplink_bridge_name: str | None = None
+        if switch.uplink is not None and switch.nat:
+            bridge_name = self._make_bridge(
+                switch, suffix="iso", uplink=None,
+                mgmt_cidr=self._mgmt_cidr(switch) if switch.mgmt else None,
+                kind=f"{kind_prefix}bridge",
+            )
+            uplink_bridge_name = self._make_bridge(
+                switch, suffix="upl", uplink=switch.uplink,
+                mgmt_cidr=None, kind=f"{kind_prefix}bridge",
+            )
+        elif switch.uplink is not None:
+            bridge_name = self._make_bridge(
+                switch, suffix="upl", uplink=switch.uplink,
+                mgmt_cidr=self._mgmt_cidr(switch) if switch.mgmt else None,
+                kind=f"{kind_prefix}bridge",
+            )
+        elif switch.mgmt or switch.needs_sidecar:
+            bridge_name = self._make_bridge(
+                switch, suffix="iso", uplink=None,
+                mgmt_cidr=self._mgmt_cidr(switch) if switch.mgmt else None,
+                kind=f"{kind_prefix}bridge",
+            )
+
+        for net in switch.networks:
+            backend = self.driver.compose_resource_name(
+                self.run_id, f"{kind_prefix}network", net.name
+            )
+            self._store.record_intent(
+                kind=f"{kind_prefix}network",
+                backend_name=backend,
+                plan_name=net.name,
+            )
+            self.driver.create_network(net, switch, backend, bridge_name=bridge_name)
+            self._store.confirm(backend)
+            self._network_backends[net.name] = backend
+
+        if uplink_bridge_name is not None:
+            uplink_net_name = f"__uplink__{switch.name}"
+            uplink_backend = self.driver.compose_resource_name(
+                self.run_id, f"{kind_prefix}network", uplink_net_name
+            )
+            # Synthetic Switch: exposes the uplink bridge as a libvirt network
+            # so the sidecar's eth1 can attach. The renderer takes the
+            # bridge-mode branch on `uplink is not None` and references
+            # `uplink_bridge_name` directly; the cidr is a shim to satisfy
+            # Switch's strict-form validator and is otherwise unused.
+            uplink_switch = Switch(
+                f"__uplink__{switch.name}",
+                Network(uplink_net_name),
+                cidr=switch.cidr,
+                uplink=switch.uplink,
+            )
+            self._store.record_intent(
+                kind=f"{kind_prefix}network",
+                backend_name=uplink_backend,
+                plan_name=uplink_net_name,
+            )
+            self.driver.create_network(
+                Network(uplink_net_name),
+                uplink_switch,
+                uplink_backend,
+                bridge_name=uplink_bridge_name,
+            )
+            self._store.confirm(uplink_backend)
+            self._network_backends[uplink_net_name] = uplink_backend
+
+    def _mgmt_cidr(self, switch: Switch) -> str:
+        return f"{switch.mgmt_ip}/{switch.network.prefixlen}"
+
+    def _make_bridge(
+        self,
+        switch: Switch,
+        *,
+        suffix: str,
+        uplink: str | None,
+        mgmt_cidr: str | None,
+        kind: str,
+    ) -> str:
+        bridge_name = self.driver.compose_bridge_name(self.run_id, f"{switch.name}-{suffix}")
+        self._store.record_intent(kind=kind, backend_name=bridge_name, plan_name=switch.name)
+        if uplink is None:
+            self.driver.create_isolated_bridge(bridge_name, mgmt_cidr=mgmt_cidr)
+        else:
+            self.driver.create_bridge(uplink, bridge_name, mgmt_cidr=mgmt_cidr)
+        self._store.confirm(bridge_name)
+        if suffix == "iso":
+            self._switch_bridge[switch.name] = bridge_name
+        else:
+            self._switch_uplink_bridge[switch.name] = bridge_name
+        return bridge_name
+
+    def _materialize_sidecar_for(self, switch: Switch, *, kind_prefix: str = "") -> None:
+        if not switch.needs_sidecar:
+            return
+        if not self.plan.hypervisor.pools:
+            raise OrchestratorError(
+                f"switch {switch.name!r} needs a sidecar but the plan has no pools"
+            )
+        pool_name = self.plan.hypervisor.pools[0].name
+        pool_backend = self._pool_backends[pool_name]
+        sidecar_spec = _sidecar_spec(switch, pool_name)
+        sidecar_vm_backend = self.driver.compose_resource_name(
+            self.run_id, f"{kind_prefix}sidecar_vm", switch.name
+        )
+
+        # 1. Sidecar's overlay disk (cached Alpine image as base).
+        sidecar_disk_name = f"{sidecar_vm_backend}{self.driver.volume_suffix('sidecar_disk')}"
+        sidecar_disk_ref = self.driver.compose_volume_ref(pool_backend, sidecar_disk_name)
+        base_info = self.cache.resolve(CacheEntry(SIDECAR_CACHE_NAME))
+        assert base_info.path is not None
+        base_ref = self._ensure_base_in_pool(pool_backend, base_info.path)
+        self._store.record_intent(
+            kind="sidecar_disk",
+            backend_name=sidecar_disk_name,
+            plan_name=switch.name,
+            pool_backend=pool_backend,
+        )
+        self.driver.create_disk_from_base(sidecar_disk_ref, base_ref)
+        self._store.confirm(sidecar_disk_name, pool_backend=pool_backend)
+
+        # 2. Per-run config ISO: dnsmasq.conf + interfaces + nftables + sysctl.
+        sidecar_cfg_name = (
+            f"{sidecar_vm_backend}-cfg{self.driver.volume_suffix('sidecar_config')}"
+        )
+        sidecar_cfg_ref = self.driver.compose_volume_ref(pool_backend, sidecar_cfg_name)
+        iso_bytes = build_sidecar_config_iso(
+            dnsmasq_conf=render_dnsmasq_conf(
+                switch, self.plan.hypervisor.vms, self._mac_for
+            ),
+            interfaces=render_sidecar_interfaces(switch),
+            nftables_ruleset=render_nftables_ruleset(switch),
+            sysctl_conf=render_sysctl_conf(switch),
+        )
+        self._store.record_intent(
+            kind="sidecar_config",
+            backend_name=sidecar_cfg_name,
+            plan_name=switch.name,
+            pool_backend=pool_backend,
+        )
+        self.driver.write_to_pool(sidecar_cfg_ref, iso_bytes)
+        self._store.confirm(sidecar_cfg_name, pool_backend=pool_backend)
+
+        # 3. Define + start the sidecar VM. NIC0 sits on the switch network;
+        # for `nat`, NIC1 sits on the hidden __uplink__ network.
+        nic_specs = sidecar_nic_specs(switch)
+        network_refs = {name: self._network_backends[name] for (name, _ip) in nic_specs}
+        self._store.record_intent(
+            kind="sidecar_vm",
+            backend_name=sidecar_vm_backend,
+            plan_name=switch.name,
+        )
+        self.driver.create_vm(
+            sidecar_vm_backend,
+            sidecar_spec,
+            self._plan_name,
+            os_disk_ref=sidecar_disk_ref,
+            seed_iso_ref=sidecar_cfg_ref,
+            network_refs=network_refs,
+        )
+        self._store.confirm(sidecar_vm_backend)
+        self.driver.start_vm(sidecar_vm_backend)
+        self._sidecar_backends[switch.name] = sidecar_vm_backend
+
+    def _mac_for(self, vm_name: str, idx: int) -> str:
+        return self.driver.compose_mac(self._plan_name, vm_name, idx)
+
+    def _teardown_install_phase(self, install_switch: Switch) -> None:
+        """Destroy install-phase sidecar VM, networks, bridges (LIFO)."""
+        sidecar = self._sidecar_backends.pop(install_switch.name, None)
+        if sidecar is not None:
+            self.driver.destroy_vm(sidecar)
+            self._store.forget(sidecar)
+        for net in install_switch.networks:
+            backend = self._network_backends.pop(net.name, None)
+            if backend is not None:
+                self.driver.destroy_network(backend)
+                self._store.forget(backend)
+        uplink_net_name = f"__uplink__{install_switch.name}"
+        uplink_backend = self._network_backends.pop(uplink_net_name, None)
+        if uplink_backend is not None:
+            self.driver.destroy_network(uplink_backend)
+            self._store.forget(uplink_backend)
+        uplink_bridge = self._switch_uplink_bridge.pop(install_switch.name, None)
+        if uplink_bridge is not None:
+            self.driver.destroy_bridge(uplink_bridge)
+            self._store.forget(uplink_bridge)
+        switch_bridge = self._switch_bridge.pop(install_switch.name, None)
+        if switch_bridge is not None:
+            self.driver.destroy_bridge(switch_bridge)
+            self._store.forget(switch_bridge)
+
     def _run_phase(self) -> None:
         self._store.set_phase(PHASE_RUN)
         hyp = self.plan.hypervisor
 
         for switch in hyp.networks:
-            for net in switch.networks:
-                backend = self.driver.compose_resource_name(self.run_id, "network", net.name)
-                self._store.record_intent(
-                    kind="network",
-                    backend_name=backend,
-                    plan_name=net.name,
-                )
-                self.driver.create_network(net, switch, backend)
-                self._store.confirm(backend)
-                self._network_backends[net.name] = backend
+            self._provision_switch(switch)
+            self._materialize_sidecar_for(switch)
 
         for vm in hyp.vms:
             pool_backend = self._pool_backends[vm.spec.os_drive.pool]

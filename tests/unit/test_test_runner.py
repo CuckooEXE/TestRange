@@ -52,6 +52,9 @@ def setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CacheManager:
     src = tmp_path / "base.qcow2"
     src.write_bytes(b"FAKE-BASE" * 50)
     cache.add(src, name="debian-13")
+    sidecar = tmp_path / "sidecar.qcow2"
+    sidecar.write_bytes(b"FAKE-SIDECAR" * 50)
+    cache.add(sidecar, name="testrange-sidecar")
     return CacheManager(local=cache)
 
 
@@ -59,7 +62,7 @@ def _plan() -> Plan:
     return Plan(
         LibvirtHypervisor(
             connection="qemu:///session",
-            networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
+            networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
             pools=[StoragePool("pool1", 32)],
             vms=[
                 VMRecipe(
