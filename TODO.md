@@ -7,13 +7,11 @@ with a date stamp.
 ## Short-term
 
 - `repl`.
-- DNS via per-network dnsmasq with `<vm>.<network>` resolution. The
-  `Network.dns` flag is honored at the libvirt XML level (forward DNS),
-  but the `<vm>.<network>` short-name resolution piece isn't wired.
-- `mgmt=True` on Switch is accepted at Plan time but is **not currently
-  honored by `LibvirtDriver`** — fix is to render a management
-  interface so guests can reach the host's libvirt API. Document the
-  security implication (guests can reach the host) when wiring.
+- Build + publish the Alpine+dnsmasq sidecar image (volume label
+  `TR_SIDECAR_CFG`; init hook copies `/dnsmasq.conf` and `/interfaces`
+  into `/etc/`; `qemu-guest-agent` baked in). Publish so users can
+  `testrange cache add <url> --name testrange-sidecar` and the smoke
+  tests work end-to-end.
 
 ## Long-term
 
@@ -47,6 +45,36 @@ with a date stamp.
 - Cache eviction (LRU + size cap).
 - `Switch(gateway=True)` — implicit router VM for cross-subnet routing
   on the same Switch.
+- **`Switch(router=True)`** — make the sidecar act as a router. The
+  eventual home for "I want my mgmt switch to route guests to the
+  internet without an uplink": sidecar gets `ip_forward=1` + iptables
+  MASQUERADE on its uplink, and the dnsmasq config advertises a real
+  default gateway via DHCP option 3 (currently always suppressed —
+  see `testrange/networks/sidecar.py`). Static netplans get a
+  default route too (`NetworkAddressing.default_route`, removed in
+  the current rework, would come back). mgmt remains "just a host
+  adapter"; router is the active-forwarding capability.
+- **Remote-libvirt bridge management.** Today `Switch(internet=True,
+  uplink=...)` is local-libvirt only — testrange uses `pyroute2` to
+  create the bridge and enslave the NIC, and pyroute2 talks to LOCAL
+  netlink. Remote URIs (`qemu+ssh://`, `qemu+tcp://`) + uplink
+  switches are caught by preflight (`code="remote_uplink_unsupported"`).
+  Options for support: revive `virInterface*` (deprecated netcf),
+  open a side-channel SSH for the netlink calls, or ship a small
+  agent on the remote host.
+- **Multi-subnet mgmt-IPs**. A `Switch(mgmt=True)` with several
+  `Network`s currently gets a single `.3/<prefix>` adapter on the
+  bridge, derived from the FIRST network on the switch. Guests on
+  the other networks see no host adapter on their subnet. Generalize
+  to N addresses on the bridge when a plan needs it. See
+  `Orchestrator._provision_bridge` for the first-network derivation
+  to remove.
+- **Host-disconnect preflight warning**. testrange's bridge mgmt
+  enslaves a physical NIC chosen by the user — if that NIC is the
+  host's only routable interface, the host briefly (or permanently)
+  loses network. Not added now (no-new-warnings stance), but worth
+  flagging in user docs and possibly an opt-in `--check-uplinks`
+  pass.
 - Parallel install pass (`ThreadPoolExecutor`); will require per-driver
   `RLock` since `libvirt-python` isn't fully thread-safe.
 - Cross-process locking on `state.json` (FileLock) if multiple processes
@@ -54,6 +82,20 @@ with a date stamp.
 
 ## Done / Superseded
 
+- **Switch owns DHCP/DNS/mgmt/internet; sidecar replaces libvirt's
+  embedded dnsmasq.** `Switch(dhcp, dns, mgmt, internet)` all default
+  False (bare L2). `Network` keeps `name`+`cidr`. One Alpine+dnsmasq
+  sidecar per Switch with `needs_sidecar` serves every Network on the
+  Switch (one NIC per subnet, one `dhcp-range` per network); the
+  rendered `dnsmasq.conf` + Alpine `interfaces` ride in on a tiny config
+  ISO (label `TR_SIDECAR_CFG`). Libvirt `<network>` renders without
+  `<dhcp>`/`<domain>` — `<ip>` (host at `.1`) emitted iff `internet or
+  mgmt`. Install network keeps libvirt-native NAT+DHCP via a separate
+  `create_install_network` path. DHCP IP discovery reads the sidecar's
+  lease file via QGA (sidecar bakes in `qemu-guest-agent` as a hard
+  requirement). `<vm>.<networkname>` DNS resolution lands with it.
+  Resolves the long-standing `mgmt` no-op. See PLAN.md §21.
+  (2026-05-16)
 - **QGACommunicator** — Communicator backed by a hypervisor's native
   guest agent. Driver owns the wire protocol (`_LibvirtGuestAgent` over
   `libvirt_qemu.qemuAgentCommand`), exposed via

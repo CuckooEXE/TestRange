@@ -3,6 +3,8 @@
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
+    sudo tools/build-sidecar-image/build.sh
+    testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
 
 Usage:
     testrange describe examples/private_public.py
@@ -11,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 
 from testrange import OrchestratorHandle, Plan, run_tests
@@ -30,27 +33,34 @@ from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
+UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
+
 _KEY = SSHKey.generate(comment="testrange-private-public")
 
-_PRIVATE_WEB_IP = "10.20.0.10"
-_CLIENT_PRIVATE_IP = "10.20.0.20"
+_PRIVATE_WEB_IP = "10.20.0.100"
+_CLIENT_PRIVATE_IP = "10.20.0.101"
 
 
 PLAN = Plan(
     LibvirtHypervisor(
         connection="qemu:///system",
+        install_uplink=UPLINK,
         networks=[
             Switch(
                 "priv-sw",
-                Network("private-net", "10.20.0.0/24", dhcp=False, dns=False),
+                Network("private-net"),
+                cidr="10.20.0.0/24",
                 mgmt=True,
-                internet=False,
             ),
             Switch(
                 "pub-sw",
-                Network("public-net", "10.30.0.0/24", dhcp=True, dns=True),
+                Network("public-net"),
+                cidr="10.30.0.0/24",
+                uplink=UPLINK,
                 mgmt=True,
-                internet=True,
+                dhcp=True,
+                dns=True,
+                nat=True,
             ),
         ],
         pools=[StoragePool("pool1", 32)],

@@ -10,6 +10,14 @@ nothing in this doc is committed code until it shows up in `PLAN.md`.
 
 ## DHCP on hypervisors without built-in DHCP (ESXi)
 
+> **Superseded — promoted to `PLAN.md` §21 (2026-05-14).** §21 takes the
+> sidecar further: it runs on *every* driver including libvirt (TestRange
+> stops using libvirt's embedded dnsmasq), rather than only as the ESXi
+> fallback. The `LibvirtDriver.renders_dhcp = True` flag and the "libvirt
+> stays native" framing below are no longer the plan. The DHCP/DNS
+> sidecar *mechanics* documented here still hold — see §21 for the
+> agreed design.
+
 ### Context
 
 `Network.addressing` is a per-Network knob with three modes:

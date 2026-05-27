@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-libvirt = ["libvirt-python>=10"]
+libvirt = ["libvirt-python>=10", "pyroute2>=0.7"]
 ssh = ["paramiko>=3"]
 cloudinit = ["pycdlib>=1.14", "pyyaml>=6"]
 http = ["requests>=2.31"]
@@ -37,6 +37,7 @@ dev = [
     "pyyaml>=6",
     "paramiko>=3",
     "requests>=2.31",
+    "pyroute2>=0.7",
 ]
 all = [
     "testrange[libvirt,ssh,cloudinit,http]",
@@ -87,7 +88,7 @@ warn_unused_configs = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["libvirt", "libvirt.*", "libvirt_qemu", "pycdlib", "pycdlib.*"]
+module = ["libvirt", "libvirt.*", "libvirt_qemu", "pycdlib", "pycdlib.*", "pyroute2", "pyroute2.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

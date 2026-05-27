@@ -40,3 +40,8 @@ docs/_build/
 # commit either. The README documents how to regenerate certs locally.
 cache-server/certs/
 cache-server/storage/
+
+# Sidecar image build artifacts — large binary outputs, rebuilt on demand
+# from tools/build-sidecar-image/.
+tools/build-sidecar-image/*.qcow2
+tools/build-sidecar-image/*.raw

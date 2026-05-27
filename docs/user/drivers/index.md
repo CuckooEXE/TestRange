@@ -7,7 +7,11 @@ the driver matching your hypervisor and follow that page's prereqs.
 :maxdepth: 1
 
 libvirt
+networking-modes
 ```
+
+[Networking modes](networking-modes.md) covers the `Switch` API and
+how each driver realizes the flags (uplink/mgmt/dhcp/dns/nat).
 
 ## Roadmap
 

@@ -3,6 +3,8 @@
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
+    sudo tools/build-sidecar-image/build.sh
+    testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
 
 Usage:
     testrange describe examples/qga.py
@@ -11,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 
 from testrange import OrchestratorHandle, Plan, run_tests
@@ -24,11 +27,22 @@ from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
+UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
+
 PLAN = Plan(
     LibvirtHypervisor(
         connection="qemu:///system",
+        install_uplink=UPLINK,
         networks=[
-            Switch("switch1", Network("netA", "172.31.0.0/24", dhcp=True, dns=True)),
+            Switch(
+                "switch1",
+                Network("netA"),
+                cidr="172.31.0.0/24",
+                uplink=UPLINK,
+                dhcp=True,
+                dns=True,
+                nat=True,
+            ),
         ],
         pools=[StoragePool("pool1", 32)],
         vms=[

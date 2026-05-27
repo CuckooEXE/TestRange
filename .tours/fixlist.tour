@@ -1,0 +1,57 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "fixlist",
+  "steps": [
+    {
+      "file": "testrange/builders/base.py",
+      "description": "Don't mention communicator here. It's okay to say that the builder is standalone or whatever, but don't mention things it DOESN'T use unless you mention ALL things it doesn't use and keep it up to date (bad idea.)",
+      "line": 4
+    },
+    {
+      "file": "testrange/cli.py",
+      "description": "If this is the ONLY place args.verbose is used; get rid of it",
+      "line": 419
+    },
+    {
+      "file": "testrange/vms/recipe.py",
+      "description": "unnecessary cross-cutting comment",
+      "line": 16
+    },
+    {
+      "file": "testrange/state/cleanup.py",
+      "description": "This file needs more docstrings (i.e in CleanupResult, etc.). Lots of \"what's happening\" not lots of \"WHY it's happening\"",
+      "line": 1
+    },
+    {
+      "file": "docs/user/install.md",
+      "description": "Is this still true? The only one?\n",
+      "line": 30
+    },
+    {
+      "file": "docs/user/writing-a-plan.md",
+      "description": "Is this true?",
+      "line": 135
+    },
+    {
+      "file": "docs/user/running-tests.md",
+      "description": "Is this all up to date?",
+      "line": 51
+    },
+    {
+      "file": "docs/dev/architecture.md",
+      "description": "\"DHCP lease lookup\" - Shouldn't this belong to the sidecar and not the hypervisor?",
+      "line": 50
+    },
+    {
+      "file": "testrange/builders/base.py",
+      "description": "This decision point should be stored in an ADR (with more detail) and there should just be a reference to the ADR",
+      "line": 58
+    },
+    {
+      "file": "testrange/builders/sidecar_iso.py",
+      "description": "This doesn't need a new const, but maybe add a comment explaiing where the 1.09 came from (same with the other integer kwargs)",
+      "line": 66
+    }
+  ],
+  "ref": "f014a964c139855fd0e52b35778c1c99449b23e0"
+}

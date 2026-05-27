@@ -44,7 +44,7 @@ VMRecipe(
         base=CacheEntry("debian-13"),
         credentials=[
             PosixCred("root", password="..."),
-            PosixCred("myuser", pubkey=key.public, sudo=True),
+            PosixCred("myuser", pubkey=key.auth_line, sudo=True),
         ],
         packages=[Apt("nginx")],
         post_install_commands=("echo hi > /tmp/hi",),
@@ -134,21 +134,70 @@ disk.
 `VMSpec.__post_init__` enforces: exactly one CPU, exactly one Memory,
 exactly one OSDrive, ≥ zero HardDrives, ≥ zero NetworkIfaces.
 
-### 10. Switch is an L2 broadcast domain (vSwitch model)
+### 10. Switch owns all networking-infrastructure knobs (ESXi-shaped)
 
-Switch maps to ESXi's vSwitch (and analogous primitives on other drivers).
-Networks on the same Switch share one L2 broadcast domain. Cross-Switch
-traffic is dropped.
+A Switch is one L2 broadcast domain *and* the place every infrastructure
+decision lives (`cidr`, `uplink`, `mgmt`, `dns`, `dhcp`, `nat`). A
+Network is a logical label (port-group) within a Switch — VMs attach by
+name. All Networks on a Switch share `switch.cidr`; multiple Networks
+are organizational labels on one wire.
 
-**Libvirt implementation**: each Switch is one OpenvSwitch (or Linux)
-bridge; each Network within is a port-group with a VLAN tag (OVS-backed)
-or a sub-network on the shared bridge. The OVS-backed model requires
-`openvswitch-switch` on the host; surfaced via preflight.
+```python
+Switch(
+    name: str,
+    *networks: Network,
+    cidr: str = "192.168.10.0/24",   # strict network form; host-form raises
+    uplink: str | None = None,        # physical NIC; testrange creates bridge(s)
+    mgmt: bool = False,               # host adapter at .2 (NOT a router)
+    dns: bool = False,                # sidecar serves DNS at .1
+    dhcp: bool = False,               # sidecar serves DHCP at .1
+    nat: bool = False,                # sidecar MASQUERADEs out uplink at .1
+)
+```
 
-Different subnets on the same Switch do not naturally route between each
-other — they're on the same wire but distinct IP spaces. A gateway VM or
-user-side routing is required. Long-term TODO: a `Switch(gateway=True)`
-kwarg that brings up an implicit router VM.
+`nat=True` requires `uplink=` (the sidecar needs a physical NIC to
+MASQUERADE traffic out of). Otherwise the flags are orthogonal; the
+bare Switch is a pure L2 wire.
+
+**Addressing pinning** (`testrange/networks/_addressing_consts.py`):
+
+- `.1` — sidecar (iff `dhcp|dns|nat`); is the gateway when `nat=True`.
+- `.2` — host mgmt adapter (iff `mgmt=True`).
+- `.3`–`.9` — reserved.
+- `.10`–`.99` — DHCP lease pool (iff `dhcp=True`).
+- `.100`–`.254` — user statics.
+
+**Sidecar VM** (`testrange/networks/sidecar.py`,
+`testrange/builders/sidecar_iso.py`): a pre-built Alpine image with
+`dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
+(`tools/build-sidecar-image/build.sh`). Per-Switch instance —
+materialized only when `switch.needs_sidecar` (= `dhcp or dns or nat`).
+Per-run config is delivered as a tiny ISO9660 (label `TR_SIDECAR_CFG`)
+carrying `dnsmasq.conf`, `interfaces`, `nftables.nft`, `sysctl.conf`.
+
+**NAT topology** (`nat=True, uplink="eth0"`): testrange creates TWO
+bridges — an isolated switch bridge (guests + sidecar's eth0 at `.1`,
+plus the host's `.2` if `mgmt`) and a separate uplink bridge enslaving
+the physical NIC (sidecar's eth1, DHCP from upstream LAN). The
+sidecar's `nftables` ruleset MASQUERADEs eth0→eth1. Without `nat`, an
+uplinked switch is one bridge (guests bridge directly to LAN with
+their own MACs).
+
+**Libvirt driver**: pyroute2 creates the bridges (`create_bridge` /
+`create_isolated_bridge`); libvirt's `<network>` XML references them in
+`<forward mode='bridge'/>`. No libvirt-native NAT/DHCP/DNS anywhere
+(install phase or otherwise) — the sidecar owns those uniformly.
+
+**Install phase** uses the same machinery: a transient
+`Switch("__install", Network("install"), cidr="10.97.99.0/24",
+uplink=hyp.install_uplink, dhcp=True, dns=True, nat=True)` synthesized
+from `LibvirtHypervisor.install_uplink`. Brought up before install VMs
+boot, torn down LIFO before the run phase begins.
+
+**Known limits** (TODO.md): pyroute2 is local-netlink only —
+`Switch.uplink` and `nat` are unsupported on remote libvirt URIs
+(`remote_uplink_unsupported` preflight finding). Multi-Network mgmt
+collapses naturally now that Switches own one CIDR.
 
 ### 11. ISOs / base disks referenced ONLY via `CacheEntry`
 
@@ -440,40 +489,37 @@ answers surfaces here.
 
 ## v0 example (target shape)
 
+Canonical source: [`examples/hello_world.py`](examples/hello_world.py). Keep
+that file as the authoritative shape — this section sketches the *structure*,
+not a runnable copy. Per §19, plan-side tests do **not** carry a
+`cloud_init_finished` probe; the orchestrator's `wait_ready` step handles
+that.
+
 ```python
-"""hello_world: one libvirt VM, cloud-init bootstraps SSH + nginx, smoke-test it.
-
-Prerequisites:
-  testrange cache add https://cloud.debian.org/.../debian-13-generic-amd64.qcow2 \
-      --name debian-13
-"""
-from __future__ import annotations
-import sys
-
 from testrange import Plan, OrchestratorHandle, run_tests
 from testrange.cache import CacheEntry
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Switch, Network
-from testrange.devices import (
-    CPU, Memory, OSDrive, HardDrive, StoragePool,
-    LibvirtNetworkIface,
-)
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.vms import VMSpec, VMRecipe
 from testrange.builders import CloudInitBuilder
-from testrange.credentials import PosixCred, gen_ssh_key
+from testrange.credentials import PosixCred, SSHKey
 from testrange.communicators import SSHCommunicator
 from testrange.packages import Apt
 
-
-_KEY = gen_ssh_key(comment="testrange-hello")
+_KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
     LibvirtHypervisor(
-        connection="qemu:///session",
+        connection="qemu:///system",
+        install_uplink="eth0",
         networks=[
-            Switch("switch1", mgmt=True, internet=True,
-                Network("netA", "172.31.0.0/24", dhcp=True, dns=True),
-                Network("netB", "10.10.10.0/24"),
+            Switch(
+                "switch1",
+                Network("netA"),
+                cidr="172.31.0.0/24",
+                uplink="eth0", mgmt=True, dhcp=True, dns=True, nat=True,
             ),
         ],
         pools=[StoragePool("pool1", 32)],
@@ -482,56 +528,36 @@ PLAN = Plan(
                 spec=VMSpec(
                     name="web",
                     devices=[
-                        CPU(2),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
+                        CPU(2), Memory(1024), OSDrive("pool1", 8),
                         LibvirtNetworkIface("netA", driver="virtio"),
                     ],
                 ),
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     credentials=[
-                        PosixCred("root", password="root"),
-                        PosixCred(
-                            "myuser",
-                            password="mypass",
-                            pubkey=_KEY.public,
-                            sudo=True,
-                        ),
+                        PosixCred("myuser", pubkey=_KEY.auth_line,
+                                  privkey=_KEY.priv, sudo=True),
                     ],
                     packages=[Apt("nginx")],
-                    post_install_commands=("echo hi > /tmp/hi",),
                 ),
                 communicator=SSHCommunicator("myuser"),
             ),
         ],
     ),
 )
-
-
-def cloud_init_finished(orch: OrchestratorHandle) -> None:
-    r = orch.vms["web"].communicator.execute(
-        ["cloud-init", "status", "--wait"], timeout=300.0
-    )
-    assert r.exit_code == 0, r
-
-
-def nginx_is_installed(orch: OrchestratorHandle) -> None:
-    r = orch.vms["web"].communicator.execute(["dpkg", "-l", "nginx"])
-    assert r.exit_code == 0, "nginx missing"
-
-
-def hostname_matches(orch: OrchestratorHandle) -> None:
-    r = orch.vms["web"].communicator.execute(["hostname"])
-    assert r.stdout.strip() == b"web", r
-
-
-TESTS = [cloud_init_finished, nginx_is_installed, hostname_matches]
-
-if __name__ == "__main__":
-    results = run_tests(TESTS, PLAN)
-    sys.exit(0 if all(r.passed for r in results) else 1)
 ```
+
+Key shape invariants this demonstrates:
+
+- `Switch(name, *networks, cidr=..., ...)` — networks are positional after the
+  name; infra knobs (`cidr`, `uplink`, `mgmt`, `dhcp`, `dns`, `nat`) are
+  keyword-only on the Switch (not on Networks). Per §10.
+- `install_uplink="eth0"` on the Hypervisor — drives the transient install
+  Switch's NAT path (§10).
+- `SSHKey.generate(...)` returns `.auth_line` (single-line `authorized_keys`
+  format) for `pubkey=` and `.priv` (OpenSSH PEM) for `privkey=`.
+- `LibvirtNetworkIface` lives under `testrange.devices.network.libvirt`, not
+  the top-level `testrange.devices`.
 
 ## v0 phases
 

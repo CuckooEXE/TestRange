@@ -44,9 +44,23 @@ Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
   with `<sha>.bin` + sidecar `<sha>.json`. Atomic writes via
   `.partial` + `os.replace`.
 - **`HypervisorDriver`** ABC — connect, preflight, network/pool/VM CRUD,
+  bridge management (`compose_bridge_name`, `create_bridge`,
+  `create_isolated_bridge`, `destroy_bridge` — default-implemented to
+  raise so a backend without bridge needs doesn't have to override),
   stable MAC derivation, DHCP lease lookup, volume transport (see
   Pool I/O below). Concretes register themselves with the driver
-  registry at import time. Today: `LibvirtDriver`.
+  registry at import time. Today: `LibvirtDriver` (uses pyroute2 for
+  bridges; local-netlink only).
+- **Per-Switch sidecar VM** — a pre-built Alpine image with
+  `dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
+  (`tools/build-sidecar-image/build.sh`). The orchestrator
+  materializes one per Switch with `needs_sidecar` (= `dhcp or dns or
+  nat`). Per-run config is delivered as a tiny ISO9660
+  (`TR_SIDECAR_CFG`) carrying `dnsmasq.conf`, `interfaces`,
+  `nftables.nft`, and `sysctl.conf` rendered by
+  `testrange/networks/sidecar.py`. The sidecar IS the gateway when
+  `nat=True`; no libvirt-native NAT/DHCP/DNS is used anywhere
+  (install or run phase).
 - **Pool I/O** — `upload_to_pool` (host file → in-pool volume) and
   `download_from_pool` (in-pool volume → host file) both flow through
   the driver's stream API. The orchestrator never opens pool files
@@ -72,13 +86,20 @@ Plan(LibvirtHypervisor(connection, networks, pools, vms=[VMRecipe(...)]), name=)
    resolvability, pool-root writable). Returns `PreflightReport`.
    Errors abort before any state.json write.
 2. **Install** — per-VM, builder-driven, cache-aware. Cache hit on
-   `builder.config_hash(...)` skips the build. Cache miss brings up
-   a transient install VM on a transient internet-NAT network with
-   the cloud-init seed; polls power-state until the VM
-   self-terminates via `runcmd: [..., poweroff]`; snapshots the
-   post-install disk into the cache; tears down the install VM.
-3. **Run** — user networks created; each VM gets a fresh overlay off
-   the cached post-install disk; defined + started with no seed.
+   `builder.config_hash(...)` skips the build. Cache miss synthesizes
+   a transient install Switch from `LibvirtHypervisor.install_uplink`
+   (dhcp + dns + nat), brings up the per-Switch sidecar VM to serve
+   DHCP and MASQUERADE outbound, runs each install VM against it,
+   polls power-state until the VM self-terminates via
+   `runcmd: [..., poweroff]`, snapshots the post-install disk into
+   the cache, and tears down the install sidecar + bridges LIFO.
+3. **Run** — for every user Switch: `_provision_switch` creates the
+   right bridges (one for `uplink` only, two for `nat + uplink`, an
+   isolated one when only `mgmt` or `needs_sidecar`), defines the
+   libvirt networks pointing at those bridges, and `_materialize_sidecar_for`
+   stands up the per-Switch sidecar VM when `dhcp|dns|nat` is set.
+   Then each user VM gets a fresh overlay off the cached post-install
+   disk; defined + started with no seed.
 4. **Test** — communicators are bound (discovered IP per VM), then
    each builder's `wait_ready` runs: the orchestrator hands the
    builder the bound communicator's `execute` callable (a `GuestExec`

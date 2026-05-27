@@ -1,0 +1,43 @@
+repos:
+  # --- generic hygiene ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-yaml
+      - id: check-toml
+      - id: detect-private-key
+
+  # --- ruff: lint + format, check-only (no file modifications) ---
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+      - id: ruff-format
+        args: ["--check"]
+
+  # --- secret scanning ---
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # --- project-local checks: run in the project venv (real deps + stubs) ---
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (strict)
+        entry: mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: ["testrange", "tests"]
+
+      - id: pytest
+        name: pytest (not libvirt)
+        entry: pytest -m "not libvirt"
+        language: system
+        types: [python]
+        pass_filenames: false

@@ -27,7 +27,18 @@ _KEY = SSHKey.generate(comment="hello")
 PLAN = Plan(
     LibvirtHypervisor(
         connection="qemu:///system",
-        networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
+        install_uplink="eth0",
+        networks=[
+            Switch(
+                "sw1",
+                Network("netA"),
+                cidr="10.0.1.0/24",
+                uplink="eth0",
+                dhcp=True,
+                dns=True,
+                nat=True,
+            ),
+        ],
         pools=[StoragePool("pool1", 32)],
         vms=[
             VMRecipe(
@@ -77,33 +88,76 @@ testrange run path/to/plan.py
 
 ## Networking
 
+### `Switch` owns the infrastructure, `Network` is a label
+
+A `Switch` is one L2 broadcast domain and the only place network
+infrastructure decisions live: `cidr`, `uplink`, `mgmt`, `dhcp`, `dns`,
+`nat`. A `Network` is a logical label (port-group) within a Switch —
+VMs attach by name, and the orchestrator resolves which Switch owns it.
+All Networks on one Switch share `switch.cidr` (multiple Networks =
+organizational labels on one wire).
+
+```python
+Switch(
+    "sw1",
+    Network("netA"),
+    Network("netB"),          # both on the same wire, same CIDR
+    cidr="10.0.1.0/24",       # strict network form; host-form raises
+    uplink="eth0",            # physical NIC on the host (vSwitch model)
+    mgmt=True,                # host reachable at .2 on this segment
+    dhcp=True,                # sidecar serves DHCP at .1
+    dns=True,                 # sidecar serves DNS at .1
+    nat=True,                 # sidecar MASQUERADEs out the uplink
+)
+```
+
+For a per-flag breakdown and the per-driver implementation, see
+[Networking modes](drivers/networking-modes.md).
+
 ### Static IPs vs DHCP
 
 Each NIC is DHCP by default. Pin a static address with `ipv4=`:
 
 ```python
-LibvirtNetworkIface("netA", ipv4="172.31.0.50")  # static
+LibvirtNetworkIface("netA", ipv4="172.31.0.150")  # static
 LibvirtNetworkIface("netA")                       # DHCP
 ```
 
 Plan-time validation runs at Hypervisor construction and reports every
 problem at once:
 
-- `ipv4` must be inside the referenced network's CIDR.
-- `ipv4` cannot equal the network/broadcast address or the gateway
-  (`cidr.network_address + 1`).
-- `ipv4` cannot fall inside the driver's managed DHCP pool when
-  `Network.dhcp=True`. (The libvirt driver currently uses `.100`–`.200`
-  within the subnet.)
-- A NIC without `ipv4` attached to a `Network(dhcp=False)` is rejected
+- `ipv4` must be inside the owning Switch's CIDR.
+- `ipv4` cannot equal the subnet's network or broadcast address.
+- `ipv4` cannot collide with the pinned sidecar slot (`.1`, present iff
+  `dhcp|dns|nat`) or the mgmt slot (`.2`, present iff `mgmt`).
+- `ipv4` cannot fall inside the DHCP pool (`.10`–`.99`) when `dhcp=True`.
+  Pick something in `.100`–`.254`.
+- A NIC without `ipv4` attached to a Switch with `dhcp=False` is rejected
   (the NIC would never get an address at run-phase).
-- Duplicate static IPs within the same network across VMs are rejected.
+- Duplicate static IPs within the same Network across VMs are rejected.
 
-### How the install/run swap works
+### `install_uplink` and the install phase
 
-The install phase always runs on a transient internet-attached subnet so
-`apt` and friends work. If the user's real subnets were used during
-install, a static IP would have no route and break the install mid-boot.
+The install phase needs internet access so `apt` / `pip` can pull
+packages into the VM's post-install disk. Declare the physical NIC on
+the libvirtd host that gives that egress:
+
+```python
+LibvirtHypervisor(
+    connection="qemu:///system",
+    install_uplink="eth0",
+    ...
+)
+```
+
+The orchestrator synthesizes a transient install Switch
+(`10.97.99.0/24`, dhcp + dns + nat) using that uplink, brings up a
+sidecar to serve DHCP and MASQUERADE outbound, runs each install VM
+against it, snapshots the post-install disk into the cache, and tears
+the whole install topology down LIFO before the run phase. Skip
+`install_uplink=` only if every VM already has a cache hit.
+
+### Static-NIC netplan staging
 
 When any NIC declares a static `ipv4`, the cloud-init seed stages two
 extra files on the post-install disk:

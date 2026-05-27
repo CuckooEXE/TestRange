@@ -3,6 +3,8 @@
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
+    sudo tools/build-sidecar-image/build.sh
+    testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
 
 Usage:
     testrange describe examples/hello_world.py
@@ -11,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 
 from testrange import OrchestratorHandle, Plan, run_tests
@@ -30,18 +33,25 @@ from testrange.networks import Network, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
+UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
+
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
     LibvirtHypervisor(
         connection="qemu:///system",
+        install_uplink=UPLINK,
         networks=[
             Switch(
                 "switch1",
-                Network("netA", "172.31.0.0/24", dhcp=True, dns=True),
-                Network("netB", "10.10.10.0/24"),
+                Network("netA"),
+                Network("netB"),
+                cidr="172.31.0.0/24",
+                uplink=UPLINK,
                 mgmt=True,
-                internet=True,
+                dhcp=True,
+                dns=True,
+                nat=True,
             ),
         ],
         pools=[StoragePool("pool1", 32)],
@@ -53,7 +63,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("netA", driver="virtio", ipv4="172.31.0.59"),
+                        LibvirtNetworkIface("netA", driver="virtio", ipv4="172.31.0.150"),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -101,10 +111,9 @@ def snapshot_lifecycle(orch: OrchestratorHandle) -> None:
     r = com.execute(["test", "-f", sentinel])
     assert r.ok, f"sentinel not created: {r}"
 
-    # Reboot via driver: shutdown waits for shutoff, then start.
     driver.shutdown_vm(vm_be, timeout=60.0)
     driver.start_vm(vm_be)
-    com.close()  # drop the stale paramiko client; next execute will reconnect
+    com.close()
     r = com.execute(["test", "-f", sentinel])
     assert r.ok, f"sentinel didn't persist across reboot: {r}"
 

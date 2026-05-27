@@ -1,0 +1,113 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "code-review",
+  "description": "Findings from the /code-review pass against the current branch. Severity tags: [BLOCKING], [SUGGESTION], [NIT], [QUESTION].",
+  "steps": [
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 1332,
+      "description": "[BLOCKING] XML injection in `_render_snapshot_xml`. `name` and `description` flow verbatim from `LibvirtDriver.create_snapshot(name, description)`, which `OrchestratorHandle.driver` exposes to user test code. A name like `foo\"><evil>` or a description containing `</description><x>` breaks the XML and can inject extra libvirt elements. Fix: pass through `xml.sax.saxutils.escape`, or reject names with non-`[A-Za-z0-9_.+-]` chars at the API boundary the way `compose_resource_name` does. Same shape risk applies to `_render_pool_xml`'s `path` if `LibvirtDriver(pool_root=...)` is ever fed a path with XML metacharacters."
+    },
+    {
+      "file": "testrange/orchestrator/runtime.py",
+      "line": 854,
+      "description": "[BLOCKING] `_teardown()` swallows `set_phase(PHASE_CLEANUP)` failures and `return`s early without attempting any destroys, leaking in-flight resources. If `set_phase` fails (disk full, perms), nothing tears down. Fix: log and continue — proceed with cleanup using `state.resources` you'll read on the next line anyway, instead of bailing out here."
+    },
+    {
+      "file": "testrange/networks/sidecar.py",
+      "line": 127,
+      "description": "[BLOCKING] No escaping for VM/network names in dnsmasq.conf. A VM name containing `,` or `=` or a newline silently breaks the config: `host-record=v1.a,10.0.0.100` becomes a parse error or an injected directive. `VMSpec` and `Network` only validate `name` is non-empty. Fix: reject names containing `[,=\\n#]` at construction (`VMSpec.__post_init__`, `Network.__post_init__`), or escape at render-time and document the constraint. Reachable from a Plan = user-controlled content reaching a parser."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 1096,
+      "description": "[BLOCKING] Unbounded read in `_LibvirtGuestAgent.read_file`. Loop calls `guest-file-read` until `eof`, accumulating `chunks: list[bytes]` in memory. Reading `/var/log/journal/system.journal` or a multi-GB file fills the orchestrator's address space. Fix: cap total size (raise `GuestAgentError` past N bytes), accept a max-size parameter, or stream to a caller-provided sink. Mirror on the write side — `write_file` sends the whole blob in one `guest-file-write`; QGA's per-message limits will reject large writes. Document the size ceiling or chunk both paths."
+    },
+    {
+      "file": "testrange/communicators/qga.py",
+      "line": 78,
+      "description": "[BLOCKING] `close()` leaves `_bound=True` but nulls the callables, so a closed comm responds 'not bound' to subsequent operations AND refuses re-`bind()` (the `_bound` flag still trips `CommunicatorAlreadyBoundError`). The test on `tests/unit/test_qga_communicator.py:98-102` codifies this. Pick one contract: either reset `_bound=False` in `close()` to allow rebind, or rename the error message to 'communicator has been closed' so users aren't sent on a wild goose chase."
+    },
+    {
+      "file": "testrange/orchestrator/runtime.py",
+      "line": 75,
+      "description": "[SUGGESTION] Reserved-name collisions. `INSTALL_SWITCH_NAME = \"__install\"` and `_uplink_network_name = f\"__uplink__{switch.name}\"` (line 544) reserve names but nothing rejects a user Switch/Network named `__install` or `__uplink__sw1`. The `LibvirtHypervisor.__init__` duplicate-name check only looks at user-declared networks; it doesn't know the orchestrator's reserved namespace. Fix: reject switch/network names matching `^__.*` at `LibvirtHypervisor.__init__`, or pick a less-likely prefix."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 991,
+      "description": "[SUGGESTION] `_qga_agent_not_ready` substring match is fragile. Matches three English substrings on `str(e).lower()`. Locale-changed libvirt builds or future error-wording shifts can flip this to 'agent really did fail' and the retry loop short-circuits. Prefer `e.get_error_code()` against `libvirt.VIR_ERR_AGENT_UNRESPONSIVE` (and friends), with the substring as a backstop."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 441,
+      "description": "[SUGGESTION] Bridge address-add race on `EEXIST`. The `mgmt_cidr` add catches 'File exists' but only after create. A stale address from a prior aborted run with a different prefix will either succeed (multiple addresses are legal) or fail with a different error the catch won't recognize. Consider an explicit 'is this exact address present?' check via `ipr.get_addr(index=bridge_idx)` before adding."
+    },
+    {
+      "file": "testrange/orchestrator/runtime.py",
+      "line": 308,
+      "description": "[SUGGESTION] `_install_one_vm` iterates VMs serially. Each install VM is created, started, and waited for `shutoff` (`install_timeout_s=600.0`) before the next begins. For a Plan with N cache-missing VMs, total install time is N × build time even though installs are independent. Plan-level parallelism is a meaningful win. Not a v0 blocker — TODO."
+    },
+    {
+      "file": "testrange/orchestrator/runtime.py",
+      "line": 264,
+      "description": "[SUGGESTION] Signal handler re-raises `KeyboardInterrupt` from inside the handler. Works during bring-up (caught at line 231), but if the user is mid-test (`run_tests`/`_execute_tests`), Python injects `KeyboardInterrupt` into whatever statement is running — SSH I/O, paramiko's read loops, etc. Most are non-cancellable and will either swallow it or leave the channel in a bad state. The `signal_received` flag polled at safe points is the safer shape but a bigger refactor. At minimum: document the limitation."
+    },
+    {
+      "file": "testrange/communicators/ssh.py",
+      "line": 151,
+      "description": "[SUGGESTION] `AutoAddPolicy()` accepts any host key. For a transient test range this is the only thing that works (each VM gets a fresh host key), but worth a comment: 'trust-on-first-use is intentional for ephemeral test VMs; do not lift this pattern into production code.'"
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 245,
+      "description": "[SUGGESTION] `compose_mac` uses 24 bits of entropy under the KVM OUI. Birthday-paradox collision around √(2²⁴) ≈ 4096 NIC pairs. Not a real concern for any plausible Plan, but worth a one-line note. Cross-plan collisions on the same L2 segment are also possible since the seed only includes `(plan_name, vm_name, nic_idx)` — consider mixing `run_id` in, or document the constraint."
+    },
+    {
+      "file": "testrange/builders/cloudinit.py",
+      "line": 200,
+      "description": "[SUGGESTION] `chpasswd: list:` is the deprecated form. Cloud-init still accepts it but the modern form is `users[].plain_text_passwd` / `hashed_passwd`. Worth a TODO. Separately: passwords end up in the seed ISO in the pool; anyone with read access can recover credentials. Document the threat model or migrate to ssh-key-only auth."
+    },
+    {
+      "file": "testrange/networks/sidecar.py",
+      "line": 184,
+      "description": "[NIT] Escape soup inside the f-string: `f\"        oifname \\\"{SIDECAR_UPLINK_NIC}\\\" masquerade\\n\"`. Cleaner with a raw string or single-quoted form."
+    },
+    {
+      "file": "testrange/orchestrator/runtime.py",
+      "line": 177,
+      "description": "[NIT] `self._plan_name = plan.name or \"plan\"` silently swallows a missing plan name. Probably fine, but `if not plan.name: raise PlanError(...)` is more in line with the codebase's 'fail loud' style."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 1395,
+      "description": "[NIT] The QGA channel is rendered unconditionally — the right call, and the justification comment is good. Consider moving `org.qemu.guest_agent.0` to a named module-level constant for grep-ability."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 1408,
+      "description": "[NIT] VNC listens on `127.0.0.1`. Comment is good. Worth making the listen address configurable for headless dev hosts where the user wants to viewer-attach from a workstation."
+    },
+    {
+      "file": "testrange/communicators/qga.py",
+      "line": 24,
+      "description": "[NIT] Three `None`-typed fields PLUS an `is_bound` flag is more state than needed. Either keep the flag and drop the `is None` checks in `execute`/`read_file`/`write_file`, or drop the flag and use `self._execute is None` as the unbound indicator. Currently both are checked, which is redundant."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 1040,
+      "description": "[QUESTION] `_LibvirtGuestAgent._send` re-resolves the domain on every call. Comment says this matches 'the rest of the driver's lookup discipline,' but most driver methods cache `dom` for the duration of a single method (`destroy_vm`, `shutdown_vm`). Is the per-RPC re-lookup specifically because QGA conversations may span libvirt reconnects, or just defensiveness? If reconnect is the reason, a one-line comment would clarify."
+    },
+    {
+      "file": "tools/build-sidecar-image/build.sh",
+      "line": 1,
+      "description": "[QUESTION] The sidecar is materialized from a pre-built Alpine image (`SIDECAR_CACHE_NAME = \"testrange-sidecar\"`). Does this script produce a SHA-stamped output, and is the version tracked anywhere? If the sidecar image drifts, every existing post-install cache entry rendered against a particular `dnsmasq.conf`/`interfaces` syntax becomes silently invalid (the post-install hash folds in the rendered seed text, not the sidecar image's hash)."
+    },
+    {
+      "file": "testrange/drivers/libvirt.py",
+      "line": 322,
+      "description": "[QUESTION] `_collect_uplink_findings` exits early on the remote-URI branch, so a remote libvirt URI gets the `remote_uplink_unsupported` error but skips the cache/pool checks below. The current order in `preflight` (lines 277-282) runs uplink check last, so cache/pool findings come first — but worth checking no downstream consumer assumes those findings will be present when the URI is remote."
+    }
+  ],
+  "ref": "b31f4ffdeb46cf222295e2498f0569079e8da34a"
+}
