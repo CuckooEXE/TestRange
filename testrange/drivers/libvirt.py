@@ -26,6 +26,9 @@ from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
 from testrange.guest_io import ExecResult
+from testrange.networks._addressing_consts import (
+    SIDECAR_CACHE_NAME,
+)
 from testrange.networks.base import Network, Switch
 from testrange.networks.validate import validate_addressing
 from testrange.preflight import PreflightFinding, PreflightReport
@@ -49,12 +52,19 @@ class LibvirtHypervisor:
 
     Driver class is inferred at orchestrator-construction time:
     ``LibvirtHypervisor -> LibvirtDriver(uri=connection)``.
+
+    ``install_uplink`` is the physical NIC the install-phase sidecar uses
+    for upstream egress (the install Switch needs internet for apt/pip).
+    Required when at least one VM needs install (cache miss); preflight
+    surfaces the missing kwarg as a finding rather than failing at
+    construction (cache state is not known yet at Plan-time).
     """
 
     connection: str
     networks: tuple[Switch, ...]
     pools: tuple[StoragePool, ...]
     vms: tuple[VMRecipe, ...]
+    install_uplink: str | None
 
     def __init__(
         self,
@@ -63,27 +73,17 @@ class LibvirtHypervisor:
         networks: Sequence[Switch] = (),
         pools: Sequence[StoragePool] = (),
         vms: Sequence[VMRecipe] = (),
+        install_uplink: str | None = None,
     ) -> None:
-        if not isinstance(connection, str) or not connection:
+        if not connection:
             raise ValueError("LibvirtHypervisor.connection must be a non-empty string")
+        if install_uplink is not None and not install_uplink:
+            raise ValueError(
+                "LibvirtHypervisor.install_uplink must be a non-empty string or None"
+            )
         switches = tuple(networks)
-        for s in switches:
-            if not isinstance(s, Switch):
-                raise TypeError(
-                    f"LibvirtHypervisor.networks must contain Switch, got {type(s).__name__}"
-                )
         ps = tuple(pools)
-        for p in ps:
-            if not isinstance(p, StoragePool):
-                raise TypeError(
-                    f"LibvirtHypervisor.pools must contain StoragePool, got {type(p).__name__}"
-                )
         rs = tuple(vms)
-        for r in rs:
-            if not isinstance(r, VMRecipe):
-                raise TypeError(
-                    f"LibvirtHypervisor.vms must contain VMRecipe, got {type(r).__name__}"
-                )
 
         net_names = {n.name for s in switches for n in s.networks}
         pool_names = {p.name for p in ps}
@@ -115,19 +115,24 @@ class LibvirtHypervisor:
                         f"{d.pool!r}; declared pools: {sorted(pool_names)}"
                     )
 
-        # Plan-wide addressing validation (static IP membership, gateway
+        # Plan-wide addressing validation (subnet membership, reserved-slot
         # collision, DHCP-pool collision, duplicates, dhcp=False + no static).
         # Accumulates every problem into one ValueError.
-        validate_addressing([n for s in switches for n in s.networks], rs)
+        validate_addressing(switches, rs)
 
         object.__setattr__(self, "connection", connection)
         object.__setattr__(self, "networks", switches)
         object.__setattr__(self, "pools", ps)
         object.__setattr__(self, "vms", rs)
+        object.__setattr__(self, "install_uplink", install_uplink)
 
     @property
     def all_networks(self) -> tuple[Network, ...]:
         return tuple(n for s in self.networks for n in s.networks)
+
+    @property
+    def all_switches(self) -> tuple[Switch, ...]:
+        return self.networks
 
 
 def _import_libvirt() -> Any:
@@ -139,6 +144,22 @@ def _import_libvirt() -> Any:
             "libvirt-python is not installed; install with `pip install -e .[libvirt]`"
         ) from e
     return libvirt
+
+
+def _import_pyroute2() -> Any:
+    """Lazy import of ``pyroute2`` (netlink for bridge management).
+
+    Only needed by ``LibvirtDriver.create_bridge`` / ``destroy_bridge``;
+    plans that never set ``Switch.uplink`` and have no ``mgmt`` switches
+    never reach this.
+    """
+    try:
+        import pyroute2
+    except ImportError as e:
+        raise DriverError(
+            "pyroute2 is not installed; install with `pip install -e .[libvirt]`"
+        ) from e
+    return pyroute2
 
 
 def _import_libvirt_qemu() -> Any:
@@ -236,7 +257,7 @@ class LibvirtDriver(HypervisorDriver):
         plan: Plan,
         *,
         cache_manager: CacheManager,
-        install_network: Network,
+        install_switch: Switch,
     ) -> PreflightReport:
         findings: list[PreflightFinding] = []
 
@@ -253,11 +274,87 @@ class LibvirtDriver(HypervisorDriver):
             )
             return PreflightReport(findings=tuple(findings))
 
-        findings.extend(_collect_subnet_findings(hyp, install_network))
+        findings.extend(_collect_subnet_findings(hyp, install_switch))
         findings.extend(_collect_cache_findings(hyp, cache_manager))
+        findings.extend(_collect_sidecar_findings(hyp, cache_manager))
         findings.extend(self._collect_pool_root_findings())
+        findings.extend(self._collect_uplink_findings(hyp, install_switch))
 
         return PreflightReport(findings=tuple(findings))
+
+    def _collect_uplink_findings(
+        self, hyp: LibvirtHypervisor, install_switch: Switch
+    ) -> list[PreflightFinding]:
+        """Verify each Switch with a bridge resolves to a usable physical NIC.
+
+        Triggered by any Switch with `needs_bridge` (uplink or mgmt) plus the
+        install Switch (which always has an uplink when install_uplink is set).
+
+        Checks, in order:
+        - **Remote URI** — pyroute2 talks LOCAL netlink only.
+        - **NIC exists** in /sys/class/net.
+        - **NIC is free** (not already enslaved).
+        - **install_uplink unset** when at least one VM needs install (cache miss).
+        """
+        findings: list[PreflightFinding] = []
+        uplinked = [s for s in hyp.networks if s.uplink is not None]
+        if install_switch.uplink is not None:
+            uplinked = [*uplinked, install_switch]
+
+        is_remote = "://" in self.uri and not self.uri.startswith("qemu:///")
+        if is_remote and (uplinked or any(s.needs_bridge for s in hyp.networks)):
+            for sw in uplinked or [s for s in hyp.networks if s.needs_bridge]:
+                findings.append(
+                    PreflightFinding(
+                        severity="error",
+                        code="remote_uplink_unsupported",
+                        message=(
+                            f"switch {sw.name!r}: testrange's bridge management "
+                            f"uses pyroute2 (LOCAL netlink only); cannot apply on "
+                            f"remote URI {self.uri!r}"
+                        ),
+                        fix_hint=(
+                            "use a local libvirt URI (qemu:///system / qemu:///session) "
+                            "or manage bridges out-of-band on the remote host"
+                        ),
+                    )
+                )
+            return findings
+
+        for sw in uplinked:
+            assert sw.uplink is not None
+            sysfs = Path("/sys/class/net") / sw.uplink
+            if not sysfs.exists():
+                findings.append(
+                    PreflightFinding(
+                        severity="error",
+                        code="uplink_nic_not_found",
+                        message=(
+                            f"switch {sw.name!r}: uplink NIC {sw.uplink!r} not "
+                            f"found ({sysfs} missing)"
+                        ),
+                        fix_hint=f"check that {sw.uplink!r} is the right interface name",
+                    )
+                )
+                continue
+            master = sysfs / "master"
+            if master.is_symlink():
+                master_name = master.resolve().name
+                findings.append(
+                    PreflightFinding(
+                        severity="error",
+                        code="uplink_nic_enslaved",
+                        message=(
+                            f"switch {sw.name!r}: uplink {sw.uplink!r} is already "
+                            f"enslaved to bridge {master_name!r}"
+                        ),
+                        fix_hint=(
+                            f"release with `ip link set {sw.uplink} nomaster`, "
+                            f"or pick a different uplink"
+                        ),
+                    )
+                )
+        return findings
 
     def _collect_pool_root_findings(self) -> list[PreflightFinding]:
         # System mode: libvirt-qemu owns /var/lib/libvirt/images and creates the
@@ -279,13 +376,135 @@ class LibvirtDriver(HypervisorDriver):
             ]
         return []
 
-    def create_network(self, network: Network, switch: Switch, backend_name: str) -> Any:
+    def create_network(
+        self,
+        network: Network,
+        switch: Switch,
+        backend_name: str,
+        *,
+        bridge_name: str | None = None,
+    ) -> Any:
         _import_libvirt()
-        xml = _render_network_xml(network, switch, backend_name)
-        _log.info("define network %s (%s)", backend_name, network.cidr)
+        xml = _render_network_xml(network, switch, backend_name, bridge_name=bridge_name)
+        _log.info("define network %s (%s)", backend_name, switch.cidr)
         net = self.conn.networkDefineXML(xml)
-        net.create()  # start it
+        net.create()
         return net
+
+    def compose_bridge_name(self, run_id: str, switch_name: str) -> str:
+        """Deterministic bridge name: ``tr-<10-hex-sha256>`` (15-char IFNAMSIZ)."""
+        return f"tr-{_short(f'{run_id}/{switch_name}', 10)}"
+
+    def create_bridge(
+        self,
+        uplink: str,
+        bridge_name: str,
+        *,
+        mgmt_cidr: str | None = None,
+    ) -> None:
+        """Create the host bridge, enslave the named NIC, optionally set mgmt IP.
+
+        Idempotent. Requires CAP_NET_ADMIN (typically root). Local-machine
+        only — pyroute2 manipulates LOCAL netlink. Preflight catches the
+        remote-URI case before we get here.
+        """
+        pyroute2 = _import_pyroute2()
+        with pyroute2.IPRoute() as ipr:
+            try:
+                uplink_idxs = ipr.link_lookup(ifname=uplink)
+            except OSError as e:
+                raise DriverError(f"uplink {uplink!r}: lookup failed: {e}") from e
+            if not uplink_idxs:
+                raise DriverError(f"uplink {uplink!r}: no such interface on this host")
+            uplink_idx = uplink_idxs[0]
+
+            existing = ipr.link_lookup(ifname=bridge_name)
+            if existing:
+                bridge_idx = existing[0]
+                _log.info("bridge %s already present (reusing)", bridge_name)
+            else:
+                _log.info("create bridge %s, enslave %s", bridge_name, uplink)
+                try:
+                    ipr.link("add", ifname=bridge_name, kind="bridge")
+                except pyroute2.NetlinkError as e:
+                    _wrap_netlink_error(e, f"create bridge {bridge_name!r}")
+                bridge_idx = ipr.link_lookup(ifname=bridge_name)[0]
+
+            try:
+                ipr.link("set", index=uplink_idx, state="up")
+                ipr.link("set", index=uplink_idx, master=bridge_idx)
+                ipr.link("set", index=bridge_idx, state="up")
+            except pyroute2.NetlinkError as e:
+                _wrap_netlink_error(e, f"bring up bridge {bridge_name!r}")
+
+            if mgmt_cidr:
+                address, _, prefix_str = mgmt_cidr.partition("/")
+                if not prefix_str:
+                    raise DriverError(
+                        f"mgmt_cidr {mgmt_cidr!r} must be in CIDR form (e.g. 10.0.0.2/24)"
+                    )
+                try:
+                    ipr.addr(
+                        "add", index=bridge_idx, address=address, prefixlen=int(prefix_str)
+                    )
+                except pyroute2.NetlinkError as e:
+                    if "File exists" not in str(e):
+                        _wrap_netlink_error(
+                            e, f"assign {mgmt_cidr!r} to bridge {bridge_name!r}"
+                        )
+
+    def create_isolated_bridge(self, bridge_name: str, *, mgmt_cidr: str | None = None) -> None:
+        """Create an isolated host bridge with no enslaved NIC.
+
+        Used for switches that need testrange-managed bridge semantics
+        (mgmt-IP, or NAT topology's switch-side bridge) but no physical
+        uplink. Idempotent.
+        """
+        pyroute2 = _import_pyroute2()
+        with pyroute2.IPRoute() as ipr:
+            existing = ipr.link_lookup(ifname=bridge_name)
+            if existing:
+                bridge_idx = existing[0]
+                _log.info("bridge %s already present (reusing)", bridge_name)
+            else:
+                _log.info("create isolated bridge %s", bridge_name)
+                try:
+                    ipr.link("add", ifname=bridge_name, kind="bridge")
+                except pyroute2.NetlinkError as e:
+                    _wrap_netlink_error(e, f"create bridge {bridge_name!r}")
+                bridge_idx = ipr.link_lookup(ifname=bridge_name)[0]
+            try:
+                ipr.link("set", index=bridge_idx, state="up")
+            except pyroute2.NetlinkError as e:
+                _wrap_netlink_error(e, f"bring up bridge {bridge_name!r}")
+            if mgmt_cidr:
+                address, _, prefix_str = mgmt_cidr.partition("/")
+                try:
+                    ipr.addr(
+                        "add", index=bridge_idx, address=address, prefixlen=int(prefix_str)
+                    )
+                except pyroute2.NetlinkError as e:
+                    if "File exists" not in str(e):
+                        _wrap_netlink_error(
+                            e, f"assign {mgmt_cidr!r} to bridge {bridge_name!r}"
+                        )
+
+    def destroy_bridge(self, bridge_name: str) -> None:
+        """Remove the host bridge. Idempotent.
+
+        Kernel auto-releases enslaved interfaces and any assigned
+        addresses when the bridge is removed.
+        """
+        pyroute2 = _import_pyroute2()
+        with pyroute2.IPRoute() as ipr:
+            idxs = ipr.link_lookup(ifname=bridge_name)
+            if not idxs:
+                _log.info("bridge %s already absent", bridge_name)
+                return
+            try:
+                ipr.link("del", index=idxs[0])
+            except pyroute2.NetlinkError as e:
+                _wrap_netlink_error(e, f"delete bridge {bridge_name!r}")
 
     def destroy_network(self, backend_name: str) -> None:
         libvirt = _import_libvirt()
@@ -367,6 +586,8 @@ class LibvirtDriver(HypervisorDriver):
         "run_disk": ".qcow2",
         "base_image": ".qcow2",
         "install_seed": ".iso",
+        "sidecar_disk": ".qcow2",
+        "sidecar_config": ".iso",
     }
 
     def volume_suffix(self, kind: str) -> str:
@@ -912,45 +1133,46 @@ class _LibvirtGuestAgent:
 
 
 def _collect_subnet_findings(
-    hyp: LibvirtHypervisor, install_network: Network
+    hyp: LibvirtHypervisor, install_switch: Switch
 ) -> list[PreflightFinding]:
-    """Pairwise CIDR-overlap check across every user network and the install network.
+    """Pairwise CIDR-overlap check across every user Switch and the install Switch.
 
-    The install network is rendered on the same libvirtd as user networks; a
+    The install Switch is rendered on the same libvirtd as user Switches; a
     CIDR collision would surface as a confusing libvirt error at install
     time. Catching it here gives the user a `fix_hint` they can act on.
     """
     findings: list[PreflightFinding] = []
-    nets: list[Network] = [*hyp.all_networks, install_network]
-    parsed = []
-    for n in nets:
+    parsed: list[tuple[Switch, ipaddress.IPv4Network]] = []
+    for s in (*hyp.networks, install_switch):
         try:
-            parsed.append((n, ipaddress.ip_network(n.cidr, strict=False)))
+            net = ipaddress.ip_network(s.cidr, strict=False)
+            if isinstance(net, ipaddress.IPv4Network):
+                parsed.append((s, net))
         except ValueError as e:
             findings.append(
                 PreflightFinding(
                     severity="error",
                     code="invalid_cidr",
-                    message=f"network {n.name!r} has invalid CIDR {n.cidr!r}: {e}",
+                    message=f"switch {s.name!r} has invalid CIDR {s.cidr!r}: {e}",
                 )
             )
 
     for i, (a, an) in enumerate(parsed):
-        for _b, bn in parsed[i + 1 :]:
+        for b, bn in parsed[i + 1 :]:
             if an.overlaps(bn):
                 hint = None
-                if a is install_network or _b is install_network:
-                    user_net = _b if a is install_network else a
+                if a is install_switch or b is install_switch:
+                    user_sw = b if a is install_switch else a
                     hint = (
-                        f"network {user_net.name!r} overlaps the install "
-                        f"network's CIDR ({install_network.cidr}); pick a "
-                        f"different CIDR for {user_net.name!r}"
+                        f"switch {user_sw.name!r} overlaps the install "
+                        f"switch's CIDR ({install_switch.cidr}); pick a "
+                        f"different cidr= for {user_sw.name!r}"
                     )
                 findings.append(
                     PreflightFinding(
                         severity="error",
                         code="subnet_overlap",
-                        message=f"networks {a.name!r} and {_b.name!r} overlap ({an} vs {bn})",
+                        message=f"switches {a.name!r} and {b.name!r} overlap ({an} vs {bn})",
                         fix_hint=hint,
                     )
                 )
@@ -986,44 +1208,103 @@ def _collect_cache_findings(
     return findings
 
 
-def _render_network_xml(network: Network, switch: Switch, backend_name: str) -> str:
-    """Render a libvirt `<network>` XML doc for one Network on a Switch.
+def _render_network_xml(
+    network: Network,
+    switch: Switch,
+    backend_name: str,
+    *,
+    bridge_name: str | None = None,
+) -> str:
+    """Render a libvirt ``<network>`` XML doc for one Network on a Switch.
 
-    v0: per-network Linux bridge (libvirt's default). The Switch-level
-    grouping is captured in `compose_resource_name` (resources from the
-    same Switch share a prefix) but actual L2 bridging across networks
-    in a Switch is a TODO (would require OVS).
+    DHCP/DNS/NAT are never libvirt's job — the per-Switch sidecar VM owns
+    them. ``<dhcp>``, ``<domain>``, and ``<forward mode='nat'/>`` are
+    never emitted. Three topology cases:
+
+    - ``uplink`` set, ``nat=False`` — the switch bridge IS the uplink
+      bridge (testrange-created via pyroute2, NIC enslaved). XML is
+      ``<forward mode='bridge'/><bridge name='<bridge_name>'/>``.
+    - ``uplink`` set, ``nat=True`` — the switch bridge stays isolated;
+      the sidecar straddles to a separate uplink bridge. XML references
+      the testrange-created isolated switch bridge by name.
+    - ``uplink`` unset — passive Linux bridge managed by libvirt (or by
+      testrange when ``mgmt=True`` so the host can hold ``.2``).
     """
-    net = network.network
-    if not isinstance(net, ipaddress.IPv4Network):
-        raise DriverError(f"only IPv4 networks supported in v0, got {network.cidr!r}")
-    gateway = network.gateway
-    netmask = str(net.netmask)
-    forward = "<forward mode='nat'/>" if switch.internet else ""
+    del network
+    if switch.uplink is not None:
+        if not bridge_name:
+            raise DriverError(
+                f"network {backend_name!r}: switch {switch.name!r} has uplink set "
+                "but bridge_name was not provided to the renderer"
+            )
+        return (
+            f"<network>"
+            f"<name>{backend_name}</name>"
+            f"<forward mode='bridge'/>"
+            f"<bridge name='{bridge_name}'/>"
+            f"</network>"
+        )
+    if switch.mgmt or switch.needs_sidecar:
+        if not bridge_name:
+            raise DriverError(
+                f"network {backend_name!r}: switch {switch.name!r} needs an isolated "
+                "testrange bridge but bridge_name was not provided"
+            )
+        return (
+            f"<network>"
+            f"<name>{backend_name}</name>"
+            f"<forward mode='bridge'/>"
+            f"<bridge name='{bridge_name}'/>"
+            f"</network>"
+        )
+    return f"<network><name>{backend_name}</name><bridge stp='on' delay='0'/></network>"
 
-    dhcp_block = ""
-    if network.dhcp:
-        # Conservative range: .100 - .200 within the subnet.
-        start = str(net.network_address + 100)
-        end = str(net.network_address + 200)
-        dhcp_block = f"<dhcp><range start='{start}' end='{end}'/></dhcp>"
 
-    domain = ""
-    if network.dns:
-        # Use the network name as the DNS zone for VMs on this network.
-        domain = f"<domain name='{network.name}.testrange' localOnly='yes'/>"
+def _collect_sidecar_findings(
+    hyp: LibvirtHypervisor,
+    cache_manager: CacheManager,
+) -> list[PreflightFinding]:
+    """Sidecar-shaped checks: cache image present, at least one pool exists."""
+    from testrange.cache.entry import CacheEntry
+    from testrange.exceptions import CacheMissError
 
-    return (
-        f"<network>"
-        f"<name>{backend_name}</name>"
-        f"{forward}"
-        f"<bridge stp='on' delay='0'/>"
-        f"{domain}"
-        f"<ip address='{gateway}' netmask='{netmask}'>"
-        f"{dhcp_block}"
-        f"</ip>"
-        f"</network>"
-    )
+    findings: list[PreflightFinding] = []
+    sidecar_switches = [s for s in hyp.networks if s.needs_sidecar]
+    install_needs_sidecar = hyp.install_uplink is not None
+    if not (sidecar_switches or install_needs_sidecar):
+        return findings
+    if not hyp.pools:
+        findings.append(
+            PreflightFinding(
+                severity="error",
+                code="sidecar_no_pool",
+                message=(
+                    "sidecar VM needs a pool for its disk but the plan declares none"
+                ),
+                fix_hint="declare at least one StoragePool in the plan",
+            )
+        )
+    try:
+        cache_manager.resolve(CacheEntry(SIDECAR_CACHE_NAME), fetch=False)
+    except CacheMissError as e:
+        findings.append(
+            PreflightFinding(
+                severity="error",
+                code="cache_miss",
+                message=f"sidecar image: {e}",
+                fix_hint=f"testrange cache add <path-or-url> --name {SIDECAR_CACHE_NAME}",
+            )
+        )
+    return findings
+
+
+def _wrap_netlink_error(e: Exception, what: str) -> None:
+    msg = str(e)
+    if "Operation not permitted" in msg or "EPERM" in msg:
+        raise DriverError(
+            f"{what}: needs CAP_NET_ADMIN (run as root, or grant the cap)"
+        ) from e
+    raise DriverError(f"{what}: {e}") from e
 
 
 def _render_pool_xml(backend_name: str, path: Path) -> str:

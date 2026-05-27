@@ -76,14 +76,15 @@ class HypervisorDriver(ABC):
         plan: Plan,
         *,
         cache_manager: CacheManager,
-        install_network: Network,
+        install_switch: Switch,
     ) -> PreflightReport:
         """Read-only checks against the live backend.
 
-        ``install_network`` is the transient subnet the orchestrator will use
-        for the install phase. Preflight includes it in CIDR-overlap checks
-        so a colliding user network is caught here rather than blowing up
-        when the install network is created.
+        ``install_switch`` is the transient Switch the orchestrator will
+        bring up for the install phase (sidecar-served DHCP+DNS+NAT, with
+        the Hypervisor's ``install_uplink`` as the upstream NIC). Preflight
+        includes it in CIDR-overlap checks so a colliding user Switch is
+        caught here rather than blowing up at install time.
         """
 
     @abstractmethod
@@ -102,10 +103,44 @@ class HypervisorDriver(ABC):
         """
 
     @abstractmethod
-    def create_network(self, network: Network, switch: Switch, backend_name: str) -> Any: ...
+    def create_network(
+        self,
+        network: Network,
+        switch: Switch,
+        backend_name: str,
+        *,
+        bridge_name: str | None = None,
+    ) -> Any:
+        """Define + start a backend network for one Network on a Switch.
+
+        ``bridge_name`` is set by the orchestrator when the Switch requires
+        a testrange-managed host bridge (uplink, nat, or mgmt-isolated).
+        Drivers reference it in their forward-mode-bridge XML so the
+        backend network is wired to the right kernel bridge.
+        """
 
     @abstractmethod
     def destroy_network(self, backend_name: str) -> None: ...
+
+    def compose_bridge_name(self, run_id: str, switch_name: str) -> str:
+        """Deterministic kernel bridge name. Override for backend-specific limits."""
+        raise DriverError(f"{type(self).__name__}: no bridge management")
+
+    def create_bridge(
+        self, uplink: str, bridge_name: str, *, mgmt_cidr: str | None = None
+    ) -> None:
+        """Create the host bridge and enslave ``uplink``. Optional mgmt IP."""
+        raise DriverError(f"{type(self).__name__}: no bridge management")
+
+    def create_isolated_bridge(
+        self, bridge_name: str, *, mgmt_cidr: str | None = None
+    ) -> None:
+        """Create an isolated host bridge (no enslaved NIC). Optional mgmt IP."""
+        raise DriverError(f"{type(self).__name__}: no bridge management")
+
+    def destroy_bridge(self, bridge_name: str) -> None:
+        """Remove the host bridge. Idempotent."""
+        raise DriverError(f"{type(self).__name__}: no bridge management")
 
     @abstractmethod
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any: ...
@@ -289,14 +324,29 @@ class HypervisorDriver(ABC):
             self.destroy_network(backend_name)
         elif kind == "pool":
             self.destroy_pool(backend_name)
-        elif kind in ("vm", "install_vm"):
+        elif kind in ("vm", "install_vm", "sidecar_vm"):
             self.destroy_vm(backend_name)
-        elif kind in ("install_disk", "install_seed", "run_disk", "base_image", "volume"):
+        elif kind in (
+            "install_disk",
+            "install_seed",
+            "run_disk",
+            "base_image",
+            "volume",
+            "sidecar_disk",
+            "sidecar_config",
+        ):
             pool_backend = metadata.get("pool_backend")
             if not pool_backend:
                 raise ValueError(
                     f"destroy({kind!r}): missing pool_backend metadata for volume kind"
                 )
             self.delete_volume(self.compose_volume_ref(str(pool_backend), backend_name))
+        elif kind in ("bridge", "install_bridge"):
+            destroy_bridge = getattr(self, "destroy_bridge", None)
+            if destroy_bridge is None:
+                raise NotImplementedError(
+                    f"destroy({kind!r}): driver has no destroy_bridge"
+                )
+            destroy_bridge(backend_name)
         else:
             raise NotImplementedError(f"destroy({kind!r}) not implemented")

@@ -69,3 +69,56 @@ class TestNativeGuestAccessors:
         d = _NoAgentDriver()
         with pytest.raises(DriverError, match="no native guest agent"):
             d.native_guest_write_file("tr_vm_x")
+
+
+class TestDestroyDispatcher:
+    """`destroy(kind, ...)` is the state-driven cleanup entry point.
+
+    Phase-prefixed kinds (``install_*``) must dispatch to the same
+    underlying destructor as their base kind, since the cleanup CLI
+    walks state.json LIFO and never inspects phase context.
+    """
+
+    def _driver_recording(self) -> tuple[HypervisorDriver, list[tuple[str, str]]]:
+        calls: list[tuple[str, str]] = []
+
+        def _record(method: str) -> object:
+            def _stub(self: object, *a: object, **_k: object) -> None:
+                del self
+                calls.append((method, str(a[0]) if a else ""))
+            return _stub
+
+        attrs: dict[str, object] = {name: _stub for name in _ABSTRACT_METHODS}
+        attrs["destroy_network"] = _record("destroy_network")
+        attrs["destroy_pool"] = _record("destroy_pool")
+        attrs["destroy_vm"] = _record("destroy_vm")
+        attrs["destroy_bridge"] = _record("destroy_bridge")
+        attrs["delete_volume"] = _record("delete_volume")
+        attrs["compose_volume_ref"] = lambda self, p, v: f"{p}/{v}"
+        cls = type("_RecDriver", (HypervisorDriver,), attrs)
+        return cls(), calls
+
+    def test_install_bridge_dispatches_to_destroy_bridge(self) -> None:
+        d, calls = self._driver_recording()
+        d.destroy("install_bridge", "tr-abc1234567")
+        assert calls == [("destroy_bridge", "tr-abc1234567")]
+
+    def test_bridge_dispatches_to_destroy_bridge(self) -> None:
+        d, calls = self._driver_recording()
+        d.destroy("bridge", "tr-deadbeef01")
+        assert calls == [("destroy_bridge", "tr-deadbeef01")]
+
+    def test_install_network_dispatches_to_destroy_network(self) -> None:
+        d, calls = self._driver_recording()
+        d.destroy("install_network", "tr_net_install")
+        assert calls == [("destroy_network", "tr_net_install")]
+
+    def test_install_vm_dispatches_to_destroy_vm(self) -> None:
+        d, calls = self._driver_recording()
+        d.destroy("install_vm", "tr_install_vm_x")
+        assert calls == [("destroy_vm", "tr_install_vm_x")]
+
+    def test_unknown_kind_raises(self) -> None:
+        d, _ = self._driver_recording()
+        with pytest.raises(NotImplementedError, match="destroy"):
+            d.destroy("nonsense_kind", "x")

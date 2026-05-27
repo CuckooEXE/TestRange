@@ -30,8 +30,21 @@ from testrange.drivers.libvirt import (
 )
 from testrange.exceptions import GuestAgentError
 from testrange.networks import Network, Switch
-from testrange.orchestrator.runtime import INSTALL_NETWORK
+from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
+from testrange.orchestrator.runtime import _install_switch
 from testrange.vms import VMRecipe, VMSpec
+
+_INSTALL_SWITCH = _install_switch("lo")
+
+
+def _seed_cache(cache: LocalCache, tmp_path: Path) -> None:
+    """Populate fake debian-13 + testrange-sidecar entries used by preflight."""
+    base = tmp_path / "fake.qcow2"
+    base.write_bytes(b"x")
+    cache.add(base, name="debian-13")
+    sidecar = tmp_path / "fake-sidecar.qcow2"
+    sidecar.write_bytes(b"y")
+    cache.add(sidecar, name=SIDECAR_CACHE_NAME)
 
 
 def _basic_recipe() -> VMRecipe:
@@ -52,11 +65,14 @@ def _plan() -> Plan:
     return Plan(
         LibvirtHypervisor(
             connection="qemu:///session",
+            install_uplink="lo",
             networks=[
                 Switch(
                     "sw1",
-                    Network("netA", "10.0.1.0/24"),
-                    Network("netB", "10.0.2.0/24"),
+                    Network("netA"),
+                    Network("netB"),
+                    cidr="10.0.1.0/24",
+                    dhcp=True,
                 ),
             ],
             pools=[StoragePool("pool1", 32)],
@@ -118,11 +134,9 @@ class TestPreflight:
         # on disk for /session URIs (system URIs let libvirtd build it).
         d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path / "pools")
         cache = LocalCache(root=tmp_path / "c")
-        src = tmp_path / "fake.qcow2"
-        src.write_bytes(b"x")
-        cache.add(src, name="debian-13")
+        _seed_cache(cache, tmp_path)
         mgr = CacheManager(local=cache)
-        report = d.preflight(_plan(), cache_manager=mgr, install_network=INSTALL_NETWORK)
+        report = d.preflight(_plan(), cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         assert bool(report), report.render()
         assert report.errors == ()
         assert (tmp_path / "pools").exists()
@@ -130,32 +144,28 @@ class TestPreflight:
     def test_cache_miss(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
         mgr = CacheManager(local=LocalCache(root=tmp_path / "c"))
-        report = d.preflight(_plan(), cache_manager=mgr, install_network=INSTALL_NETWORK)
+        report = d.preflight(_plan(), cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         codes = {f.code for f in report.errors}
         assert "cache_miss" in codes
 
     def test_subnet_overlap(self, tmp_path: Path) -> None:
         d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
         cache = LocalCache(root=tmp_path / "c")
-        src = tmp_path / "fake.qcow2"
-        src.write_bytes(b"x")
-        cache.add(src, name="debian-13")
+        _seed_cache(cache, tmp_path)
         mgr = CacheManager(local=cache)
         plan = Plan(
             LibvirtHypervisor(
                 connection="qemu:///session",
+                install_uplink="lo",
                 networks=[
-                    Switch(
-                        "sw1",
-                        Network("netA", "10.0.0.0/24"),
-                        Network("netB", "10.0.0.128/25"),
-                    ),
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True),
+                    Switch("sw2", Network("netB"), cidr="10.0.0.128/25", dhcp=True),
                 ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe()],
             )
         )
-        report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
+        report = d.preflight(plan, cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         codes = {f.code for f in report.errors}
         assert "subnet_overlap" in codes
 
@@ -165,25 +175,23 @@ class TestPreflight:
         # fail with an opaque error).
         d = LibvirtDriver(uri="qemu:///session", pool_root=tmp_path)
         cache = LocalCache(root=tmp_path / "c")
-        src = tmp_path / "fake.qcow2"
-        src.write_bytes(b"x")
-        cache.add(src, name="debian-13")
+        _seed_cache(cache, tmp_path)
         mgr = CacheManager(local=cache)
-        # Use a CIDR that overlaps INSTALL_NETWORK ("10.97.99.0/24").
         plan = Plan(
             LibvirtHypervisor(
                 connection="qemu:///session",
+                install_uplink="lo",
                 networks=[
-                    Switch("sw1", Network("netA", "10.97.99.0/25")),
+                    Switch("sw1", Network("netA"), cidr="10.97.99.0/25", dhcp=True),
                 ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe()],
             )
         )
-        report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
+        report = d.preflight(plan, cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         overlap_findings = [f for f in report.errors if f.code == "subnet_overlap"]
         assert overlap_findings, report.render()
-        assert any(f.fix_hint and "install network" in f.fix_hint for f in overlap_findings), [
+        assert any(f.fix_hint and "install switch" in f.fix_hint for f in overlap_findings), [
             f.fix_hint for f in overlap_findings
         ]
 
@@ -193,46 +201,58 @@ class TestPreflight:
         unwritable = Path("/nonexistent-root/cannot-mkdir/here")
         d = LibvirtDriver(uri="qemu:///system", pool_root=unwritable)
         cache = LocalCache(root=tmp_path / "c")
-        src = tmp_path / "fake.qcow2"
-        src.write_bytes(b"x")
-        cache.add(src, name="debian-13")
+        _seed_cache(cache, tmp_path)
         mgr = CacheManager(local=cache)
         plan = Plan(
             LibvirtHypervisor(
                 connection="qemu:///system",
-                networks=[Switch("sw1", Network("netA", "10.0.1.0/24"))],
+                install_uplink="lo",
+                networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe()],
             )
         )
-        report = d.preflight(plan, cache_manager=mgr, install_network=INSTALL_NETWORK)
+        report = d.preflight(plan, cache_manager=mgr, install_switch=_INSTALL_SWITCH)
         codes = {f.code for f in report.errors}
         assert "pool_root_unwritable" not in codes
         assert not unwritable.exists()
 
 
 class TestXMLRendering:
-    def test_network_xml_has_required_fields(self) -> None:
-        n = Network("netA", "10.0.1.0/24", dhcp=True, dns=True)
-        sw = Switch("sw1", internet=True)
+    def test_bare_switch_xml(self) -> None:
+        # No infra flags: libvirt manages a passive bridge, no <ip>.
+        n = Network("netA")
+        sw = Switch("sw1", n, cidr="10.0.1.0/24")
         xml = _render_network_xml(n, sw, "tr_net_abc_netA")
         assert "<name>tr_net_abc_netA</name>" in xml
-        assert "<forward mode='nat'/>" in xml
-        assert "10.0.1.1" in xml  # gateway = first usable
-        assert "255.255.255.0" in xml
-        assert "<dhcp>" in xml
-
-    def test_network_xml_air_gapped(self) -> None:
-        n = Network("netA", "10.0.1.0/24")
-        sw = Switch("sw1", internet=False)
-        xml = _render_network_xml(n, sw, "x")
         assert "<forward" not in xml
+        assert "<dhcp>" not in xml
+        assert "<ip" not in xml
 
-    def test_network_xml_dns_off(self) -> None:
-        n = Network("netA", "10.0.1.0/24", dns=False)
-        sw = Switch("sw1")
-        xml = _render_network_xml(n, sw, "x")
-        assert "<domain" not in xml
+    def test_uplink_no_nat_xml_uses_bridge_mode(self) -> None:
+        # uplink without nat: switch bridge IS the uplink bridge.
+        n = Network("netA")
+        sw = Switch("sw1", n, cidr="10.0.1.0/24", uplink="eth0")
+        xml = _render_network_xml(n, sw, "net_abc", bridge_name="tr-bridge0")
+        assert "<forward mode='bridge'/>" in xml
+        assert "<bridge name='tr-bridge0'/>" in xml
+
+    def test_nat_uplink_xml_references_isolated_bridge(self) -> None:
+        # nat+uplink: switch stays isolated; orchestrator passes the
+        # testrange-created isolated switch-bridge name.
+        n = Network("netA")
+        sw = Switch("sw1", n, cidr="10.0.1.0/24", uplink="eth0", nat=True)
+        xml = _render_network_xml(n, sw, "net_abc", bridge_name="tr-iso0")
+        assert "<forward mode='bridge'/>" in xml
+        assert "<bridge name='tr-iso0'/>" in xml
+
+    def test_mgmt_only_xml_requires_bridge_name(self) -> None:
+        # mgmt without uplink: orchestrator creates an isolated bridge
+        # for mgmt-IP assignment; renderer requires the bridge_name.
+        n = Network("netA")
+        sw = Switch("sw1", n, cidr="10.0.1.0/24", mgmt=True)
+        xml = _render_network_xml(n, sw, "net_abc", bridge_name="tr-mgmt0")
+        assert "<bridge name='tr-mgmt0'/>" in xml
 
     def test_pool_xml(self, tmp_path: Path) -> None:
         xml = _render_pool_xml("tr_pool_abc_pool1", tmp_path / "p")
