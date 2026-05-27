@@ -23,7 +23,7 @@ class CacheEntry:
     identifier: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identifier, str) or not self.identifier:
+        if not self.identifier:
             raise ValueError("CacheEntry identifier must be a non-empty string")
 
     @property

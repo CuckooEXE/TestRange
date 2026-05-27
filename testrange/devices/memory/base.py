@@ -19,5 +19,5 @@ class Memory(Device):
     size_mb: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.size_mb, int) or self.size_mb < 1:
+        if self.size_mb < 1:
             raise ValueError(f"Memory.size_mb must be a positive int, got {self.size_mb!r}")

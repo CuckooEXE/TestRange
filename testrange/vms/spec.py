@@ -28,51 +28,37 @@ class VMSpec:
     devices: tuple[Device, ...] = field(default_factory=tuple)
 
     def __init__(self, *, name: str, devices: Sequence[Device]) -> None:
-        if not isinstance(name, str) or not name:
+        if not name:
             raise ValueError("VMSpec.name must be a non-empty string")
         devs = tuple(devices)
 
-        cpus = [d for d in devs if isinstance(d, CPU)]
-        mems = [d for d in devs if isinstance(d, Memory)]
-        os_drives = [d for d in devs if isinstance(d, OSDrive)]
+        cpus = sum(1 for d in devs if isinstance(d, CPU))
+        mems = sum(1 for d in devs if isinstance(d, Memory))
+        os_drives = sum(1 for d in devs if isinstance(d, OSDrive))
 
-        if len(cpus) != 1:
-            raise ValueError(f"VMSpec({name!r}) must have exactly one CPU, found {len(cpus)}")
-        if len(mems) != 1:
-            raise ValueError(f"VMSpec({name!r}) must have exactly one Memory, found {len(mems)}")
-        if len(os_drives) != 1:
+        if cpus != 1:
+            raise ValueError(f"VMSpec({name!r}) must have exactly one CPU, found {cpus}")
+        if mems != 1:
+            raise ValueError(f"VMSpec({name!r}) must have exactly one Memory, found {mems}")
+        if os_drives != 1:
             raise ValueError(
-                f"VMSpec({name!r}) must have exactly one OSDrive, found {len(os_drives)}"
+                f"VMSpec({name!r}) must have exactly one OSDrive, found {os_drives}"
             )
-        for d in devs:
-            if not isinstance(d, Device):
-                raise TypeError(
-                    f"VMSpec({name!r}) devices must be Device instances, got {type(d).__name__}"
-                )
 
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "devices", devs)
 
     @property
     def cpu(self) -> CPU:
-        for d in self.devices:
-            if isinstance(d, CPU):
-                return d
-        raise AssertionError("CPU missing — should be unreachable after __init__ validation")
+        return next(d for d in self.devices if isinstance(d, CPU))
 
     @property
     def memory(self) -> Memory:
-        for d in self.devices:
-            if isinstance(d, Memory):
-                return d
-        raise AssertionError("Memory missing — should be unreachable")
+        return next(d for d in self.devices if isinstance(d, Memory))
 
     @property
     def os_drive(self) -> OSDrive:
-        for d in self.devices:
-            if isinstance(d, OSDrive):
-                return d
-        raise AssertionError("OSDrive missing — should be unreachable")
+        return next(d for d in self.devices if isinstance(d, OSDrive))
 
     @property
     def data_drives(self) -> tuple[HardDrive, ...]:

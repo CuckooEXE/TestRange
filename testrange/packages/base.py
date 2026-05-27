@@ -13,5 +13,5 @@ class Package(ABC):
     name: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
+        if not self.name:
             raise ValueError(f"{type(self).__name__}.name must be a non-empty string")

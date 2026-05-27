@@ -22,5 +22,3 @@ class Pip(Package):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.insecure, bool):
-            raise TypeError(f"Pip.insecure must be bool, got {type(self.insecure).__name__}")

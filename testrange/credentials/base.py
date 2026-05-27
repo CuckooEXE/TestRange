@@ -20,5 +20,5 @@ class Credential(ABC):
     admin: bool = False
 
     def __post_init__(self) -> None:
-        if not isinstance(self.username, str) or not self.username:
+        if not self.username:
             raise ValueError("Credential.username must be a non-empty string")

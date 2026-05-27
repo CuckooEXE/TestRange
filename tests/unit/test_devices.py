@@ -20,10 +20,10 @@ class TestCPU:
         c = CPU(4)
         assert c.count == 4
 
-    @pytest.mark.parametrize("bad", [0, -1, "two", None, 1.5])
-    def test_invalid_count(self, bad: object) -> None:
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_invalid_count(self, bad: int) -> None:
         with pytest.raises(ValueError):
-            CPU(bad)  # type: ignore[arg-type]
+            CPU(bad)
 
 
 class TestMemory:
@@ -31,10 +31,10 @@ class TestMemory:
         m = Memory(2048)
         assert m.size_mb == 2048
 
-    @pytest.mark.parametrize("bad", [0, -1, None])
-    def test_invalid(self, bad: object) -> None:
+    @pytest.mark.parametrize("bad", [0, -1])
+    def test_invalid(self, bad: int) -> None:
         with pytest.raises(ValueError):
-            Memory(bad)  # type: ignore[arg-type]
+            Memory(bad)
 
 
 class TestDisks:

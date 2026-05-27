@@ -22,19 +22,6 @@ class VMRecipe:
     builder: Builder
     communicator: Communicator
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.spec, VMSpec):
-            raise TypeError(f"VMRecipe.spec must be a VMSpec, got {type(self.spec).__name__}")
-        if not isinstance(self.builder, Builder):
-            raise TypeError(
-                f"VMRecipe.builder must be a Builder, got {type(self.builder).__name__}"
-            )
-        if not isinstance(self.communicator, Communicator):
-            raise TypeError(
-                f"VMRecipe.communicator must be a Communicator, "
-                f"got {type(self.communicator).__name__}"
-            )
-
     @property
     def name(self) -> str:
         return self.spec.name

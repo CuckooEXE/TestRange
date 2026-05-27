@@ -41,7 +41,7 @@ class TestPlan:
     def test_single_hypervisor(self) -> None:
         hyp = LibvirtHypervisor(
             connection="qemu:///session",
-            networks=[Switch("sw1", Network("netA", "10.0.0.0/24"))],
+            networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe()],
         )
@@ -68,7 +68,7 @@ class TestLibvirtHypervisor:
         with pytest.raises(ValueError, match="unknown network"):
             LibvirtHypervisor(
                 connection="qemu:///session",
-                networks=[Switch("sw1", Network("netA", "10.0.0.0/24"))],
+                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe(net="netZZ")],
             )
@@ -77,7 +77,7 @@ class TestLibvirtHypervisor:
         with pytest.raises(ValueError, match="unknown pool"):
             LibvirtHypervisor(
                 connection="qemu:///session",
-                networks=[Switch("sw1", Network("netA", "10.0.0.0/24"))],
+                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe(pool="poolZZ")],
             )
@@ -86,7 +86,7 @@ class TestLibvirtHypervisor:
         with pytest.raises(ValueError, match="duplicate names"):
             LibvirtHypervisor(
                 connection="qemu:///session",
-                networks=[Switch("sw1", Network("netA", "10.0.0.0/24"))],
+                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_basic_recipe("web"), _basic_recipe("web")],
             )
@@ -96,8 +96,8 @@ class TestLibvirtHypervisor:
             LibvirtHypervisor(
                 connection="qemu:///session",
                 networks=[
-                    Switch("sw1", Network("netA", "10.0.0.0/24")),
-                    Switch("sw2", Network("netA", "10.0.1.0/24")),
+                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", dhcp=True),
+                    Switch("sw2", Network("netA"), cidr="10.0.1.0/24", dhcp=True),
                 ],
                 pools=[StoragePool("pool1", 32)],
                 vms=[],

@@ -16,15 +16,25 @@ from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
-from testrange.networks import Network, NetworkAddressing
+from testrange.networks import Network, NetworkAddressing, Switch
 from testrange.packages import Apt, Pip
 from testrange.vms import VMRecipe, VMSpec
 
 # Default per-test addressing map. Builders take a Mapping[network_name,
 # NetworkAddressing] from the orchestrator so they never see a hypervisor.
+# Both fixture switches have dhcp + dns + nat + uplink set so addr.gateway
+# and addr.dns_server are non-None (exercises the full netplan path).
+_SW_A = Switch(
+    "swA", Network("netA"), cidr="172.31.0.0/24",
+    dhcp=True, dns=True, nat=True, uplink="lo",
+)
+_SW_B = Switch(
+    "swB", Network("netB"), cidr="10.10.10.0/24",
+    dhcp=True, dns=True, nat=True, uplink="lo",
+)
 DEFAULT_ADDR: Mapping[str, NetworkAddressing] = {
-    "netA": NetworkAddressing.from_network(Network("netA", "172.31.0.0/24")),
-    "netB": NetworkAddressing.from_network(Network("netB", "10.10.10.0/24")),
+    "netA": NetworkAddressing.from_switch(_SW_A),
+    "netB": NetworkAddressing.from_switch(_SW_B),
 }
 
 
@@ -180,11 +190,6 @@ class TestInsecureFlags:
         assert "/etc/apt/apt.conf.d/99-testrange-insecure" in paths
         assert "/etc/dnf/dnf.conf" in paths
 
-    def test_non_bool_raises(self) -> None:
-        with pytest.raises(TypeError, match="insecure_apt must be bool"):
-            CloudInitBuilder(base=CacheEntry("x"), insecure_apt="yes")  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match="insecure_dnf must be bool"):
-            CloudInitBuilder(base=CacheEntry("x"), insecure_dnf=1)  # type: ignore[arg-type]
 
 
 class TestPipInsecure:
@@ -229,9 +234,6 @@ class TestPipInsecure:
         assert len(pip_lines) == 1
         assert "--trusted-host" in pip_lines[0]
 
-    def test_insecure_non_bool_raises(self) -> None:
-        with pytest.raises(TypeError, match=r"Pip\.insecure must be bool"):
-            Pip("x", insecure="yes")  # type: ignore[arg-type]
 
 
 class TestRenderMetaData:

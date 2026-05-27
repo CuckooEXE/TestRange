@@ -42,9 +42,11 @@ def _import_requests() -> Any:
     return requests
 
 
-# Default timeout for HTTP calls. Connect+read in one knob since requests
-# bundles them under a single (connect, read) tuple — we set the read side
-# generously because qcow2 transfers can be slow.
+# (connect, read) timeout for every cache HTTP call. The 600s read side is
+# sized for streaming a multi-GB qcow2 over a saturated link (~150Mbps); it
+# applies to small JSON metadata calls too, but those return in <1s in
+# practice so the slack is harmless. Per-call-site tuning (short for JSON,
+# long for blobs) is deferred until a real workload exposes the asymmetry.
 _DEFAULT_TIMEOUT = (10.0, 600.0)
 
 

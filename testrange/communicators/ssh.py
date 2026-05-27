@@ -27,11 +27,6 @@ from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorErro
 
 _log = get_logger(__name__)
 
-# Connect retry policy: sshd typically takes 30-60s to come up after VM boot.
-_CONNECT_TIMEOUT_PER_ATTEMPT_S = 10.0
-_CONNECT_TOTAL_TIMEOUT_S = 180.0
-_CONNECT_BACKOFF_S = 3.0
-
 
 def _import_paramiko() -> Any:
     try:
@@ -126,11 +121,19 @@ class SSHCommunicator(Communicator):
             )
         paramiko = _import_paramiko()
 
+        # sshd typically accepts connections only after cloud-init's
+        # network.target completes — empirically 30-60s on debian-13 cloud
+        # images with 2 vCPU / 1GB RAM. Cap total wait at 180s for slow
+        # hosts; back off 3s between attempts so we don't hammer the port.
+        per_attempt_timeout_s = 10.0
+        total_timeout_s = 180.0
+        backoff_s = 3.0
+
         kwargs: dict[str, Any] = {
             "hostname": self._host,
             "port": self._port,
             "username": self._credential.username,
-            "timeout": _CONNECT_TIMEOUT_PER_ATTEMPT_S,
+            "timeout": per_attempt_timeout_s,
             "look_for_keys": False,
             "allow_agent": False,
         }
@@ -147,7 +150,7 @@ class SSHCommunicator(Communicator):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-        deadline = time.monotonic() + _CONNECT_TOTAL_TIMEOUT_S
+        deadline = time.monotonic() + total_timeout_s
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
             try:
@@ -158,10 +161,10 @@ class SSHCommunicator(Communicator):
             except (paramiko.SSHException, OSError, socket.error) as e:  # noqa: UP024
                 last_exc = e
                 _log.debug("ssh connect retry: %s", e)
-                time.sleep(_CONNECT_BACKOFF_S)
+                time.sleep(backoff_s)
         raise CommunicatorError(
             f"SSH connect to {self._host}:{self._port} as {self._username} "
-            f"failed after {_CONNECT_TOTAL_TIMEOUT_S:.0f}s: {last_exc}"
+            f"failed after {total_timeout_s:.0f}s: {last_exc}"
         )
 
     def execute(

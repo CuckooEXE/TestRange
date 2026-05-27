@@ -109,25 +109,12 @@ class CloudInitBuilder(Builder):
         insecure_apt: bool,
         insecure_dnf: bool,
     ) -> tuple[tuple[Credential, ...], tuple[Package, ...], tuple[str, ...]]:
-        if not isinstance(base, CacheEntry):
-            raise TypeError(
-                f"CloudInitBuilder.base must be a CacheEntry, got {type(base).__name__}"
-            )
+        del insecure_apt, insecure_dnf  # accepted to keep the kwarg surface stable
         creds = tuple(credentials)
         pkgs = tuple(packages)
         cmds = tuple(post_install_commands)
-        for c in creds:
-            if not isinstance(c, Credential):
-                raise TypeError(
-                    f"CloudInitBuilder.credentials must contain Credential, got {type(c).__name__}"
-                )
-        for p in pkgs:
-            if not isinstance(p, Package):
-                raise TypeError(
-                    f"CloudInitBuilder.packages must contain Package, got {type(p).__name__}"
-                )
         for cmd in cmds:
-            if not isinstance(cmd, str) or not cmd:
+            if not cmd:
                 raise ValueError(
                     "CloudInitBuilder.post_install_commands entries must be non-empty strings"
                 )
@@ -136,14 +123,6 @@ class CloudInitBuilder(Builder):
         if dupes:
             raise ValueError(
                 f"CloudInitBuilder.credentials has duplicate usernames: {sorted(dupes)}"
-            )
-        if not isinstance(insecure_apt, bool):
-            raise TypeError(
-                f"CloudInitBuilder.insecure_apt must be bool, got {type(insecure_apt).__name__}"
-            )
-        if not isinstance(insecure_dnf, bool):
-            raise TypeError(
-                f"CloudInitBuilder.insecure_dnf must be bool, got {type(insecure_dnf).__name__}"
             )
         return creds, pkgs, cmds
 
@@ -456,11 +435,6 @@ def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
 # network module on subsequent boots so it doesn't undo our work.
 # ----------------------------------------------------------------------------
 
-_RUN_NETPLAN_TARGET = "/etc/netplan/50-cloud-init.yaml"
-_DISABLE_NETWORK_PATH = "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg"
-_DISABLE_NETWORK_BODY = "network: {config: disabled}\n"
-
-
 def _render_run_netplan_yaml(
     spec: VMSpec,
     addressing: Mapping[str, NetworkAddressing],
@@ -493,8 +467,9 @@ def _render_run_netplan_yaml(
         if nic.ipv4 is not None:
             addr = addressing[nic.network]
             cfg["addresses"] = [f"{nic.ipv4}/{addr.prefix_len}"]
-            cfg["nameservers"] = {"addresses": [addr.gateway]}
-            if not first_static_seen:
+            if addr.dns_server is not None:
+                cfg["nameservers"] = {"addresses": [addr.dns_server]}
+            if addr.gateway is not None and not first_static_seen:
                 cfg["routes"] = [{"to": "default", "via": addr.gateway}]
                 first_static_seen = True
         else:
@@ -525,15 +500,15 @@ def _render_run_netplan_write_files(
     staged = _render_run_netplan_yaml(spec, addressing, macs)
     return [
         {
-            "path": _RUN_NETPLAN_TARGET,
+            "path": "/etc/netplan/50-cloud-init.yaml",
             "content": staged,
             "owner": "root:root",
             # netplan 0.106+ warns/errors on world-readable netplan files.
             "permissions": "0600",
         },
         {
-            "path": _DISABLE_NETWORK_PATH,
-            "content": _DISABLE_NETWORK_BODY,
+            "path": "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg",
+            "content": "network: {config: disabled}\n",
             "owner": "root:root",
             "permissions": "0644",
         },

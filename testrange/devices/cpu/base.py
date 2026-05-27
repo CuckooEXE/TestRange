@@ -14,5 +14,5 @@ class CPU(Device):
     count: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.count, int) or self.count < 1:
+        if self.count < 1:
             raise ValueError(f"CPU.count must be a positive int, got {self.count!r}")

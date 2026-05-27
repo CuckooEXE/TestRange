@@ -17,7 +17,7 @@ class StoragePool:
     size_gb: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or not self.name:
+        if not self.name:
             raise ValueError("StoragePool.name must be a non-empty string")
-        if not isinstance(self.size_gb, int) or self.size_gb < 1:
+        if self.size_gb < 1:
             raise ValueError(f"StoragePool.size_gb must be a positive int, got {self.size_gb!r}")

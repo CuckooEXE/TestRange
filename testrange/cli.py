@@ -161,14 +161,23 @@ def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
         print("Switches:")
         for sw in switches:
             assert isinstance(sw, Switch)
-            attrs = [n for n, on in [("mgmt", sw.mgmt), ("internet", sw.internet)] if on]
+            attrs = [
+                attr
+                for attr, on in [
+                    ("mgmt", sw.mgmt),
+                    ("dhcp", sw.dhcp),
+                    ("dns", sw.dns),
+                    ("nat", sw.nat),
+                ]
+                if on
+            ]
+            if sw.uplink:
+                attrs.append(f"uplink={sw.uplink}")
             attr_str = f" [{', '.join(attrs)}]" if attrs else ""
-            print(f"  {sw.name}{attr_str}")
+            print(f"  {sw.name}: {sw.cidr}{attr_str}")
             for n in sw.networks:
                 assert isinstance(n, Network)
-                flags = [f for f, on in [("dhcp", n.dhcp), ("dns", n.dns)] if on]
-                flag_str = f" [{', '.join(flags)}]" if flags else ""
-                print(f"    - {n.name}: {n.cidr}{flag_str}")
+                print(f"    - {n.name}")
         print()
 
     if pools := getattr(hyp, "pools", ()):
