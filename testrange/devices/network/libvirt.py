@@ -19,5 +19,5 @@ class LibvirtNetworkIface(NetworkIface):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.driver, str) or not self.driver:
+        if not self.driver:
             raise ValueError("LibvirtNetworkIface.driver must be a non-empty string")

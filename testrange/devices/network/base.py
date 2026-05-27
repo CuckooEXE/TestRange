@@ -25,7 +25,7 @@ class NetworkIface(Device):
     ipv4: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.network, str) or not self.network:
+        if not self.network:
             raise ValueError("NetworkIface.network must be a non-empty string")
         if self.ipv4 is not None:
             try:

@@ -1,14 +1,14 @@
-"""Plan-level cross-VM/network addressing validation.
+"""Plan-level cross-VM/Switch addressing validation.
 
 Single-NIC checks (parseable IPv4) live in ``NetworkIface.__post_init__``.
-Anything that needs the full plan in hand — subnet membership, gateway
-collision, DHCP-pool collision, duplicates across VMs, DHCP-disabled-network
-+ DHCP-NIC — lives here so a user sees every problem in one pass instead of
-fix-one-retry-find-next.
+Anything that needs the full plan in hand — subnet membership against
+the owning Switch, reserved-slot collisions (sidecar at ``.1``, mgmt at
+``.2``), DHCP-pool collision, duplicates across VMs — lives here so a
+user sees every problem in one pass instead of fix-one-retry-find-next.
 
-The DHCP pool (``.100`` to ``.200``) mirrors the range the driver renders
-into the managed bridge's DHCP block. If a driver picks a different range,
-take a knob here rather than hard-coding two callers.
+The DHCP pool bounds and reserved offsets come from
+:mod:`testrange.networks._addressing_consts` so the validator and the
+sidecar's dnsmasq config can never drift apart.
 """
 
 from __future__ import annotations
@@ -16,60 +16,63 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import Iterable
 
-from testrange.networks.base import Network
+from testrange.networks._addressing_consts import (
+    DHCP_RANGE_HI,
+    DHCP_RANGE_LO,
+    MGMT_OFFSET,
+    SIDECAR_OFFSET,
+)
+from testrange.networks.base import Switch
 from testrange.vms.recipe import VMRecipe
 
-# Mirrors the driver-rendered DHCP pool (currently hardcoded `.100`-`.200`).
-_DHCP_RANGE_LO = 100
-_DHCP_RANGE_HI = 200
 
-
-def validate_addressing(networks: Iterable[Network], vms: Iterable[VMRecipe]) -> None:
-    """Validate every NIC against the plan's network shape.
+def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> None:
+    """Validate every NIC against the plan's Switch shape.
 
     Accumulates all issues and raises one ``ValueError`` containing every
     problem so the user can fix them in one pass.
     """
-    nets_by_name = {n.name: n for n in networks}
+    switch_for: dict[str, Switch] = {}
+    for sw in switches:
+        for net in sw.networks:
+            if net.name in switch_for:
+                continue
+            switch_for[net.name] = sw
+
     vms_list = list(vms)
     problems: list[str] = []
-
-    # Per-network (ipv4 -> origin) so we can cite both sides of a duplicate.
     seen_per_net: dict[str, dict[str, str]] = {}
 
     for vm in vms_list:
         for idx, nic in enumerate(vm.spec.nics):
             origin = f"VM {vm.name!r} NIC {idx} ({nic.network!r})"
-            net = nets_by_name.get(nic.network)
-            if net is None:
+            switch_opt = switch_for.get(nic.network)
+            if switch_opt is None:
                 problems.append(f"{origin}: references unknown network {nic.network!r}")
                 continue
+            switch = switch_opt
 
             if nic.ipv4 is None:
-                # NIC will use DHCP — only valid if the network actually has
-                # DHCP enabled, otherwise it would never get an address at
-                # run-phase.
-                if not net.dhcp:
+                if not switch.dhcp:
                     problems.append(
-                        f"{origin}: nic_no_address — network {nic.network!r} "
-                        f"has dhcp=False and the NIC declares no static ipv4; "
-                        f"this NIC would never get an address. Set ipv4= on "
-                        f"the NIC or set dhcp=True on the network."
+                        f"{origin}: nic_no_address — switch {switch.name!r} has "
+                        f"dhcp=False and the NIC declares no static ipv4; this "
+                        f"NIC would never get an address. Set ipv4= on the NIC "
+                        f"or set dhcp=True on the switch."
                     )
                 continue
 
             origin = f"{origin}={nic.ipv4}"
+            subnet = switch.network
             try:
-                subnet = net.network
                 addr = ipaddress.IPv4Address(nic.ipv4)
             except ValueError as e:  # pragma: no cover (caught at NIC level)
                 problems.append(f"{origin}: {e}")
                 continue
-            if not isinstance(subnet, ipaddress.IPv4Network):
-                problems.append(f"{origin}: network {nic.network!r} is not IPv4")
-                continue
             if addr not in subnet:
-                problems.append(f"{origin}: address not in subnet {subnet!s}")
+                problems.append(
+                    f"{origin}: address not in subnet {subnet!s} (switch {switch.name!r})"
+                )
                 continue
             if addr == subnet.network_address:
                 problems.append(f"{origin}: address is the subnet's network address")
@@ -77,19 +80,29 @@ def validate_addressing(networks: Iterable[Network], vms: Iterable[VMRecipe]) ->
             if addr == subnet.broadcast_address:
                 problems.append(f"{origin}: address is the subnet's broadcast address")
                 continue
-            gw = ipaddress.IPv4Address(net.gateway)
-            if addr == gw:
-                problems.append(f"{origin}: address collides with gateway {gw!s}")
-                continue
-            if net.dhcp:
-                lo = subnet.network_address + _DHCP_RANGE_LO
-                hi = subnet.network_address + _DHCP_RANGE_HI
+            if switch.needs_sidecar:
+                sidecar = subnet.network_address + SIDECAR_OFFSET
+                if addr == sidecar:
+                    problems.append(
+                        f"{origin}: address collides with sidecar slot {sidecar!s}"
+                    )
+                    continue
+            if switch.mgmt:
+                mgmt = subnet.network_address + MGMT_OFFSET
+                if addr == mgmt:
+                    problems.append(
+                        f"{origin}: address collides with mgmt slot {mgmt!s}"
+                    )
+                    continue
+            if switch.dhcp:
+                lo = subnet.network_address + DHCP_RANGE_LO
+                hi = subnet.network_address + DHCP_RANGE_HI
                 if lo <= addr <= hi:
                     problems.append(
                         f"{origin}: address falls inside the DHCP pool "
-                        f"({lo!s}-{hi!s}); pick something outside it "
-                        f"(typically in {subnet.network_address + 2!s}-"
-                        f"{lo - 1!s})"
+                        f"({lo!s}-{hi!s}); pick something in "
+                        f"{subnet.network_address + 100!s}-"
+                        f"{subnet.network_address + 254!s}"
                     )
                     continue
 
