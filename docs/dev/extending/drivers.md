@@ -114,11 +114,11 @@ the extra to `pyproject.toml`'s `optional-dependencies`.
 
 The default `destroy(kind, backend_name, **metadata)` dispatch routes:
 
-- `vm`, `install_vm`, `sidecar_vm` → `destroy_vm`
-- `switch`, `install_switch` → `destroy_switch`
-- `network`, `install_network` → `destroy_network`
-- `pool` → `destroy_pool`
-- `install_disk`, `install_seed`, `run_disk`, `base_image`, `volume`,
+- `vm`, `build_vm`, `sidecar_vm` → `destroy_vm`
+- `switch`, `build_switch` → `destroy_switch`
+- `network`, `build_network` → `destroy_network`
+- `pool`, `build_pool` → `destroy_pool`
+- `build_disk`, `build_seed`, `run_disk`, `data_disk`, `base_image`, `volume`,
   `sidecar_disk`, `sidecar_config`
   → `delete_volume(compose_volume_ref(pool_backend, backend_name))`
 

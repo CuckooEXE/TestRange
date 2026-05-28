@@ -100,6 +100,10 @@ rule.
 
 ### 3. Native capability is declared and validated in preflight
 
+> **Amended 2026-05-27 (CORE-16) — see Addendum:** this section is rescinded for
+> now. `native_guest_capabilities()` and the preflight check that consumed it
+> were removed; the native-agent *transport* is unchanged.
+
 Native ops are not uniformly available. The driver declares
 `native_guest_capabilities() -> frozenset[str]` (subset of
 `{"execute","read_file","write_file"}`, default empty). Preflight fails loud
@@ -181,3 +185,27 @@ lives in the driver, never in the communicator.
   floor), turning two former mid-run/late failures into early, actionable ones.
 - A backend lacking unauthenticated native read (Hyper-V Linux sidecar) is, for
   v1, constrained to static addressing unless its lease channel is wired.
+
+## Addendum — 2026-05-27 (CORE-16)
+
+§3 ("Native capability is declared and validated in preflight") is **rescinded
+for now**. `native_guest_capabilities()` and the preflight check that consumed
+it (`preflight.native_capability_findings`) are removed. In practice the gate
+fired in only two cases: a `NativeCommunicator` (or DHCP-lease readback) on
+libvirt before its QGA transport lands (BACKEND-1.5), since libvirt inherited
+the empty base default; and `MockDriver`'s test-only capability knob — Proxmox
+already declares the full op set, so it never tripped. Rather than carry the
+machinery for those, it is removed.
+
+What stays: the native-agent *transport* of §1/§2 — `native_guest_execute` /
+`native_guest_read_file` / `native_guest_write_file` and the optional
+`credential` keyword — is unchanged. A backend that cannot perform an op simply
+leaves that accessor at its default, which raises `DriverError`. The trade is
+that this libvirt-before-1.5 case now fails at first use rather than at
+preflight — accepted, since it's transient and loud either way.
+
+Consequently the "native-capability gap" preflight failure class listed under
+Consequences no longer exists (the pool-capacity floor remains). The per-op
+preflight gate will be reinstated when a backend that genuinely lacks an op
+lands (Hyper-V / WinRM) — at which point this section is un-rescinded or a new
+ADR supersedes it.

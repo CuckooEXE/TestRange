@@ -94,9 +94,11 @@ testrange run path/to/plan.py
 
 ### `Switch` owns the infrastructure, `Network` is a label
 
-A `Switch` is one L2 broadcast domain and the only place network
-infrastructure decisions live: `cidr`, `uplink`, `mgmt`, `dhcp`, `dns`,
-`nat`. A `Network` is a logical label (port-group) within a Switch —
+A `Switch` is one L2 broadcast domain and the only place L2 topology
+decisions live: `cidr`, `uplink`, `mgmt`. The services a sidecar VM serves at
+`.1` (`dhcp`, `dns`, `nat`) are bundled into an optional `Sidecar` the Switch
+carries, not flags on the Switch itself ([ADR-0013](../adr/0013-switch-sidecar-split.md)).
+A `Network` is a logical label (port-group) within a Switch —
 VMs attach by name, and the orchestrator resolves which Switch owns it.
 All Networks on one Switch share `switch.cidr` (multiple Networks =
 organizational labels on one wire).
@@ -334,9 +336,11 @@ auditable steps. See [build vs run](build-vs-run.md).
 
 ## Tips
 
-- The cloud-init seed `runcmd` always ends with `poweroff` so the
-  build VM self-terminates. The cached disks are what subsequent
-  runs boot from.
+- During `build`, the cloud-init seed runs provisioning fail-fast, reports an
+  explicit `TESTRANGE-RESULT: ok` on the serial console, then powers off — the
+  `ok` token, not the power-off, is what tells the orchestrator the build
+  succeeded and is safe to cache ([ADR-0012](../adr/0012-serial-build-result.md)).
+  The cached disks are what subsequent runs boot from.
 - Don't reuse one `SSHCommunicator(...)` instance across multiple
   VMs; each VM constructs its own. The single-use guard fails loud
   if you try.

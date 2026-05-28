@@ -51,7 +51,9 @@ Plan(name, MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]))
 - **`HypervisorDriver`** ABC — connect, preflight, switch/network/pool/VM
   CRUD, stable MAC derivation, an optional native-guest transport
   (`native_guest_execute` / `native_guest_read_file` /
-  `native_guest_write_file`), and volume transport
+  `native_guest_write_file`), an optional build-result sink
+  (`read_build_result_sink`, see Phases below and
+  [ADR-0012](../adr/0012-serial-build-result.md)), and volume transport
   (see Pool I/O below). **The driver owns L2**: `create_switch` /
   `destroy_switch` realize the whole fabric (host bridge, vSwitch, vmbr+SDN,
   VMSwitch) and `create_network` attaches port-groups to it — the orchestrator
@@ -117,12 +119,16 @@ tests (`--require-cache` makes a miss fail fast instead of building). The
    and loop over only the missing VMs. Each missing VM is provisioned as a unit:
    its base is `upload_to_pool`-ed straight onto its own OS-disk ref and
    `resize_volume`-d up; each `HardDrive` is a `create_blank_volume`; the seed is
-   written; the VM boots with **all** disks attached and self-terminates via
-   `runcmd: [..., poweroff]`. On power-off every writable disk is
-   `download_from_pool`-ed and `cache.add`-ed (and pushed to the HTTP tier when
-   configured). The build VM and its disks are destroyed immediately after
-   capture; the build pool, switch, and sidecar are torn down at phase end. The
-   backend holds no testrange state between phases.
+   written; the VM boots with **all** disks attached and runs its provisioning
+   fail-fast. Success is an explicit `TESTRANGE-RESULT: ok` token the guest
+   emits on the serial console — the orchestrator tails the driver's
+   `read_build_result_sink` and treats anything else (a `fail` record, or
+   power-off without a token) as `BuildFailedError`, so a half-provisioned disk
+   is never cached ([ADR-0012](../adr/0012-serial-build-result.md)). **Only on
+   `ok`** is every writable disk `download_from_pool`-ed and `cache.add`-ed (and
+   pushed to the HTTP tier when configured). The build VM and its disks are
+   destroyed immediately after capture; the build pool, switch, and sidecar are
+   torn down at phase end. The backend holds no testrange state between phases.
 3. **Run** — creates the user's `pools` (build leaves none behind), then for
    every user Switch: `provision_switch` calls `driver.create_switch` (the driver
    realizes the fabric — bridge / vSwitch / vmbr / VMSwitch — and, for

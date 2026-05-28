@@ -20,11 +20,9 @@ class PosixCred(Credential):
       password: optional plaintext password (rendered to a deterministic
         sha512 crypt by the builder when needed).
       ssh_key: optional SSH keypair. The public half is baked into
-        authorized_keys; the private half is held in memory only and never
-        written to the orchestrator host's filesystem.
-      sudo: grant passwordless sudo (POSIX-specific). Translated by the
-        builder into the right sudoers fragment.
-      admin: cross-platform "elevated" flag inherited from Credential.
+        authorized_keys.
+      admin: cross-platform "elevated" flag inherited from Credential. On
+        POSIX the builder grants passwordless sudo (the right sudoers fragment).
     """
 
     password: str | None = None

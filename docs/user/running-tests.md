@@ -13,8 +13,11 @@ tears the range down:
 testrange run path/to/plan.py
 ```
 
-Exit codes: `0` if all tests passed, `1` on failure, `2` on preflight error
-or missing plan file.
+Exit codes: `0` all tests passed (or `build` warmed the cache); `1` a test
+failed or the build failed; `2` bad invocation — missing/invalid plan,
+preflight reject, or a `run --require-cache` cache miss; `3` cleanup ran but
+some resources would not tear down. See [build vs run](build-vs-run.md#exit-codes)
+for the same table.
 
 ## CLI surface
 

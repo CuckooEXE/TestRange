@@ -55,16 +55,18 @@ class Network:
 class Sidecar:
     """The services a Switch's sidecar VM provides.
 
-    A Switch carrying a ``Sidecar`` materializes one sidecar VM at ``.1`` of
-    its subnet; the flags here describe what *TestRange's* sidecar serves, not
-    wire reality (an out-of-band DHCP/DNS server on the segment is a legitimate
-    topology — the flags don't police it):
+    A Switch carrying a ``Sidecar`` materializes one sidecar VM at the sidecar
+    slot (``SIDECAR_OFFSET``) of its subnet; the flags here describe what
+    *TestRange's* sidecar serves, not wire reality (an out-of-band DHCP/DNS
+    server on the segment is a legitimate topology — the flags don't police it).
+    The reserved-slot and pool layout is defined once in
+    :mod:`testrange.networks._addressing_consts`:
 
-    - ``dhcp`` — sidecar serves DHCP at ``.1``; pool is ``.10``-``.99``.
-    - ``dns`` — sidecar serves DNS at ``.1`` (one ``<vmname>.<networkname>``
-      record per VM).
-    - ``nat`` — sidecar MASQUERADEs guest traffic out the Switch's uplink at
-      ``.1`` (the sidecar is the gateway). The matching ``uplink`` lives on the
+    - ``dhcp`` — sidecar serves DHCP; the lease pool is the
+      ``DHCP_RANGE_LO``..``DHCP_RANGE_HI`` band.
+    - ``dns`` — sidecar serves DNS (one ``<vmname>.<networkname>`` record per VM).
+    - ``nat`` — sidecar MASQUERADEs guest traffic out the Switch's uplink (the
+      sidecar is the gateway). The matching ``uplink`` lives on the
       :class:`Switch` (it is L2 topology); the *only* object seeing both the
       service and the uplink — ``Switch.__init__`` — enforces that ``nat``
       has one.
@@ -155,8 +157,7 @@ class Switch:
       Strict network form (``192.168.10.0/24``); host-form raises.
     - ``uplink`` — physical NIC on the hypervisor host. When set, the
       driver attaches the Switch to that NIC. Without a NAT sidecar, guests
-      egress with their own MACs and IPs (pure L2 to the LAN — this is why
-      ``uplink`` is a Switch concern, not a sidecar one). With a
+      egress with their own MACs and IPs (pure L2 to the LAN). With a
       ``Sidecar(nat=True)``, the guest segment stays isolated and the
       sidecar MASQUERADEs out a second NIC on a driver-provided uplink
       segment.
@@ -226,12 +227,12 @@ class Switch:
 
     @property
     def sidecar_ip(self) -> str:
-        """The sidecar's pinned address: ``network_address + 1``."""
+        """The sidecar's pinned address: ``network_address + SIDECAR_OFFSET``."""
         return str(self.network.network_address + SIDECAR_OFFSET)
 
     @property
     def mgmt_ip(self) -> str:
-        """The host mgmt adapter's pinned address: ``network_address + 2``."""
+        """The host mgmt adapter's pinned address: ``network_address + MGMT_OFFSET``."""
         return str(self.network.network_address + MGMT_OFFSET)
 
     @property

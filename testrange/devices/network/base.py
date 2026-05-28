@@ -106,7 +106,7 @@ class NetworkIface(Device):
 
     - ``None`` (the default) — the NIC exists but is left **unconfigured**: no
       address, no DHCP. The guest OS decides (link-local, its own client, or
-      nothing). Renders ``dhcp4: false``.
+      nothing).
     - :class:`DHCPAddr` — request a lease at boot.
     - :class:`StaticAddr` — a static address (with prefix/gateway/DNS either
       dictated or derived from the owning Switch).

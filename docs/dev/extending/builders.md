@@ -63,7 +63,12 @@ constraints:
    any of them, the hash should change.
 
 A safe default: hash the rendered seed bytes + the base SHA + the disk
-sizes. See `CloudInitBuilder.config_hash` for the pattern.
+sizes. See `CloudInitBuilder.config_hash` for the pattern; it additionally
+folds in the sidecar image's content sha (`sidecar_sha`), since every build
+boots against the build switch's sidecar and a drifted sidecar can produce
+byte-different disks ([ADR-0007](../../adr/0007-deterministic-config-hash.md)).
+`sidecar_sha` is a concrete extension `CloudInitBuilder` accepts, not part of
+the `Builder` ABC signature.
 
 ## Steps
 
@@ -91,10 +96,29 @@ sizes. See `CloudInitBuilder.config_hash` for the pattern.
            return h
    ```
 
-2. **Self-terminate.** The orchestrator polls VM power state during
-   the build — your seed should end with whatever triggers a shutdown
-   on the target OS so the build VM self-terminates and the
-   orchestrator can capture the resulting disks.
+2. **Emit the build-result token, then power off** ([ADR-0012](../../adr/0012-serial-build-result.md)).
+   Power-off alone is *not* the success signal — a guest that powers off
+   without reporting `ok` is treated as a failed build (this is what kills the
+   silent-corrupt-cache bug). Your provisioning payload must run **fail-fast**
+   and, on the guest serial console (`ttyS0` / `com0` / `COM1`), emit a framed
+   record before it powers off:
+
+   ```
+   TESTRANGE-RESULT: ok
+   # --- or, on failure ---
+   TESTRANGE-RESULT: fail rc=<n> cmd="<failing command>"
+   TESTRANGE-LOG-BEGIN
+   <base64 of the relevant log tail>
+   TESTRANGE-LOG-END
+   ```
+
+   The orchestrator opens the per-driver build-result sink right after
+   `start_vm`, live-tails it, and short-circuits on the first record: `ok` →
+   capture the disks; `fail` / powered-off-without-token → `BuildFailedError`.
+   `CloudInitBuilder` does this by wrapping all provisioning (apt, pip,
+   `post_install_commands`) in one `set -eE` `bash -c` script with an `ERR` trap
+   that frames the failing command + rc + log onto the console, then `sync`s,
+   emits `ok`, and powers off.
 
 3. **No Communicator during build.** The Communicator only binds
    at run-phase bring-up, against the cached built disks. The

@@ -4,17 +4,16 @@ The seed is an ISO9660 image labeled ``cidata`` containing ``user-data``,
 ``meta-data``, and ``network-config``. The install VM mounts it on first
 boot and applies it.
 
-Build-result contract (ADR §21)
--------------------------------
+Build-result contract (ADR-0012)
+--------------------------------
 All provisioning — apt, pip, and ``post_install_commands`` — runs inside a
 single **fail-fast** ``bash`` script with an ``ERR`` trap. On success the
 script emits ``TESTRANGE-RESULT: ok`` to ``/dev/ttyS0`` then powers off; on
 the first failing command the trap emits ``TESTRANGE-RESULT: fail rc=… cmd=…``
 plus a base64'd tail of ``/var/log/cloud-init-output.log``, then powers off.
-The orchestrator treats the ``ok`` token as the *only* success signal, so a
-failed ``apt-get update`` no longer powers off "successfully" and caches a
-corrupt disk. Package installs live in the trapped script (not cloud-init's
-``packages:`` directive) precisely so a package failure is caught fail-fast.
+The orchestrator treats the ``ok`` token as the *only* success signal. Package
+installs live in the trapped script (not cloud-init's ``packages:`` directive)
+so a package failure is caught fail-fast under the ``ERR`` trap.
 
 Network rendering uses **interface-name matching** (``match: name: ...``)
 so the cached disk doesn't bake in the install VM's MAC.

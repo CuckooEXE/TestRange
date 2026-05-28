@@ -67,11 +67,11 @@ class Builder(ABC):
         base_sha: str = "",
         macs: Sequence[str] = (),
     ) -> str:
-        """16-char hex hash that uniquely identifies the post-install disk.
+        """16-char hex hash that uniquely identifies the VM's built disk set.
 
         Pure and deterministic: same ``(spec, recipe, addressing, base_sha,
         macs)`` -> same hash, every time, with no ``run_id``/clock/random
-        input. This is the post-install cache key; the rationale and the
+        input. This is the build cache key; the rationale and the
         contract for builder authors live in ADR-0007.
 
         ``macs`` (one per NIC in spec order) lets concretes that bake
@@ -112,4 +112,4 @@ class Builder(ABC):
         this after ``_bind_communicators`` and before yielding the
         ``OrchestratorHandle`` to test code.
         """
-        del spec, recipe, execute
+        del spec, recipe, execute  # real statement: a docstring-only body trips B027

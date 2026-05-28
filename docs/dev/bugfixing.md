@@ -57,14 +57,23 @@ part of the contract.
 ```sh
 ruff check .
 ruff format --check .
-mypy --strict testrange/
-pytest -q
-# and the smoke run:
-python -m testrange.cli --log-level DEBUG run examples/hello_world.py
+mypy --strict testrange tests
+pytest -m "not proxmox"
 ```
 
-All five gates must pass. The smoke run is the one most easily forgotten;
-treat it as part of "done."
+All four must pass (this mirrors `.pre-commit-config.yaml`).
+
+Once a real backend is configured, also run a live smoke `run` as part of
+"done" — it exercises paths the mock cannot (real disk/guest I/O):
+
+```sh
+python -m testrange.cli --log-level DEBUG run examples/<plan>.py
+```
+
+This cannot pass against `MockDriver` (it serves no real guest), so it is not
+part of the offline gate above; it lands as a gate the moment a real driver is
+wired up (Proxmox today via `examples/px_hello.py` with PVE credentials; see
+[drivers](../user/drivers/index.md)).
 
 ## Common gotchas
 

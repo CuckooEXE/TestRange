@@ -19,11 +19,12 @@ pip install -e '.[all,dev]'
 ```sh
 ruff check .
 ruff format --check .
-mypy --strict testrange/
-pytest -q
+mypy --strict testrange tests
+pytest -m "not proxmox"
 ```
 
-All four must pass. The ``proxmox`` mark gates integration tests against a
+All four must pass (this mirrors `.pre-commit-config.yaml`; note mypy covers
+both ``testrange`` and ``tests``). The ``proxmox`` mark gates integration tests against a
 live Proxmox VE host (they skip without ``TESTRANGE_PVE_HOST`` configured); the
 unit suite runs entirely against the in-memory ``MockDriver`` and needs no
 backend.

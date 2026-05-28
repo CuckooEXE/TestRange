@@ -1,6 +1,6 @@
 # ADR-0011: Content-addressed backend image cache at the driver ABC
 
-Status: **Draft** (not implemented — see [PVE-side cache discussion, 2026-05-23])
+Status: Draft (not implemented — see [PVE-side cache discussion, 2026-05-23])
 Date: 2026-05-23
 
 Amends [ADR-0008](0008-driver-abc-multi-backend.md) (the driver disk surface)

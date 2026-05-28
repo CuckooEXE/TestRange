@@ -72,6 +72,10 @@ driver, which is why it is recorded here rather than decided ad hoc per backend.
 
 ### Interim gate (already in effect)
 
+> **Amended 2026-05-27 (CORE-16) — see Addendum:** the `native_capability_findings`
+> cross-reference below is obsolete (that helper was removed), and findings no
+> longer carry a severity.
+
 Until this ADR is ratified, `mgmt=True` fails loud at preflight:
 `mgmt_unsupported_findings` (shared, in `testrange/preflight.py`, alongside
 `native_capability_findings`) emits one error-level `PreflightFinding` per
@@ -84,10 +88,25 @@ specified `mgmt` support drops the call from its `preflight`.
 - `mgmt` is a no-op-but-loud flag for now: plans that set it are rejected early
   with a fix hint pointing here, instead of silently provisioning nothing (or,
   worse, an unreachable adapter) at run time.
-- The shipped examples that use `mgmt=True` (`hello_world.py`,
-  `private_public.py`, `network_modes.py`) will now **fail preflight**. They are
-  demonstrating a feature that is not yet supported; they must be updated (drop
-  `mgmt`, or move to `uplink`+`nat`) or clearly marked aspirational once this
-  ADR lands.
+- The shipped examples that previously set `mgmt=True` (`hello_world.py`,
+  `private_public.py`, `network_modes.py`) would otherwise **fail preflight**,
+  so they have been updated: each `mgmt=True` is commented out with a pointer to
+  this ADR, demonstrating the wiring without tripping the interim gate. They
+  return to `mgmt=True` once this ADR is ratified and a backend realizes it.
 - Ratifying (A) vs (B) is a prerequisite for the Proxmox driver (and any other
   remote backend) to claim mgmt support; the gate stays until then.
+
+## Addendum — 2026-05-27 (CORE-16)
+
+The interim gate is **still in effect**; `mgmt_unsupported_findings` is
+unchanged. Two wording corrections to the paragraph above:
+
+- The sibling helper `native_capability_findings` it cites was removed (see the
+  ADR-0008 addendum). `mgmt_unsupported_findings` is now the lone shared
+  topology gate in `testrange/preflight.py`; `managed_build_egress_findings`
+  moved onto the driver ABC (ADR-0014).
+- `PreflightFinding` no longer carries a severity — the error/warning tier was
+  dropped, since preflight only ever emitted blockers. "one error-level
+  `PreflightFinding` per offending Switch" now reads simply "one
+  `PreflightFinding` per offending Switch," and `bool(report)` is true iff there
+  are no findings at all.

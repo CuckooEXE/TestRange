@@ -13,9 +13,6 @@ disambiguates multiple NICs on one network). Omitted, the orchestrator
 uses the first NIC that carries an address::
 
     communicator=SSHCommunicator("myuser", nic_idx=1)
-
-The private key (if provided) is loaded from text in memory — never
-written to the orchestrator host's filesystem.
 """
 
 from __future__ import annotations

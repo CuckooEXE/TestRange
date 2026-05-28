@@ -182,9 +182,9 @@ longer leaves pools behind, `run_phase` must create the user's `hyp.pools`
 itself before pushing disks. (Today only the install phase creates pools and
 they survive into run — that dependency is severed.)
 
-`wait_builder_ready` is unchanged and remains the per-VM guest-liveness gate
-("bound and pinged" is exactly what its readiness command already does
-through the bound communicator).
+`await_guest_readiness` (the run-phase gate, formerly `wait_builder_ready`) is
+unchanged and remains the per-VM guest-liveness gate ("bound and pinged" is
+exactly what its readiness command already does through the bound communicator).
 
 ## Consequences
 

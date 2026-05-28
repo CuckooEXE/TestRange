@@ -41,8 +41,12 @@ its cache key.
 
 ## Decision
 
-`Builder.config_hash(spec, recipe, *, addressing, base_sha, sidecar_sha, macs)
--> str` is defined on the `Builder` ABC as a **pure function**:
+`Builder.config_hash(spec, recipe, *, addressing, base_sha, macs) -> str` is
+defined on the `Builder` ABC as a **pure function**. (The `sidecar_sha` input
+from CI-1 is *not* on the ABC signature; it is a concrete extension —
+`CloudInitBuilder.config_hash` adds the keyword and the orchestrator passes it
+on the build-cache probe. A builder that does not boot against the sidecar
+need not accept it.) The ABC contract:
 
 - It MUST NOT depend on `run_id`, clocks, or any non-deterministic input.
 - The same `(spec, recipe, addressing, base_sha, macs)` MUST yield the same

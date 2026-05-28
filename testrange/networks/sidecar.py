@@ -18,10 +18,11 @@ driver's job (``compose_mac``); :func:`render_dnsmasq_conf` takes a
 ``mac_for`` callable the orchestrator injects, so this module never
 reaches into the driver stovepipe.
 
-Addressing layout (sidecar ``.1``, mgmt ``.2``, pool ``.10``-``.99``)
-comes from :mod:`testrange.networks._addressing_consts` — the same
-source :mod:`testrange.networks.validate` reads, so the rendered
-``dhcp-range`` and the static-IP validation can never drift apart.
+The reserved-slot and DHCP-pool layout (``SIDECAR_OFFSET``, ``MGMT_OFFSET``,
+``DHCP_RANGE_LO``..``DHCP_RANGE_HI``) comes from
+:mod:`testrange.networks._addressing_consts` — the same source
+:mod:`testrange.networks.validate` reads, so the rendered ``dhcp-range`` and
+the static-IP validation can never drift apart.
 """
 
 from __future__ import annotations
@@ -87,7 +88,12 @@ def sidecar_nic_specs(switch: Switch) -> list[tuple[str, str | None]]:
 
 
 def _uplink_network_name(switch: Switch) -> str:
-    """Hidden network name the orchestrator uses for the sidecar's uplink NIC."""
+    """Hidden network name the orchestrator uses for the sidecar's uplink NIC.
+
+    Shared with ``orchestrator.provision`` (which registers the uplink network
+    backend under this key) and ``orchestrator.build_phase`` (which pops it at
+    teardown), so the ``__uplink__<switch>`` convention lives in one place.
+    """
     return f"__uplink__{switch.name}"
 
 
