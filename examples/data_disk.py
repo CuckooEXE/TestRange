@@ -71,7 +71,7 @@ PLAN = Plan(
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     credentials=[
-                        PosixCred("myuser", password="mypass", ssh_key=_KEY, sudo=True),
+                        PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
                     ],
                     post_install_commands=(
                         "mkfs.ext4 -F /dev/vdb",

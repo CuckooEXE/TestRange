@@ -106,8 +106,13 @@ class StateStore:
             created_at=_now_utc_iso(),
             resources=(),
         )
-        self._write_state_atomic(state)
+        # PID first: it is the ownership guard. Writing it before state.json
+        # closes the window where state.json exists with no recorded owner — a
+        # concurrent `cleanup --all` seeing an owner-less state file could tear
+        # the run down mid-bring-up. The reverse (pid without state.json) is
+        # benign: read() fails loudly and remove() tolerates a missing state.
         self._write_pid_atomic(os.getpid())
+        self._write_state_atomic(state)
         _log.info("state initialized for run %s at %s", run_id, self.run_dir)
         return state
 

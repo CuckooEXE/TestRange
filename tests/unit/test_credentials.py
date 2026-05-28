@@ -20,9 +20,9 @@ class TestPosixCred:
         assert c.ssh_key is not None
 
     def test_both(self) -> None:
-        c = PosixCred("u", password="p", ssh_key=SSHKey.generate(), sudo=True)
+        c = PosixCred("u", password="p", ssh_key=SSHKey.generate(), admin=True)
         assert c.password is not None and c.ssh_key is not None
-        assert c.sudo is True
+        assert c.admin is True
 
     def test_neither_auth(self) -> None:
         with pytest.raises(ValueError):

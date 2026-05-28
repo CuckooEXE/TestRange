@@ -72,7 +72,7 @@ PLAN = Plan(
                             "myuser",
                             password="mypass",
                             ssh_key=_KEY,
-                            sudo=True,
+                            admin=True,
                         ),
                     ],
                     packages=[Apt("nginx")],

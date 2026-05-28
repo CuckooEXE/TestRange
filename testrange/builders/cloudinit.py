@@ -91,23 +91,19 @@ class CloudInitBuilder(Builder):
         credentials: Sequence[Credential] = (),
         packages: Sequence[Package] = (),
         post_install_commands: Sequence[str] = (),
-        insecure_apt: bool = False,
-        insecure_dnf: bool = False,
+        insecure_pkg_manager: bool = False,
     ) -> None:
         creds, pkgs, cmds = self._validate_init_params(
             base=base,
             credentials=credentials,
             packages=packages,
             post_install_commands=post_install_commands,
-            insecure_apt=insecure_apt,
-            insecure_dnf=insecure_dnf,
         )
         self.base = base
         self._credentials = creds
         self.packages = pkgs
         self.post_install_commands = cmds
-        self.insecure_apt = insecure_apt
-        self.insecure_dnf = insecure_dnf
+        self.insecure_pkg_manager = insecure_pkg_manager
 
     @staticmethod
     def _validate_init_params(
@@ -116,13 +112,15 @@ class CloudInitBuilder(Builder):
         credentials: Sequence[Credential],
         packages: Sequence[Package],
         post_install_commands: Sequence[str],
-        insecure_apt: bool,
-        insecure_dnf: bool,
     ) -> tuple[tuple[Credential, ...], tuple[Package, ...], tuple[str, ...]]:
-        del insecure_apt, insecure_dnf  # accepted to keep the kwarg surface stable
         creds = tuple(credentials)
         pkgs = tuple(packages)
         cmds = tuple(post_install_commands)
+        for p in pkgs:
+            if not isinstance(p, Apt | Pip):
+                raise ValueError(
+                    f"CloudInitBuilder.packages entries must be Apt or Pip; got {type(p).__name__}"
+                )
         for cmd in cmds:
             if not cmd:
                 raise ValueError(
@@ -185,7 +183,7 @@ class CloudInitBuilder(Builder):
                 user_entry["shell"] = "/bin/bash"
             if c.ssh_key:
                 user_entry["ssh_authorized_keys"] = [c.ssh_key.auth_line]
-            if c.sudo or c.admin:
+            if c.admin:
                 user_entry["sudo"] = "ALL=(ALL) NOPASSWD:ALL"
                 user_entry["groups"] = list(c.groups) or ["sudo"]
             elif c.groups:
@@ -203,9 +201,7 @@ class CloudInitBuilder(Builder):
             "ssh_pwauth": True,
             "users": users or [{"name": "root", "lock_passwd": False}],
         }
-        write_files = _render_insecure_write_files(
-            insecure_apt=self.insecure_apt, insecure_dnf=self.insecure_dnf
-        )
+        write_files = _render_insecure_write_files(insecure=self.insecure_pkg_manager)
         write_files.extend(_render_run_netplan_write_files(spec, addressing, macs))
         if write_files:
             body["write_files"] = write_files
@@ -403,34 +399,24 @@ _INSECURE_APT_CONFIG = (
     'APT::Get::AllowUnauthenticated "true";\n'
 )
 
-# dnf has no /etc/dnf/dnf.conf.d/ drop-in; append into the [main] section of
-# /etc/dnf/dnf.conf instead (cloud-init's write_files supports append=true).
-_INSECURE_DNF_CONFIG = "sslverify=False\ngpgcheck=0\n"
 
+def _render_insecure_write_files(*, insecure: bool) -> list[dict[str, Any]]:
+    """Cloud-init ``write_files`` entry disabling apt signature verification.
 
-def _render_insecure_write_files(*, insecure_apt: bool, insecure_dnf: bool) -> list[dict[str, Any]]:
-    """Build cloud-init ``write_files`` entries for the insecure apt/dnf flags."""
-    entries: list[dict[str, Any]] = []
-    if insecure_apt:
-        entries.append(
-            {
-                "path": "/etc/apt/apt.conf.d/99-testrange-insecure",
-                "content": _INSECURE_APT_CONFIG,
-                "owner": "root:root",
-                "permissions": "0644",
-            }
-        )
-    if insecure_dnf:
-        entries.append(
-            {
-                "path": "/etc/dnf/dnf.conf",
-                "content": _INSECURE_DNF_CONFIG,
-                "owner": "root:root",
-                "permissions": "0644",
-                "append": True,
-            }
-        )
-    return entries
+    Apt is the only package manager the builder's typed ``packages`` cover, so
+    the insecure drop-in is apt-only; a guest provisioned via ``dnf`` in
+    ``post_install_commands`` manages its own config.
+    """
+    if not insecure:
+        return []
+    return [
+        {
+            "path": "/etc/apt/apt.conf.d/99-testrange-insecure",
+            "content": _INSECURE_APT_CONFIG,
+            "owner": "root:root",
+            "permissions": "0644",
+        }
+    ]
 
 
 # The guest serial device the build-result record is written to. Linux exposes
@@ -462,8 +448,7 @@ __tr_emit_fail() {{
     poweroff -f
 }}
 trap __tr_emit_fail ERR
-set -eE
-export DEBIAN_FRONTEND=noninteractive"""
+set -eE"""
 
 # The success footer: `sync` flushes provisioning writes to the virtual disk
 # *before* announcing `ok`, because the orchestrator captures the disk the
@@ -488,6 +473,9 @@ def _render_provision_script(
     """
     lines = [_PROVISION_PREAMBLE]
     if apt_pkgs:
+        # DEBIAN_FRONTEND is apt-specific; scope it to the apt commands rather
+        # than exporting it for the whole (distro-agnostic) provisioning script.
+        lines.append("export DEBIAN_FRONTEND=noninteractive")
         lines.append("apt-get update")
         lines.append(f"apt-get install -y {' '.join(apt_pkgs)}")
     lines.extend(_render_pip_install_lines(pips))

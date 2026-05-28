@@ -87,7 +87,7 @@ def _basic_builder() -> CloudInitBuilder:
         base=CacheEntry("debian-13"),
         credentials=[
             PosixCred("root", password="rootpass"),
-            PosixCred("u", password="upass", ssh_key=_KEY, sudo=True),
+            PosixCred("u", password="upass", ssh_key=_KEY, admin=True),
         ],
         packages=[Apt("nginx"), Apt("curl"), Pip("requests")],
         post_install_commands=("echo hi > /tmp/hi",),
@@ -198,11 +198,11 @@ class TestInsecureFlags:
         body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
         assert "write_files" not in body
 
-    def test_insecure_apt_drops_conf_d_file(self) -> None:
+    def test_insecure_pkg_manager_drops_apt_conf_d_file(self) -> None:
         b = CloudInitBuilder(
             base=CacheEntry("debian-13"),
             packages=[Apt("nginx")],
-            insecure_apt=True,
+            insecure_pkg_manager=True,
         )
         body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
         wf = {entry["path"]: entry for entry in body["write_files"]}
@@ -211,28 +211,18 @@ class TestInsecureFlags:
         assert "Acquire::AllowInsecureRepositories" in content
         assert "APT::Get::AllowUnauthenticated" in content
 
-    def test_insecure_dnf_appends_to_dnf_conf(self) -> None:
-        b = CloudInitBuilder(
-            base=CacheEntry("rocky-9"),
-            insecure_dnf=True,
-        )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        assert wf["/etc/dnf/dnf.conf"]["append"] is True
-        content = wf["/etc/dnf/dnf.conf"]["content"]
-        assert "sslverify=False" in content
-        assert "gpgcheck=0" in content
-
-    def test_both_flags_together(self) -> None:
-        b = CloudInitBuilder(
-            base=CacheEntry("x"),
-            insecure_apt=True,
-            insecure_dnf=True,
-        )
+    def test_insecure_pkg_manager_is_apt_only(self) -> None:
+        # The single flag emits the apt drop-in only — no dnf config.
+        b = CloudInitBuilder(base=CacheEntry("x"), insecure_pkg_manager=True)
         body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
         paths = {entry["path"] for entry in body["write_files"]}
-        assert "/etc/apt/apt.conf.d/99-testrange-insecure" in paths
-        assert "/etc/dnf/dnf.conf" in paths
+        assert paths == {"/etc/apt/apt.conf.d/99-testrange-insecure"}
+
+
+class TestPackageValidation:
+    def test_rejects_non_apt_pip_package(self) -> None:
+        with pytest.raises(ValueError, match="must be Apt or Pip"):
+            CloudInitBuilder(base=CacheEntry("x"), packages=["nginx"])  # type: ignore[list-item]
 
 
 class TestPipInsecure:

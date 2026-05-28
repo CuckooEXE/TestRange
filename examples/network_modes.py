@@ -52,7 +52,7 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
                     "myuser",
                     password="mypass",
                     ssh_key=_KEY,
-                    sudo=True,
+                    admin=True,
                 ),
             ],
         ),

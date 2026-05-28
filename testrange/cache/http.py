@@ -110,6 +110,12 @@ class HttpCache:
         sha: str = resp.text.strip()
         if not sha:
             raise CacheError(f"http cache: name {name!r} resolved to empty sha")
+        # The pointer body comes off the wire untrusted; make sure it's actually
+        # a sha before we go fetch /isos/<sha>.* with it.
+        from testrange.cache.entry import CacheEntry
+
+        if not (CacheEntry(sha).looks_like_sha and len(sha) == 64):
+            raise CacheError(f"http cache: name {name!r} resolved to a non-sha value {sha!r}")
         return sha
 
     def _read_sidecar(self, sha: str) -> CacheEntryInfo:

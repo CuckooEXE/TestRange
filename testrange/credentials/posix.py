@@ -27,7 +27,6 @@ class PosixCred(Credential):
 
     password: str | None = None
     ssh_key: SSHKey | None = None
-    sudo: bool = False
     groups: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
