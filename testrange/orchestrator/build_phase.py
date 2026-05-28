@@ -358,7 +358,7 @@ def _capture_disk(
     return info.path
 
 
-# --- Build-result protocol (backend-independent) --------------------------
+# Build-result protocol (backend-independent).
 #
 # The builder emits a framed record to the guest serial console; the driver's
 # build-result sink streams those bytes back host-side and the orchestrator

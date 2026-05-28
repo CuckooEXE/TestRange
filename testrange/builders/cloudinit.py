@@ -527,7 +527,6 @@ def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
     return lines
 
 
-# ----------------------------------------------------------------------------
 # Run-phase netplan staging.
 #
 # Why this exists: the install VM runs on a transient DHCP-only "install"
@@ -537,7 +536,6 @@ def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
 # at install time via cloud-init's `write_files` (config stage runs AFTER
 # init-stage netplan rendering, so our file wins) and disable cloud-init's
 # network module on subsequent boots so it doesn't undo our work.
-# ----------------------------------------------------------------------------
 
 
 def _render_run_netplan_yaml(

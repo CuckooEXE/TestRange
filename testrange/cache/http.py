@@ -86,8 +86,6 @@ class HttpCache:
         requests = _import_requests()
         return requests.delete(self._url(path), verify=False, timeout=_DEFAULT_TIMEOUT)
 
-    # ---- public surface --------------------------------------------------
-
     def resolve(self, identifier: str) -> CacheEntryInfo:
         """Look up by full sha or by name. Raises ``CacheMissError`` on 404.
 
@@ -239,8 +237,6 @@ class HttpCache:
         )
         resp = self._put(f"/isos/{sha}.json", data=self._sidecar_body(new_info).encode("utf-8"))
         self._raise_for_put(resp, f"/isos/{sha}.json")
-
-    # ---- helpers ----------------------------------------------------------
 
     def _put_name(self, name: str, sha: str) -> None:
         validate_name(name)

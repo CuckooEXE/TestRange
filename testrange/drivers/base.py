@@ -335,7 +335,7 @@ class HypervisorDriver(ABC):
     # dnsmasq lease file, not in anything the hypervisor manages. The
     # orchestrator reads it over the native guest-file transport below.
 
-    # --- Native guest agent (optional) --------------------------------
+    # Native guest agent (optional).
     # A backend with a native in-guest agent (QEMU Guest Agent, VMware
     # Tools, Hyper-V integration) overrides these to return VM-bound
     # callables. They are non-abstract: the default for a backend with no
@@ -362,7 +362,7 @@ class HypervisorDriver(ABC):
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")
 
-    # --- Build-result sink (hypervisor capability, not agent-level) -------
+    # Build-result sink (hypervisor capability, not agent-level).
     # The build phase keys success on a structured ``TESTRANGE-RESULT:``
     # record the builder writes to the guest's serial console; the
     # orchestrator reads it back host-side through this accessor. It is a

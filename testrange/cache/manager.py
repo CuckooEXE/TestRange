@@ -49,8 +49,6 @@ class CacheManager:
         """Scratch dir on the cache filesystem (see :attr:`LocalCache.staging`)."""
         return self.local.staging
 
-    # ---- resolution ------------------------------------------------------
-
     def resolve(self, ref: str | CacheEntry, *, fetch: bool = True) -> CacheEntryInfo:
         """Resolve a CacheEntry / identifier across both tiers.
 
@@ -99,8 +97,6 @@ class CacheManager:
         self.local._write_sidecar(sidecar, local_info)
         _log.info("fetched %s from http cache (%d bytes)", info.sha256[:16], info.size)
         return local_info
-
-    # ---- mutation --------------------------------------------------------
 
     def add(
         self,
@@ -153,8 +149,6 @@ class CacheManager:
             except Exception as e:
                 _log.warning("http cache: forget_name %s failed: %s", name, e)
         return info
-
-    # ---- manual reconciliation ------------------------------------------
 
     def push(self, identifier: str) -> CacheEntryInfo:
         """Copy a local entry to the HTTP tier. Raises if no HTTP configured."""
