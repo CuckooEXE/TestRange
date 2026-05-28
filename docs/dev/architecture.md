@@ -8,7 +8,7 @@ functions, and tears the range down.
 ## High-level shape
 
 ```
-Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
+Plan(name, MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]))
                                             │
                                             ▼
                           Orchestrator
@@ -24,7 +24,7 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
 
 ## Key components
 
-- **`Plan(*hypervisors, name=)`** — the top-level user declaration.
+- **`Plan(name, *hypervisors)`** — the top-level user declaration.
   Currently exactly one hypervisor; the variadic shape is locked in for
   future multi-hypervisor without changing the call shape.
 - **`MockHypervisor(networks=, pools=, vms=, build_switch=, ...)`** —
@@ -50,8 +50,8 @@ Plan(MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]), name=)
   `.partial` + `os.replace`.
 - **`HypervisorDriver`** ABC — connect, preflight, switch/network/pool/VM
   CRUD, stable MAC derivation, an optional native-guest transport
-  (`native_guest_capabilities` + `native_guest_execute` /
-  `native_guest_read_file` / `native_guest_write_file`), and volume transport
+  (`native_guest_execute` / `native_guest_read_file` /
+  `native_guest_write_file`), and volume transport
   (see Pool I/O below). **The driver owns L2**: `create_switch` /
   `destroy_switch` realize the whole fabric (host bridge, vSwitch, vmbr+SDN,
   VMSwitch) and `create_network` attaches port-groups to it — the orchestrator

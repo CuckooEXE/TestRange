@@ -8,8 +8,8 @@ the native guest agent is simulated. Every backend call is appended to
 
 It is the canonical substrate the orchestrator and ABC-contract tests run
 against while no real driver is shipped. The native agent is QGA-shaped —
-unauthenticated, all three ops supported — so it declares the full
-:func:`native_guest_capabilities` set by default.
+unauthenticated, all three ops supported — so all three ``native_guest_*``
+accessors are live.
 """
 
 from __future__ import annotations
@@ -30,9 +30,7 @@ from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
-    managed_build_egress_findings,
     mgmt_unsupported_findings,
-    native_capability_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -109,12 +107,10 @@ class MockDriver(HypervisorDriver):
         uri: str = "mock:///",
         pool_root: Path | None = None,
         backing_capacity_gb: int | None = None,
-        native_caps: frozenset[str] = frozenset({"execute", "read_file", "write_file"}),
     ) -> None:
         self.uri = uri
         self.pool_root = pool_root or Path(tempfile.mkdtemp(prefix="testrange-mock-"))
         self.backing_capacity_gb = backing_capacity_gb
-        self._native_caps = native_caps
         self.connected = False
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
@@ -176,11 +172,8 @@ class MockDriver(HypervisorDriver):
         self._record("preflight")
         if self.preflight_override is not None:
             return self.preflight_override
-        findings: list[PreflightFinding] = list(native_capability_findings(plan, self._native_caps))
-        findings.extend(mgmt_unsupported_findings(plan))
-        findings.extend(
-            managed_build_egress_findings(plan, supported=self.supports_managed_build_egress)
-        )
+        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
+        findings.extend(self.managed_build_egress_findings(plan))
         findings.extend(self._pool_capacity_findings(plan))
         return PreflightReport(findings=tuple(findings))
 
@@ -193,7 +186,6 @@ class MockDriver(HypervisorDriver):
             if pool.size_gb > self.backing_capacity_gb:
                 out.append(
                     PreflightFinding(
-                        severity="error",
                         code="pool-capacity",
                         message=(
                             f"pool {pool.name!r} needs {pool.size_gb} GiB but the backing "
@@ -366,9 +358,6 @@ class MockDriver(HypervisorDriver):
         return "shutoff" if self.power_state_calls >= self.shutoff_after_calls else "running"
 
     # -- native guest agent (QGA-shaped: unauthenticated, all ops) ---------
-
-    def native_guest_capabilities(self) -> frozenset[str]:
-        return self._native_caps
 
     def native_guest_execute(self, backend_name: str) -> GuestExec:
         def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:

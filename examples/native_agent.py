@@ -27,6 +27,7 @@ from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
+    "qga-demo",
     ProxmoxHypervisor(
         host="40.160.34.83",
         password="Target123!",
@@ -61,7 +62,6 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="qga-demo",
 )
 
 

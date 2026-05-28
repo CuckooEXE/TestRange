@@ -113,7 +113,3 @@ class TestFiles:
         big = b"x" * (_guest._MAX_WRITE_CONTENT)  # base64 inflates past the cap
         with pytest.raises(GuestAgentError, match="single-write cap"):
             _guest.make_write_file(c, "tr-vm-x-web")("/tmp/big", big)
-
-
-def test_capabilities_is_full_set() -> None:
-    assert _guest.CAPABILITIES == frozenset({"execute", "read_file", "write_file"})

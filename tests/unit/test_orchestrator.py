@@ -37,6 +37,7 @@ from testrange.vms import VMRecipe, VMSpec
 
 def _plan(name: str = "hello") -> Plan:
     return Plan(
+        name,
         MockHypervisor(
             networks=[
                 Switch(
@@ -64,13 +65,13 @@ def _plan(name: str = "hello") -> Plan:
                 ),
             ],
         ),
-        name=name,
     )
 
 
 def _qga_plan(name: str = "hello") -> Plan:
     """Same shape as ``_plan`` but the VM talks over a NativeCommunicator."""
     return Plan(
+        name,
         MockHypervisor(
             networks=[
                 Switch(
@@ -98,7 +99,6 @@ def _qga_plan(name: str = "hello") -> Plan:
                 ),
             ],
         ),
-        name=name,
     )
 
 
@@ -231,7 +231,7 @@ class TestEnterAndExit:
     ) -> None:
         mgr, _ = populated_cache
         fake_driver.preflight_override = PreflightReport(
-            findings=(PreflightFinding(severity="error", code="x", message="nope"),)
+            findings=(PreflightFinding(code="x", message="nope"),)
         )
         with pytest.raises(PreflightError):
             with Orchestrator(_plan(), cache_manager=mgr):
@@ -281,6 +281,7 @@ class TestEnterAndExit:
         del fake_driver
         mgr, _ = populated_cache
         plan = Plan(
+            "hello",
             MockHypervisor(
                 networks=[
                     Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
@@ -300,7 +301,6 @@ class TestEnterAndExit:
                     ),
                 ],
             ),
-            name="hello",
         )
         with pytest.raises(OrchestratorError, match="no NICs"):
             with Orchestrator(plan, cache_manager=mgr):
@@ -348,6 +348,7 @@ class TestHandleLeak:
 
 def _static_plan(ipv4: str) -> Plan:
     return Plan(
+        "hello",
         MockHypervisor(
             networks=[
                 Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)),
@@ -372,7 +373,6 @@ def _static_plan(ipv4: str) -> Plan:
                 ),
             ],
         ),
-        name="hello",
     )
 
 
@@ -381,6 +381,7 @@ def _two_static_nic_plan(nic_idx: int | None) -> Plan:
     # and only an index disambiguates the SSH target.
     comm = SSHCommunicator("u", nic_idx=nic_idx) if nic_idx is not None else SSHCommunicator("u")
     return Plan(
+        "hello",
         MockHypervisor(
             networks=[
                 Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)),
@@ -406,7 +407,6 @@ def _two_static_nic_plan(nic_idx: int | None) -> Plan:
                 ),
             ],
         ),
-        name="hello",
     )
 
 

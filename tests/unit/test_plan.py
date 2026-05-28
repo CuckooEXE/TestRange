@@ -46,22 +46,28 @@ class TestPlan:
             pools=[StoragePool("pool1", 32)],
             vms=[_basic_recipe()],
         )
-        plan = Plan(hyp, name="t")
+        plan = Plan("t", hyp)
         assert plan.hypervisor is hyp
+        assert plan.name == "t"
 
-    def test_empty_plan(self) -> None:
-        with pytest.raises(ValueError):
-            Plan()
+    def test_no_hypervisor(self) -> None:
+        with pytest.raises(ValueError, match="at least one hypervisor"):
+            Plan("t")
 
-    def test_name_required(self) -> None:
+    def test_name_missing_is_type_error(self) -> None:
+        # name is the leading positional; omitting it entirely is a TypeError.
+        with pytest.raises(TypeError):
+            Plan()  # type: ignore[call-arg]
+
+    def test_empty_name_rejected(self) -> None:
         hyp = MockHypervisor()
-        with pytest.raises(ValueError, match="required"):
-            Plan(hyp)
+        with pytest.raises(ValueError, match="non-empty name"):
+            Plan("", hyp)
 
     def test_multi_hypervisor_not_supported(self) -> None:
         hyp = MockHypervisor()
         with pytest.raises(NotImplementedError):
-            Plan(hyp, hyp)
+            Plan("t", hyp, hyp)
 
 
 class TestMockHypervisor:

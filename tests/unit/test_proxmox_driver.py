@@ -170,6 +170,7 @@ def _vm(name: str = "web", *, addr: _Addr = None, comm: Communicator | None = No
 
 def _plan(switch: Switch, *, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
     return Plan(
+        "t",
         ProxmoxHypervisor(
             host="pve.example",
             password="pw",
@@ -178,7 +179,6 @@ def _plan(switch: Switch, *, addr: _Addr = None, comm: Communicator | None = Non
             pools=[StoragePool("pool1", 8)],
             vms=[_vm(addr=addr, comm=comm)],
         ),
-        name="t",
     )
 
 
@@ -582,7 +582,7 @@ class TestPreflight:
             "sw1", Network("netA"), cidr="10.0.0.0/24", uplink="vmbr9", sidecar=Sidecar(nat=True)
         )
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")))
-        assert "proxmox-uplink-bridge-missing" in {f.code for f in report.errors}
+        assert "proxmox-uplink-bridge-missing" in {f.code for f in report.findings}
 
     def test_build_switch_uplink_bridge_is_checked(self) -> None:
         # The transient build switch's uplink (resolved from build_switch) is verified too.
@@ -591,32 +591,27 @@ class TestPreflight:
             "build", Network("b"), cidr="10.97.99.0/24", uplink="vmbr9", sidecar=Sidecar(nat=True)
         )
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")), build_switch=build)
-        assert "proxmox-uplink-bridge-missing" in {f.code for f in report.errors}
+        assert "proxmox-uplink-bridge-missing" in {f.code for f in report.findings}
 
     def test_mgmt_is_rejected(self) -> None:
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", mgmt=True)
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")))
-        assert "mgmt-unsupported" in {f.code for f in report.errors}
+        assert "mgmt-unsupported" in {f.code for f in report.findings}
 
     def test_native_communicator_ok_with_qga(self) -> None:
-        # PVE-4 wired QGA → full native caps, so a NativeCommunicator passes.
+        # A NativeCommunicator plan has no extra preflight gate; it passes clean.
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24")
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24"), comm=NativeCommunicator()))
         assert bool(report), report.render()
 
     def test_dhcp_addressing_ok_with_qga(self) -> None:
-        # read_file capability (QGA) lets the sidecar lease file be read.
+        # A DHCP-addressed plan preflights clean.
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
         report = self._run(_plan(sw, addr=DHCPAddr()))
         assert bool(report), report.render()
-
-    def test_native_capabilities_full_with_qga(self) -> None:
-        assert _driver().native_guest_capabilities() == frozenset(
-            {"execute", "read_file", "write_file"}
-        )
 
     def test_import_content_missing_is_rejected(self) -> None:
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24")
         client = _FakeClient(content="images,iso,vztmpl")  # no 'import'
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")), client=client)
-        assert "proxmox-import-content-missing" in {f.code for f in report.errors}
+        assert "proxmox-import-content-missing" in {f.code for f in report.findings}

@@ -41,6 +41,7 @@ def _plan(*, data_disks: int = 1) -> Plan:
         devices.append(HardDrive("pool1", 16))
     devices.append(NetworkIface("netA", addr=DHCPAddr()))
     return Plan(
+        "hello",
         MockHypervisor(
             networks=[
                 Switch(
@@ -59,7 +60,6 @@ def _plan(*, data_disks: int = 1) -> Plan:
                 ),
             ],
         ),
-        name="hello",
     )
 
 

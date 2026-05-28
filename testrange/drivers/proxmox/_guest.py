@@ -2,9 +2,9 @@
 
 The native in-guest channel: QGA over the PVE REST API. Unauthenticated (no
 guest credentials, matching the QGA contract — so the ABC's ``native_guest_*``
-accessors stay credential-free). Wiring these flips the driver's
-:func:`native_guest_capabilities` to the full set, which unblocks
-``NativeCommunicator`` and the sidecar DHCP-lease readback on Proxmox.
+accessors stay credential-free). Wiring these makes all three ``native_guest_*``
+accessors live, which unblocks ``NativeCommunicator`` and the sidecar
+DHCP-lease readback on Proxmox.
 
 Each ``make_*`` returns a VM-bound callable matching the corresponding
 ``guest_io`` Protocol; the orchestrator binds them onto ``NativeCommunicator``.
@@ -38,8 +38,6 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from testrange.drivers.proxmox._client import ProxmoxClient
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-
-CAPABILITIES = frozenset({"execute", "read_file", "write_file"})
 
 _POLL_INTERVAL_S = 0.25
 # PVE agent/file-write caps `content` length; base64 inflates by ~4/3, so the

@@ -38,9 +38,7 @@ from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
-    managed_build_egress_findings,
     mgmt_unsupported_findings,
-    native_capability_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -210,13 +208,8 @@ class ProxmoxDriver(HypervisorDriver):
         type the upload path needs) land with PVE-3 alongside ``_storage``.
         """
         del cache_manager
-        findings: list[PreflightFinding] = list(
-            native_capability_findings(plan, self.native_guest_capabilities())
-        )
-        findings.extend(mgmt_unsupported_findings(plan))
-        findings.extend(
-            managed_build_egress_findings(plan, supported=self.supports_managed_build_egress)
-        )
+        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
+        findings.extend(self.managed_build_egress_findings(plan))
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))
@@ -235,7 +228,6 @@ class ProxmoxDriver(HypervisorDriver):
             return ()
         return (
             PreflightFinding(
-                severity="error",
                 code="proxmox-import-content-missing",
                 message=(
                     f"storage {storage!r} does not enable the 'import' content type "
@@ -276,7 +268,6 @@ class ProxmoxDriver(HypervisorDriver):
         }
         return tuple(
             PreflightFinding(
-                severity="error",
                 code="proxmox-uplink-bridge-missing",
                 message=(
                     f"uplink {name!r} is not an existing bridge on node "
@@ -409,9 +400,6 @@ class ProxmoxDriver(HypervisorDriver):
         return _vm.get_vm_power_state(self._client, backend_name)
 
     # -- native guest agent (PVE-4; QGA via _guest) ------------------------
-
-    def native_guest_capabilities(self) -> frozenset[str]:
-        return _guest.CAPABILITIES
 
     def native_guest_execute(self, backend_name: str) -> GuestExec:
         return _guest.make_execute(self._client, backend_name)

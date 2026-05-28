@@ -27,9 +27,7 @@ from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
-    managed_build_egress_findings,
     mgmt_unsupported_findings,
-    native_capability_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -132,18 +130,13 @@ class LibvirtDriver(HypervisorDriver):
     ) -> PreflightReport:
         """Plan-side read-only checks.
 
-        Runs the cross-driver findings (native-agent capability, mgmt gating,
-        managed-egress capability). Live libvirt-side checks (backing pool
-        present, uplink bridge present) land with their phases (storage / L2).
+        Runs the cross-driver findings (mgmt gating, managed-egress
+        capability). Live libvirt-side checks (backing pool present, uplink
+        bridge present) land with their phases (storage / L2).
         """
         del cache_manager, build_switch
-        findings: list[PreflightFinding] = list(
-            native_capability_findings(plan, self.native_guest_capabilities())
-        )
-        findings.extend(mgmt_unsupported_findings(plan))
-        findings.extend(
-            managed_build_egress_findings(plan, supported=self.supports_managed_build_egress)
-        )
+        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
+        findings.extend(self.managed_build_egress_findings(plan))
         return PreflightReport(findings=tuple(findings))
 
     # -- naming (pure) -----------------------------------------------------

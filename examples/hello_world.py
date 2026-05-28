@@ -36,6 +36,7 @@ from testrange.vms import VMRecipe, VMSpec
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
+    "hello-world",
     ProxmoxHypervisor(
         host="40.160.34.83",
         password="Target123!",
@@ -81,7 +82,6 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="hello-world",
 )
 
 

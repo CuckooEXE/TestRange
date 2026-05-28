@@ -1,8 +1,8 @@
 """MockDriver + the new ABC contracts it exercises.
 
 Covers the switch-ownership L2 boundary (create_switch / no bridge methods),
-the native-agent capability declaration + preflight gating, and the pool
-minimum-capacity preflight check.
+mgmt + managed-build-egress preflight gating, and the pool minimum-capacity
+preflight check.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager
-from testrange.communicators import Communicator, NativeCommunicator, SSHCommunicator
+from testrange.communicators import Communicator, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
@@ -23,7 +23,7 @@ from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
-from testrange.preflight import mgmt_unsupported_findings, native_capability_findings
+from testrange.preflight import mgmt_unsupported_findings
 from testrange.vms import VMRecipe, VMSpec
 
 _Addr = DHCPAddr | StaticAddr | None
@@ -45,6 +45,7 @@ def _vm(name: str = "web", *, addr: _Addr = None, comm: Communicator | None = No
 
 def _plan(*, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
     return Plan(
+        "t",
         MockHypervisor(
             networks=[
                 Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
@@ -52,7 +53,6 @@ def _plan(*, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
             pools=[StoragePool("pool1", 32)],
             vms=[_vm(addr=addr, comm=comm)],
         ),
-        name="t",
     )
 
 
@@ -142,28 +142,6 @@ class TestDiskPrimitives:
         assert dest.read_bytes() == Path(ref).read_bytes()
 
 
-class TestNativeCapabilities:
-    def test_mock_declares_all_three(self) -> None:
-        assert MockDriver().native_guest_capabilities() == frozenset(
-            {"execute", "read_file", "write_file"}
-        )
-
-    def test_native_communicator_gap_is_error(self) -> None:
-        plan = _plan(addr=StaticAddr("10.0.0.100"), comm=NativeCommunicator())
-        findings = native_capability_findings(plan, frozenset())
-        assert any(f.code == "native-agent-missing-ops" and f.severity == "error" for f in findings)
-
-    def test_native_communicator_satisfied(self) -> None:
-        plan = _plan(addr=StaticAddr("10.0.0.100"), comm=NativeCommunicator())
-        full = frozenset({"execute", "read_file", "write_file"})
-        assert native_capability_findings(plan, full) == ()
-
-    def test_dhcp_discovery_requires_read_file(self) -> None:
-        plan = _plan(addr=DHCPAddr())  # SSH comm, DHCP NIC -> needs lease read
-        findings = native_capability_findings(plan, frozenset({"execute", "write_file"}))
-        assert any(f.code == "dhcp-discovery-unsupported" for f in findings)
-
-
 class TestBuildResultSink:
     """CORE-5: the reference build-result sink (live byte generator)."""
 
@@ -213,18 +191,17 @@ class TestMgmtGating:
 
     def _mgmt_plan(self) -> Plan:
         return Plan(
+            "t",
             MockHypervisor(
                 networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", mgmt=True)],
                 pools=[StoragePool("pool1", 32)],
                 vms=[_vm()],
             ),
-            name="t",
         )
 
     def test_mgmt_switch_is_error(self) -> None:
         findings = mgmt_unsupported_findings(self._mgmt_plan())
         assert [f.code for f in findings] == ["mgmt-unsupported"]
-        assert findings[0].severity == "error"
 
     def test_no_mgmt_is_clean(self) -> None:
         assert mgmt_unsupported_findings(_plan()) == ()
@@ -239,7 +216,7 @@ class TestMgmtGating:
             build_switch=resolve_build_switch(None)[0],
         )
         assert bool(report) is False
-        assert any(f.code == "mgmt-unsupported" for f in report.errors)
+        assert any(f.code == "mgmt-unsupported" for f in report.findings)
 
 
 class TestManagedBuildEgressGating:
@@ -247,6 +224,7 @@ class TestManagedBuildEgressGating:
 
     def _managed_plan(self) -> Plan:
         return Plan(
+            "t",
             MockHypervisor(
                 networks=[
                     Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
@@ -255,7 +233,6 @@ class TestManagedBuildEgressGating:
                 vms=[_vm()],
                 build_switch=ManagedBuildSwitch(uplink="vmbr9"),
             ),
-            name="t",
         )
 
     def test_mock_does_not_support_managed_egress(self) -> None:
@@ -273,7 +250,7 @@ class TestManagedBuildEgressGating:
             build_switch=resolve_build_switch(plan.hypervisor.build_switch)[0],
         )
         assert bool(report) is False
-        assert any(f.code == "managed-build-egress-unsupported" for f in report.errors)
+        assert any(f.code == "managed-build-egress-unsupported" for f in report.findings)
 
 
 class TestPoolCapacityPreflight:
@@ -292,8 +269,8 @@ class TestPoolCapacityPreflight:
         report = self._preflight(
             driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path
         )
-        assert not report  # error-level finding -> falsy report
-        assert any(f.code == "pool-capacity" for f in report.errors)  # type: ignore[attr-defined]
+        assert not report  # a finding -> falsy report
+        assert any(f.code == "pool-capacity" for f in report.findings)  # type: ignore[attr-defined]
 
     def test_pool_within_capacity_clean(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

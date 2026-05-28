@@ -61,6 +61,7 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
 
 
 PLAN = Plan(
+    "network-modes",
     ProxmoxHypervisor(
         host="40.160.34.83",
         password="Target123!",
@@ -107,7 +108,6 @@ PLAN = Plan(
             _vm("both-vm", "both-net", "10.53.0.100"),
         ],
     ),
-    name="network-modes",
 )
 
 

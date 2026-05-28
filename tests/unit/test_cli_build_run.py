@@ -35,6 +35,7 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
+    "hello",
     MockHypervisor(
         networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))],
         pools=[StoragePool("pool1", 32)],
@@ -49,7 +50,6 @@ PLAN = Plan(
             communicator=SSHCommunicator("u"),
         )],
     ),
-    name="hello",
 )
 
 def test_ok(orch):
@@ -75,6 +75,7 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
+    "data-disk-mock",
     MockHypervisor(
         networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))],
         pools=[StoragePool("pool1", 64)],
@@ -89,7 +90,6 @@ PLAN = Plan(
             communicator=SSHCommunicator("u"),
         )],
     ),
-    name="data-disk-mock",
 )
 
 def test_ok(orch):

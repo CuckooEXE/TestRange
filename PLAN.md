@@ -520,9 +520,10 @@ creds — ADR-0008 §2) — returning a VM-bound callable typed as the matching
 `NativeCommunicator` (ADR-0008 §7: renamed from `QGACommunicator`, since the
 shim is backend-agnostic) takes those three callables in `bind` and delegates;
 it imports nothing driver-side. The orchestrator is the broker — it pulls the
-callables off the driver and hands them over. The driver declares which ops it
-supports via `native_guest_capabilities()`, and preflight fails loud on a gap
-(ADR-0008 §3).
+callables off the driver and hands them over. A backend that can't perform an
+op leaves that `native_guest_*` accessor at its default (raises `DriverError`);
+a per-op preflight capability gate is deferred until a backend actually lacks an
+op (e.g. Hyper-V / WinRM) — see CORE-16.
 
 Loose callables, not a bundle object: a backend might not expose every
 operation, and three independent callables leave room for that without a rigid
@@ -553,8 +554,8 @@ surfaces here.
 #### Where it lives (landed)
 
 `testrange/guest_io.py` (shared Protocols, also §19), `exceptions.py`
-(`GuestAgentError`), `drivers/base.py` (the `native_guest_*` accessors +
-`native_guest_capabilities`), `drivers/mock.py` (reference transport),
+(`GuestAgentError`), `drivers/base.py` (the `native_guest_*` accessors),
+`drivers/mock.py` (reference transport),
 `communicators/native.py` (`NativeCommunicator`), the orchestrator bind branch
 in `run_phase`, plus `examples/native_agent.py` and unit coverage
 (`test_native_communicator.py`, `test_mock_driver.py`, `test_drivers_base.py`).
@@ -1083,8 +1084,8 @@ but empty).
   (`proxmox-import-content-missing`).
 - **`PVE-4` — QGA native transport (`_guest`).** `agent/exec` (pid + poll
   `exec-status`), `file-read` (→ bytes), `file-write` (binary-safe via base64 +
-  `encode=0`, single-write cap raises). Flips `native_guest_capabilities()` to
-  the full set, unblocking `NativeCommunicator` + sidecar DHCP-lease readback.
+  `encode=0`, single-write cap raises). Makes all three `native_guest_*`
+  accessors live, unblocking `NativeCommunicator` + sidecar DHCP-lease readback.
 - **`PVE-5` — snapshots (`_vm`).** create (`vmstate=1` for memory), list
   (excludes PVE's synthetic `current`, oldest-first), delete (no-op if absent),
   rollback; duplicate/missing raise `DriverError`. **Live-validated.**

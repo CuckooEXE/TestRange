@@ -20,12 +20,12 @@ the full contract. The deviation analysis behind this shape is
 2. **Subclass `HypervisorDriver`.** Implement every abstract method:
 
    - `connect()` / `disconnect()` — connection lifecycle.
-   - `preflight(plan, *, cache_manager, install_switch)` — **read-only** checks.
-     Must not mutate backend state. Call
-     `preflight.native_capability_findings(plan, self.native_guest_capabilities())`
-     so a VM needing a native-agent op the backend lacks fails here, not
-     mid-run; verify each pool's `size_gb` fits its backing store; include
-     `install_switch` in subnet-overlap checks.
+   - `preflight(plan, *, cache_manager, build_switch)` — **read-only** checks.
+     Must not mutate backend state. Call `preflight.mgmt_unsupported_findings(plan)`
+     and `self.managed_build_egress_findings(plan)` to reject `mgmt=True` and a
+     `ManagedBuildSwitch` this backend can't realize; verify each pool's
+     `size_gb` fits its backing store; include `build_switch` in subnet-overlap
+     checks.
    - `compose_resource_name(run_id, kind, name)` — deterministic backend-safe
      name.
    - `compose_mac(plan_name, vm_name, nic_idx)` — stable MAC under your OUI.
@@ -59,14 +59,13 @@ the full contract. The deviation analysis behind this shape is
      `get_vm_power_state`. (There is no `get_lease_ip`: DHCP leases live in the
      per-Switch sidecar, which the orchestrator reads via the native-guest
      transport below — not through the driver.)
-   - Native guest transport (optional capability): override
-     `native_guest_capabilities()` to return the subset of
-     `{"execute","read_file","write_file"}` you support, plus
-     `native_guest_execute` / `native_guest_read_file` /
-     `native_guest_write_file`. These back `NativeCommunicator` and the
-     sidecar lease reads. (A backend whose guest channel needs per-call guest
-     credentials — VMware Tools, Hyper-V PowerShell Direct — adds an optional
-     `credential` keyword to these accessors when it lands; see ADR-0008.)
+   - Native guest transport (optional): override the `native_guest_execute` /
+     `native_guest_read_file` / `native_guest_write_file` accessors for the ops
+     your backend supports (each defaults to raising `DriverError`). These back
+     `NativeCommunicator` and the sidecar lease reads. (A backend whose guest
+     channel needs per-call guest credentials — VMware Tools, Hyper-V
+     PowerShell Direct — adds an optional `credential` keyword to these
+     accessors when it lands; see ADR-0008.)
    - Snapshots: `create_snapshot`, `list_snapshots`, `delete_snapshot`,
      `restore_snapshot`. Raise `DriverError` for `mem=True` if unsupported.
 

@@ -93,3 +93,42 @@ class TestReplSubcommand:
         with pytest.raises(SystemExit) as exc:
             cli.main(["repl", "/nonexistent/plan.py"])
         assert exc.value.code == 2
+
+
+class TestTestsValidation:
+    """_load_plan_module rejects a malformed TESTS up front (exit 2)."""
+
+    def _write(self, tmp_path: Path, tests_src: str) -> Path:
+        f = tmp_path / "plan.py"
+        f.write_text(
+            "from testrange import Plan\n"
+            "from testrange.drivers.mock import MockHypervisor\n"
+            'PLAN = Plan("t", MockHypervisor())\n'
+            f"{tests_src}\n"
+        )
+        return f
+
+    def test_valid_tests_ok(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        f = self._write(tmp_path, "def t(orch):\n    pass\nTESTS = [t]")
+        assert cli.main(["describe", str(f)]) == 0
+
+    def test_not_a_list(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        f = self._write(tmp_path, "TESTS = 'nope'")
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["describe", str(f)])
+        assert exc.value.code == 2
+        assert "must be a list" in capsys.readouterr().err
+
+    def test_entry_not_callable(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        f = self._write(tmp_path, "TESTS = [123]")
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["describe", str(f)])
+        assert exc.value.code == 2
+        assert "not callable" in capsys.readouterr().err
+
+    def test_entry_wrong_arity(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        f = self._write(tmp_path, "def t():\n    pass\nTESTS = [t]")
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["describe", str(f)])
+        assert exc.value.code == 2
+        assert "one argument" in capsys.readouterr().err

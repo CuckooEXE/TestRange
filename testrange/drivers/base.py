@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NewType
 
 from testrange.exceptions import DriverError
-from testrange.preflight import PreflightReport
+from testrange.preflight import PreflightFinding, PreflightReport
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
@@ -94,6 +94,38 @@ class HypervisorDriver(ABC):
         CIDR-overlap checks so a colliding user Switch is caught here rather
         than blowing up at build time.
         """
+
+    def managed_build_egress_findings(self, plan: Plan) -> tuple[PreflightFinding, ...]:
+        """Reject a ``ManagedBuildSwitch`` on a backend that can't realize its egress.
+
+        A ``ManagedBuildSwitch`` asks the driver to *manufacture* and fence the
+        build network's internet egress (ADR-0014). A backend with no host-NAT
+        primitive (e.g. ESXi) cannot, and must reject it at preflight rather
+        than bring up a build network with no way out. The capability is this
+        driver's own ``supports_managed_build_egress`` class attr, so the gate
+        is a concrete shared method that reads ``self`` — not a free function
+        taking the flag as a kwarg. Subclasses call it from ``preflight``; at
+        most one finding.
+        """
+        from testrange.networks.base import ManagedBuildSwitch
+
+        build_switch = getattr(plan.hypervisor, "build_switch", None)
+        if self.supports_managed_build_egress or not isinstance(build_switch, ManagedBuildSwitch):
+            return ()
+        return (
+            PreflightFinding(
+                code="managed-build-egress-unsupported",
+                message=(
+                    f"build_switch is a ManagedBuildSwitch(uplink={build_switch.uplink!r}), but "
+                    "this backend cannot manufacture managed build egress"
+                ),
+                fix_hint=(
+                    "use a plain Switch build_switch on an uplink that already has its own "
+                    "NAT/route, or run on a backend that supports managed build egress "
+                    "(e.g. Proxmox)"
+                ),
+            ),
+        )
 
     @abstractmethod
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str: ...
@@ -303,28 +335,17 @@ class HypervisorDriver(ABC):
     # dnsmasq lease file, not in anything the hypervisor manages. The
     # orchestrator reads it over the native guest-file transport below.
 
-    # --- Native guest agent (optional capability) ---------------------
+    # --- Native guest agent (optional) --------------------------------
     # A backend with a native in-guest agent (QEMU Guest Agent, VMware
     # Tools, Hyper-V integration) overrides these to return VM-bound
-    # callables and declares which ops it supports via
-    # ``native_guest_capabilities``. They are non-abstract: the default for
-    # a backend with no native agent is an empty capability set and a clean
-    # DriverError, not a missing method.
+    # callables. They are non-abstract: the default for a backend with no
+    # native agent is a clean DriverError, not a missing method.
     #
     # NOTE: backends whose guest channel requires per-call guest OS
     # credentials (VMware Tools, Hyper-V PowerShell Direct) will add an
     # optional ``credential`` keyword to these accessors when that driver
     # lands (see ADR-0008); QGA-style agents need none, so the parameter is
     # deliberately not introduced before a backend exercises it.
-
-    def native_guest_capabilities(self) -> frozenset[str]:
-        """The native-agent ops this backend supports.
-
-        A subset of ``{"execute", "read_file", "write_file"}``. Preflight
-        checks it against each VM's communicator so a missing op fails loud
-        before run, not mid-run. Default: none.
-        """
-        return frozenset()
 
     def native_guest_execute(self, backend_name: str) -> GuestExec:
         """A VM-bound callable that runs a command in the guest via the

@@ -1,39 +1,37 @@
-"""Tests for PreflightFinding / PreflightReport and shared finding helpers."""
+"""Tests for PreflightFinding / PreflightReport and the shared finding gates."""
 
 from __future__ import annotations
 
 from testrange import Plan
-from testrange.drivers.mock import MockHypervisor
+from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
-from testrange.preflight import (
-    PreflightFinding,
-    PreflightReport,
-    managed_build_egress_findings,
-)
+from testrange.preflight import PreflightFinding, PreflightReport
+
+
+class _SupportingDriver(MockDriver):
+    """A driver that *can* realize managed build egress (Proxmox-like)."""
+
+    supports_managed_build_egress = True
 
 
 class TestReport:
-    def test_with_error(self) -> None:
-        r = PreflightReport(findings=(PreflightFinding(severity="error", code="x", message="m"),))
+    def test_a_finding_makes_the_report_falsy(self) -> None:
+        r = PreflightReport(findings=(PreflightFinding(code="x", message="m"),))
         assert bool(r) is False
-        assert len(r.errors) == 1
+        assert len(r.findings) == 1
 
-    def test_warning_only(self) -> None:
-        r = PreflightReport(findings=(PreflightFinding(severity="warning", code="x", message="m"),))
-        assert bool(r) is True
-        assert len(r.warnings) == 1
+    def test_empty_report_is_truthy(self) -> None:
+        assert bool(PreflightReport()) is True
 
     def test_merge(self) -> None:
-        a = PreflightReport(findings=(PreflightFinding(severity="error", code="a", message="a"),))
-        b = PreflightReport(findings=(PreflightFinding(severity="warning", code="b", message="b"),))
-        merged = a.merged(b)
-        assert len(merged.findings) == 2
+        a = PreflightReport(findings=(PreflightFinding(code="a", message="a"),))
+        b = PreflightReport(findings=(PreflightFinding(code="b", message="b"),))
+        assert len(a.merged(b).findings) == 2
 
     def test_render(self) -> None:
         r = PreflightReport(
             findings=(
                 PreflightFinding(
-                    severity="error",
                     code="cache_miss",
                     message="not in cache",
                     fix_hint="testrange cache add ...",
@@ -47,27 +45,28 @@ class TestReport:
 
 
 class TestManagedBuildEgressFindings:
-    def _plan(self, build_switch: object) -> Plan:
-        return Plan(MockHypervisor(build_switch=build_switch), name="t")  # type: ignore[arg-type]
+    """The egress gate is a driver method reading its own capability flag."""
 
-    def test_managed_unsupported_is_error(self) -> None:
-        findings = managed_build_egress_findings(
-            self._plan(ManagedBuildSwitch(uplink="vmbr9")), supported=False
+    def _plan(self, build_switch: object) -> Plan:
+        return Plan("t", MockHypervisor(build_switch=build_switch))  # type: ignore[arg-type]
+
+    def test_unsupported_backend_rejects_managed_build_switch(self) -> None:
+        findings = MockDriver().managed_build_egress_findings(
+            self._plan(ManagedBuildSwitch(uplink="vmbr9"))
         )
         assert [f.code for f in findings] == ["managed-build-egress-unsupported"]
-        assert findings[0].severity == "error"
 
-    def test_managed_supported_is_clean(self) -> None:
+    def test_supporting_backend_is_clean(self) -> None:
         assert (
-            managed_build_egress_findings(
-                self._plan(ManagedBuildSwitch(uplink="vmbr9")), supported=True
+            _SupportingDriver().managed_build_egress_findings(
+                self._plan(ManagedBuildSwitch(uplink="vmbr9"))
             )
             == ()
         )
 
     def test_plain_switch_is_clean_even_when_unsupported(self) -> None:
         plain = Switch("b", Network("n"), cidr="10.9.9.0/24", sidecar=Sidecar(dhcp=True))
-        assert managed_build_egress_findings(self._plan(plain), supported=False) == ()
+        assert MockDriver().managed_build_egress_findings(self._plan(plain)) == ()
 
     def test_no_build_switch_is_clean(self) -> None:
-        assert managed_build_egress_findings(self._plan(None), supported=False) == ()
+        assert MockDriver().managed_build_egress_findings(self._plan(None)) == ()

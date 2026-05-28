@@ -40,6 +40,7 @@ _CLIENT_PRIVATE_IP = "10.20.0.101"
 
 
 PLAN = Plan(
+    "private-public",
     ProxmoxHypervisor(
         host="40.160.34.83",
         password="Target123!",
@@ -153,7 +154,6 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="private-public",
 )
 
 

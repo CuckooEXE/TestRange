@@ -60,6 +60,7 @@ def setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CacheManager:
 
 def _plan() -> Plan:
     return Plan(
+        "hello",
         MockHypervisor(
             networks=[
                 Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
@@ -84,7 +85,6 @@ def _plan() -> Plan:
                 ),
             ],
         ),
-        name="hello",
     )
 
 

@@ -13,7 +13,7 @@ import pytest
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
-from testrange.communicators import NativeCommunicator, SSHCommunicator
+from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
@@ -49,6 +49,7 @@ def _vm(name: str = "web", *, comm: object | None = None) -> VMRecipe:
 
 def _plan(*, build_switch: object = None, comm: object | None = None) -> Plan:
     return Plan(
+        "t",
         LibvirtHypervisor(
             networks=[
                 Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
@@ -57,7 +58,6 @@ def _plan(*, build_switch: object = None, comm: object | None = None) -> Plan:
             vms=[_vm(comm=comm)],
             build_switch=build_switch,  # type: ignore[arg-type]
         ),
-        name="t",
     )
 
 
@@ -121,31 +121,22 @@ class TestNaming:
 class TestPreflight:
     def test_clean_plan_passes(self) -> None:
         report = LibvirtDriver(LibvirtConn()).preflight(
-            _plan(), cache_manager=None, build_switch=_BUILD_SW
-        )  # type: ignore[arg-type]
-        assert bool(report) is True
-
-    def test_native_communicator_without_agent_is_flagged(self) -> None:
-        # The QGA transport lands in BACKEND-1.5; until then native caps are empty,
-        # so a NativeCommunicator VM must be rejected at preflight, not mid-run.
-        report = LibvirtDriver(LibvirtConn()).preflight(
-            _plan(comm=NativeCommunicator()),
-            cache_manager=None,
-            build_switch=_BUILD_SW,  # type: ignore[arg-type]
+            _plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
         )
-        assert bool(report) is False
-        assert any(f.code == "native-agent-missing-ops" for f in report.errors)
+        assert bool(report) is True
 
     def test_managed_build_switch_rejected_until_realized(self) -> None:
         # supports_managed_build_egress is False until BACKEND-1.2.
         assert LibvirtDriver(LibvirtConn()).supports_managed_build_egress is False
         report = LibvirtDriver(LibvirtConn()).preflight(
             _plan(build_switch=ManagedBuildSwitch(uplink="virbr0")),
-            cache_manager=None,
-            build_switch=_BUILD_SW,  # type: ignore[arg-type]
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
         )
         assert bool(report) is False
-        assert any(f.code == "managed-build-egress-unsupported" for f in report.errors)
+        assert any(f.code == "managed-build-egress-unsupported" for f in report.findings)
 
 
 class TestUnimplementedSurfaceFailsLoud:

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import code
+import functools
 import importlib.util
+import inspect
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
@@ -34,33 +37,89 @@ from testrange.plan import Plan
 from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
 from testrange.vms.recipe import VMRecipe
 
+# A subcommand handler: takes the parsed args, returns a process exit code.
+Handler = Callable[[argparse.Namespace], int]
+
+
+class Exit(IntEnum):
+    """Process exit codes for the CLI (see ``cli-tool-design`` conventions)."""
+
+    OK = 0
+    FAILURE = 1  # a phase ran but failed: build/orchestrator error, test failures
+    USAGE = 2  # bad invocation: missing/invalid plan, preflight reject, cache miss
+    CLEANUP_ERRORS = 3  # cleanup ran but some resources would not tear down
+    INTERRUPTED = 130  # SIGINT (Ctrl-C) during a phase
+
 
 def _build_manager(args: argparse.Namespace) -> CacheManager:
     # Resolve the HTTP cache base URL from --cache. If unset, manager.http
-    # stays None and behavior matches v0.0.1. The flag is the only knob —
+    # stays None and the cache is local-only. The flag is the only knob —
     # no env var — so a `testrange` invocation is fully self-describing.
     url = getattr(args, "cache", None)
     http = HttpCache(url) if url else None
     return CacheManager(http=http)
 
 
+_PROBE = object()
+
+
+def _accepts_one_arg(fn: Any) -> bool:
+    """True if ``fn`` can be called with exactly one positional argument."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True  # un-introspectable (builtin / C callable) — don't reject
+    try:
+        sig.bind(_PROBE)
+    except TypeError:
+        return False
+    return True
+
+
+def _validate_tests(raw: object, path: str) -> list[Any]:
+    """Confirm ``TESTS`` is a list of one-arg callables (each receives the orch handle).
+
+    The runner calls every test as ``t(orch)`` (see ``run_tests``), so a
+    non-list ``TESTS`` or an entry that isn't callable-with-one-arg is a plan
+    bug we surface up front rather than at execution time.
+    """
+    if not isinstance(raw, list):
+        print(
+            f"error: {path}: TESTS must be a list of test functions, got {type(raw).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(Exit.USAGE)
+    for t in raw:
+        if not callable(t):
+            print(f"error: {path}: TESTS entry {t!r} is not callable", file=sys.stderr)
+            sys.exit(Exit.USAGE)
+        if not _accepts_one_arg(t):
+            name = getattr(t, "__name__", repr(t))
+            print(
+                f"error: {path}: test {name!r} must take exactly one argument "
+                "(the orchestrator handle)",
+                file=sys.stderr,
+            )
+            sys.exit(Exit.USAGE)
+    return raw
+
+
 def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     p = Path(path).resolve()
     if not p.exists():
         print(f"error: plan file not found: {path}", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(Exit.USAGE)
     spec = importlib.util.spec_from_file_location(f"_userplan_{p.stem}", p)
     if spec is None or spec.loader is None:
         print(f"error: cannot load plan module: {path}", file=sys.stderr)
-        sys.exit(2)
+        sys.exit(Exit.USAGE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     plan = getattr(module, "PLAN", None)
     if not isinstance(plan, Plan):
         print(f"error: {path} does not define a top-level PLAN: Plan(...)", file=sys.stderr)
-        sys.exit(2)
-    tests = getattr(module, "TESTS", [])
-    return plan, list(tests)
+        sys.exit(Exit.USAGE)
+    return plan, _validate_tests(getattr(module, "TESTS", []), path)
 
 
 def _build(args: argparse.Namespace) -> int:
@@ -70,18 +129,18 @@ def _build(args: argparse.Namespace) -> int:
         run_id = build_range(plan, cache_manager=mgr)
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
-        return 2
+        return Exit.USAGE
     except BuildFailedError as e:
         print(f"build failed: {e}", file=sys.stderr)
-        return 1
+        return Exit.FAILURE
     except OrchestratorError as e:
         print(f"build failed: {e}", file=sys.stderr)
-        return 1
+        return Exit.FAILURE
     except KeyboardInterrupt:
         print("interrupted; teardown attempted", file=sys.stderr)
-        return 130
+        return Exit.INTERRUPTED
     print(f"build complete; cache warmed (run_id={run_id})")
-    return 0
+    return Exit.OK
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -98,22 +157,22 @@ def _run(args: argparse.Namespace) -> int:
         )
     except BuildRequiredError as e:
         print(f"cache miss: {e}", file=sys.stderr)
-        return 2
+        return Exit.USAGE
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
-        return 2
+        return Exit.USAGE
     except BuildFailedError as e:
         print(f"build failed: {e}", file=sys.stderr)
-        return 1
+        return Exit.FAILURE
     except OrchestratorError as e:
         print(f"orchestrator failed: {e}", file=sys.stderr)
-        return 1
+        return Exit.FAILURE
     except KeyboardInterrupt:
         print("interrupted; teardown attempted", file=sys.stderr)
-        return 130
+        return Exit.INTERRUPTED
     for r in results:
         print(r.report_line())
-    return 0 if all(r.passed for r in results) else 1
+    return Exit.OK if all(r.passed for r in results) else Exit.FAILURE
 
 
 def _repl(args: argparse.Namespace) -> int:
@@ -140,14 +199,14 @@ def _repl(args: argparse.Namespace) -> int:
             )
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
-        return 2
+        return Exit.USAGE
     except OrchestratorError as e:
         print(f"orchestrator failed: {e}", file=sys.stderr)
-        return 1
+        return Exit.FAILURE
     except KeyboardInterrupt:
         print("interrupted; teardown attempted", file=sys.stderr)
-        return 130
-    return 0
+        return Exit.INTERRUPTED
+    return Exit.OK
 
 
 def _cleanup(args: argparse.Namespace) -> int:
@@ -156,28 +215,28 @@ def _cleanup(args: argparse.Namespace) -> int:
             results = list(cleanup_all(dry_run=args.dry_run))
             if not results:
                 print("(no runs)")
-                return 0
+                return Exit.OK
             print(format_cleanup_results(results))
-            return 3 if any(r.errors for r in results) else 0
+            return Exit.CLEANUP_ERRORS if any(r.errors for r in results) else Exit.OK
         if not args.run_id:
             print("error: cleanup requires <run-id> or --all", file=sys.stderr)
-            return 2
+            return Exit.USAGE
         r = cleanup_run(args.run_id, dry_run=args.dry_run)
         print(format_cleanup_results([r]))
-        return 3 if r.errors else 0
+        return Exit.CLEANUP_ERRORS if r.errors else Exit.OK
     except StateLockedError as e:
         print(f"error: {e}", file=sys.stderr)
-        return 1
+        return Exit.FAILURE
     except StateError as e:
         print(f"error: {e}", file=sys.stderr)
-        return 2
+        return Exit.USAGE
 
 
 def _describe(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     mgr = _build_manager(args)
     _print_describe(plan, tests, mgr)
-    return 0
+    return Exit.OK
 
 
 def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
@@ -278,54 +337,74 @@ def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
         print(f"CacheEntry references: {len(unique)} unique")
 
 
-def _cache(args: argparse.Namespace) -> int:
-    mgr = _build_manager(args)
-    sub = args.cache_subcommand
-    try:
-        if sub == "add":
-            # Goes through the broker so HTTP gets a mirror.
-            info = mgr.add(
-                args.source,
-                name=args.name,
-                description=args.description,
-            )
-            print(info.sha256)
-            return 0
-        if sub == "list":
-            # Local-only; HTTP has no listing protocol.
-            _print_list(mgr.local.list_entries())
-            return 0
-        if sub == "del":
-            info = mgr.delete(args.identifier)
-            print(f"deleted {info.short_sha}")
-            return 0
-        if sub == "rename":
-            info = mgr.add_name(args.identifier, args.new_name)
-            print(f"{info.short_sha}: names now {list(info.names)}")
-            return 0
-        if sub == "forget-name":
-            info = mgr.forget_name(args.name)
-            print(f"{info.short_sha}: names now {list(info.names)}")
-            return 0
-        if sub == "push":
-            info = mgr.push(args.identifier)
-            print(f"pushed {info.short_sha} → http cache")
-            return 0
-        if sub == "pull":
-            info = mgr.pull(args.identifier)
-            print(f"pulled {info.short_sha} ← http cache")
-            return 0
-    except CacheMissError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    except CacheError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    except TestRangeError as e:  # pragma: no cover (broad safety net)
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    print(f"error: unknown cache subcommand {sub!r}", file=sys.stderr)
-    return 2
+def _cache_errors(fn: Handler) -> Handler:
+    """Map the cache exception family onto exit codes, uniformly for every cache op."""
+
+    @functools.wraps(fn)
+    def wrapper(args: argparse.Namespace) -> int:
+        try:
+            return fn(args)
+        except CacheMissError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return Exit.USAGE
+        except CacheError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return Exit.FAILURE
+        except TestRangeError as e:  # pragma: no cover (broad safety net)
+            print(f"error: {e}", file=sys.stderr)
+            return Exit.FAILURE
+
+    return wrapper
+
+
+@_cache_errors
+def _cache_add(args: argparse.Namespace) -> int:
+    # Goes through the broker so the HTTP tier gets a mirror.
+    info = _build_manager(args).add(args.source, name=args.name, description=args.description)
+    print(info.sha256)
+    return Exit.OK
+
+
+@_cache_errors
+def _cache_list(args: argparse.Namespace) -> int:
+    # Local-only; the HTTP tier has no listing protocol.
+    _print_list(_build_manager(args).local.list_entries())
+    return Exit.OK
+
+
+@_cache_errors
+def _cache_del(args: argparse.Namespace) -> int:
+    info = _build_manager(args).delete(args.identifier)
+    print(f"deleted {info.short_sha}")
+    return Exit.OK
+
+
+@_cache_errors
+def _cache_rename(args: argparse.Namespace) -> int:
+    info = _build_manager(args).add_name(args.identifier, args.new_name)
+    print(f"{info.short_sha}: names now {list(info.names)}")
+    return Exit.OK
+
+
+@_cache_errors
+def _cache_forget_name(args: argparse.Namespace) -> int:
+    info = _build_manager(args).forget_name(args.name)
+    print(f"{info.short_sha}: names now {list(info.names)}")
+    return Exit.OK
+
+
+@_cache_errors
+def _cache_push(args: argparse.Namespace) -> int:
+    info = _build_manager(args).push(args.identifier)
+    print(f"pushed {info.short_sha} → http cache")
+    return Exit.OK
+
+
+@_cache_errors
+def _cache_pull(args: argparse.Namespace) -> int:
+    info = _build_manager(args).pull(args.identifier)
+    print(f"pulled {info.short_sha} ← http cache")
+    return Exit.OK
 
 
 def _print_list(entries: Iterable[CacheEntryInfo]) -> None:
@@ -384,30 +463,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_add.add_argument("source", help="local path or http(s):// URL")
     p_add.add_argument("--name", default=None, help="optional pretty-name alias")
     p_add.add_argument("--description", default=None, help="optional description")
+    p_add.set_defaults(func=_cache_add)
 
-    cache_sub.add_parser("list", help="list cached entries")
+    p_list = cache_sub.add_parser("list", help="list cached entries")
+    p_list.set_defaults(func=_cache_list)
 
     p_del = cache_sub.add_parser("del", help="delete an entry by sha or name")
     p_del.add_argument("identifier", help="content sha (or prefix >= 16 hex) or pretty-name")
+    p_del.set_defaults(func=_cache_del)
 
     p_rename = cache_sub.add_parser("rename", help="add a pretty-name alias to an entry")
     p_rename.add_argument("identifier", help="content sha or existing name")
     p_rename.add_argument("new_name", help="new alias to attach")
+    p_rename.set_defaults(func=_cache_rename)
 
     p_forget = cache_sub.add_parser("forget-name", help="remove a single alias")
     p_forget.add_argument("name", help="alias to remove")
+    p_forget.set_defaults(func=_cache_forget_name)
 
     p_push = cache_sub.add_parser(
         "push", help="copy a local entry to the HTTP cache (requires --cache)"
     )
     p_push.add_argument("identifier", help="content sha or pretty-name")
+    p_push.set_defaults(func=_cache_push)
 
     p_pull = cache_sub.add_parser(
         "pull", help="fetch an entry from the HTTP cache into local (requires --cache)"
     )
     p_pull.add_argument("identifier", help="content sha or pretty-name")
-
-    p_cache.set_defaults(func=_cache)
+    p_pull.set_defaults(func=_cache_pull)
 
     p_cleanup = sub.add_parser("cleanup", help="tear down resources from a previous run")
     p_cleanup.add_argument("run_id", nargs="?", default=None, help="run id to clean up")
