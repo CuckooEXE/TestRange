@@ -280,9 +280,10 @@ def _describe(args: argparse.Namespace) -> int:
 def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
     """Print the resolved backend binding (or UNBOUND for a generic plan).
 
-    The password is **masked** by default: ``describe`` output is the thing most
-    likely to be pasted into a report or PR, so the value is never printed —
-    only whether one is set.
+    The per-backend field list comes from ``profile.describe_fields()`` when a
+    profile is supplied (each backend renders its own representative bits, with
+    passwords masked); the pinned-no-profile path falls back to the four common
+    proxmox-shaped attributes for back-compat.
     """
     hyp = plan.hypervisor
     if not is_pinned(hyp) and profile is None:
@@ -296,19 +297,22 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
         print()
         return
 
-    # Connection details come from the profile when one is supplied, else from
-    # the concrete entry. The driver itself is not introspected — backends
-    # differ in what connection surface they expose.
-    src: Any = profile if profile is not None else hyp
-    scheme = profile.driver if profile is not None else scheme_for_hypervisor(hyp)
+    scheme = profile.scheme if profile is not None else scheme_for_hypervisor(hyp)
     print("  backend:")
     print(f"    driver: {scheme} ({resolved.driver.DRIVER_NAME})")
-    for label in ("host", "port", "node", "user"):
-        value = getattr(src, label, None)
-        if value not in (None, ""):
+    if profile is not None:
+        for label, value in profile.describe_fields():
             print(f"    {label}: {value}")
-    password = getattr(src, "password", "") or ""
-    print(f"    password: {'***set***' if password else '(unset)'}")
+    else:
+        # Pinned-no-profile fallback: read the four common proxmox-shaped attrs
+        # off the entry. New-backend pinned entries that don't expose these
+        # simply skip them.
+        for attr in ("host", "port", "node", "user"):
+            attr_value = getattr(hyp, attr, None)
+            if attr_value not in (None, ""):
+                print(f"    {attr}: {attr_value}")
+        password = getattr(hyp, "password", "") or ""
+        print(f"    password: {'***set***' if password else '(unset)'}")
     bs = resolved.build_switch
     if bs is None:
         print("    build egress: none (isolated build network)")

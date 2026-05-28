@@ -14,15 +14,16 @@ The pin/override matrix (``pinned = is_pinned(plan.hypervisor)``):
 ==================  ====================================================
 concrete + none     today's path: ``driver_for(hyp)``; build egress and
                     teardown URI from the concrete entry (full back-compat).
-concrete + given    profile.driver MUST equal the entry's scheme, else a
+concrete + given    profile.scheme MUST equal the entry's scheme, else a
                     hard error; the driver is built from the profile
-                    connection; build egress from the profile; topology
-                    still from the entry. (Profile overrides *connection
-                    only* — a concrete entry pins the driver.)
+                    connection (``profile.build_driver()``); build egress
+                    from the profile; topology still from the entry.
+                    (Profile overrides *connection only* — a concrete entry
+                    pins the driver.)
 generic  + none     hard error: the plan is backend-agnostic; pass
                     ``--connect <profile>``.
-generic  + given    driver from ``driver_for_profile``; build egress from
-                    the profile.
+generic  + given    driver from ``profile.build_driver()``; build egress
+                    from the profile.
 ==================  ====================================================
 
 Compatibility preflight is three layers; this module owns the first two:
@@ -39,7 +40,6 @@ from typing import TYPE_CHECKING
 
 from testrange.drivers import (
     driver_for,
-    driver_for_profile,
     is_pinned,
     scheme_for_hypervisor,
 )
@@ -92,14 +92,14 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
 
     if pinned and profile is not None:
         scheme = scheme_for_hypervisor(hyp)
-        if profile.driver != scheme:
+        if profile.scheme != scheme:
             raise DriverError(
-                f"connection profile selects driver {profile.driver!r}, but the plan pins "
+                f"connection profile selects driver {profile.scheme!r}, but the plan pins "
                 f"a {type(hyp).__name__} ({scheme!r} backend); a concrete Hypervisor entry "
                 f"pins the driver — a profile may override the connection only, not the driver. "
                 f"Use the generic `Hypervisor` for a portable plan, or a {scheme!r} profile here."
             )
-        driver = driver_for_profile(profile.to_mapping())
+        driver = profile.build_driver()
         return ResolvedBackend(
             driver=driver,
             build_switch=profile.build_switch,
@@ -114,7 +114,7 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
 
     # generic + given
     assert profile is not None  # narrowed by the branches above (mypy)
-    driver = driver_for_profile(profile.to_mapping())
+    driver = profile.build_driver()
     return ResolvedBackend(
         driver=driver,
         build_switch=profile.build_switch,

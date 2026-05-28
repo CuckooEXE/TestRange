@@ -14,7 +14,6 @@ live; the L2 / storage / VM / agent / snapshot surface raises a clear
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
@@ -113,15 +112,6 @@ class LibvirtDriver(HypervisorDriver):
     @classmethod
     def from_uri(cls, uri: str) -> LibvirtDriver:
         return cls(LibvirtConn.from_uri(uri))
-
-    @classmethod
-    def from_profile(cls, profile: Mapping[str, Any]) -> LibvirtDriver:
-        return cls(
-            LibvirtConn(
-                libvirt_uri=str(profile.get("uri", "qemu:///system")),
-                backing_pool=str(profile.get("backing_pool", "default")),
-            )
-        )
 
     @property
     def uri(self) -> str:
@@ -263,7 +253,6 @@ register(
     scheme="libvirt",
     from_hypervisor=LibvirtDriver.from_hypervisor,
     from_uri=LibvirtDriver.from_uri,
-    from_profile=LibvirtDriver.from_profile,
 )
 
 

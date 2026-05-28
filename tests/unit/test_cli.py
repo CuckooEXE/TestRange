@@ -157,7 +157,7 @@ class TestConnectFlag:
         from testrange.connect import BackendProfile
 
         assert isinstance(captured["profile"], BackendProfile)
-        assert captured["profile"].driver == "mock"
+        assert captured["profile"].scheme == "mock"
 
     def test_build_passes_profile_through(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

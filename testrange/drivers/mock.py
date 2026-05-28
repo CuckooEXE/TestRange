@@ -16,15 +16,17 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from testrange.communicators.base import ExecResult
+from testrange.connect import BackendProfile, register_profile
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
+from testrange.networks.base import ManagedBuildSwitch
 from testrange.networks.sidecar import LEASEFILE
 from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
@@ -37,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import ManagedBuildSwitch, ManagedEgress, Network, Switch
+    from testrange.networks.base import ManagedEgress, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
@@ -151,22 +153,6 @@ class MockDriver(HypervisorDriver):
     @classmethod
     def from_uri(cls, uri: str) -> MockDriver:
         return cls(uri=uri)
-
-    @classmethod
-    def from_profile(cls, profile: Mapping[str, Any]) -> MockDriver:
-        """Build a MockDriver from a connection profile (the ``mock`` scheme).
-
-        Mostly for tests / a ``mock`` profile. ``pool_root`` and
-        ``backing_capacity_gb`` are the only meaningful knobs; everything else a
-        profile might carry (host/user/password) is inert for the in-memory
-        backend.
-        """
-        pool_root = profile.get("pool_root")
-        capacity = profile.get("backing_capacity_gb")
-        return cls(
-            pool_root=Path(pool_root) if pool_root is not None else None,
-            backing_capacity_gb=int(capacity) if capacity is not None else None,
-        )
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -449,14 +435,55 @@ class MockDriver(HypervisorDriver):
             raise DriverError(f"snapshot {name!r} not found on vm {vm_backend_name!r}")
 
 
+@dataclass(frozen=True)
+class MockProfile(BackendProfile):
+    """Connection profile for the in-memory :class:`MockDriver` (CORE-18).
+
+    The mock backend has no real connection; ``pool_root`` and
+    ``backing_capacity_gb`` are the only meaningful knobs (mirroring
+    :class:`MockHypervisor`), and both default to ``None`` (a per-driver temp
+    dir; unlimited capacity).
+    """
+
+    scheme: ClassVar[str] = "mock"
+    _FIELDS: ClassVar[frozenset[str]] = frozenset({"pool_root", "backing_capacity_gb"})
+
+    pool_root: Path | None = None
+    backing_capacity_gb: int | None = None
+    build_switch: ManagedBuildSwitch | None = None
+
+    @classmethod
+    def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
+        cls._validate_keys(table, cls._FIELDS, path)
+        pool_root = table.get("pool_root")
+        capacity = table.get("backing_capacity_gb")
+        return cls(
+            pool_root=Path(pool_root) if pool_root is not None else None,
+            backing_capacity_gb=int(capacity) if capacity is not None else None,
+            build_switch=cls._parse_build_switch(table, path),
+        )
+
+    def build_driver(self) -> MockDriver:
+        return MockDriver(
+            pool_root=self.pool_root,
+            backing_capacity_gb=self.backing_capacity_gb,
+        )
+
+    def describe_fields(self) -> Iterable[tuple[str, str]]:
+        if self.pool_root is not None:
+            yield ("pool_root", str(self.pool_root))
+        if self.backing_capacity_gb is not None:
+            yield ("backing_capacity_gb", f"{self.backing_capacity_gb} GiB")
+
+
 register(
     hypervisor_cls=MockHypervisor,
     driver_name=MockDriver.DRIVER_NAME,
     scheme="mock",
     from_hypervisor=MockDriver.from_hypervisor,
     from_uri=MockDriver.from_uri,
-    from_profile=MockDriver.from_profile,
 )
+register_profile(MockProfile)
 
 
-__all__ = ["MockDriver", "MockHypervisor"]
+__all__ = ["MockDriver", "MockHypervisor", "MockProfile"]

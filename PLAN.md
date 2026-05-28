@@ -1269,9 +1269,12 @@ Compatibility preflight is three layers: (1) the pin/driver-match above, raised
 in `resolve_backend`; (2) `compatibility_findings(plan, driver)`, a near-empty
 portability-lint hook today; (3) the resolved driver's own live `preflight`. The
 orchestrator merges (2) and (3). `RunContext.resolved` holds the binding;
-`ctx.driver` is a property over it. The registry gained a scheme map
-(`driver_for_profile`) and pin introspection (`scheme_for_hypervisor`,
-`is_pinned`) alongside type/name dispatch.
+`ctx.driver` is a property over it. The driver registry carries type/name
+dispatch + `scheme_for_hypervisor` / `is_pinned` for pin introspection. The
+`--connect` profile path is owned by each backend itself (CORE-18):
+`BackendProfile` is an ABC in `connect.py`; each backend ships a concrete
+subclass (`ProxmoxProfile` / `LibvirtProfile` / `MockProfile`) that self-registers
+its scheme and builds its own driver via `profile.build_driver()`.
 
 ### Deferred (named, not built)
 

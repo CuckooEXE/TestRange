@@ -22,7 +22,6 @@ from testrange.drivers import proxmox as _proxmox  # noqa: F401
 from testrange.drivers._registry import (
     driver_for,
     driver_for_name,
-    driver_for_profile,
     is_pinned,
     register,
     scheme_for_hypervisor,
@@ -33,7 +32,6 @@ __all__ = [
     "HypervisorDriver",
     "driver_for",
     "driver_for_name",
-    "driver_for_profile",
     "is_pinned",
     "register",
     "scheme_for_hypervisor",

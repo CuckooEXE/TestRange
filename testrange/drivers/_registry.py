@@ -1,23 +1,27 @@
 """Driver registry — maps Hypervisor types, driver names, and schemes to factories.
 
-Concrete drivers register themselves at module import time. Four dispatch paths
-share this one registry; no other module knows that, e.g., ``MockHypervisor``
-maps to ``MockDriver`` or that the ``"mock"`` scheme builds one:
+Concrete drivers register themselves at module import time. Three driver
+dispatch paths share this one registry, plus the pin introspection helpers
+the binding resolver (CORE-10) uses; no other module knows that, e.g.,
+``MockHypervisor`` maps to ``MockDriver``:
 
 - by **Hypervisor data type** from a *concrete* Plan entry (``MockHypervisor``
   -> ``MockDriver``) — the orchestrator's pinned entry point (``driver_for``);
 - by **driver class name** recorded in state.json (``"MockDriver"``) — the
   cleanup entry point (``driver_for_name``);
-- by **connection-profile scheme** (``profile["driver"] == "mock"``) — the
-  ``--connect`` entry point for a *generic* Plan (``driver_for_profile``);
-- plus two introspection helpers the binding resolver (CORE-10) uses to tell a
-  pinned (concrete) Plan entry from a generic one: ``scheme_for_hypervisor`` and
-  ``is_pinned``.
+- plus ``scheme_for_hypervisor`` and ``is_pinned`` for the binding resolver.
+
+The ``--connect`` profile path is **not** in this registry: each concrete
+:class:`~testrange.connect.BackendProfile` subclass builds its own driver
+(``profile.build_driver()``) and self-registers under
+:data:`testrange.connect._PROFILE_BY_SCHEME`. ``scheme`` is still kept here
+because the binding resolver needs to compare a pinned entry's scheme against a
+profile's scheme without going through a profile instance.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from testrange.drivers.base import HypervisorDriver
@@ -25,7 +29,6 @@ from testrange.exceptions import DriverError
 
 _FROM_HYP: dict[type, Callable[[Any], HypervisorDriver]] = {}
 _FROM_NAME: dict[str, Callable[[str], HypervisorDriver]] = {}
-_BY_SCHEME: dict[str, Callable[[Mapping[str, Any]], HypervisorDriver]] = {}
 _SCHEME_FOR_HYP: dict[type, str] = {}
 
 
@@ -36,20 +39,18 @@ def register(
     scheme: str,
     from_hypervisor: Callable[[Any], HypervisorDriver],
     from_uri: Callable[[str], HypervisorDriver],
-    from_profile: Callable[[Mapping[str, Any]], HypervisorDriver],
 ) -> None:
     """Register a driver's construction paths and its short scheme token.
 
     ``from_hypervisor`` builds the driver from a concrete Plan-time Hypervisor
     data type (the pinned orchestrator entry point). ``from_uri`` rebuilds it
     from the connection URI stored in state.json (the cleanup entry point).
-    ``from_profile`` builds it from a connection-profile mapping (the
-    ``--connect`` entry point). ``scheme`` is the short token a profile names
-    the driver by (``"mock"``, ``"proxmox"``, ``"libvirt"``).
+    ``scheme`` is the short token a profile names the driver by (``"mock"``,
+    ``"proxmox"``, ``"libvirt"``); the ``--connect`` path uses it to dispatch
+    to the matching :class:`~testrange.connect.BackendProfile` subclass.
     """
     _FROM_HYP[hypervisor_cls] = from_hypervisor
     _FROM_NAME[driver_name] = from_uri
-    _BY_SCHEME[scheme] = from_profile
     _SCHEME_FOR_HYP[hypervisor_cls] = scheme
 
 
@@ -73,22 +74,6 @@ def driver_for_name(driver_name: str, uri: str) -> HypervisorDriver:
             f"no driver registered under name {driver_name!r}; registered: {sorted(_FROM_NAME)}"
         )
     return factory(uri)
-
-
-def driver_for_profile(profile: Mapping[str, Any]) -> HypervisorDriver:
-    """Construct the driver named by ``profile["driver"]`` from the profile mapping.
-
-    The mapping is the connection profile's connection fields (CORE-9
-    ``BackendProfile.to_mapping()``). ``profile["driver"]`` is the scheme; an
-    unknown scheme is a hard error listing the registered ones.
-    """
-    scheme = profile.get("driver")
-    if not scheme:
-        raise DriverError("connection profile has no 'driver' scheme")
-    factory = _BY_SCHEME.get(str(scheme))
-    if factory is None:
-        raise DriverError(f"unknown driver scheme {scheme!r}; registered: {sorted(_BY_SCHEME)}")
-    return factory(profile)
 
 
 def scheme_for_hypervisor(hypervisor: Any) -> str | None:

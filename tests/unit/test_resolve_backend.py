@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 
 from testrange import Hypervisor, Plan
-from testrange.connect import BackendProfile
-from testrange.drivers.mock import MockDriver, MockHypervisor
+from testrange.drivers.mock import MockDriver, MockHypervisor, MockProfile
+from testrange.drivers.proxmox import ProxmoxProfile
 from testrange.drivers.proxmox.driver import ProxmoxDriver, ProxmoxHypervisor
 from testrange.exceptions import DriverError
 from testrange.networks.base import ManagedBuildSwitch
@@ -36,8 +36,7 @@ class TestPinMatrix:
         # Profile scheme matches the pin: driver built from the profile
         # connection; build switch from the profile; topology stays the entry's.
         hyp = ProxmoxHypervisor(host="ENTRY-HOST", password="entry")
-        profile = BackendProfile(
-            driver="proxmox",
+        profile = ProxmoxProfile(
             host="PROFILE-HOST",
             user="root",
             password="profilepw",
@@ -50,7 +49,7 @@ class TestPinMatrix:
 
     def test_concrete_plus_mismatched_profile_hard_errors(self) -> None:
         hyp = ProxmoxHypervisor(host="h", password="pw")
-        profile = BackendProfile(driver="mock")
+        profile = MockProfile()
         with pytest.raises(DriverError) as ei:
             resolve_backend(Plan("t", hyp), profile)
         msg = str(ei.value)
@@ -61,8 +60,7 @@ class TestPinMatrix:
             resolve_backend(Plan("t", Hypervisor()), None)
 
     def test_generic_plus_profile_binds(self) -> None:
-        profile = BackendProfile(
-            driver="proxmox",
+        profile = ProxmoxProfile(
             host="10.0.0.9",
             password="pw",
             build_switch=ManagedBuildSwitch(uplink="vmbr9"),
@@ -74,7 +72,7 @@ class TestPinMatrix:
         assert resolved.driver_uri.startswith("proxmox://")
 
     def test_generic_plus_mock_profile(self) -> None:
-        resolved = resolve_backend(Plan("t", Hypervisor()), BackendProfile(driver="mock"))
+        resolved = resolve_backend(Plan("t", Hypervisor()), MockProfile())
         assert isinstance(resolved.driver, MockDriver)
         assert resolved.build_switch is None
 

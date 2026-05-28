@@ -25,7 +25,7 @@ end-to-end ``testrange run`` smoke is PVE-9.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -186,10 +186,6 @@ class ProxmoxDriver(HypervisorDriver):
     @classmethod
     def from_uri(cls, uri: str) -> ProxmoxDriver:
         return cls(ProxmoxConn.from_uri(uri))
-
-    @classmethod
-    def from_profile(cls, profile: Mapping[str, Any]) -> ProxmoxDriver:
-        return cls(ProxmoxConn.from_profile(profile))
 
     @property
     def uri(self) -> str:
@@ -442,7 +438,6 @@ register(
     scheme="proxmox",
     from_hypervisor=ProxmoxDriver.from_hypervisor,
     from_uri=ProxmoxDriver.from_uri,
-    from_profile=ProxmoxDriver.from_profile,
 )
 
 

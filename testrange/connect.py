@@ -7,6 +7,14 @@ concern rather than portable topology. Keeping these in a local file — not the
 committed plan — lets one plan run unmodified against any backend, and keeps
 backend addresses out of the test.
 
+This module is **backend-agnostic**: it defines the :class:`BackendProfile` ABC
+and the :func:`load_profile` dispatch, but knows nothing about which keys any
+particular backend expects. Each backend ships its own concrete subclass
+(``ProxmoxProfile`` / ``LibvirtProfile`` / ``MockProfile``) that declares the
+keys IT consumes, self-registers under :attr:`BackendProfile.scheme`, and builds
+its own driver via :meth:`BackendProfile.build_driver`. Adding a backend means
+landing one more subclass — no edits here.
+
 Secrets policy (deliberately simple): passwords live **inline** in the TOML as
 plain ``password`` / ``ssh_password`` strings. TestRange backends are
 firewalled lab environments, so a credential in a local file is acceptable;
@@ -15,113 +23,154 @@ env/file-indirection layer.
 
 Format (parsed with stdlib :mod:`tomllib`, no new dependency)::
 
-    driver = "proxmox"
-    host = "10.0.0.5"
-    user = "root@pam"          # optional; a bare user takes the @pam realm
+    driver = "proxmox"          # required: dispatches to the registered subclass
+    host = "10.0.0.5"           # backend-specific keys follow
+    user = "root@pam"
     password = "Target123!"
-    port = 8006                # optional
-    verify_ssl = false         # optional
-    node = ""                  # optional; "" auto-detects the single node
-    backing_storage = "local"  # optional
-    ssh_user = "root"          # optional; defaults to the API user's local part
-    ssh_password = "..."       # optional; defaults to the API password
-    ssh_port = 22              # optional
+    ...
 
-    [build_switch]             # optional: managed build-internet egress
-    uplink = "vmbr9"           # host interface to SNAT the build network out of
-    cidr = "10.10.10.0/24"     # optional internal build subnet
+    [build_switch]              # optional: managed build-internet egress, common
+    uplink = "vmbr9"            # host interface to SNAT the build network out of
+    cidr = "10.10.10.0/24"      # optional internal build subnet
 
-The ``[build_switch]`` table maps to a
-:class:`~testrange.networks.base.ManagedBuildSwitch` — the managed-egress
-automation (ADR-0014). A bring-your-own plain ``Switch`` egress path is not
-expressible here by design; declare it by *pinning* the plan to a concrete
-``*Hypervisor`` with a ``build_switch=Switch(...)`` instead.
-
-Shape validation only: this module parses and validates structure. The driver
-*scheme* is not checked against the registry here — that is
-``driver_for_profile``'s job (CORE-8) — so this stays backend-agnostic.
+The ``[build_switch]`` table is the one keyset *every* backend understands; it
+maps to a :class:`~testrange.networks.base.ManagedBuildSwitch` (ADR-0014). A
+bring-your-own plain ``Switch`` egress path is not expressible here by design;
+declare it by *pinning* the plan to a concrete ``*Hypervisor`` with a
+``build_switch=Switch(...)`` instead.
 """
 
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 from testrange.exceptions import ProfileError
 from testrange.networks.base import ManagedBuildSwitch
 
-# Connection fields fed to a driver's ``from_profile`` (CORE-8). ``build_switch``
-# is intentionally absent: it is read off the BackendProfile directly by the
-# binding resolver (CORE-10), not passed to driver construction.
-_CONNECTION_KEYS = (
-    "host",
-    "user",
-    "port",
-    "verify_ssl",
-    "node",
-    "backing_storage",
-    "ssh_user",
-    "ssh_password",
-    "ssh_port",
-    "pool_root",
-    "backing_capacity_gb",
-)
-_ALLOWED_TOP = {"driver", "password", "build_switch", *_CONNECTION_KEYS}
-_ALLOWED_BUILD_SWITCH = {"uplink", "cidr"}
+if TYPE_CHECKING:  # pragma: no cover
+    from testrange.drivers.base import HypervisorDriver
 
 
-@dataclass(frozen=True)
-class BackendProfile:
-    """A parsed connection profile: driver scheme + connection + build egress.
+# scheme -> concrete profile class. Populated by each driver package at import
+# time via register_profile(); load_profile dispatches against it. Kept private
+# to mirror the driver registry's _BY_SCHEME pattern.
+_PROFILE_BY_SCHEME: dict[str, type[BackendProfile]] = {}
 
-    ``driver`` is the only required field. The rest default to ``None`` (driver
-    defaults apply) except ``password`` (empty string). ``build_switch`` carries
-    the optional managed build-egress intent.
+# Keys every backend understands at the top level. Concrete subclasses add their
+# own via _validate_keys(); unknown keys are rejected for typo protection.
+_COMMON_KEYS: frozenset[str] = frozenset({"driver", "build_switch"})
+_ALLOWED_BUILD_SWITCH: frozenset[str] = frozenset({"uplink", "cidr"})
+
+
+class BackendProfile(ABC):
+    """A connection profile parsed from TOML; subclassed once per backend.
+
+    Each concrete subclass declares the connection keys IT expects (as its own
+    instance attributes / dataclass fields), implements :meth:`_from_table` to
+    construct itself from a parsed TOML mapping, and implements
+    :meth:`build_driver` to construct the driver bound to that connection.
+
+    The ABC only carries what every backend shares: the optional
+    :class:`~testrange.networks.base.ManagedBuildSwitch` driving build-internet
+    egress (ADR-0014).
     """
 
-    driver: str
-    host: str | None = None
-    user: str | None = None
-    password: str = ""
-    port: int | None = None
-    verify_ssl: bool | None = None
-    node: str | None = None
-    backing_storage: str | None = None
-    ssh_user: str | None = None
-    ssh_password: str | None = None
-    ssh_port: int | None = None
-    pool_root: str | None = None
-    backing_capacity_gb: int | None = None
-    build_switch: ManagedBuildSwitch | None = None
+    scheme: ClassVar[str]
+    """The short TOML token (``"mock"``, ``"proxmox"``, ``"libvirt"``) the
+    profile selects this subclass with. Set on each concrete class."""
 
-    def __post_init__(self) -> None:
-        if not self.driver:
-            raise ProfileError("connection profile requires a non-empty 'driver' scheme")
+    build_switch: ManagedBuildSwitch | None
+    """User-declared managed build-egress (ADR-0014); ``None`` = isolated."""
 
-    def to_mapping(self) -> dict[str, Any]:
-        """Connection fields for the registry's ``driver_for_profile`` (CORE-8).
+    @classmethod
+    @abstractmethod
+    def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
+        """Construct an instance from a parsed TOML mapping.
 
-        Emits ``driver`` and ``password`` always, and every other connection
-        field that was set (``None`` omitted so the driver's own defaults
-        apply). ``build_switch`` is excluded — the resolver reads it off the
-        profile directly.
+        Subclasses validate their backend-specific keys (typically via
+        :meth:`_validate_keys`), parse :attr:`build_switch` via
+        :meth:`_parse_build_switch`, and return a fully-populated instance.
+        ``path`` is supplied for error messages only.
         """
-        mapping: dict[str, Any] = {"driver": self.driver, "password": self.password}
-        for key in _CONNECTION_KEYS:
-            value = getattr(self, key)
-            if value is not None:
-                mapping[key] = value
-        return mapping
+
+    @abstractmethod
+    def build_driver(self) -> HypervisorDriver:
+        """Construct the driver bound to this profile's connection."""
+
+    @abstractmethod
+    def describe_fields(self) -> Iterable[tuple[str, str]]:
+        """Yield ``(label, displayed_value)`` for ``testrange describe``.
+
+        Passwords MUST be masked (``"***set***"`` / ``"(unset)"``): the binding
+        print is the thing most likely to land in a report or PR.
+        """
+
+    @staticmethod
+    def _validate_keys(table: Mapping[str, Any], allowed: Iterable[str], path: Path) -> None:
+        """Reject any top-level key not in ``allowed`` or the common set.
+
+        Typo protection — names the offending key(s). Subclasses call this on
+        the raw parsed table before pulling values out.
+        """
+        allowed_set = _COMMON_KEYS | frozenset(allowed)
+        unknown = set(table) - allowed_set
+        if unknown:
+            raise ProfileError(
+                f"connection profile {path} has unknown key(s) {sorted(unknown)}; "
+                f"allowed: {sorted(allowed_set)}"
+            )
+
+    @staticmethod
+    def _parse_build_switch(table: Mapping[str, Any], path: Path) -> ManagedBuildSwitch | None:
+        """Parse the common ``[build_switch]`` table off ``table``, if present."""
+        if "build_switch" not in table:
+            return None
+        bs = table["build_switch"]
+        if not isinstance(bs, dict):
+            raise ProfileError(f"connection profile {path}: [build_switch] must be a table")
+        unknown = set(bs) - _ALLOWED_BUILD_SWITCH
+        if unknown:
+            raise ProfileError(
+                f"connection profile {path}: [build_switch] has unknown key(s) {sorted(unknown)}; "
+                f"allowed: {sorted(_ALLOWED_BUILD_SWITCH)}"
+            )
+        uplink = bs.get("uplink")
+        if not isinstance(uplink, str) or not uplink:
+            raise ProfileError(
+                f"connection profile {path}: [build_switch] requires a non-empty 'uplink'"
+            )
+        try:
+            return ManagedBuildSwitch(uplink=uplink, cidr=bs.get("cidr"))
+        except ValueError as e:
+            raise ProfileError(f"connection profile {path}: invalid [build_switch]: {e}") from e
+
+    @staticmethod
+    def _mask_password(password: str | None) -> str:
+        """Render a password for :meth:`describe_fields` without leaking it."""
+        return "***set***" if password else "(unset)"
+
+
+def register_profile(profile_cls: type[BackendProfile]) -> None:
+    """Register a concrete :class:`BackendProfile` under its :attr:`scheme`.
+
+    Driver packages call this at module import time; the symmetric driver-side
+    side-effect is :func:`testrange.drivers._registry.register`. Re-registering
+    the same scheme replaces the prior class (matches the driver registry).
+    """
+    _PROFILE_BY_SCHEME[profile_cls.scheme] = profile_cls
 
 
 def load_profile(path: Path) -> BackendProfile:
-    """Read, parse, and validate a connection profile at ``path``.
+    """Read ``path``, parse TOML, dispatch on ``driver`` to the registered subclass.
 
-    Raises :class:`ProfileError` for a missing/unreadable file, invalid TOML, an
-    unknown key (typo protection — the offending key is named), a missing
-    ``driver``, or a malformed ``[build_switch]`` table.
+    Raises :class:`ProfileError` for a missing/unreadable file, invalid TOML,
+    a missing/empty ``driver`` scheme, an unknown scheme (lists the registered
+    ones), or any backend-specific validation failure raised inside
+    :meth:`BackendProfile._from_table`.
     """
     try:
         with path.open("rb") as fh:
@@ -132,60 +181,17 @@ def load_profile(path: Path) -> BackendProfile:
         raise ProfileError(f"cannot read connection profile {path}: {e}") from e
     except tomllib.TOMLDecodeError as e:
         raise ProfileError(f"connection profile {path} is not valid TOML: {e}") from e
-    return _from_toml(data, path)
 
-
-def _from_toml(data: dict[str, Any], path: Path) -> BackendProfile:
-    unknown = set(data) - _ALLOWED_TOP
-    if unknown:
-        raise ProfileError(
-            f"connection profile {path} has unknown key(s) {sorted(unknown)}; "
-            f"allowed: {sorted(_ALLOWED_TOP)}"
-        )
     driver = data.get("driver")
     if not isinstance(driver, str) or not driver:
         raise ProfileError(f"connection profile {path} requires a non-empty 'driver' scheme")
-
-    build_switch = None
-    if "build_switch" in data:
-        build_switch = _parse_build_switch(data["build_switch"], path)
-
-    return BackendProfile(
-        driver=driver,
-        host=data.get("host"),
-        user=data.get("user"),
-        password=data.get("password", ""),
-        port=data.get("port"),
-        verify_ssl=data.get("verify_ssl"),
-        node=data.get("node"),
-        backing_storage=data.get("backing_storage"),
-        ssh_user=data.get("ssh_user"),
-        ssh_password=data.get("ssh_password"),
-        ssh_port=data.get("ssh_port"),
-        pool_root=data.get("pool_root"),
-        backing_capacity_gb=data.get("backing_capacity_gb"),
-        build_switch=build_switch,
-    )
-
-
-def _parse_build_switch(table: Any, path: Path) -> ManagedBuildSwitch:
-    if not isinstance(table, dict):
-        raise ProfileError(f"connection profile {path}: [build_switch] must be a table")
-    unknown = set(table) - _ALLOWED_BUILD_SWITCH
-    if unknown:
+    profile_cls = _PROFILE_BY_SCHEME.get(driver)
+    if profile_cls is None:
         raise ProfileError(
-            f"connection profile {path}: [build_switch] has unknown key(s) {sorted(unknown)}; "
-            f"allowed: {sorted(_ALLOWED_BUILD_SWITCH)}"
+            f"connection profile {path} names unknown driver scheme {driver!r}; "
+            f"registered: {sorted(_PROFILE_BY_SCHEME)}"
         )
-    uplink = table.get("uplink")
-    if not isinstance(uplink, str) or not uplink:
-        raise ProfileError(
-            f"connection profile {path}: [build_switch] requires a non-empty 'uplink'"
-        )
-    try:
-        return ManagedBuildSwitch(uplink=uplink, cidr=table.get("cidr"))
-    except ValueError as e:
-        raise ProfileError(f"connection profile {path}: invalid [build_switch]: {e}") from e
+    return profile_cls._from_table(data, path)
 
 
-__all__ = ["BackendProfile", "load_profile"]
+__all__ = ["BackendProfile", "load_profile", "register_profile"]

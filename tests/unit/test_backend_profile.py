@@ -1,8 +1,18 @@
-"""Tests for the connection-profile loader (CORE-9).
+"""Tests for the connection-profile ABC + dispatch (CORE-9 / CORE-18).
 
-Covers the TOML round-trip, the descoped (inline) secrets policy, the
-``[build_switch]`` -> ManagedBuildSwitch mapping, and the validation errors
-(missing driver, unknown key, malformed build_switch).
+Covers what's backend-agnostic in :mod:`testrange.connect`:
+
+- ``load_profile`` reads TOML and dispatches on ``driver`` to the registered
+  concrete subclass (Mock/Libvirt/Proxmox);
+- :class:`BackendProfile` can't be instantiated directly (it's an ABC);
+- the common ``[build_switch]`` table is parsed identically across backends;
+- the common validation errors (missing/empty driver, unknown scheme, malformed
+  ``[build_switch]``) raise :class:`ProfileError`.
+
+The per-backend field shape, defaulting (e.g., PVE realm normalization), and
+``build_driver()`` behavior are tested alongside the concrete subclasses
+themselves (test_proxmox_profile.py, test_libvirt_profile.py,
+test_mock_profile.py).
 """
 
 from __future__ import annotations
@@ -12,6 +22,9 @@ from pathlib import Path
 import pytest
 
 from testrange.connect import BackendProfile, load_profile
+from testrange.drivers.libvirt import LibvirtProfile
+from testrange.drivers.mock import MockProfile
+from testrange.drivers.proxmox import ProxmoxProfile
 from testrange.exceptions import ProfileError
 from testrange.networks.base import ManagedBuildSwitch
 
@@ -22,62 +35,28 @@ def _write(tmp_path: Path, text: str) -> Path:
     return p
 
 
-class TestLoadProfile:
-    def test_full_profile_round_trips(self, tmp_path: Path) -> None:
-        p = _write(
-            tmp_path,
-            """
-            driver = "proxmox"
-            host = "10.0.0.5"
-            user = "root@pam"
-            password = "Target123!"
-            port = 8006
-            verify_ssl = false
-            node = "pve1"
-            backing_storage = "local"
-            ssh_user = "root"
-            ssh_password = "sshpw"
-            ssh_port = 2222
-
-            [build_switch]
-            uplink = "vmbr9"
-            cidr = "10.10.10.0/24"
-            """,
-        )
-        prof = load_profile(p)
-        assert prof.driver == "proxmox"
-        assert prof.host == "10.0.0.5"
-        assert prof.user == "root@pam"
-        assert prof.password == "Target123!"
-        assert prof.port == 8006
-        assert prof.verify_ssl is False
-        assert prof.node == "pve1"
-        assert prof.backing_storage == "local"
-        assert prof.ssh_user == "root"
-        assert prof.ssh_password == "sshpw"
-        assert prof.ssh_port == 2222
-        assert prof.build_switch == ManagedBuildSwitch(uplink="vmbr9", cidr="10.10.10.0/24")
-
-    def test_minimal_profile_parses(self, tmp_path: Path) -> None:
-        prof = load_profile(_write(tmp_path, 'driver = "proxmox"\nhost = "h"\n'))
-        assert prof.driver == "proxmox"
-        assert prof.host == "h"
-        assert prof.password == ""
-        assert prof.build_switch is None
-
-    def test_driver_only_parses(self, tmp_path: Path) -> None:
+class TestDispatch:
+    def test_mock_scheme_returns_mock_profile(self, tmp_path: Path) -> None:
         prof = load_profile(_write(tmp_path, 'driver = "mock"\n'))
-        assert prof.driver == "mock"
-        assert prof.host is None
+        assert isinstance(prof, MockProfile)
+        assert prof.scheme == "mock"
 
-    def test_build_switch_uplink_only(self, tmp_path: Path) -> None:
-        prof = load_profile(
-            _write(tmp_path, 'driver = "proxmox"\nhost = "h"\n[build_switch]\nuplink = "vmbr9"\n')
-        )
-        assert prof.build_switch == ManagedBuildSwitch(uplink="vmbr9")
+    def test_libvirt_scheme_returns_libvirt_profile(self, tmp_path: Path) -> None:
+        prof = load_profile(_write(tmp_path, 'driver = "libvirt"\n'))
+        assert isinstance(prof, LibvirtProfile)
 
-    # -- error paths --------------------------------------------------------
+    def test_proxmox_scheme_returns_proxmox_profile(self, tmp_path: Path) -> None:
+        prof = load_profile(_write(tmp_path, 'driver = "proxmox"\nhost = "h"\n'))
+        assert isinstance(prof, ProxmoxProfile)
 
+    def test_unknown_scheme_lists_known(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match=r"unknown driver scheme 'bogus'") as ei:
+            load_profile(_write(tmp_path, 'driver = "bogus"\n'))
+        msg = str(ei.value)
+        assert "mock" in msg and "proxmox" in msg and "libvirt" in msg
+
+
+class TestCommonErrors:
     def test_missing_file(self, tmp_path: Path) -> None:
         with pytest.raises(ProfileError, match="not found"):
             load_profile(tmp_path / "nope.toml")
@@ -94,57 +73,46 @@ class TestLoadProfile:
         with pytest.raises(ProfileError, match="non-empty 'driver'"):
             load_profile(_write(tmp_path, 'driver = ""\n'))
 
-    def test_unknown_key_named(self, tmp_path: Path) -> None:
-        with pytest.raises(ProfileError, match=r"unknown key\(s\) \['nost'\]"):
-            load_profile(_write(tmp_path, 'driver = "proxmox"\nnost = "typo"\n'))
 
-    def test_build_switch_missing_uplink(self, tmp_path: Path) -> None:
+class TestBuildSwitchCommon:
+    """``[build_switch]`` is the one keyset every backend understands; the parse
+    lives on the ABC so its shape errors are identical across schemes."""
+
+    def test_uplink_only(self, tmp_path: Path) -> None:
+        prof = load_profile(_write(tmp_path, 'driver = "mock"\n[build_switch]\nuplink = "vmbr9"\n'))
+        assert prof.build_switch == ManagedBuildSwitch(uplink="vmbr9")
+
+    def test_uplink_plus_cidr(self, tmp_path: Path) -> None:
+        prof = load_profile(
+            _write(
+                tmp_path,
+                'driver = "mock"\n[build_switch]\nuplink = "vmbr9"\ncidr = "10.10.10.0/24"\n',
+            )
+        )
+        assert prof.build_switch == ManagedBuildSwitch(uplink="vmbr9", cidr="10.10.10.0/24")
+
+    def test_missing_uplink(self, tmp_path: Path) -> None:
         with pytest.raises(ProfileError, match="requires a non-empty 'uplink'"):
             load_profile(
-                _write(tmp_path, 'driver = "proxmox"\n[build_switch]\ncidr = "10.10.10.0/24"\n')
+                _write(tmp_path, 'driver = "mock"\n[build_switch]\ncidr = "10.10.10.0/24"\n')
             )
 
-    def test_build_switch_bad_cidr(self, tmp_path: Path) -> None:
-        with pytest.raises(ProfileError, match="invalid \\[build_switch\\]"):
+    def test_bad_cidr(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match=r"invalid \[build_switch\]"):
             load_profile(
-                _write(
-                    tmp_path, 'driver = "proxmox"\n[build_switch]\nuplink = "v"\ncidr = "nope"\n'
-                )
+                _write(tmp_path, 'driver = "mock"\n[build_switch]\nuplink = "v"\ncidr = "nope"\n')
             )
 
-    def test_build_switch_unknown_key(self, tmp_path: Path) -> None:
+    def test_unknown_key(self, tmp_path: Path) -> None:
         with pytest.raises(ProfileError, match=r"\[build_switch\] has unknown key"):
             load_profile(
-                _write(tmp_path, 'driver = "proxmox"\n[build_switch]\nuplink = "v"\nnat = true\n')
+                _write(tmp_path, 'driver = "mock"\n[build_switch]\nuplink = "v"\nnat = true\n')
             )
 
 
-class TestToMapping:
-    def test_omits_unset_and_keeps_driver_password(self) -> None:
-        prof = BackendProfile(driver="proxmox", host="h")
-        mapping = prof.to_mapping()
-        assert mapping == {"driver": "proxmox", "password": "", "host": "h"}
-
-    def test_includes_set_connection_fields(self) -> None:
-        prof = BackendProfile(
-            driver="proxmox", host="h", user="root", port=8006, ssh_port=22, password="pw"
-        )
-        mapping = prof.to_mapping()
-        assert mapping["user"] == "root"
-        assert mapping["port"] == 8006
-        assert mapping["ssh_port"] == 22
-        assert mapping["password"] == "pw"
-
-    def test_excludes_build_switch(self) -> None:
-        prof = BackendProfile(driver="proxmox", build_switch=ManagedBuildSwitch(uplink="vmbr9"))
-        assert "build_switch" not in prof.to_mapping()
-
-    def test_mapping_feeds_driver_for_profile(self) -> None:
-        # The mapping is exactly what the registry consumes (CORE-8 seam).
-        from testrange.drivers import driver_for_profile
-        from testrange.drivers.proxmox.driver import ProxmoxDriver
-
-        prof = BackendProfile(driver="proxmox", host="10.0.0.5", user="root", password="pw")
-        drv = driver_for_profile(prof.to_mapping())
-        assert isinstance(drv, ProxmoxDriver)
-        assert drv._conn.user == "root@pam"
+class TestABCConstraints:
+    def test_cannot_instantiate_abc(self) -> None:
+        # BackendProfile is abstract; concrete subclasses are the only construction
+        # path. mypy would refuse this too; we belt-and-suspenders at runtime.
+        with pytest.raises(TypeError, match="abstract"):
+            BackendProfile()  # type: ignore[abstract]
