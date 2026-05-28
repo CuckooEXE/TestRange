@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from testrange._log import get_logger
 from testrange.cache.manager import CacheManager
+from testrange.connect import BackendProfile
 from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
 from testrange.plan import Plan
 
@@ -32,13 +33,19 @@ class TestResult:
         return line
 
 
-def build_range(plan: Plan, *, cache_manager: CacheManager | None = None) -> str:
+def build_range(
+    plan: Plan,
+    *,
+    cache_manager: CacheManager | None = None,
+    profile: BackendProfile | None = None,
+) -> str:
     """Warm the cache for ``plan`` (``testrange build``); run no tests.
 
     Runs preflight + the build phase only, tearing down all build infra. The
     backend holds nothing afterward. Returns the run id (for logging).
+    ``profile`` binds a backend-agnostic plan to a backend (CORE-10/-11).
     """
-    o = Orchestrator(plan, cache_manager=cache_manager)
+    o = Orchestrator(plan, cache_manager=cache_manager, profile=profile)
     o.build()
     return o.run_id
 
@@ -51,6 +58,7 @@ def run_tests(
     fail_fast: bool = False,
     leak_on_failure: bool = False,
     require_cache: bool = False,
+    profile: BackendProfile | None = None,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
@@ -63,7 +71,9 @@ def run_tests(
     ``testrange cleanup <run_id>``.
     """
     results: list[TestResult] = []
-    o = Orchestrator(plan, cache_manager=cache_manager, require_cache=require_cache)
+    o = Orchestrator(
+        plan, cache_manager=cache_manager, require_cache=require_cache, profile=profile
+    )
     with o as orch:
         _execute_tests(orch, tests, results, fail_fast=fail_fast)
         if leak_on_failure and any(not r.passed for r in results):

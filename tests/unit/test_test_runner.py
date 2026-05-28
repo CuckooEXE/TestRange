@@ -90,9 +90,18 @@ def _plan() -> Plan:
 
 def _install_fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
     from testrange.drivers.mock import MockDriver
+    from testrange.orchestrator.backend import ResolvedBackend
 
     driver = MockDriver(pool_root=tmp_path / "pools")
-    monkeypatch.setattr(Orchestrator, "_build_driver", lambda self: driver)
+
+    def _fake_resolve(plan: Any, profile: Any) -> ResolvedBackend:
+        return ResolvedBackend(
+            driver=driver,
+            build_switch=getattr(plan.hypervisor, "build_switch", None),
+            driver_uri="",
+        )
+
+    monkeypatch.setattr("testrange.orchestrator.runtime.resolve_backend", _fake_resolve)
     return driver
 
 

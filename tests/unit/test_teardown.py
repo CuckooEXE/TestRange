@@ -8,6 +8,7 @@ from typing import Any, cast
 import pytest
 
 from testrange.exceptions import StateError
+from testrange.orchestrator.backend import ResolvedBackend
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.teardown import teardown
 from testrange.state.schema import PHASE_CLEANUP
@@ -26,7 +27,7 @@ def _ctx(store: StateStore, driver: _FakeDriver) -> RunContext:
     # teardown() only touches store/driver/run_id; plan and cache are unused.
     return RunContext(
         plan=cast(Any, None),
-        driver=cast(Any, driver),
+        resolved=ResolvedBackend(driver=cast(Any, driver), build_switch=None, driver_uri=""),
         store=store,
         cache=cast(Any, None),
         run_id="r1",

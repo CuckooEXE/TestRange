@@ -19,19 +19,24 @@ from testrange.cache.entry import CacheEntry
 from testrange.cache.http import HttpCache
 from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
+from testrange.connect import BackendProfile, load_profile
 from testrange.devices.network import DHCPAddr, StaticAddr
+from testrange.drivers import is_pinned, scheme_for_hypervisor
 from testrange.exceptions import (
     BuildFailedError,
     BuildRequiredError,
     CacheError,
     CacheMissError,
+    DriverError,
     OrchestratorError,
     PreflightError,
+    ProfileError,
     StateError,
     StateLockedError,
     TestRangeError,
 )
-from testrange.networks.base import Network, Switch
+from testrange.networks.base import ManagedBuildSwitch, Network, Switch
+from testrange.orchestrator.backend import resolve_backend
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
 from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
@@ -122,11 +127,33 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     return plan, _validate_tests(getattr(module, "TESTS", []), path)
 
 
+def _load_profile_arg(args: argparse.Namespace) -> BackendProfile | None:
+    """Load the ``--connect`` profile if given, else ``None``.
+
+    A missing/malformed profile is a usage error (exit 2): the loader's
+    :class:`ProfileError` is printed and the process exits here, before any
+    backend work begins.
+    """
+    path = getattr(args, "connect", None)
+    if not path:
+        return None
+    try:
+        return load_profile(Path(path))
+    except ProfileError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(Exit.USAGE)
+
+
 def _build(args: argparse.Namespace) -> int:
     plan, _tests = _load_plan_module(args.plan)
+    profile = _load_profile_arg(args)
     mgr = _build_manager(args)
     try:
-        run_id = build_range(plan, cache_manager=mgr)
+        run_id = build_range(plan, cache_manager=mgr, profile=profile)
+    except DriverError as e:
+        # Binding/pin mismatch or a backend-agnostic plan with no --connect.
+        print(f"error: {e}", file=sys.stderr)
+        return Exit.USAGE
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return Exit.USAGE
@@ -145,6 +172,7 @@ def _build(args: argparse.Namespace) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
+    profile = _load_profile_arg(args)
     mgr = _build_manager(args)
     try:
         results = run_tests(
@@ -154,7 +182,11 @@ def _run(args: argparse.Namespace) -> int:
             fail_fast=args.fail_fast,
             leak_on_failure=args.leak_on_failure,
             require_cache=args.require_cache,
+            profile=profile,
         )
+    except DriverError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return Exit.USAGE
     except BuildRequiredError as e:
         print(f"cache miss: {e}", file=sys.stderr)
         return Exit.USAGE
@@ -177,13 +209,18 @@ def _run(args: argparse.Namespace) -> int:
 
 def _repl(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
+    profile = _load_profile_arg(args)
     mgr = _build_manager(args)
-    _print_describe(plan, tests, mgr)
+    _print_describe(plan, tests, mgr, profile)
     print()
 
     from testrange.orchestrator.runtime import Orchestrator
 
-    o = Orchestrator(plan, cache_manager=mgr)
+    try:
+        o = Orchestrator(plan, cache_manager=mgr, profile=profile)
+    except DriverError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return Exit.USAGE
     try:
         with o as orch:
             banner = (
@@ -234,18 +271,61 @@ def _cleanup(args: argparse.Namespace) -> int:
 
 def _describe(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
+    profile = _load_profile_arg(args)
     mgr = _build_manager(args)
-    _print_describe(plan, tests, mgr)
+    _print_describe(plan, tests, mgr, profile)
     return Exit.OK
 
 
-def _print_describe(plan: Plan, tests: list[Any], mgr: CacheManager) -> None:
+def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
+    """Print the resolved backend binding (or UNBOUND for a generic plan).
+
+    The password is **masked** by default: ``describe`` output is the thing most
+    likely to be pasted into a report or PR, so the value is never printed —
+    only whether one is set.
+    """
+    hyp = plan.hypervisor
+    if not is_pinned(hyp) and profile is None:
+        print("  backend: UNBOUND (pass --connect <profile> to run)")
+        print()
+        return
+    try:
+        resolved = resolve_backend(plan, profile)
+    except DriverError as e:
+        print(f"  backend: ERROR — {e}")
+        print()
+        return
+
+    # Connection details come from the profile when one is supplied, else from
+    # the concrete entry. The driver itself is not introspected — backends
+    # differ in what connection surface they expose.
+    src: Any = profile if profile is not None else hyp
+    scheme = profile.driver if profile is not None else scheme_for_hypervisor(hyp)
+    print("  backend:")
+    print(f"    driver: {scheme} ({resolved.driver.DRIVER_NAME})")
+    for label in ("host", "port", "node", "user"):
+        value = getattr(src, label, None)
+        if value not in (None, ""):
+            print(f"    {label}: {value}")
+    password = getattr(src, "password", "") or ""
+    print(f"    password: {'***set***' if password else '(unset)'}")
+    bs = resolved.build_switch
+    if bs is None:
+        print("    build egress: none (isolated build network)")
+    elif isinstance(bs, ManagedBuildSwitch):
+        print(f"    build egress: managed (uplink={bs.uplink})")
+    else:
+        print(f"    build egress: switch {bs.name!r}")
+    print()
+
+
+def _print_describe(
+    plan: Plan, tests: list[Any], mgr: CacheManager, profile: BackendProfile | None = None
+) -> None:
     """Pretty-print a Plan + its tests. Shared by `describe` and `repl`."""
     hyp = plan.hypervisor
     print(f"Plan ({type(hyp).__name__})")
-    if connection := getattr(hyp, "connection", None):
-        print(f"  connection: {connection}")
-    print()
+    _print_binding(plan, profile)
 
     if switches := getattr(hyp, "networks", ()):
         print("Switches:")
@@ -454,6 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_describe = sub.add_parser("describe", help="passively pretty-print a plan")
     p_describe.add_argument("plan", help="path to the plan file (.py)")
+    _add_connect_arg(p_describe)
     p_describe.set_defaults(func=_describe)
 
     p_cache = sub.add_parser("cache", help="manage the local cache")
@@ -514,6 +595,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_build.add_argument("plan", help="path to the plan file (.py)")
+    _add_connect_arg(p_build)
     p_build.set_defaults(func=_build)
 
     p_run = sub.add_parser("run", help="bring up the range, run tests, tear down")
@@ -533,6 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail fast if any artifact is missing instead of auto-building it first",
     )
+    _add_connect_arg(p_run)
     p_run.set_defaults(func=_run)
 
     p_repl = sub.add_parser(
@@ -546,9 +629,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_repl.add_argument("plan", help="path to the plan file (.py)")
+    _add_connect_arg(p_repl)
     p_repl.set_defaults(func=_repl)
 
     return parser
+
+
+def _add_connect_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach ``--connect PATH`` to a plan-taking verb (run/build/repl/describe).
+
+    Binds a backend-agnostic plan to a backend via a local TOML profile (CORE-9).
+    A concrete ``*Hypervisor`` plan runs without it; a generic ``Hypervisor``
+    plan requires it. There is no environment fallback — the flag is the only
+    knob, so an invocation is fully self-describing.
+    """
+    parser.add_argument(
+        "--connect",
+        metavar="PATH",
+        default=None,
+        help="path to a connection profile (TOML) binding the plan to a backend",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

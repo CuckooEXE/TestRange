@@ -31,6 +31,10 @@ class DriverError(TestRangeError):
     """Hypervisor driver failure."""
 
 
+class ProfileError(TestRangeError):
+    """A ``--connect`` connection profile is missing, unreadable, or malformed."""
+
+
 class GuestAgentError(DriverError):
     """A hypervisor's native guest agent (QGA / VMware Tools / ...) command failed."""
 

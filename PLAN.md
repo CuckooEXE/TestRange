@@ -931,7 +931,8 @@ docs/
     index.md, conf.py           # Sphinx site
 examples/
     hello_world.py  data_disk.py  native_agent.py
-    network_modes.py  private_public.py
+    network_modes.py  private_public.py  px_hello.py
+    capabilities.py             # broad-coverage: every driver-facing feature
 testrange/
     builders/
         base.py                 # Builder ABC (+ wait_ready)
@@ -1232,6 +1233,45 @@ driver manufacture a `snat=1` SDN vnet + fence for the sidecar's static `eth1`,
 so no host-side bridge/NAT/DHCP fiddling is needed. (A plain `Switch` build
 switch with a static `Sidecar.addr` still expresses the manual recipe for
 operators who want to own the bridge themselves.)
+
+### 22. Backend binding: topology Plan entry vs. resolved backend
+
+A Plan entry used to be a concrete `*Hypervisor` that conflated four jobs:
+topology, backend selection (its type drove `driver_for`), connection, and
+environment knobs (build egress / backing storage / node). That pinned every
+test to one backend and put a host address + password in the committed plan.
+ADR-0015 splits them.
+
+- **Generic `Hypervisor`** (`from testrange import Hypervisor`) — portable
+  topology only (networks/pools/vms). Unregistered in the driver registry, so
+  it selects no driver and carries no connection. The entry a portable plan uses.
+- **Concrete `*Hypervisor`** — still pins its driver and carries the connection
+  inline. For tests that genuinely target one backend.
+- **Connection profile** (`testrange/connect.py`) — a local TOML file passed
+  with `--connect`. Names the driver by *scheme* (`driver = "proxmox"`), carries
+  the connection (inline plain-string password; lab posture), and carries build
+  egress as a `[build_switch]` table → `ManagedBuildSwitch`. No env-var fallback;
+  `.gitignore` keeps a real `connect.toml` out of git.
+
+`resolve_backend(plan, profile)` (`testrange/orchestrator/backend.py`) folds the
+entry + optional profile into `ResolvedBackend { driver, build_switch,
+driver_uri }`, which the orchestrator reads instead of reaching into
+`plan.hypervisor` for the driver/uri/build-switch. The pin/override matrix:
+
+| (entry, profile) | resolution |
+| ---------------- | ---------- |
+| concrete + none  | driver from the entry's type; build egress + URI from the entry (back-compat). |
+| concrete + given | profile `driver` **must** equal the entry's scheme (else hard error); driver from the profile connection; build egress from the profile; topology from the entry. |
+| generic + none   | hard error: backend-agnostic; pass `--connect`. |
+| generic + given  | driver from the profile scheme; build egress from the profile. |
+
+Compatibility preflight is three layers: (1) the pin/driver-match above, raised
+in `resolve_backend`; (2) `compatibility_findings(plan, driver)`, a near-empty
+portability-lint hook today; (3) the resolved driver's own live `preflight`. The
+orchestrator merges (2) and (3). `RunContext.resolved` holds the binding;
+`ctx.driver` is a property over it. The registry gained a scheme map
+(`driver_for_profile`) and pin introspection (`scheme_for_hypervisor`,
+`is_pinned`) alongside type/name dispatch.
 
 ### Deferred (named, not built)
 

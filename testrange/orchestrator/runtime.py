@@ -19,10 +19,15 @@ from typing import Any
 
 from testrange._log import get_logger
 from testrange.cache.manager import CacheManager
-from testrange.drivers import driver_for
+from testrange.connect import BackendProfile
 from testrange.drivers.base import HypervisorDriver
 from testrange.exceptions import BuildRequiredError, PreflightError
 from testrange.networks.base import NetworkAddressing, Switch
+from testrange.orchestrator.backend import (
+    ResolvedBackend,
+    compatibility_findings,
+    resolve_backend,
+)
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
@@ -34,6 +39,7 @@ from testrange.orchestrator.run_phase import (
 )
 from testrange.orchestrator.teardown import teardown
 from testrange.plan import Plan
+from testrange.preflight import PreflightReport
 from testrange.state.schema import PHASE_LEAKED
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms.handle import VMHandle
@@ -79,13 +85,18 @@ class Orchestrator:
         lease_timeout_s: float = 120.0,
         sidecar_ready_timeout_s: float = 120.0,
         require_cache: bool = False,
+        profile: BackendProfile | None = None,
     ) -> None:
         self.plan = plan
         self._require_cache = require_cache
+        # Fold the Plan entry + optional connection profile into the single
+        # backend binding (CORE-10). A pin/driver mismatch or a backend-agnostic
+        # plan with no profile raises here, at construction.
+        self._resolved: ResolvedBackend = resolve_backend(plan, profile)
         run_id = run_id or new_run_id()
         self.ctx = RunContext(
             plan=plan,
-            driver=self._build_driver(),
+            resolved=self._resolved,
             store=StateStore(run_dir_for(run_id)),
             cache=cache_manager or CacheManager(),
             run_id=run_id,
@@ -128,16 +139,19 @@ class Orchestrator:
             return ()
         return tuple(switches)
 
-    def _build_driver(self) -> HypervisorDriver:
-        return driver_for(self.plan.hypervisor)
-
     def _preflight_and_initialize(self) -> None:
         """Run read-only preflight (abort on error) and open the state file."""
-        build_switch, _ = resolve_build_switch(getattr(self.plan.hypervisor, "build_switch", None))
+        build_switch, _ = resolve_build_switch(self._resolved.build_switch)
         report = self.ctx.driver.preflight(
             self.plan,
             cache_manager=self.ctx.cache,
             build_switch=build_switch,
+        )
+        # Merge the portability-lint layer (CORE-10 layer 2) with the driver's
+        # own live findings (layer 3); pin/driver-match (layer 1) already ran in
+        # resolve_backend at construction.
+        report = report.merged(
+            PreflightReport(findings=compatibility_findings(self.plan, self.ctx.driver))
         )
         if not report:
             raise PreflightError(report.render())
@@ -145,7 +159,7 @@ class Orchestrator:
             run_id=self.ctx.run_id,
             plan_name=self.ctx.plan_name,
             driver_class=self.ctx.driver.DRIVER_NAME,
-            driver_uri=getattr(self.plan.hypervisor, "driver_uri", ""),
+            driver_uri=self._resolved.driver_uri,
         )
 
     def build(self) -> None:

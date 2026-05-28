@@ -25,7 +25,7 @@ end-to-end ``testrange run`` smoke is PVE-9.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import _guest, _naming, _sdn, _serial, _storage, _vm
-from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn
+from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn, normalize_realm
 from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
@@ -117,8 +117,8 @@ class ProxmoxHypervisor:
         """
         # PVE authenticates against a realm; default to `pam` for a bare
         # username (the common `user="root"`). An explicit realm — `root@pam`,
-        # `user@pve`, `user@ldap` — is preserved.
-        user = self.user if "@" in self.user else f"{self.user}@pam"
+        # `user@pve`, `user@ldap` — is preserved. Shared with the profile path.
+        user = normalize_realm(self.user)
         ssh_user = self.ssh_user or user.split("@", 1)[0]
         ssh_password = self.ssh_password if self.ssh_password is not None else self.password
         return ProxmoxConn(
@@ -186,6 +186,10 @@ class ProxmoxDriver(HypervisorDriver):
     @classmethod
     def from_uri(cls, uri: str) -> ProxmoxDriver:
         return cls(ProxmoxConn.from_uri(uri))
+
+    @classmethod
+    def from_profile(cls, profile: Mapping[str, Any]) -> ProxmoxDriver:
+        return cls(ProxmoxConn.from_profile(profile))
 
     @property
     def uri(self) -> str:
@@ -435,8 +439,10 @@ class ProxmoxDriver(HypervisorDriver):
 register(
     hypervisor_cls=ProxmoxHypervisor,
     driver_name=ProxmoxDriver.DRIVER_NAME,
+    scheme="proxmox",
     from_hypervisor=ProxmoxDriver.from_hypervisor,
     from_uri=ProxmoxDriver.from_uri,
+    from_profile=ProxmoxDriver.from_profile,
 )
 
 

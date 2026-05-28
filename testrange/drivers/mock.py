@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -151,6 +151,22 @@ class MockDriver(HypervisorDriver):
     @classmethod
     def from_uri(cls, uri: str) -> MockDriver:
         return cls(uri=uri)
+
+    @classmethod
+    def from_profile(cls, profile: Mapping[str, Any]) -> MockDriver:
+        """Build a MockDriver from a connection profile (the ``mock`` scheme).
+
+        Mostly for tests / a ``mock`` profile. ``pool_root`` and
+        ``backing_capacity_gb`` are the only meaningful knobs; everything else a
+        profile might carry (host/user/password) is inert for the in-memory
+        backend.
+        """
+        pool_root = profile.get("pool_root")
+        capacity = profile.get("backing_capacity_gb")
+        return cls(
+            pool_root=Path(pool_root) if pool_root is not None else None,
+            backing_capacity_gb=int(capacity) if capacity is not None else None,
+        )
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -436,8 +452,10 @@ class MockDriver(HypervisorDriver):
 register(
     hypervisor_cls=MockHypervisor,
     driver_name=MockDriver.DRIVER_NAME,
+    scheme="mock",
     from_hypervisor=MockDriver.from_hypervisor,
     from_uri=MockDriver.from_uri,
+    from_profile=MockDriver.from_profile,
 )
 
 

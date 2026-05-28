@@ -32,7 +32,8 @@ class TestDescribe:
         rc = cli.main(["describe", str(EXAMPLES / "hello_world.py")])
         assert rc == 0
         out = capsys.readouterr().out
-        assert "Plan (ProxmoxHypervisor)" in out
+        assert "Plan (Hypervisor)" in out  # portable plan (ADR-0015)
+        assert "backend: UNBOUND" in out
         assert "switch1" in out
         assert "netA" in out
         assert "pool1" in out
@@ -93,6 +94,159 @@ class TestReplSubcommand:
         with pytest.raises(SystemExit) as exc:
             cli.main(["repl", "/nonexistent/plan.py"])
         assert exc.value.code == 2
+
+
+_GENERIC_PLAN_SRC = """
+from testrange import Hypervisor, Plan
+from testrange.builders import CloudInitBuilder
+from testrange.cache import CacheEntry
+from testrange.communicators import SSHCommunicator
+from testrange.credentials import PosixCred
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import NetworkIface
+from testrange.networks import Network, Sidecar, Switch
+from testrange.vms import VMRecipe, VMSpec
+
+PLAN = Plan(
+    "portable",
+    Hypervisor(
+        networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
+        pools=[StoragePool("pool1", 32)],
+        vms=[
+            VMRecipe(
+                spec=VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive("pool1", 8),
+                                                 NetworkIface("netA")]),
+                builder=CloudInitBuilder(base=CacheEntry("debian-13"),
+                                         credentials=[PosixCred("u", password="p")]),
+                communicator=SSHCommunicator("u"),
+            ),
+        ],
+    ),
+)
+
+def t(orch):
+    pass
+
+TESTS = [t]
+"""
+
+
+def _write_generic_plan(tmp_path: Path) -> str:
+    p = tmp_path / "portable_plan.py"
+    p.write_text(_GENERIC_PLAN_SRC)
+    return str(p)
+
+
+class TestConnectFlag:
+    def test_run_passes_profile_through(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        plan_path = _write_generic_plan(tmp_path)
+        prof = tmp_path / "connect.toml"
+        prof.write_text('driver = "mock"\n')
+
+        captured: dict[str, object] = {}
+
+        def fake_run_tests(tests: object, plan: object, **kwargs: object) -> list[object]:
+            captured["profile"] = kwargs.get("profile")
+            return []
+
+        monkeypatch.setattr(cli, "run_tests", fake_run_tests)
+        rc = cli.main(["run", plan_path, "--connect", str(prof)])
+        assert rc == 0
+        from testrange.connect import BackendProfile
+
+        assert isinstance(captured["profile"], BackendProfile)
+        assert captured["profile"].driver == "mock"
+
+    def test_build_passes_profile_through(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        plan_path = _write_generic_plan(tmp_path)
+        prof = tmp_path / "connect.toml"
+        prof.write_text('driver = "mock"\n')
+        captured: dict[str, object] = {}
+
+        def fake_build_range(plan: object, **kwargs: object) -> str:
+            captured["profile"] = kwargs.get("profile")
+            return "run-xyz"
+
+        monkeypatch.setattr(cli, "build_range", fake_build_range)
+        rc = cli.main(["build", plan_path, "--connect", str(prof)])
+        assert rc == 0
+        assert captured["profile"] is not None
+
+    def test_run_without_connect_passes_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        plan_path = _write_generic_plan(tmp_path)
+        captured: dict[str, object] = {}
+
+        def fake_run_tests(tests: object, plan: object, **kwargs: object) -> list[object]:
+            captured["profile"] = kwargs.get("profile", "MISSING")
+            return []
+
+        monkeypatch.setattr(cli, "run_tests", fake_run_tests)
+        rc = cli.main(["run", plan_path])
+        assert rc == 0
+        assert captured["profile"] is None
+
+    def test_profile_not_found_exits_2(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        plan_path = _write_generic_plan(tmp_path)
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["run", plan_path, "--connect", str(tmp_path / "nope.toml")])
+        assert exc.value.code == 2
+        assert "not found" in capsys.readouterr().err
+
+    def test_generic_plan_no_connect_run_errors_exit_2(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "c"))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "s"))
+        plan_path = _write_generic_plan(tmp_path)
+        rc = cli.main(["run", plan_path])
+        assert rc == 2
+        assert "backend-agnostic" in capsys.readouterr().err
+
+
+class TestDescribeBinding:
+    def test_generic_unbound_without_connect(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        rc = cli.main(["describe", _write_generic_plan(tmp_path)])
+        assert rc == 0
+        assert "backend: UNBOUND" in capsys.readouterr().out
+
+    def test_generic_with_connect_shows_masked_binding(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        plan_path = _write_generic_plan(tmp_path)
+        prof = tmp_path / "connect.toml"
+        prof.write_text('driver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
+        rc = cli.main(["describe", plan_path, "--connect", str(prof)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "driver: proxmox (ProxmoxDriver)" in out
+        assert "host: 10.0.0.5" in out
+        assert "password: ***set***" in out
+        assert "Secret123!" not in out  # never printed
+
+    def test_concrete_plan_shows_binding_no_connect(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        # px_hello.py is the pinned-Proxmox example: it resolves with no --connect.
+        rc = cli.main(["describe", str(EXAMPLES / "px_hello.py")])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Plan (ProxmoxHypervisor)" in out
+        assert "driver: proxmox (ProxmoxDriver)" in out
+        assert "password: ***set***" in out
+        assert "Target123!" not in out  # masked, value not shown
 
 
 class TestTestsValidation:

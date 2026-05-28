@@ -4,6 +4,14 @@ A `testrange` plan is a Python file that declares a top-level
 ``PLAN = Plan(...)`` and a ``TESTS = [...]`` list. The CLI imports
 the file and uses both.
 
+```{note}
+A plan's Hypervisor entry can be **portable** (the generic `Hypervisor`, which
+takes its backend from a `--connect` profile) or **pinned** (a concrete
+`*Hypervisor` like `ProxmoxHypervisor`). See
+[Connecting to a backend](connecting-to-a-backend.md) for the split; this page
+covers the topology the entry carries either way.
+```
+
 ## Minimal plan
 
 ```python

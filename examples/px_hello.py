@@ -1,5 +1,10 @@
 """Proxmox live smoke (PVE-9): build debian+nginx, reach it over QGA, assert.
 
+This is the **pinned-Proxmox** example: it hard-codes `ProxmoxHypervisor` because
+the test genuinely targets PVE. For a portable plan that pins no backend and
+takes its connection from a `--connect` profile, see `examples/hello_world.py`
+(ADR-0015).
+
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13

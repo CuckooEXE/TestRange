@@ -19,12 +19,22 @@ from __future__ import annotations
 from testrange.drivers import libvirt as _libvirt  # noqa: F401
 from testrange.drivers import mock as _mock  # noqa: F401
 from testrange.drivers import proxmox as _proxmox  # noqa: F401
-from testrange.drivers._registry import driver_for, driver_for_name, register
+from testrange.drivers._registry import (
+    driver_for,
+    driver_for_name,
+    driver_for_profile,
+    is_pinned,
+    register,
+    scheme_for_hypervisor,
+)
 from testrange.drivers.base import HypervisorDriver
 
 __all__ = [
     "HypervisorDriver",
     "driver_for",
     "driver_for_name",
+    "driver_for_profile",
+    "is_pinned",
     "register",
+    "scheme_for_hypervisor",
 ]

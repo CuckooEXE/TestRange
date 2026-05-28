@@ -28,6 +28,7 @@ from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import BuildFailedError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
+from testrange.orchestrator.backend import ResolvedBackend
 from testrange.orchestrator.build_phase import build_phase
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
@@ -78,7 +79,11 @@ def _ctx(plan: Plan, driver: MockDriver, cache: CacheManager) -> RunContext:
     }
     return RunContext(
         plan=plan,
-        driver=driver,
+        resolved=ResolvedBackend(
+            driver=driver,
+            build_switch=getattr(plan.hypervisor, "build_switch", None),
+            driver_uri="",
+        ),
         store=store,
         cache=cache,
         run_id=run_id,
@@ -348,7 +353,7 @@ class TestSidecarReadinessGate:
         # Tiny readiness timeout so the loop gives up fast.
         ctx = RunContext(
             plan=ctx.plan,
-            driver=ctx.driver,
+            resolved=ctx.resolved,
             store=ctx.store,
             cache=ctx.cache,
             run_id=ctx.run_id,

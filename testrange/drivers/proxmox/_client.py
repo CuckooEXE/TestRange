@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ssl
 import urllib.parse
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -126,6 +127,17 @@ def parse_connection(uri: str) -> tuple[str, int, str, str]:
     )
 
 
+def normalize_realm(user: str) -> str:
+    """Give a bare PVE username the default ``pam`` realm; keep an explicit one.
+
+    PVE authenticates against a realm, so ``user="root"`` must become
+    ``root@pam``; an already-qualified ``root@pam`` / ``user@pve`` / ``user@ldap``
+    is preserved. Shared by the Plan-entry path (``ProxmoxHypervisor.conn``) and
+    the connection-profile path (``ProxmoxConn.from_profile``) so they agree.
+    """
+    return user if "@" in user else f"{user}@pam"
+
+
 @dataclass(frozen=True)
 class ProxmoxConn:
     """Everything needed to reach a PVE node over REST + SSH.
@@ -185,6 +197,33 @@ class ProxmoxConn:
             ssh_user=q.get("ssh_user", ["root"])[0],
             ssh_password=q.get("ssh_password", [""])[0],
             ssh_port=int(q.get("ssh_port", ["22"])[0]),
+        )
+
+    @classmethod
+    def from_profile(cls, profile: Mapping[str, Any]) -> ProxmoxConn:
+        """Build a :class:`ProxmoxConn` from a connection-profile mapping.
+
+        Applies the same realm normalisation and SSH-credential defaulting as
+        :meth:`ProxmoxHypervisor.conn` (a bare ``user`` takes ``@pam``; SSH
+        reuses the API user's local part and the API password unless overridden)
+        so a profile-supplied connection and an in-Plan one resolve identically.
+        Shape validation is the profile loader's job (CORE-9); this assumes a
+        well-formed mapping and only fills operational defaults.
+        """
+        user = normalize_realm(str(profile.get("user", "root@pam")))
+        password = str(profile.get("password", ""))
+        ssh_password = profile.get("ssh_password")
+        return cls(
+            host=str(profile.get("host", "")),
+            node=str(profile.get("node", "")),
+            user=user,
+            password=password,
+            verify_ssl=bool(profile.get("verify_ssl", False)),
+            port=int(profile.get("port", 8006)),
+            backing_storage=str(profile.get("backing_storage", "local")),
+            ssh_user=str(profile.get("ssh_user") or user.split("@", 1)[0]),
+            ssh_password=str(ssh_password) if ssh_password is not None else password,
+            ssh_port=int(profile.get("ssh_port", 22)),
         )
 
 

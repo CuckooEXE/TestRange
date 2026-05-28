@@ -1,0 +1,36 @@
+# Connection profile for a portable testrange plan (ADR-0015).
+#
+# Copy this to a local, gitignored `connect.toml` and point `--connect` at it:
+#
+#     cp examples/connect.toml.example connect.toml
+#     # edit host/password for your backend
+#     testrange run examples/hello_world.py --connect connect.toml
+#
+# A real `connect.toml` (and any `*.connect.toml`) is gitignored: it carries a
+# password. The `.example` is the only profile tracked in git. Secrets live
+# inline as plain strings — testrange backends are firewalled lab environments.
+
+# Driver scheme (required): "proxmox" | "libvirt" | "mock".
+driver = "proxmox"
+
+# --- connection ---
+host = "10.0.0.5"
+user = "root@pam"        # optional; a bare "root" takes the @pam realm
+password = "Target123!"
+port = 8006              # optional
+verify_ssl = false       # optional (PVE ships a self-signed cert)
+node = ""                # optional; "" auto-detects the single node
+backing_storage = "local"  # optional
+
+# SSH is used only for volume byte I/O; it defaults to the API user/password.
+# ssh_user = "root"
+# ssh_password = "..."
+# ssh_port = 22
+
+# --- build-time internet egress (optional) ---
+# TestRange manufactures and fences an egress segment for the build network and
+# SNATs it out the named host interface (ManagedBuildSwitch; ADR-0014). Without
+# this table the build network is isolated, so a build that needs apt/pip fails.
+[build_switch]
+uplink = "vmbr0"
+# cidr = "10.10.10.0/24"   # optional internal build subnet

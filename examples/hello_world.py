@@ -1,34 +1,33 @@
 """hello_world: one VM, cloud-init bootstraps SSH + nginx, smoke-test it.
 
-Prerequisites:
+Portable plan — it declares topology only and pins no backend. Supply the
+backend at run time with a connection profile:
+
+    testrange describe examples/hello_world.py
+    testrange describe examples/hello_world.py --connect connect.toml
+    testrange run examples/hello_world.py --connect connect.toml
+
+See examples/connect.toml.example for the profile shape, and
+docs/user/connecting-to-a-backend.md for the full workflow. Prerequisites:
+
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
     sudo tools/build-sidecar-image/build.sh
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
-
-Usage:
-    testrange describe examples/hello_world.py
-    testrange run examples/hello_world.py
 """
 
 from __future__ import annotations
 
 import sys
 
-from testrange import OrchestratorHandle, Plan, run_tests
+from testrange import Hypervisor, OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import (
-    CPU,
-    Memory,
-    OSDrive,
-    StoragePool,
-)
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface, StaticAddr
-from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
@@ -37,19 +36,14 @@ _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
     "hello-world",
-    ProxmoxHypervisor(
-        host="40.160.34.83",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
+    Hypervisor(
         networks=[
             Switch(
                 "switch1",
                 Network("netA"),
                 Network("netB"),
                 cidr="172.31.0.0/24",
-                uplink="vmbr9",
-                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+                sidecar=Sidecar(dhcp=True, dns=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],
@@ -68,12 +62,7 @@ PLAN = Plan(
                     base=CacheEntry("debian-13"),
                     credentials=[
                         PosixCred("root", password="root"),
-                        PosixCred(
-                            "myuser",
-                            password="mypass",
-                            ssh_key=_KEY,
-                            admin=True,
-                        ),
+                        PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
                     ],
                     packages=[Apt("nginx")],
                     post_install_commands=("echo hi > /tmp/hi",),

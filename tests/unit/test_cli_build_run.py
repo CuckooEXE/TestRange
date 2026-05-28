@@ -20,7 +20,7 @@ from testrange.cache import CacheManager, LocalCache
 from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.drivers.mock import MockDriver
 from testrange.orchestrator import run_tests
-from testrange.orchestrator.runtime import Orchestrator
+from testrange.orchestrator.backend import ResolvedBackend
 
 _PLAN_SRC = """
 from testrange import Plan
@@ -128,7 +128,15 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[MockDriver, st
     cache.add(sidecar, name="testrange-sidecar")
 
     driver = MockDriver(pool_root=tmp_path / "pools")
-    monkeypatch.setattr(Orchestrator, "_build_driver", lambda self: driver)
+
+    def _fake_resolve(plan: object, profile: object) -> ResolvedBackend:
+        return ResolvedBackend(
+            driver=driver,
+            build_switch=getattr(plan.hypervisor, "build_switch", None),  # type: ignore[attr-defined]
+            driver_uri="",
+        )
+
+    monkeypatch.setattr("testrange.orchestrator.runtime.resolve_backend", _fake_resolve)
 
     plan_path = tmp_path / "plan.py"
     plan_path.write_text(_PLAN_SRC)

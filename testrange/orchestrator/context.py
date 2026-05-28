@@ -16,6 +16,7 @@ from pathlib import Path
 from testrange.cache.manager import CacheManager
 from testrange.drivers.base import HypervisorDriver
 from testrange.networks.base import NetworkAddressing
+from testrange.orchestrator.backend import ResolvedBackend
 from testrange.plan import Plan
 from testrange.state.store import StateStore
 
@@ -31,7 +32,10 @@ class RunContext:
     """
 
     plan: Plan
-    driver: HypervisorDriver
+    # The resolved backend binding (CORE-10): driver + declared build switch +
+    # teardown URI. ``driver`` is exposed as a property so the phases keep
+    # reading ``ctx.driver`` while the binding stays the single source of truth.
+    resolved: ResolvedBackend
     store: StateStore
     cache: CacheManager
     run_id: str
@@ -59,6 +63,10 @@ class RunContext:
     # vm name -> {role -> cached disk path}, e.g. {"web": {"os": ..., "data0": ...}}.
     # Populated by the build phase (capture or cache-hit); read by the run phase.
     built_disk_paths: dict[str, dict[str, Path]] = field(default_factory=dict)
+
+    @property
+    def driver(self) -> HypervisorDriver:
+        return self.resolved.driver
 
 
 __all__ = ["RunContext"]

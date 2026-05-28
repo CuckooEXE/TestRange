@@ -30,6 +30,7 @@ from testrange.exceptions import (
 from testrange.networks import Network, Sidecar, Switch
 from testrange.networks.sidecar import LEASEFILE
 from testrange.orchestrator import Orchestrator
+from testrange.orchestrator.backend import ResolvedBackend
 from testrange.packages import Apt
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms import VMRecipe, VMSpec
@@ -105,11 +106,15 @@ def _qga_plan(name: str = "hello") -> Plan:
 @pytest.fixture
 def fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> MockDriver:
     driver = MockDriver(pool_root=tmp_path / "pools")
-    monkeypatch.setattr(
-        Orchestrator,
-        "_build_driver",
-        lambda self: driver,
-    )
+
+    def _fake_resolve(plan: Plan, profile: object) -> ResolvedBackend:
+        return ResolvedBackend(
+            driver=driver,
+            build_switch=getattr(plan.hypervisor, "build_switch", None),
+            driver_uri="",
+        )
+
+    monkeypatch.setattr("testrange.orchestrator.runtime.resolve_backend", _fake_resolve)
     return driver
 
 
