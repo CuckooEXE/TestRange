@@ -27,9 +27,9 @@ from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import (
+    await_guest_readiness,
     bind_communicators,
     run_phase,
-    wait_builder_ready,
     wait_communicators_ready,
 )
 from testrange.orchestrator.teardown import teardown
@@ -192,7 +192,7 @@ class Orchestrator:
                 self._handle = self._build_handle()
                 bind_communicators(self.ctx)
                 wait_communicators_ready(self.ctx)
-                wait_builder_ready(self.ctx)
+                await_guest_readiness(self.ctx)
             except Exception:
                 _log.exception("bring-up failed; tearing down")
                 teardown(self.ctx)

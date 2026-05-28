@@ -1,10 +1,15 @@
-"""Plan-level cross-VM/Switch addressing validation.
+"""Network-level plan validation, plus the whole-plan entry point.
 
 Single-NIC checks (parseable IPv4) live in ``NetworkIface.__post_init__``.
-Anything that needs the full plan in hand — subnet membership against
-the owning Switch, reserved-slot collisions (sidecar at ``.1``, mgmt at
-``.2``), DHCP-pool collision, duplicates across VMs — lives here so a
-user sees every problem in one pass instead of fix-one-retry-find-next.
+The network checks that need the full plan in hand — subnet membership
+against the owning Switch, reserved-slot collisions (sidecar/mgmt),
+DHCP-pool collision, duplicate static IPs, network-name uniqueness/safety,
+and that every NIC references a declared network — live here, so a user
+sees every problem in one pass instead of fix-one-retry-find-next.
+
+:func:`validate_hypervisor_plan` is the entry point a Hypervisor runs at
+construction; it delegates the VM- and pool-level (non-network) checks to
+:func:`testrange.vms.validate.validate_vm_plan`.
 
 The DHCP pool bounds and reserved offsets come from
 :mod:`testrange.networks._addressing_consts` so the validator and the
@@ -39,17 +44,6 @@ from testrange.vms.recipe import VMRecipe
 # `__` prefix is reserved against *user* names (orchestrator internals use it).
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*")
 
-# The orchestrator names a VM's i-th data disk ``<vm>-data<i>`` (see
-# ``orchestrator/artifacts.py``), while its OS disk is just ``<vm>``. So a VM
-# whose name ends in a ``-data<N>`` marker would produce an OS-disk volume ref
-# identical to some *other* VM's data-disk ref — two distinct disks colliding on
-# one backend locator (silent clobber on upload, mis-resolution on capture —
-# PVE-30). The marker is backend-agnostic (it's the orchestrator's, not a
-# driver's), so the guard lives here. ``[-_.]`` covers the separators a backend
-# may fold to ``-`` when sanitizing (e.g. Proxmox lowercases and maps ``_``/``.``
-# to ``-``), case-insensitively.
-_DATA_DISK_MARKER = re.compile(r"[-_.]data\d+$", re.IGNORECASE)
-
 
 def validate_name(value: str, kind: str) -> str:
     """Return ``value`` unchanged, or raise ``ValueError`` if unsafe.
@@ -74,24 +68,26 @@ def validate_hypervisor_plan(
 ) -> None:
     """Backend-agnostic plan validation a Hypervisor runs at construction.
 
-    Checks structural coherence (every VM NIC/OSDrive references a declared
-    network/pool), uniqueness (no duplicate VM or network names), name safety
-    (:func:`validate_name`), the reserved ``__`` prefix, and then per-NIC
-    addressing via :func:`validate_addressing`. Raises ``ValueError`` on the
-    first structural problem; addressing problems are accumulated together.
+    Network checks live here; the VM- and pool-level (non-network) checks are
+    delegated to :func:`testrange.vms.validate.validate_vm_plan`. Together they
+    cover structural coherence (every VM NIC/OSDrive references a declared
+    network/pool), name uniqueness/safety, the reserved ``__`` prefix and
+    ``-data<N>`` marker, and per-NIC addressing (:func:`validate_addressing`).
+    Raises ``ValueError`` on the first structural problem; addressing problems
+    are accumulated together.
     """
+    # Local import breaks the cycle: vms.validate imports validate_name from
+    # this module, so this module must not import vms.validate at load time.
+    from testrange.vms.validate import validate_vm_plan
+
     switches = tuple(networks)
-    ps = tuple(pools)
     rs = tuple(vms)
 
     net_names = {n.name for s in switches for n in s.networks}
-    pool_names = {p.name for p in ps}
     all_nets = [n.name for s in switches for n in s.networks]
-    vm_names = [r.name for r in rs]
 
-    dup_vms = {n for n in vm_names if vm_names.count(n) > 1}
-    if dup_vms:
-        raise ValueError(f"hypervisor vms have duplicate names: {sorted(dup_vms)}")
+    validate_vm_plan(rs, pools)
+
     dup_nets = {n for n in all_nets if all_nets.count(n) > 1}
     if dup_nets:
         raise ValueError(f"hypervisor networks have duplicate names: {sorted(dup_nets)}")
@@ -100,25 +96,14 @@ def validate_hypervisor_plan(
         validate_name(s.name, "Switch.name")
     for n in all_nets:
         validate_name(n, "Network.name")
-    for r in rs:
-        validate_name(r.name, "VMSpec.name")
 
-    # The orchestrator synthesizes internal switches/networks/VMs under a `__`
-    # prefix (__build, __uplink__<sw>, __sidecar_<sw>); reserve it.
-    reserved = sorted(
-        {n for n in (*(s.name for s in switches), *all_nets, *vm_names) if n.startswith("__")}
-    )
+    # The orchestrator synthesizes internal switches/networks under a `__`
+    # prefix (__build, __uplink__<sw>); reserve it. (VM names are checked by
+    # validate_vm_plan.)
+    reserved = sorted({n for n in (*(s.name for s in switches), *all_nets) if n.startswith("__")})
     if reserved:
         raise ValueError(
             f"names starting with '__' are reserved for testrange internals; rename: {reserved}"
-        )
-
-    data_marked = sorted(n for n in vm_names if _DATA_DISK_MARKER.search(n))
-    if data_marked:
-        raise ValueError(
-            "VM names ending in a '-data<N>' marker are reserved (the orchestrator "
-            "names a VM's i-th data disk '<vm>-data<i>', so such a name would collide "
-            f"with another VM's data-disk volume ref); rename: {data_marked}"
         )
 
     for r in rs:
@@ -128,11 +113,6 @@ def validate_hypervisor_plan(
                     f"VM {r.name!r} references unknown network {nic.network!r}; "
                     f"declared networks: {sorted(net_names)}"
                 )
-        if r.spec.os_drive.pool not in pool_names:
-            raise ValueError(
-                f"VM {r.name!r} OSDrive references unknown pool {r.spec.os_drive.pool!r}; "
-                f"declared pools: {sorted(pool_names)}"
-            )
 
     validate_addressing(switches, rs)
 

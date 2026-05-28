@@ -374,32 +374,24 @@ class CloudInitBuilder(Builder):
             rock_ridge="1.09",
             vol_ident="cidata",
         )
-        for path, data, rr_name in (
-            ("/USERDATA.;1", user_data, "user-data"),
-            ("/METADATA.;1", meta_data, "meta-data"),
-            ("/NETWORKC.;1", network_config, "network-config"),
+        # (ISO9660 8.3 path, bytes, Rock Ridge name, Joliet long-name path).
+        for path, data, rr_name, joliet_path in (
+            ("/USERDATA.;1", user_data, "user-data", "/user-data"),
+            ("/METADATA.;1", meta_data, "meta-data", "/meta-data"),
+            ("/NETWORKC.;1", network_config, "network-config", "/network-config"),
         ):
             iso.add_fp(
                 io.BytesIO(data),
                 len(data),
                 path,
                 rr_name=rr_name,
-                joliet_path=_joliet_name_for(path),
+                joliet_path=joliet_path,
             )
 
         buf = io.BytesIO()
         iso.write_fp(buf)
         iso.close()
         return buf.getvalue()
-
-
-def _joliet_name_for(path: str) -> str:
-    """Map our ISO path to a Joliet (long-name) path."""
-    return {
-        "/USERDATA.;1": "/user-data",
-        "/METADATA.;1": "/meta-data",
-        "/NETWORKC.;1": "/network-config",
-    }[path]
 
 
 # Apt config drop-in that disables signature verification. Written into

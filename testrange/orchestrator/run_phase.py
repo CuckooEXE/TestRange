@@ -178,7 +178,7 @@ def wait_communicators_ready(ctx: RunContext) -> None:
 
     At run-phase boot the native guest agent (or SSH) comes up a few seconds
     *after* the VM powers on. The first real exec — the builder's readiness
-    probe (``wait_builder_ready``) — must not race that, or it hits e.g. PVE's
+    probe (``await_guest_readiness``) — must not race that, or it hits e.g. PVE's
     ``QEMU guest agent is not running``. This is the user-VM analogue of
     :func:`wait_sidecars_ready`: poll a trivial exec until the communicator
     answers, then hand off. A VM whose communicator never answers fails loud.
@@ -206,8 +206,11 @@ def _wait_one_communicator_ready(ctx: RunContext, vm: VMRecipe) -> None:
     )
 
 
-def wait_builder_ready(ctx: RunContext) -> None:
+def await_guest_readiness(ctx: RunContext) -> None:
     """Drive each builder's readiness check via the bound communicator.
+
+    Run-phase gate (not the build phase): once a guest is up and its
+    communicator is bound, block until it passes its builder's readiness check.
 
     The builder runs its own readiness command through the injected
     ``execute`` callable (``vm.communicator.execute`` — whatever the
@@ -325,11 +328,11 @@ def lookup_credential(vm: VMRecipe) -> PosixCred:
 
 
 __all__ = [
+    "await_guest_readiness",
     "bind_communicators",
     "discover_ip",
     "lookup_credential",
     "run_phase",
-    "wait_builder_ready",
     "wait_communicators_ready",
     "wait_sidecars_ready",
 ]

@@ -11,7 +11,6 @@ import datetime as _dt
 import json
 import os
 import secrets
-from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -162,13 +161,6 @@ class StateStore:
                 "kill it first or wait for it to exit, then re-run cleanup."
             )
 
-    def update(self, mutator: Callable[[State], State]) -> State:
-        """Read, apply mutator, write atomically. Returns the new state."""
-        current = self.read()
-        new = mutator(current)
-        self._write_state_atomic(new)
-        return new
-
     def record_intent(
         self,
         *,
@@ -196,30 +188,27 @@ class StateStore:
             intent_at=_now_utc_iso(),
             metadata=metadata,
         )
-        self.update(lambda s: s.with_resource(r))
+        self._write_state_atomic(self.read().with_resource(r))
         return r
 
     def confirm(self, backend_name: str, **metadata: object) -> None:
         """Set outcome_at on the matching resource and merge metadata."""
         outcome = _now_utc_iso()
-
-        def _f(s: State) -> State:
-            for r in s.resources:
-                if r.backend_name == backend_name:
-                    return s.replace_resource(
-                        backend_name,
-                        r.with_outcome(outcome, **metadata),
-                    )
-            raise StateError(f"confirm: no resource named {backend_name!r} in state")
-
-        self.update(_f)
+        state = self.read()
+        for r in state.resources:
+            if r.backend_name == backend_name:
+                self._write_state_atomic(
+                    state.replace_resource(backend_name, r.with_outcome(outcome, **metadata))
+                )
+                return
+        raise StateError(f"confirm: no resource named {backend_name!r} in state")
 
     def forget(self, backend_name: str) -> None:
         """Remove a resource from state.json (post-successful-destroy)."""
-        self.update(lambda s: s.remove_resource(backend_name))
+        self._write_state_atomic(self.read().remove_resource(backend_name))
 
     def set_phase(self, phase: str) -> None:
-        self.update(lambda s: replace(s, phase=phase))
+        self._write_state_atomic(replace(self.read(), phase=phase))
 
     def _write_state_atomic(self, state: State) -> None:
         text = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"
