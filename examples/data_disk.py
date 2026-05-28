@@ -34,7 +34,7 @@ from testrange.devices import (
 )
 from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
@@ -43,9 +43,6 @@ _KEY = SSHKey.generate(comment="testrange-data-disk")
 PLAN = Plan(
     "data-disk",
     ProxmoxHypervisor(
-        host="40.160.34.83",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[
             Switch(
                 "switch1",

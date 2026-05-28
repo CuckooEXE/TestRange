@@ -1,13 +1,14 @@
 # Connecting to a backend
 
 A plan describes *what* range to stand up; a **backend** decides *where*. The
-two are separate (ADR-0015): a portable plan declares topology only and pins no
-backend, and you supply the backend at run time with a connection profile.
+two are separate (ADR-0015): a plan declares topology only — and optionally
+constrains *which* backend scheme is allowed — while the connection always
+arrives at run time via a connection profile.
 
 ## Writing a portable plan
 
 Use the generic `Hypervisor` as your Plan entry. It carries only topology —
-networks, pools, and VMs — and selects no driver:
+networks, pools, and VMs — and pins no backend:
 
 ```python
 from testrange import Hypervisor, Plan
@@ -68,6 +69,12 @@ backing_storage = "local"   # optional
 uplink = "vmbr0"            # host interface to SNAT the build network out of
 ```
 
+Each backend ships its own concrete `BackendProfile` subclass (CORE-18) — the
+`ProxmoxProfile` shown above; `LibvirtProfile(uri, backing_pool)`;
+`MockProfile(pool_root, backing_capacity_gb)` for the in-memory backend. The
+`driver = "..."` scheme picks which one TestRange loads, and each subclass
+rejects keys it doesn't know (typo protection).
+
 Notes:
 
 - **Secrets are inline.** Passwords live in the file as plain strings;
@@ -80,8 +87,8 @@ Notes:
   `ManagedBuildSwitch`: TestRange manufactures and fences an egress segment for
   the build network and SNATs it out the named host interface (ADR-0014).
   Without it the build network is isolated, so a build that needs `apt`/`pip`
-  will fail. A bring-your-own plain-`Switch` egress path isn't expressible in a
-  profile — declare it by pinning the plan (below).
+  will fail. The build switch lives on the profile (not the plan), so the same
+  topology can run isolated in one profile and with managed egress in another.
 
 `testrange describe --connect connect.toml` prints the resolved binding with
 the **password masked**:
@@ -95,31 +102,35 @@ Plan (Hypervisor)
     build egress: managed (uplink=vmbr0)
 ```
 
-## Pinning a plan to a backend
+## Constraining a plan to a backend scheme
 
-When a test genuinely needs a specific backend, use that backend's concrete
-`*Hypervisor` directly. It pins the driver and carries the connection inline —
-no profile needed:
+When a test genuinely depends on a specific backend (a PVE-specific CPU type
+or SDN feature, a libvirt-specific NIC model), use that backend's concrete
+`*Hypervisor` as the Plan entry. Under CORE-19 it is a **topology-only scheme
+marker** — same shape as the generic `Hypervisor`, but it asserts *this
+topology MUST run against backend X*:
 
 ```python
 from testrange import Plan
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch
 
 PLAN = Plan(
     "pve-smoke",
     ProxmoxHypervisor(
-        host="10.0.0.5",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[...], pools=[...], vms=[...],
     ),
 )
 ```
 
-`examples/px_hello.py` is a pinned-Proxmox plan.
+`examples/px_hello.py` is a scheme-pinned-Proxmox plan.
 
-A pinned plan still accepts a `--connect` profile, but only to **override the
-connection** — the profile's `driver` scheme must match the pinned backend. A
-mismatch (e.g. a `mock` profile against a `ProxmoxHypervisor`) is a hard error:
-a concrete entry pins the driver, and a profile cannot change it.
+A scheme-pinned plan still **requires** `--connect` — the entry carries no
+connection. The profile's `driver` scheme **must** match the pinned scheme; a
+mismatch (e.g. a `mock` profile against a `ProxmoxHypervisor`) is a hard
+error. Running `testrange describe` on a pinned plan with no `--connect`
+renders an UNBOUND binding that names the required scheme:
+
+```text
+Plan (ProxmoxHypervisor)
+  backend: UNBOUND (pinned to 'proxmox'; pass --connect <proxmox-profile>)
+```

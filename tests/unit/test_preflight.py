@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-from testrange import Plan
-from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
-from testrange.preflight import PreflightFinding, PreflightReport
-
-
-class _SupportingDriver(MockDriver):
-    """A driver that *can* realize managed build egress (Proxmox-like)."""
-
-    supports_managed_build_egress = True
+from testrange.preflight import (
+    PreflightFinding,
+    PreflightReport,
+    managed_build_egress_findings,
+)
 
 
 class TestReport:
@@ -45,28 +41,31 @@ class TestReport:
 
 
 class TestManagedBuildEgressFindings:
-    """The egress gate is a driver method reading its own capability flag."""
+    """The egress gate (CORE-19) is a free function the orchestrator runs.
 
-    def _plan(self, build_switch: object) -> Plan:
-        return Plan("t", MockHypervisor(build_switch=build_switch))  # type: ignore[arg-type]
+    It takes the user-declared build switch (lives on the profile) plus the
+    driver's :attr:`supports_managed_build_egress` capability flag.
+    """
 
     def test_unsupported_backend_rejects_managed_build_switch(self) -> None:
-        findings = MockDriver().managed_build_egress_findings(
-            self._plan(ManagedBuildSwitch(uplink="vmbr9"))
+        findings = managed_build_egress_findings(
+            ManagedBuildSwitch(uplink="vmbr9"),
+            supports_managed_egress=False,
         )
         assert [f.code for f in findings] == ["managed-build-egress-unsupported"]
 
     def test_supporting_backend_is_clean(self) -> None:
         assert (
-            _SupportingDriver().managed_build_egress_findings(
-                self._plan(ManagedBuildSwitch(uplink="vmbr9"))
+            managed_build_egress_findings(
+                ManagedBuildSwitch(uplink="vmbr9"),
+                supports_managed_egress=True,
             )
             == ()
         )
 
     def test_plain_switch_is_clean_even_when_unsupported(self) -> None:
         plain = Switch("b", Network("n"), cidr="10.9.9.0/24", sidecar=Sidecar(dhcp=True))
-        assert MockDriver().managed_build_egress_findings(self._plan(plain)) == ()
+        assert managed_build_egress_findings(plain, supports_managed_egress=False) == ()
 
     def test_no_build_switch_is_clean(self) -> None:
-        assert MockDriver().managed_build_egress_findings(self._plan(None)) == ()
+        assert managed_build_egress_findings(None, supports_managed_egress=False) == ()

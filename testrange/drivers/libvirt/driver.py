@@ -23,9 +23,8 @@ from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.libvirt import _naming
 from testrange.drivers.libvirt._conn import LibvirtClient, LibvirtConn
 from testrange.exceptions import DriverError
-from testrange.networks.validate import validate_hypervisor_plan
+from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
-    PreflightFinding,
     PreflightReport,
     mgmt_unsupported_findings,
 )
@@ -35,55 +34,21 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
-    from testrange.networks.base import ManagedBuildSwitch, ManagedEgress, Network, Switch
+    from testrange.networks.base import ManagedEgress, Network, Switch
     from testrange.plan import Plan
-    from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
 
 
 @dataclass(frozen=True)
-class LibvirtHypervisor:
-    """Plan-time config selecting the libvirt :class:`LibvirtDriver`.
+class LibvirtHypervisor(Hypervisor):
+    """Topology-only scheme marker selecting the ``libvirt`` backend (CORE-19).
 
-    Only the topology (``networks``/``pools``/``vms``) is required; the rest
-    defaults to a local system QEMU:
-
-    - ``uri`` — the libvirt connect URI (``qemu:///system`` needs root). Remote
-      ``qemu+ssh://`` connects, but host-local L2 can't reach a remote host
-      (BACKEND-5), so the L2 surface assumes a local hypervisor.
-    - ``backing_pool`` — name of a pre-existing libvirt **dir** storage pool the
-      per-run pools carve into (static driver config, not provisioned here).
-    - ``build_switch`` — user-declared build network (``Switch |
-      ManagedBuildSwitch | None``, ADR-0014); ``None`` => isolated, no egress.
+    Identical in shape to the generic :class:`~testrange.Hypervisor`; its only
+    job is to assert *this topology MUST run against libvirt* (e.g., a recipe
+    that relies on a libvirt-specific NIC model) so preflight catches a
+    mismatched ``--connect`` early. Connection (``uri`` / ``backing_pool``) and
+    build egress live on :class:`LibvirtProfile`.
     """
-
-    networks: Sequence[Switch] = ()
-    pools: Sequence[StoragePool] = ()
-    vms: Sequence[VMRecipe] = ()
-    build_switch: Switch | ManagedBuildSwitch | None = None
-    uri: str = "qemu:///system"
-    backing_pool: str = "default"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "networks", tuple(self.networks))
-        object.__setattr__(self, "pools", tuple(self.pools))
-        object.__setattr__(self, "vms", tuple(self.vms))
-        if not self.uri:
-            raise ValueError("LibvirtHypervisor.uri must be a non-empty libvirt connect URI")
-        # build_switch self-validates in Switch / ManagedBuildSwitch construction.
-        validate_hypervisor_plan(self.networks, self.pools, self.vms)
-
-    @property
-    def all_switches(self) -> tuple[Switch, ...]:
-        return tuple(self.networks)
-
-    def conn(self) -> LibvirtConn:
-        return LibvirtConn(libvirt_uri=self.uri, backing_pool=self.backing_pool)
-
-    @property
-    def driver_uri(self) -> str:
-        """The teardown URI persisted into ``state.json`` (cleanup entry point)."""
-        return self.conn().to_uri()
 
 
 class LibvirtDriver(HypervisorDriver):
@@ -92,8 +57,8 @@ class LibvirtDriver(HypervisorDriver):
     DRIVER_NAME = "LibvirtDriver"
 
     # Flipped on in BACKEND-1.2 when the managed-egress realization (a libvirt
-    # NAT network + nwfilter fence) lands; until then preflight rejects a
-    # ManagedBuildSwitch on this backend (managed_build_egress_findings).
+    # NAT network + nwfilter fence) lands; until then the orchestrator's
+    # preflight rejects a ManagedBuildSwitch on this backend.
     supports_managed_build_egress = False
 
     def __init__(self, conn: LibvirtConn, *, client: LibvirtClient | None = None) -> None:
@@ -104,10 +69,6 @@ class LibvirtDriver(HypervisorDriver):
         self._client = client if client is not None else LibvirtClient(conn)
 
     # -- construction paths ------------------------------------------------
-
-    @classmethod
-    def from_hypervisor(cls, hyp: LibvirtHypervisor) -> LibvirtDriver:
-        return cls(hyp.conn())
 
     @classmethod
     def from_uri(cls, uri: str) -> LibvirtDriver:
@@ -130,14 +91,12 @@ class LibvirtDriver(HypervisorDriver):
     ) -> PreflightReport:
         """Plan-side read-only checks.
 
-        Runs the cross-driver findings (mgmt gating, managed-egress
-        capability). Live libvirt-side checks (backing pool present, uplink
-        bridge present) land with their phases (storage / L2).
+        Runs the cross-driver mgmt gate. Managed-egress capability is checked
+        in the orchestrator (CORE-19). Live libvirt-side checks (backing pool
+        present, uplink bridge present) land with their phases (storage / L2).
         """
         del cache_manager, build_switch
-        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
-        findings.extend(self.managed_build_egress_findings(plan))
-        return PreflightReport(findings=tuple(findings))
+        return PreflightReport(findings=tuple(mgmt_unsupported_findings(plan)))
 
     # -- naming (pure) -----------------------------------------------------
 
@@ -251,7 +210,6 @@ register(
     hypervisor_cls=LibvirtHypervisor,
     driver_name=LibvirtDriver.DRIVER_NAME,
     scheme="libvirt",
-    from_hypervisor=LibvirtDriver.from_hypervisor,
     from_uri=LibvirtDriver.from_uri,
 )
 

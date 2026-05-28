@@ -60,6 +60,12 @@ class ProxmoxProfile(BackendProfile):
     ssh_port: int = 22
     build_switch: ManagedBuildSwitch | None = None
 
+    def __post_init__(self) -> None:
+        # Early-fail authoring check that used to live on ProxmoxHypervisor
+        # (CORE-19 moved it here when the hypervisor became topology-only).
+        if not self.host:
+            raise ValueError("ProxmoxProfile.host must be a non-empty string (the PVE host/IP)")
+
     @classmethod
     def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
         cls._validate_keys(table, cls._FIELDS, path)

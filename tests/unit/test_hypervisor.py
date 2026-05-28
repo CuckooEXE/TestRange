@@ -1,9 +1,9 @@
 """Tests for the generic, backend-agnostic ``Hypervisor`` topology type (CORE-7).
 
 The generic ``Hypervisor`` carries only portable topology (networks/pools/vms);
-it selects no driver and carries no connection. ``driver_for`` must reject it
-(it is deliberately unregistered) so a backend-agnostic plan fails loud and
-points the author at a connection profile.
+it selects no driver and carries no connection. The binding resolver rejects it
+without a ``--connect`` profile (CORE-10/CORE-19), since the generic type pins
+no scheme.
 """
 
 from __future__ import annotations
@@ -17,8 +17,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers import driver_for
-from testrange.exceptions import DriverError
+from testrange.drivers import is_pinned, scheme_for_hypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
@@ -93,8 +92,8 @@ class TestGenericHypervisor:
         # topology; the generic type must not grow a build_switch field.
         assert not hasattr(Hypervisor(), "build_switch")
 
-    def test_not_pinned_driver_for_raises(self) -> None:
-        # Unregistered by design: it selects no driver. driver_for must reject
-        # it with a clear error (final --connect wording lands in CORE-10).
-        with pytest.raises(DriverError, match="no driver registered"):
-            driver_for(Hypervisor(**_topology()))  # type: ignore[arg-type]
+    def test_not_pinned(self) -> None:
+        # Unregistered by design: it selects no scheme. is_pinned must report
+        # False so the binding resolver routes it through the --connect path.
+        assert is_pinned(Hypervisor(**_topology())) is False  # type: ignore[arg-type]
+        assert scheme_for_hypervisor(Hypervisor(**_topology())) is None  # type: ignore[arg-type]

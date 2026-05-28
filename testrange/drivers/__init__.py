@@ -20,7 +20,6 @@ from testrange.drivers import libvirt as _libvirt  # noqa: F401
 from testrange.drivers import mock as _mock  # noqa: F401
 from testrange.drivers import proxmox as _proxmox  # noqa: F401
 from testrange.drivers._registry import (
-    driver_for,
     driver_for_name,
     is_pinned,
     register,
@@ -30,7 +29,6 @@ from testrange.drivers.base import HypervisorDriver
 
 __all__ = [
     "HypervisorDriver",
-    "driver_for",
     "driver_for_name",
     "is_pinned",
     "register",

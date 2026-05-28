@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NewType
 
 from testrange.exceptions import DriverError
-from testrange.preflight import PreflightFinding, PreflightReport
+from testrange.preflight import PreflightReport
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
@@ -68,8 +68,10 @@ class HypervisorDriver(ABC):
     # Whether this backend can realize a ManagedBuildSwitch — manufacture and
     # fence the build network's internet-egress segment (ADR-0014). Default
     # False: a backend opts in by overriding to True once it implements the
-    # egress path in create_switch. The orchestrator's preflight rejects a
-    # ManagedBuildSwitch where this is False (managed_build_egress_findings).
+    # egress path in create_switch. The orchestrator's preflight (CORE-19
+    # moved this check out of the driver onto
+    # :func:`testrange.preflight.managed_build_egress_findings`) rejects a
+    # ManagedBuildSwitch where this is False.
     supports_managed_build_egress: bool = False
 
     @abstractmethod
@@ -94,38 +96,6 @@ class HypervisorDriver(ABC):
         CIDR-overlap checks so a colliding user Switch is caught here rather
         than blowing up at build time.
         """
-
-    def managed_build_egress_findings(self, plan: Plan) -> tuple[PreflightFinding, ...]:
-        """Reject a ``ManagedBuildSwitch`` on a backend that can't realize its egress.
-
-        A ``ManagedBuildSwitch`` asks the driver to *manufacture* and fence the
-        build network's internet egress (ADR-0014). A backend with no host-NAT
-        primitive (e.g. ESXi) cannot, and must reject it at preflight rather
-        than bring up a build network with no way out. The capability is this
-        driver's own ``supports_managed_build_egress`` class attr, so the gate
-        is a concrete shared method that reads ``self`` — not a free function
-        taking the flag as a kwarg. Subclasses call it from ``preflight``; at
-        most one finding.
-        """
-        from testrange.networks.base import ManagedBuildSwitch
-
-        build_switch = getattr(plan.hypervisor, "build_switch", None)
-        if self.supports_managed_build_egress or not isinstance(build_switch, ManagedBuildSwitch):
-            return ()
-        return (
-            PreflightFinding(
-                code="managed-build-egress-unsupported",
-                message=(
-                    f"build_switch is a ManagedBuildSwitch(uplink={build_switch.uplink!r}), but "
-                    "this backend cannot manufacture managed build egress"
-                ),
-                fix_hint=(
-                    "use a plain Switch build_switch on an uplink that already has its own "
-                    "NAT/route, or run on a backend that supports managed build egress "
-                    "(e.g. Proxmox)"
-                ),
-            ),
-        )
 
     @abstractmethod
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str: ...

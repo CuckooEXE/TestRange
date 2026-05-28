@@ -33,8 +33,8 @@ from typing import TYPE_CHECKING, Any
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import _guest, _naming, _sdn, _serial, _storage, _vm
-from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn, normalize_realm
-from testrange.networks.validate import validate_hypervisor_plan
+from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn
+from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
@@ -45,106 +45,22 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import ManagedBuildSwitch, ManagedEgress, Network, Switch
+    from testrange.networks.base import ManagedEgress, Network, Switch
     from testrange.plan import Plan
-    from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
 
 
 @dataclass(frozen=True)
-class ProxmoxHypervisor:
-    """Plan-time config selecting the :class:`ProxmoxDriver`.
+class ProxmoxHypervisor(Hypervisor):
+    """Topology-only scheme marker selecting the ``proxmox`` backend (CORE-19).
 
-    A test author gives the **host** (+ password) plus their networks/pools/vms::
-
-        ProxmoxHypervisor(host="10.0.0.5", password="Target123!",
-                          networks=[...], pools=[...], vms=[...])
-
-    Everything operational defaults sanely, because authors care that their
-    tests run, not where: ``user="root@pam"`` (PVE's default realm — a bare
-    ``"root"`` is normalised to ``root@pam``); ``node=""`` auto-detects the
-    host's single node; ``backing_storage="local"`` is PVE's near-universal
-    default; the SDN zone isn't a field at all (TestRange mints one per run and
-    tears it down). All stay as keyword overrides for the less-common cases (a
-    multi-node cluster, an NFS store, a different realm).
-
-    Build-time internet egress is **opt-in** (ADR-0014): set ``build_switch`` to
-    a ``Switch`` (bring-your-own uplink + sidecar) or a ``ManagedBuildSwitch``
-    (TestRange manufactures and fences the egress segment). Left unset, the build
-    network is isolated (DHCP+DNS only) — a build that needs apt/pip must declare
-    one.
-
-    SSH (used only for ``download_from_pool``) reuses the API user/password by
-    default, since ``root@pam`` is the host's system root.
+    Identical in shape to the generic :class:`~testrange.Hypervisor`; its only
+    job is to assert *this topology MUST run on Proxmox VE* (e.g., a recipe
+    relying on a PVE-specific CPU type or SDN feature) so preflight catches a
+    mismatched ``--connect`` early. Connection (host/user/password/node/...)
+    and build egress live on :class:`ProxmoxProfile`; the per-run SDN zone is
+    still minted on the driver, never an author surface.
     """
-
-    host: str
-    networks: Sequence[Switch] = ()
-    pools: Sequence[StoragePool] = ()
-    vms: Sequence[VMRecipe] = ()
-    user: str = "root@pam"
-    password: str = ""
-    port: int = 8006
-    # User-declared build switch (ADR-0014): a Switch (BYO uplink) or a
-    # ManagedBuildSwitch (TestRange manufactures + fences the egress segment).
-    # None => isolated build network, no internet egress. Replaces the former
-    # build_uplink / build_uplink_addr knobs.
-    build_switch: Switch | ManagedBuildSwitch | None = None
-    node: str = ""  # "" => auto-detect the single node
-    backing_storage: str = "local"
-    verify_ssl: bool = False
-    ssh_user: str | None = None  # default: API user's local part (root@pam -> root)
-    ssh_password: str | None = None  # default: reuse the API password
-    ssh_port: int = 22
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "networks", tuple(self.networks))
-        object.__setattr__(self, "pools", tuple(self.pools))
-        object.__setattr__(self, "vms", tuple(self.vms))
-        if not self.host:
-            raise ValueError("ProxmoxHypervisor.host must be a non-empty string (the PVE host/IP)")
-        # build_switch self-validates in Switch / ManagedBuildSwitch construction.
-        validate_hypervisor_plan(self.networks, self.pools, self.vms)
-
-    @property
-    def all_switches(self) -> tuple[Switch, ...]:
-        return tuple(self.networks)
-
-    def conn(self) -> ProxmoxConn:
-        """The :class:`ProxmoxConn` this hypervisor reaches the backend with.
-
-        SSH creds default to the API creds (``root@pam`` is system root).
-        """
-        # PVE authenticates against a realm; default to `pam` for a bare
-        # username (the common `user="root"`). An explicit realm — `root@pam`,
-        # `user@pve`, `user@ldap` — is preserved. Shared with the profile path.
-        user = normalize_realm(self.user)
-        ssh_user = self.ssh_user or user.split("@", 1)[0]
-        ssh_password = self.ssh_password if self.ssh_password is not None else self.password
-        return ProxmoxConn(
-            host=self.host,
-            node=self.node,
-            user=user,
-            password=self.password,
-            verify_ssl=self.verify_ssl,
-            port=self.port,
-            backing_storage=self.backing_storage,
-            ssh_user=ssh_user,
-            ssh_password=ssh_password,
-            ssh_port=self.ssh_port,
-        )
-
-    @property
-    def driver_uri(self) -> str:
-        """The teardown URI the orchestrator persists into ``state.json``.
-
-        It is an internal serialization (the ``proxmox://`` round-trip lives on
-        :class:`ProxmoxConn`), not the author surface — it carries the resolved
-        operational params (storage, ssh, node) cleanup needs, so a later
-        ``cleanup`` rebuilds the driver via :meth:`ProxmoxDriver.from_uri` with
-        the same backing store and SSH creds.
-        """
-        return self.conn().to_uri()
 
 
 class ProxmoxDriver(HypervisorDriver):
@@ -163,7 +79,7 @@ class ProxmoxDriver(HypervisorDriver):
         # PVE or import proxmoxer.
         self._client = client if client is not None else ProxmoxClient(conn)
         # Per-run SDN zone, minted once per driver instance (one driver == one
-        # run via from_hypervisor). 8-char alnum, leading letter — PVE's SDN-id
+        # run via the profile path). 8-char alnum, leading letter — PVE's SDN-id
         # limit. TestRange owns the zone end-to-end (created in create_switch,
         # self-discovered + dropped in destroy_switch), so it is never an author
         # knob and never needs to be deterministic — a teardown driver rebuilt
@@ -178,10 +94,6 @@ class ProxmoxDriver(HypervisorDriver):
         self._vnet_by_network: dict[str, str] = {}
 
     # -- construction paths ------------------------------------------------
-
-    @classmethod
-    def from_hypervisor(cls, hyp: ProxmoxHypervisor) -> ProxmoxDriver:
-        return cls(hyp.conn())
 
     @classmethod
     def from_uri(cls, uri: str) -> ProxmoxDriver:
@@ -209,7 +121,6 @@ class ProxmoxDriver(HypervisorDriver):
         """
         del cache_manager
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
-        findings.extend(self.managed_build_egress_findings(plan))
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))
@@ -436,7 +347,6 @@ register(
     hypervisor_cls=ProxmoxHypervisor,
     driver_name=ProxmoxDriver.DRIVER_NAME,
     scheme="proxmox",
-    from_hypervisor=ProxmoxDriver.from_hypervisor,
     from_uri=ProxmoxDriver.from_uri,
 )
 

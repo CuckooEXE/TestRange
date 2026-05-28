@@ -19,9 +19,9 @@ from testrange.communicators import Communicator, NativeCommunicator, SSHCommuni
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers import driver_for, driver_for_name
+from testrange.drivers import driver_for_name
 from testrange.drivers.base import HypervisorDriver, VolumeRef
-from testrange.drivers.proxmox import ProxmoxDriver, ProxmoxHypervisor
+from testrange.drivers.proxmox import ProxmoxDriver, ProxmoxHypervisor, ProxmoxProfile
 from testrange.drivers.proxmox._client import ProxmoxConn
 from testrange.networks import ManagedEgress, Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
@@ -172,9 +172,6 @@ def _plan(switch: Switch, *, addr: _Addr = None, comm: Communicator | None = Non
     return Plan(
         "t",
         ProxmoxHypervisor(
-            host="pve.example",
-            password="pw",
-            node="ns1001849",
             networks=[switch],
             pools=[StoragePool("pool1", 8)],
             vms=[_vm(addr=addr, comm=comm)],
@@ -189,57 +186,33 @@ class TestConstruction:
     def test_satisfies_abc(self) -> None:
         assert isinstance(_driver(), HypervisorDriver)
 
-    def test_registry_dispatch_by_hypervisor_type(self) -> None:
-        hyp = ProxmoxHypervisor(host="pve.example", password="pw")
-        assert isinstance(driver_for(hyp), ProxmoxDriver)
-
     def test_registry_dispatch_by_name_roundtrips_uri(self) -> None:
-        # The orchestrator persists the *resolved* teardown URI (driver_uri), an
+        # The orchestrator persists the *resolved* teardown URI (driver.uri), an
         # internal serialization carrying storage/ssh so cleanup rebuilds
         # faithfully. It round-trips through from_uri/to_uri.
-        uri = ProxmoxHypervisor(host="pve.example", password="s3cret", node="ns1001849").driver_uri
+        uri = (
+            ProxmoxProfile(host="pve.example", password="s3cret", node="ns1001849")
+            .build_driver()
+            .uri
+        )
         d = driver_for_name("ProxmoxDriver", uri)
         assert isinstance(d, ProxmoxDriver)
         assert d.uri == uri
 
     def test_teardown_uri_is_proxmox_scheme(self) -> None:
-        uri = ProxmoxHypervisor(host="pve.example").driver_uri
+        uri = ProxmoxProfile(host="pve.example").build_driver().uri
         assert uri.startswith("proxmox://")
 
-    def test_requires_host(self) -> None:
-        with pytest.raises(ValueError, match="host"):
-            ProxmoxHypervisor(host="")
-
-    def test_ssh_defaults_to_api_creds(self) -> None:
-        # SSH (download_from_pool only) reuses the API user/password by default;
-        # root@pam -> root for the system login.
-        conn = ProxmoxHypervisor(host="pve.example", password="p@ss:w/rd").conn()
-        assert conn.password == "p@ss:w/rd"
-        assert conn.ssh_user == "root" and conn.ssh_password == "p@ss:w/rd"
-
-    def test_bare_username_defaults_to_pam_realm(self) -> None:
-        # PVE-21: a realm-less user must auth as root@pam, not root (which 401s);
-        # the default user is already root@pam. SSH still logs in as the bare user.
-        assert ProxmoxHypervisor(host="pve.example", user="root").conn().user == "root@pam"
-        assert ProxmoxHypervisor(host="pve.example").conn().user == "root@pam"
-
-    def test_explicit_realm_is_preserved(self) -> None:
-        assert ProxmoxHypervisor(host="pve.example", user="svc@pve").conn().user == "svc@pve"
-
-    def test_node_defaults_to_autodetect(self) -> None:
-        # No node => conn carries "" (the client resolves it at connect).
-        assert ProxmoxHypervisor(host="pve.example").conn().node == ""
-
-    def test_build_switch_is_resolved_for_the_build_phase(self) -> None:
+    def test_build_switch_resolves_via_profile(self) -> None:
         # ADR-0014: the user-declared build_switch flows through resolve_build_switch
-        # into the Switch the build phase brings up. A ManagedBuildSwitch yields a
-        # NAT'd sidecar with a static eth1 + a ManagedEgress carrier.
+        # into the Switch the build phase brings up. CORE-19: build_switch now lives
+        # on the profile (no longer on the topology-only ProxmoxHypervisor).
         from testrange.networks import ManagedBuildSwitch
         from testrange.orchestrator.build import resolve_build_switch
 
-        hyp = ProxmoxHypervisor(host="h", build_switch=ManagedBuildSwitch(uplink="vmbr9"))
-        assert isinstance(hyp.build_switch, ManagedBuildSwitch)
-        sw, egress = resolve_build_switch(hyp.build_switch)
+        profile = ProxmoxProfile(host="h", build_switch=ManagedBuildSwitch(uplink="vmbr9"))
+        assert isinstance(profile.build_switch, ManagedBuildSwitch)
+        sw, egress = resolve_build_switch(profile.build_switch)
         assert sw.uplink == "vmbr9"
         assert sw.sidecar is not None and sw.sidecar.nat is True and sw.sidecar.addr is not None
         assert egress is not None

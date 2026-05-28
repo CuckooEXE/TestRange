@@ -26,7 +26,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
@@ -63,9 +63,6 @@ def _vm(name: str, network: str, ipv4: str) -> VMRecipe:
 PLAN = Plan(
     "network-modes",
     ProxmoxHypervisor(
-        host="40.160.34.83",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[
             Switch("bare-sw", Network("bare-net"), cidr="10.50.0.0/24"),
             Switch(

@@ -21,7 +21,7 @@ from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, Storag
 from testrange.devices.network import NetworkIface
 from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.mock import MockDriver, MockHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.preflight import mgmt_unsupported_findings
 from testrange.vms import VMRecipe, VMSpec
@@ -222,35 +222,12 @@ class TestMgmtGating:
 class TestManagedBuildEgressGating:
     """A ManagedBuildSwitch is preflight-rejected on a backend that can't realize it."""
 
-    def _managed_plan(self) -> Plan:
-        return Plan(
-            "t",
-            MockHypervisor(
-                networks=[
-                    Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
-                ],
-                pools=[StoragePool("pool1", 32)],
-                vms=[_vm()],
-                build_switch=ManagedBuildSwitch(uplink="vmbr9"),
-            ),
-        )
-
     def test_mock_does_not_support_managed_egress(self) -> None:
         # MockDriver inherits the ABC default; it has no host-NAT to manufacture.
+        # The orchestrator's managed_build_egress_findings (CORE-19) reads this
+        # capability flag and rejects the ManagedBuildSwitch on the profile;
+        # coverage of that flow lives in test_preflight.py.
         assert MockDriver().supports_managed_build_egress is False
-
-    def test_preflight_rejects_managed_build_switch(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-        plan = self._managed_plan()
-        report = MockDriver().preflight(
-            plan,
-            cache_manager=CacheManager(),
-            build_switch=resolve_build_switch(plan.hypervisor.build_switch)[0],
-        )
-        assert bool(report) is False
-        assert any(f.code == "managed-build-egress-unsupported" for f in report.findings)
 
 
 class TestPoolCapacityPreflight:

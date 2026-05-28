@@ -22,16 +22,13 @@ from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
     "qga-demo",
     ProxmoxHypervisor(
-        host="40.160.34.83",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[
             Switch(
                 "switch1",

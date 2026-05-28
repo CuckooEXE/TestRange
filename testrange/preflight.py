@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
+    from testrange.networks.base import ManagedBuildSwitch, Switch
     from testrange.plan import Plan
 
 
@@ -46,6 +47,41 @@ class PreflightReport:
             if f.fix_hint:
                 lines.append(f"          fix: {f.fix_hint}")
         return "preflight:\n" + "\n".join(lines)
+
+
+def managed_build_egress_findings(
+    user_build_switch: Switch | ManagedBuildSwitch | None,
+    *,
+    supports_managed_egress: bool,
+) -> tuple[PreflightFinding, ...]:
+    """Reject a ``ManagedBuildSwitch`` on a backend that can't realize its egress.
+
+    A :class:`~testrange.networks.base.ManagedBuildSwitch` asks the driver to
+    *manufacture* and fence the build network's internet egress (ADR-0014). A
+    backend with no host-NAT primitive (e.g., ESXi) cannot, and must reject it
+    at preflight rather than bring up a build network with no way out. CORE-19
+    moved this off the driver (the user-declared build switch lives on the
+    profile now, not on the topology-only Hypervisor); the orchestrator passes
+    both forms in.
+    """
+    from testrange.networks.base import ManagedBuildSwitch
+
+    if supports_managed_egress or not isinstance(user_build_switch, ManagedBuildSwitch):
+        return ()
+    return (
+        PreflightFinding(
+            code="managed-build-egress-unsupported",
+            message=(
+                f"build_switch is a ManagedBuildSwitch(uplink={user_build_switch.uplink!r}), but "
+                "this backend cannot manufacture managed build egress"
+            ),
+            fix_hint=(
+                "use a plain Switch build_switch on an uplink that already has its own "
+                "NAT/route, or run on a backend that supports managed build egress "
+                "(e.g. Proxmox)"
+            ),
+        ),
+    )
 
 
 def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:

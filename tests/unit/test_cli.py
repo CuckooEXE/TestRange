@@ -235,18 +235,34 @@ class TestDescribeBinding:
         assert "password: ***set***" in out
         assert "Secret123!" not in out  # never printed
 
-    def test_concrete_plan_shows_binding_no_connect(
+    def test_concrete_plan_shows_pinned_unbound_without_connect(
         self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-        # px_hello.py is the pinned-Proxmox example: it resolves with no --connect.
+        # CORE-19: px_hello.py is scheme-pinned (ProxmoxHypervisor) but carries no
+        # connection, so describe without --connect renders an UNBOUND binding
+        # that names the pinned scheme so the dev knows which profile to point at.
         rc = cli.main(["describe", str(EXAMPLES / "px_hello.py")])
         assert rc == 0
         out = capsys.readouterr().out
         assert "Plan (ProxmoxHypervisor)" in out
+        assert "backend: UNBOUND (pinned to 'proxmox'" in out
+        assert "--connect <proxmox-profile>" in out
+
+    def test_concrete_plan_with_matching_connect_shows_binding(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        prof = tmp_path / "connect.toml"
+        prof.write_text('driver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
+        rc = cli.main(["describe", str(EXAMPLES / "px_hello.py"), "--connect", str(prof)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Plan (ProxmoxHypervisor)" in out
         assert "driver: proxmox (ProxmoxDriver)" in out
+        assert "host: 10.0.0.5" in out
         assert "password: ***set***" in out
-        assert "Target123!" not in out  # masked, value not shown
+        assert "Secret123!" not in out  # masked, value not shown
 
 
 class TestTestsValidation:

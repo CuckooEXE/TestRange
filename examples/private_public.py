@@ -28,7 +28,7 @@ from testrange.devices import (
 )
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
@@ -42,9 +42,6 @@ _CLIENT_PRIVATE_IP = "10.20.0.101"
 PLAN = Plan(
     "private-public",
     ProxmoxHypervisor(
-        host="40.160.34.83",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[
             Switch(
                 "priv-sw",

@@ -23,7 +23,7 @@ from testrange.drivers.proxmox.driver import ProxmoxHypervisor
 class TestPinIntrospection:
     def test_concrete_entries_report_their_scheme(self) -> None:
         assert scheme_for_hypervisor(MockHypervisor()) == "mock"
-        assert scheme_for_hypervisor(ProxmoxHypervisor(host="h")) == "proxmox"
+        assert scheme_for_hypervisor(ProxmoxHypervisor()) == "proxmox"
         assert scheme_for_hypervisor(LibvirtHypervisor()) == "libvirt"
 
     def test_generic_entry_has_no_scheme(self) -> None:
@@ -31,5 +31,5 @@ class TestPinIntrospection:
 
     def test_is_pinned_agrees(self) -> None:
         assert is_pinned(MockHypervisor()) is True
-        assert is_pinned(ProxmoxHypervisor(host="h")) is True
+        assert is_pinned(ProxmoxHypervisor()) is True
         assert is_pinned(Hypervisor()) is False

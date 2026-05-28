@@ -17,12 +17,12 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers import driver_for, driver_for_name
+from testrange.drivers import driver_for_name, is_pinned, scheme_for_hypervisor
 from testrange.drivers.base import HypervisorDriver
-from testrange.drivers.libvirt import LibvirtDriver, LibvirtHypervisor
+from testrange.drivers.libvirt import LibvirtDriver, LibvirtHypervisor, LibvirtProfile
 from testrange.drivers.libvirt._conn import LibvirtConn
 from testrange.exceptions import DriverError
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.vms import VMRecipe, VMSpec
 
@@ -47,7 +47,7 @@ def _vm(name: str = "web", *, comm: object | None = None) -> VMRecipe:
     )
 
 
-def _plan(*, build_switch: object = None, comm: object | None = None) -> Plan:
+def _plan(comm: object | None = None) -> Plan:
     return Plan(
         "t",
         LibvirtHypervisor(
@@ -56,7 +56,6 @@ def _plan(*, build_switch: object = None, comm: object | None = None) -> Plan:
             ],
             pools=[StoragePool("pool1", 16)],
             vms=[_vm(comm=comm)],
-            build_switch=build_switch,  # type: ignore[arg-type]
         ),
     )
 
@@ -65,25 +64,19 @@ class TestConstruction:
     def test_satisfies_abc(self) -> None:
         assert isinstance(LibvirtDriver(LibvirtConn()), HypervisorDriver)
 
-    def test_registry_dispatch_by_hypervisor_type(self) -> None:
-        assert isinstance(driver_for(LibvirtHypervisor()), LibvirtDriver)
+    def test_topology_only_scheme_marker(self) -> None:
+        # CORE-19: LibvirtHypervisor is a topology-only subclass of the generic
+        # Hypervisor; it pins the 'libvirt' scheme and carries no connection.
+        hyp = LibvirtHypervisor()
+        assert is_pinned(hyp) is True
+        assert scheme_for_hypervisor(hyp) == "libvirt"
+        assert hyp.networks == () and hyp.pools == () and hyp.vms == ()
 
     def test_registry_dispatch_by_name_roundtrips_uri(self) -> None:
-        hyp = LibvirtHypervisor(uri="qemu:///system", backing_pool="images")
-        d = driver_for_name("LibvirtDriver", hyp.driver_uri)
+        drv = LibvirtProfile(uri="qemu:///system", backing_pool="images").build_driver()
+        d = driver_for_name("LibvirtDriver", drv.uri)
         assert isinstance(d, LibvirtDriver)
-        assert d.uri == hyp.driver_uri
-
-    def test_hypervisor_defaults(self) -> None:
-        hyp = LibvirtHypervisor()
-        assert hyp.uri == "qemu:///system"
-        assert hyp.backing_pool == "default"
-        assert hyp.build_switch is None
-        assert hyp.all_switches == ()
-
-    def test_empty_uri_rejected(self) -> None:
-        with pytest.raises(ValueError, match="uri"):
-            LibvirtHypervisor(uri="")
+        assert d.uri == drv.uri
 
 
 class TestConnRoundTrip:
@@ -127,16 +120,11 @@ class TestPreflight:
         )
         assert bool(report) is True
 
-    def test_managed_build_switch_rejected_until_realized(self) -> None:
-        # supports_managed_build_egress is False until BACKEND-1.2.
+    def test_supports_managed_build_egress_is_false_until_realized(self) -> None:
+        # Capability flag — the orchestrator's managed_build_egress_findings
+        # (CORE-19) rejects a ManagedBuildSwitch against this driver until
+        # BACKEND-1.2 lands the egress realization.
         assert LibvirtDriver(LibvirtConn()).supports_managed_build_egress is False
-        report = LibvirtDriver(LibvirtConn()).preflight(
-            _plan(build_switch=ManagedBuildSwitch(uplink="virbr0")),
-            cache_manager=None,  # type: ignore[arg-type]
-            build_switch=_BUILD_SW,
-        )
-        assert bool(report) is False
-        assert any(f.code == "managed-build-egress-unsupported" for f in report.findings)
 
 
 class TestUnimplementedSurfaceFailsLoud:

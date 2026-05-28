@@ -1,33 +1,29 @@
-"""Backend binding resolver (CORE-10).
+"""Backend binding resolver (CORE-10 / CORE-19).
 
-Folds a Plan entry and an optional connection profile into a single
+Folds a Plan entry and the required connection profile into a single
 :class:`ResolvedBackend` the orchestrator consumes — the one place that decides
 *which* driver runs, *how* it connects, and *what* build egress and teardown URI
-it carries. This replaces the orchestrator reaching into ``plan.hypervisor`` for
-the driver/env/uri directly, and it is where the portable-vs-pinned distinction
-is enforced.
+it carries.
 
-The pin/override matrix (``pinned = is_pinned(plan.hypervisor)``):
+Under CORE-19 the matrix has only two cells that actually bind, because a
+concrete ``*Hypervisor`` is a topology-only scheme marker now (it carries no
+connection):
 
 ==================  ====================================================
 (entry, profile)    resolution
 ==================  ====================================================
-concrete + none     today's path: ``driver_for(hyp)``; build egress and
-                    teardown URI from the concrete entry (full back-compat).
 concrete + given    profile.scheme MUST equal the entry's scheme, else a
-                    hard error; the driver is built from the profile
-                    connection (``profile.build_driver()``); build egress
-                    from the profile; topology still from the entry.
-                    (Profile overrides *connection only* — a concrete entry
-                    pins the driver.)
-generic  + none     hard error: the plan is backend-agnostic; pass
-                    ``--connect <profile>``.
-generic  + given    driver from ``profile.build_driver()``; build egress
+                    hard error; driver = ``profile.build_driver()``;
+                    build egress + teardown URI from the profile/driver.
+concrete + none     hard error: pass ``--connect <profile>`` (a concrete
+                    entry only constrains *which* scheme is allowed).
+generic  + given    driver = ``profile.build_driver()``; build egress
                     from the profile.
+generic  + none     hard error: backend-agnostic plan; pass ``--connect``.
 ==================  ====================================================
 
 Compatibility preflight is three layers; this module owns the first two:
-(1) the static pin/driver-match above, raised here; (2) the portability lint
+(1) the scheme-pin/profile-match above, raised here; (2) the portability lint
 :func:`compatibility_findings` (a near-empty honest hook today). The third —
 live capability findings against the resolved driver — runs inside the driver's
 own ``preflight`` and is merged by the orchestrator.
@@ -39,7 +35,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from testrange.drivers import (
-    driver_for,
     is_pinned,
     scheme_for_hypervisor,
 )
@@ -58,10 +53,11 @@ class ResolvedBackend:
     """The single backend binding the orchestrator runs against.
 
     ``build_switch`` is the user-*declared* build switch (the binding's env-knob,
-    ``Switch | ManagedBuildSwitch | None``) — ``resolve_build_switch`` later
-    folds it into the transient build Switch the build phase brings up.
-    ``driver_uri`` is the teardown URI persisted into state.json so a later
-    ``cleanup`` rebuilds the driver.
+    a :class:`~testrange.networks.base.ManagedBuildSwitch` or ``None``) —
+    ``resolve_build_switch`` later folds it into the transient build Switch the
+    build phase brings up. ``driver_uri`` is the teardown URI persisted into
+    state.json so a later ``cleanup`` rebuilds the driver via
+    :func:`~testrange.drivers.driver_for_name`.
     """
 
     driver: HypervisorDriver
@@ -72,48 +68,35 @@ class ResolvedBackend:
 def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBackend:
     """Resolve ``(plan entry, optional profile)`` into a :class:`ResolvedBackend`.
 
-    Implements the pin/override matrix. Raises :class:`DriverError` on a pinned
-    driver/profile mismatch or a backend-agnostic plan with no profile.
+    Implements the CORE-19 matrix. Raises :class:`DriverError` on a missing
+    profile (concrete or generic) or a concrete/profile scheme mismatch.
     """
     hyp = plan.hypervisor
     pinned = is_pinned(hyp)
 
-    if pinned and profile is None:
-        # A pinned entry is always a concrete *Hypervisor, which always carries a
-        # build_switch — read it directly. driver_uri stays a getattr: the
-        # in-memory MockHypervisor (the test backend) has no teardown URI, so it
-        # omits the attribute and falls back to "".
-        driver = driver_for(hyp)
-        return ResolvedBackend(
-            driver=driver,
-            build_switch=hyp.build_switch,
-            driver_uri=str(getattr(hyp, "driver_uri", "")),
-        )
-
-    if pinned and profile is not None:
-        scheme = scheme_for_hypervisor(hyp)
-        if profile.scheme != scheme:
+    if profile is None:
+        if pinned:
+            scheme = scheme_for_hypervisor(hyp)
             raise DriverError(
-                f"connection profile selects driver {profile.scheme!r}, but the plan pins "
-                f"a {type(hyp).__name__} ({scheme!r} backend); a concrete Hypervisor entry "
-                f"pins the driver — a profile may override the connection only, not the driver. "
-                f"Use the generic `Hypervisor` for a portable plan, or a {scheme!r} profile here."
+                f"plan entry {type(hyp).__name__} pins the {scheme!r} backend but no "
+                f"connection profile was supplied; pass --connect <profile> (the entry is "
+                f"a topology-only scheme marker — it carries no connection)"
             )
-        driver = profile.build_driver()
-        return ResolvedBackend(
-            driver=driver,
-            build_switch=profile.build_switch,
-            driver_uri=_driver_uri(driver),
-        )
-
-    if not pinned and profile is None:
         raise DriverError(
             f"plan entry {type(hyp).__name__} is backend-agnostic and selects no driver; "
             f"pass --connect <profile> to bind it to a backend"
         )
 
-    # generic + given
-    assert profile is not None  # narrowed by the branches above (mypy)
+    if pinned:
+        scheme = scheme_for_hypervisor(hyp)
+        if profile.scheme != scheme:
+            raise DriverError(
+                f"connection profile selects driver {profile.scheme!r}, but the plan pins "
+                f"a {type(hyp).__name__} ({scheme!r} backend); a concrete Hypervisor entry "
+                f"constrains which scheme is allowed. Use the generic `Hypervisor` for a "
+                f"portable plan, or a {scheme!r} profile here."
+            )
+
     driver = profile.build_driver()
     return ResolvedBackend(
         driver=driver,

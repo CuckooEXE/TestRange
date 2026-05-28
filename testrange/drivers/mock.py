@@ -26,9 +26,9 @@ from testrange.connect import BackendProfile, register_profile
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
+from testrange.hypervisor import Hypervisor
 from testrange.networks.base import ManagedBuildSwitch
 from testrange.networks.sidecar import LEASEFILE
-from testrange.networks.validate import validate_hypervisor_plan
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
@@ -41,7 +41,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.networks.base import ManagedEgress, Network, Switch
     from testrange.plan import Plan
-    from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
 
 _MOCK_OUI = "02:00:00"  # locally-administered, unicast
@@ -57,34 +56,15 @@ _SUFFIXES = {
 
 
 @dataclass(frozen=True)
-class MockHypervisor:
-    """Plan-time config selecting the in-memory :class:`MockDriver`.
+class MockHypervisor(Hypervisor):
+    """Topology-only scheme marker selecting the in-memory ``mock`` backend (CORE-19).
 
-    ``pool_root`` is where simulated volumes are written (a temp dir when
-    omitted). ``backing_capacity_gb`` is the simulated free space of the
-    single backing store the pools carve into; ``None`` means unlimited and
-    disables the pool minimum-capacity preflight check.
+    Identical in shape to the generic :class:`~testrange.Hypervisor`; its only
+    job is to assert *this topology MUST run against the mock backend* so a
+    preflight (and a human reader) can catch a mismatched ``--connect`` early.
+    The mock-side env knobs (``pool_root`` / ``backing_capacity_gb``) live on
+    :class:`MockProfile`; connection is **always** supplied via ``--connect``.
     """
-
-    networks: Sequence[Switch] = ()
-    pools: Sequence[StoragePool] = ()
-    vms: Sequence[VMRecipe] = ()
-    # User-declared build switch (ADR-0014); None => isolated build network, no
-    # egress. Replaces the former build_uplink knob.
-    build_switch: Switch | ManagedBuildSwitch | None = None
-    pool_root: Path | None = None
-    backing_capacity_gb: int | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "networks", tuple(self.networks))
-        object.__setattr__(self, "pools", tuple(self.pools))
-        object.__setattr__(self, "vms", tuple(self.vms))
-        # build_switch self-validates in Switch / ManagedBuildSwitch construction.
-        validate_hypervisor_plan(self.networks, self.pools, self.vms)
-
-    @property
-    def all_switches(self) -> tuple[Switch, ...]:
-        return tuple(self.networks)
 
 
 @dataclass
@@ -147,10 +127,6 @@ class MockDriver(HypervisorDriver):
     # -- construction paths ------------------------------------------------
 
     @classmethod
-    def from_hypervisor(cls, hyp: MockHypervisor) -> MockDriver:
-        return cls(pool_root=hyp.pool_root, backing_capacity_gb=hyp.backing_capacity_gb)
-
-    @classmethod
     def from_uri(cls, uri: str) -> MockDriver:
         return cls(uri=uri)
 
@@ -175,7 +151,6 @@ class MockDriver(HypervisorDriver):
         if self.preflight_override is not None:
             return self.preflight_override
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
-        findings.extend(self.managed_build_egress_findings(plan))
         findings.extend(self._pool_capacity_findings(plan))
         return PreflightReport(findings=tuple(findings))
 
@@ -480,7 +455,6 @@ register(
     hypervisor_cls=MockHypervisor,
     driver_name=MockDriver.DRIVER_NAME,
     scheme="mock",
-    from_hypervisor=MockDriver.from_hypervisor,
     from_uri=MockDriver.from_uri,
 )
 register_profile(MockProfile)

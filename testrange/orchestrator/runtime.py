@@ -39,7 +39,7 @@ from testrange.orchestrator.run_phase import (
 )
 from testrange.orchestrator.teardown import teardown
 from testrange.plan import Plan
-from testrange.preflight import PreflightReport
+from testrange.preflight import PreflightReport, managed_build_egress_findings
 from testrange.state.schema import PHASE_LEAKED
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms.handle import VMHandle
@@ -149,9 +149,20 @@ class Orchestrator:
         )
         # Merge the portability-lint layer (CORE-10 layer 2) with the driver's
         # own live findings (layer 3); pin/driver-match (layer 1) already ran in
-        # resolve_backend at construction.
+        # resolve_backend at construction. The managed-egress-capability check
+        # also lives here (CORE-19): the user-declared build switch sits on the
+        # profile, not the topology-only Hypervisor, so the orchestrator is the
+        # one place that sees both it and the driver's capability flag.
         report = report.merged(
             PreflightReport(findings=compatibility_findings(self.plan, self.ctx.driver))
+        )
+        report = report.merged(
+            PreflightReport(
+                findings=managed_build_egress_findings(
+                    self._resolved.build_switch,
+                    supports_managed_egress=self.ctx.driver.supports_managed_build_egress,
+                )
+            )
         )
         if not report:
             raise PreflightError(report.render())

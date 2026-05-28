@@ -21,7 +21,7 @@ from testrange.cache.local import CacheEntryInfo
 from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile, load_profile
 from testrange.devices.network import DHCPAddr, StaticAddr
-from testrange.drivers import is_pinned, scheme_for_hypervisor
+from testrange.drivers import scheme_for_hypervisor
 from testrange.exceptions import (
     BuildFailedError,
     BuildRequiredError,
@@ -278,16 +278,21 @@ def _describe(args: argparse.Namespace) -> int:
 
 
 def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
-    """Print the resolved backend binding (or UNBOUND for a generic plan).
+    """Print the resolved backend binding (or UNBOUND when ``--connect`` is missing).
 
-    The per-backend field list comes from ``profile.describe_fields()`` when a
-    profile is supplied (each backend renders its own representative bits, with
-    passwords masked); the pinned-no-profile path falls back to the four common
-    proxmox-shaped attributes for back-compat.
+    Under CORE-19 a concrete ``*Hypervisor`` is a topology-only scheme marker,
+    so *every* runnable plan needs ``--connect``; the unbound message names the
+    pinned scheme (when known) so the dev sees which profile flavor is needed.
+    The per-backend field list comes from ``profile.describe_fields()`` (each
+    backend renders its own representative bits, with passwords masked).
     """
     hyp = plan.hypervisor
-    if not is_pinned(hyp) and profile is None:
-        print("  backend: UNBOUND (pass --connect <profile> to run)")
+    if profile is None:
+        scheme = scheme_for_hypervisor(hyp)
+        if scheme is not None:
+            print(f"  backend: UNBOUND (pinned to {scheme!r}; pass --connect <{scheme}-profile>)")
+        else:
+            print("  backend: UNBOUND (pass --connect <profile> to run)")
         print()
         return
     try:
@@ -297,22 +302,10 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
         print()
         return
 
-    scheme = profile.scheme if profile is not None else scheme_for_hypervisor(hyp)
     print("  backend:")
-    print(f"    driver: {scheme} ({resolved.driver.DRIVER_NAME})")
-    if profile is not None:
-        for label, value in profile.describe_fields():
-            print(f"    {label}: {value}")
-    else:
-        # Pinned-no-profile fallback: read the four common proxmox-shaped attrs
-        # off the entry. New-backend pinned entries that don't expose these
-        # simply skip them.
-        for attr in ("host", "port", "node", "user"):
-            attr_value = getattr(hyp, attr, None)
-            if attr_value not in (None, ""):
-                print(f"    {attr}: {attr_value}")
-        password = getattr(hyp, "password", "") or ""
-        print(f"    password: {'***set***' if password else '(unset)'}")
+    print(f"    driver: {profile.scheme} ({resolved.driver.DRIVER_NAME})")
+    for label, value in profile.describe_fields():
+        print(f"    {label}: {value}")
     bs = resolved.build_switch
     if bs is None:
         print("    build egress: none (isolated build network)")

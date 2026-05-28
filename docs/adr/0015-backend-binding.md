@@ -1,6 +1,6 @@
 # ADR-0015: The Plan entry is topology; the backend is bound separately at run time
 
-Status: Accepted
+Status: Accepted (amended 2026-05-28 — see Addendum)
 Date: 2026-05-27
 
 Relates to [ADR-0008](0008-driver-abc-multi-backend.md) (the driver ABC this
@@ -56,12 +56,22 @@ Split the Plan entry from the backend binding.
   | generic + none    | hard error: the plan is backend-agnostic; pass `--connect`. |
   | generic + given   | driver from the profile scheme; build egress from the profile. |
 
+  > **Amended 2026-05-28 — see Addendum.** Under CORE-19 the concrete+none
+  > back-compat cell becomes a hard error: a concrete `*Hypervisor` is
+  > topology-only and carries no connection, so `--connect` is required in
+  > every cell that has a concrete entry.
+
 - **Build egress lives on the binding, not the topology.** Following
   [ADR-0014](0014-managed-build-switch.md), the build switch is the binding's
   env-knob. A concrete entry still declares it inline; a profile expresses the
   managed-egress form with a `[build_switch]` table mapping to
   `ManagedBuildSwitch(uplink, cidr)`. A bring-your-own plain-`Switch` egress path
   is not expressible in a profile by design — declare it by pinning the plan.
+
+  > **Amended 2026-05-28 — see Addendum.** Under CORE-19 the build switch lives
+  > on the profile only; a concrete entry no longer declares it inline, and the
+  > bring-your-own plain-`Switch` egress path is gone (the only realised form
+  > on any backend is `ManagedBuildSwitch`).
 
 ### Compatibility preflight — three layers
 
@@ -89,3 +99,41 @@ Split the Plan entry from the backend binding.
 - The driver registry gains a scheme map (`driver_for_profile`) and pin
   introspection (`scheme_for_hypervisor`, `is_pinned`) alongside the existing
   type and name dispatch.
+
+## Addendum — 2026-05-28 (CORE-18 + CORE-19)
+
+Two follow-up tickets reshape the binding surface around the principles this
+ADR establishes; the body above records the original state.
+
+**CORE-18 — `BackendProfile` becomes an ABC.** The flat `BackendProfile`
+dataclass with `_CONNECTION_KEYS` covering every backend's keys at once was
+replaced with an ABC in `testrange.connect`. Each backend ships a concrete
+subclass (`ProxmoxProfile` / `LibvirtProfile` / `MockProfile`) declaring only
+the keys IT consumes, self-registering its scheme, and building its own driver
+via `profile.build_driver()`. The driver registry's `driver_for_profile` and
+each driver's `from_profile` classmethod were dropped; `resolve_backend` calls
+`profile.build_driver()` directly.
+
+**CORE-19 — concrete `*Hypervisor` becomes topology-only.** A concrete
+`*Hypervisor` is now an empty subclass of the generic `Hypervisor` plus a
+registered scheme marker — no connection fields, no `conn()`, no `driver_uri`,
+no `build_switch`. Its only job is to assert *this topology MUST run on
+backend X* (a recipe relying on a PVE-specific CPU type, for instance), so
+preflight catches a mismatched `--connect` early. Consequences for the matrix:
+
+| (entry, profile) | CORE-19 resolution |
+| ---------------- | ------------------ |
+| concrete + none  | **hard error**: pinned to a scheme but no connection. Pass `--connect <profile>`. |
+| concrete + given | profile scheme MUST equal the entry's scheme, else hard error; `driver = profile.build_driver()`; build egress from the profile. |
+| generic + none   | hard error (unchanged). |
+| generic + given  | `driver = profile.build_driver()` (unchanged). |
+
+`from_hypervisor` and `driver_for(type)` are gone (the only remaining
+type-driven path was the concrete+none cell). `from_uri` / `driver_for_name`
+stay (cleanup path). `is_pinned` / `scheme_for_hypervisor` stay, now keyed on
+`_SCHEME_FOR_HYP` alone. The managed-egress capability check moves off the
+driver onto a free function `testrange.preflight.managed_build_egress_findings`
+that the orchestrator merges with the driver's preflight; the driver still
+declares its `supports_managed_build_egress` flag. `examples/px_hello.py` is
+now topology-only and runs via `--connect`; `connecting-to-a-backend.md` and
+`PLAN.md §22` are updated to match.

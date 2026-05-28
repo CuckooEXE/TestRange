@@ -1245,36 +1245,41 @@ ADR-0015 splits them.
 - **Generic `Hypervisor`** (`from testrange import Hypervisor`) — portable
   topology only (networks/pools/vms). Unregistered in the driver registry, so
   it selects no driver and carries no connection. The entry a portable plan uses.
-- **Concrete `*Hypervisor`** — still pins its driver and carries the connection
-  inline. For tests that genuinely target one backend.
+- **Concrete `*Hypervisor`** (CORE-19) — an empty subclass of `Hypervisor` plus
+  a registered scheme marker. Topology-only, carries no connection; its only
+  job is to assert *this topology MUST run against backend X* so a mismatched
+  `--connect` is caught at preflight (e.g., a PVE-specific CPU type).
 - **Connection profile** (`testrange/connect.py`) — a local TOML file passed
   with `--connect`. Names the driver by *scheme* (`driver = "proxmox"`), carries
   the connection (inline plain-string password; lab posture), and carries build
   egress as a `[build_switch]` table → `ManagedBuildSwitch`. No env-var fallback;
-  `.gitignore` keeps a real `connect.toml` out of git.
+  `.gitignore` keeps a real `connect.toml` out of git. `BackendProfile` is an
+  ABC (CORE-18); each backend ships a concrete subclass
+  (`ProxmoxProfile` / `LibvirtProfile` / `MockProfile`) that self-registers its
+  scheme and builds its own driver via `profile.build_driver()`.
 
 `resolve_backend(plan, profile)` (`testrange/orchestrator/backend.py`) folds the
-entry + optional profile into `ResolvedBackend { driver, build_switch,
+entry + required profile into `ResolvedBackend { driver, build_switch,
 driver_uri }`, which the orchestrator reads instead of reaching into
-`plan.hypervisor` for the driver/uri/build-switch. The pin/override matrix:
+`plan.hypervisor` for the driver/uri/build-switch. The matrix (CORE-19
+collapse — both "+none" cells are hard errors now):
 
 | (entry, profile) | resolution |
 | ---------------- | ---------- |
-| concrete + none  | driver from the entry's type; build egress + URI from the entry (back-compat). |
-| concrete + given | profile `driver` **must** equal the entry's scheme (else hard error); driver from the profile connection; build egress from the profile; topology from the entry. |
+| concrete + none  | hard error: pinned scheme, no connection. Names the scheme so the dev knows which profile to point `--connect` at. |
+| concrete + given | profile `scheme` **must** equal the entry's scheme (else hard error); `driver = profile.build_driver()`; build egress from the profile. |
 | generic + none   | hard error: backend-agnostic; pass `--connect`. |
-| generic + given  | driver from the profile scheme; build egress from the profile. |
+| generic + given  | `driver = profile.build_driver()`; build egress from the profile. |
 
-Compatibility preflight is three layers: (1) the pin/driver-match above, raised
-in `resolve_backend`; (2) `compatibility_findings(plan, driver)`, a near-empty
-portability-lint hook today; (3) the resolved driver's own live `preflight`. The
-orchestrator merges (2) and (3). `RunContext.resolved` holds the binding;
-`ctx.driver` is a property over it. The driver registry carries type/name
-dispatch + `scheme_for_hypervisor` / `is_pinned` for pin introspection. The
-`--connect` profile path is owned by each backend itself (CORE-18):
-`BackendProfile` is an ABC in `connect.py`; each backend ships a concrete
-subclass (`ProxmoxProfile` / `LibvirtProfile` / `MockProfile`) that self-registers
-its scheme and builds its own driver via `profile.build_driver()`.
+Compatibility preflight is three layers: (1) the scheme-pin/profile-match
+above, raised in `resolve_backend`; (2) `compatibility_findings(plan, driver)`
++ `managed_build_egress_findings(user_build_switch, supports_managed_egress)`,
+both merged by the orchestrator before driver preflight; (3) the resolved
+driver's own live `preflight`. `RunContext.resolved` holds the binding;
+`ctx.driver` is a property over it. The driver registry carries name dispatch
+(`driver_for_name`, cleanup) + `scheme_for_hypervisor` / `is_pinned` (pin
+introspection); the type-driven `driver_for` path is gone (CORE-19 — the
+concrete+none cell that needed it now errors).
 
 ### Deferred (named, not built)
 

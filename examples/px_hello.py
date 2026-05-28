@@ -1,8 +1,10 @@
 """Proxmox live smoke (PVE-9): build debian+nginx, reach it over QGA, assert.
 
-This is the **pinned-Proxmox** example: it hard-codes `ProxmoxHypervisor` because
-the test genuinely targets PVE. For a portable plan that pins no backend and
-takes its connection from a `--connect` profile, see `examples/hello_world.py`
+This is the **scheme-pinned** example: it uses :class:`ProxmoxHypervisor` to
+assert *this topology MUST run on Proxmox VE* (CORE-19), but the plan still
+carries no connection — host/password/node/etc. come from a ``--connect``
+profile (``examples/connect.toml.example``) at run time. For a fully
+backend-agnostic plan that pins no scheme, see ``examples/hello_world.py``
 (ADR-0015).
 
 Prerequisites:
@@ -10,20 +12,20 @@ Prerequisites:
         --name debian-13
     sudo tools/build-sidecar-image/build.sh
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
+    cp examples/connect.toml.example my-pve.toml   # then edit host/password
 Usage:
-    testrange describe examples/px_hello.py
-    testrange --log-level debug run examples/px_hello.py
+    testrange describe examples/px_hello.py --connect my-pve.toml
+    testrange --log-level debug run examples/px_hello.py --connect my-pve.toml
 
-Only host + password are required; user defaults to root@pam, node auto-detects,
-storage defaults to 'local'. The VM is reached over the QEMU guest agent, so the
-orchestrator host needs no route to it.
+The VM is reached over the QEMU guest agent, so the orchestrator host needs no
+route to it.
 
-Build egress is opt-in (ADR-0014): ``build_switch=ManagedBuildSwitch(uplink="vmbr0")``
-has TestRange manufacture and fence the build network's internet egress (an SDN
-SNAT segment on Proxmox) out the named host bridge — ``vmbr0``, the one carrying
-the default gateway. No manual internal bridge or host-NAT setup. Without a
-build_switch the build network is isolated, so a build that needs apt/pip must
-declare one.
+Build egress is opt-in (ADR-0014) and now lives on the profile too: the
+``[build_switch]`` table in the TOML maps to a
+:class:`~testrange.networks.base.ManagedBuildSwitch` that has TestRange
+manufacture and fence the build network's internet egress (an SDN SNAT segment
+on Proxmox). Without a ``[build_switch]`` the build network is isolated, so a
+build that needs apt/pip must declare one.
 """
 
 from __future__ import annotations
@@ -37,16 +39,13 @@ from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.drivers.proxmox import ProxmoxHypervisor
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
     "pve-smoke",
     ProxmoxHypervisor(
-        host="40.160.34.83",
-        password="Target123!",
-        build_switch=ManagedBuildSwitch(uplink="vmbr0"),
         networks=[
             Switch(
                 "switch1",

@@ -131,8 +131,7 @@ def normalize_realm(user: str) -> str:
 
     PVE authenticates against a realm, so ``user="root"`` must become
     ``root@pam``; an already-qualified ``root@pam`` / ``user@pve`` / ``user@ldap``
-    is preserved. Shared by the Plan-entry path (``ProxmoxHypervisor.conn``) and
-    the connection-profile path (``ProxmoxProfile.build_driver``) so they agree.
+    is preserved. Sole caller is :meth:`ProxmoxProfile.build_driver`.
     """
     return user if "@" in user else f"{user}@pam"
 

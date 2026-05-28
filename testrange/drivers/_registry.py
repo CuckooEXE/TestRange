@@ -1,22 +1,24 @@
-"""Driver registry — maps Hypervisor types, driver names, and schemes to factories.
+"""Driver registry — driver-class-name dispatch + Hypervisor-type scheme markers.
 
-Concrete drivers register themselves at module import time. Three driver
-dispatch paths share this one registry, plus the pin introspection helpers
-the binding resolver (CORE-10) uses; no other module knows that, e.g.,
-``MockHypervisor`` maps to ``MockDriver``:
+Concrete drivers register themselves at module import time. Two paths share the
+registry now (CORE-19 collapsed the third):
 
-- by **Hypervisor data type** from a *concrete* Plan entry (``MockHypervisor``
-  -> ``MockDriver``) — the orchestrator's pinned entry point (``driver_for``);
 - by **driver class name** recorded in state.json (``"MockDriver"``) — the
   cleanup entry point (``driver_for_name``);
-- plus ``scheme_for_hypervisor`` and ``is_pinned`` for the binding resolver.
+- by **Hypervisor data type** for pin introspection (``scheme_for_hypervisor``,
+  ``is_pinned``) — the binding resolver (CORE-10) uses this to detect a
+  topology-only scheme marker (CORE-19) and to enforce that ``--connect``'s
+  scheme matches.
 
-The ``--connect`` profile path is **not** in this registry: each concrete
-:class:`~testrange.connect.BackendProfile` subclass builds its own driver
-(``profile.build_driver()``) and self-registers under
-:data:`testrange.connect._PROFILE_BY_SCHEME`. ``scheme`` is still kept here
-because the binding resolver needs to compare a pinned entry's scheme against a
-profile's scheme without going through a profile instance.
+The Plan-entry-type-to-driver path (``driver_for(hyp)``) is gone with CORE-19:
+a concrete ``*Hypervisor`` is now a topology-only scheme marker carrying no
+connection, so the driver is *always* built from the ``--connect`` profile
+(``BackendProfile.build_driver``) or, on cleanup, rebuilt from the persisted
+teardown URI via ``driver_for_name``.
+
+The ``--connect`` profile dispatch lives separately in
+:mod:`testrange.connect` (``_PROFILE_BY_SCHEME``); the ``scheme`` recorded here
+is what the binding resolver compares the profile's scheme against.
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ from typing import Any
 from testrange.drivers.base import HypervisorDriver
 from testrange.exceptions import DriverError
 
-_FROM_HYP: dict[type, Callable[[Any], HypervisorDriver]] = {}
 _FROM_NAME: dict[str, Callable[[str], HypervisorDriver]] = {}
 _SCHEME_FOR_HYP: dict[type, str] = {}
 
@@ -37,33 +38,18 @@ def register(
     hypervisor_cls: type,
     driver_name: str,
     scheme: str,
-    from_hypervisor: Callable[[Any], HypervisorDriver],
     from_uri: Callable[[str], HypervisorDriver],
 ) -> None:
-    """Register a driver's construction paths and its short scheme token.
+    """Register a driver's cleanup factory and its Hypervisor-type scheme marker.
 
-    ``from_hypervisor`` builds the driver from a concrete Plan-time Hypervisor
-    data type (the pinned orchestrator entry point). ``from_uri`` rebuilds it
-    from the connection URI stored in state.json (the cleanup entry point).
-    ``scheme`` is the short token a profile names the driver by (``"mock"``,
-    ``"proxmox"``, ``"libvirt"``); the ``--connect`` path uses it to dispatch
-    to the matching :class:`~testrange.connect.BackendProfile` subclass.
+    ``from_uri`` rebuilds the driver from the connection URI stored in
+    state.json (the cleanup entry point). ``hypervisor_cls`` is the concrete
+    topology-only ``*Hypervisor`` subclass that scheme-pins to this backend;
+    ``scheme`` is the short token (``"mock"``, ``"proxmox"``, ``"libvirt"``)
+    the binding resolver matches a ``--connect`` profile against.
     """
-    _FROM_HYP[hypervisor_cls] = from_hypervisor
     _FROM_NAME[driver_name] = from_uri
     _SCHEME_FOR_HYP[hypervisor_cls] = scheme
-
-
-def driver_for(hypervisor: Any) -> HypervisorDriver:
-    """Construct the driver registered for ``type(hypervisor)``."""
-    factory = _FROM_HYP.get(type(hypervisor))
-    if factory is None:
-        raise DriverError(
-            f"no driver registered for hypervisor type "
-            f"{type(hypervisor).__name__}; registered: "
-            f"{sorted(c.__name__ for c in _FROM_HYP)}"
-        )
-    return factory(hypervisor)
 
 
 def driver_for_name(driver_name: str, uri: str) -> HypervisorDriver:
@@ -80,12 +66,12 @@ def scheme_for_hypervisor(hypervisor: Any) -> str | None:
     """The scheme of a *concrete* Hypervisor entry, or ``None`` if it is generic.
 
     ``None`` means the entry's type is unregistered — the backend-agnostic
-    :class:`~testrange.hypervisor.Hypervisor` — so it pins no driver and the
-    binding must come from a connection profile (CORE-10).
+    :class:`~testrange.hypervisor.Hypervisor` — so it pins no scheme and the
+    binding resolver accepts any registered ``--connect`` profile.
     """
     return _SCHEME_FOR_HYP.get(type(hypervisor))
 
 
 def is_pinned(hypervisor: Any) -> bool:
-    """True if this Plan entry pins a concrete driver (its type is registered)."""
-    return type(hypervisor) in _FROM_HYP
+    """True if this Plan entry is a scheme marker (its type is registered)."""
+    return type(hypervisor) in _SCHEME_FOR_HYP
