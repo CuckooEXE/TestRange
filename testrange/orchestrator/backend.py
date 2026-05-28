@@ -79,10 +79,14 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
     pinned = is_pinned(hyp)
 
     if pinned and profile is None:
+        # A pinned entry is always a concrete *Hypervisor, which always carries a
+        # build_switch — read it directly. driver_uri stays a getattr: the
+        # in-memory MockHypervisor (the test backend) has no teardown URI, so it
+        # omits the attribute and falls back to "".
         driver = driver_for(hyp)
         return ResolvedBackend(
             driver=driver,
-            build_switch=getattr(hyp, "build_switch", None),
+            build_switch=hyp.build_switch,
             driver_uri=str(getattr(hyp, "driver_uri", "")),
         )
 

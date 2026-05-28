@@ -38,6 +38,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
+    from testrange.cache.entry import CacheEntry
     from testrange.credentials.base import Credential
     from testrange.guest_io import GuestExec
     from testrange.networks.base import NetworkAddressing
@@ -58,6 +59,24 @@ class Builder(ABC):
         """
 
     @abstractmethod
+    def os_disk_base(self) -> CacheEntry | None:
+        """The cache entry that seeds the VM's OS disk, or ``None``.
+
+        This is the OS-disk *origin* the build phase uses: the orchestrator
+        resolves the returned :class:`CacheEntry`, uploads its bytes onto the
+        VM's own disk ref, and grows it. An image-based builder (cloud-init)
+        returns its base image. ``None`` means the builder materializes its own
+        OS disk — an installer-based origin (ESXi Kickstart, Windows
+        autounattend) that boots blank media; that path is the deferred BUILD-1
+        ``materialize_os_disk`` seam (ADR-0010 §6) and is not built yet, so the
+        orchestrator rejects a ``None`` origin at preflight for now.
+
+        Abstract because OS-disk origin is a fundamental build property every
+        builder must declare — the orchestrator reads it through this seam
+        rather than knowing any concrete builder type.
+        """
+
+    @abstractmethod
     def config_hash(
         self,
         spec: VMSpec,
@@ -65,18 +84,23 @@ class Builder(ABC):
         *,
         addressing: Mapping[str, NetworkAddressing],
         base_sha: str = "",
+        sidecar_sha: str = "",
         macs: Sequence[str] = (),
     ) -> str:
         """16-char hex hash that uniquely identifies the VM's built disk set.
 
         Pure and deterministic: same ``(spec, recipe, addressing, base_sha,
-        macs)`` -> same hash, every time, with no ``run_id``/clock/random
-        input. This is the build cache key; the rationale and the
-        contract for builder authors live in ADR-0007.
+        sidecar_sha, macs)`` -> same hash, every time, with no
+        ``run_id``/clock/random input. This is the build cache key; the
+        rationale and the contract for builder authors live in ADR-0007.
 
-        ``macs`` (one per NIC in spec order) lets concretes that bake
-        positional NIC config into the install payload key the cache on
-        the stable MACs the orchestrator will assign at run-phase.
+        ``base_sha`` is the OS-disk base image's content sha (from
+        :meth:`os_disk_base`); ``sidecar_sha`` is the build sidecar image's
+        content sha — every build boots on a sidecar-served switch, so a
+        drifted sidecar must invalidate the cache. ``macs`` (one per NIC in
+        spec order) lets concretes that bake positional NIC config into the
+        install payload key the cache on the stable MACs the orchestrator will
+        assign at run-phase.
         """
 
     @abstractmethod
@@ -87,12 +111,17 @@ class Builder(ABC):
         *,
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
-    ) -> bytes:
+    ) -> bytes | None:
         """Render the install payload (e.g., a cloud-init seed ISO) as bytes.
 
-        Per the build-result contract (module docstring), the rendered payload
-        MUST run fail-fast, emit the framed ``TESTRANGE-RESULT:`` record to the
-        guest serial console, and power off.
+        Return ``None`` when this builder needs no seed medium at all — a
+        builder that produces a fully-baked disk with nothing to hand the guest
+        at boot (the build phase then attaches no seed ISO). A concrete that
+        always emits a seed narrows its own return type to ``bytes``.
+
+        When a seed *is* produced, then per the build-result contract (module
+        docstring) the rendered payload MUST run fail-fast, emit the framed
+        ``TESTRANGE-RESULT:`` record to the guest serial console, and power off.
 
         ``macs`` (one per NIC in spec order) lets concretes bake
         positional NIC config (run-phase netplan match-by-MAC etc.) into

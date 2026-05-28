@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from testrange._log import get_logger
-from testrange.builders.cloudinit import CloudInitBuilder
+from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import VolumeRef
@@ -66,7 +66,7 @@ class _VMBuildPlan:
     """A VM's resolved build inputs, plus its cache-probe outcome."""
 
     vm: VMRecipe
-    builder: CloudInitBuilder
+    builder: Builder
     config_hash: str
     macs: tuple[str, ...]
     base_path: Path
@@ -142,19 +142,18 @@ def _probe_all(
 
 
 def _probe_vm(ctx: RunContext, vm: VMRecipe, sidecar_sha: str) -> _VMBuildPlan:
-    if not vm.spec.nics:
-        raise OrchestratorError(
-            f"vm {vm.name!r} declares no NICs; cloud-init build needs at "
-            "least one NIC for internet access during build"
-        )
     builder = vm.builder
-    if not isinstance(builder, CloudInitBuilder):
+    base = builder.os_disk_base()
+    if base is None:
+        # Installer-based OS-disk origin (blank disk + boot media): the deferred
+        # BUILD-1 materialize_os_disk seam (ADR-0010 §6). The image-based path
+        # below is the only one built today.
         raise OrchestratorError(
-            f"vm {vm.name!r}: only CloudInitBuilder is supported in v0, "
-            f"got {type(builder).__name__}"
+            f"vm {vm.name!r}: builder {type(builder).__name__} provides no OS-disk base "
+            "image; installer-based OS-disk origin is not supported yet (BUILD-1)"
         )
 
-    base_info = ctx.cache.resolve(builder.base)
+    base_info = ctx.cache.resolve(base)
     assert base_info.path is not None  # cache.resolve(fetch=True) materializes locally
     macs = tuple(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
@@ -264,18 +263,21 @@ def build_one_vm(
         ctx.store.confirm(name, pool_backend=build_pool_backend)
         data_disk_refs.append((name, ref))
 
-    # --- Seed ISO.
+    # --- Seed ISO (optional: a builder that needs no seed medium returns None).
+    seed_ref: VolumeRef | None = None
+    seed_name: str | None = None
     seed_bytes = bp.builder.render_seed(spec, vm, addressing=ctx.addressing, macs=bp.macs)
-    seed_name = f"{build_vm_backend}-seed{ctx.driver.volume_suffix('build_seed')}"
-    seed_ref = ctx.driver.compose_volume_ref(build_pool_backend, seed_name)
-    ctx.store.record_intent(
-        kind="build_seed",
-        backend_name=seed_name,
-        plan_name=vm.name,
-        pool_backend=build_pool_backend,
-    )
-    ctx.driver.write_to_pool(seed_ref, seed_bytes)
-    ctx.store.confirm(seed_name, pool_backend=build_pool_backend)
+    if seed_bytes is not None:
+        seed_name = f"{build_vm_backend}-seed{ctx.driver.volume_suffix('build_seed')}"
+        seed_ref = ctx.driver.compose_volume_ref(build_pool_backend, seed_name)
+        ctx.store.record_intent(
+            kind="build_seed",
+            backend_name=seed_name,
+            plan_name=vm.name,
+            pool_backend=build_pool_backend,
+        )
+        ctx.driver.write_to_pool(seed_ref, seed_bytes)
+        ctx.store.confirm(seed_name, pool_backend=build_pool_backend)
 
     # --- Define + start the build VM with every writable disk attached.
     network_refs = {nic.network: build_net_backend for nic in spec.nics}
@@ -312,8 +314,9 @@ def build_one_vm(
     # --- Delete everything on the backend (ADR-0010 §3).
     ctx.driver.destroy_vm(build_vm_backend)
     ctx.store.forget(build_vm_backend)
-    ctx.driver.delete_volume(seed_ref)
-    ctx.store.forget(seed_name)
+    if seed_ref is not None and seed_name is not None:
+        ctx.driver.delete_volume(seed_ref)
+        ctx.store.forget(seed_name)
     for name, ref in data_disk_refs:
         ctx.driver.delete_volume(ref)
         ctx.store.forget(name)

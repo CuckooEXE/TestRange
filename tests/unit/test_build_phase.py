@@ -213,6 +213,85 @@ class TestBuildPhase:
         # ...and the rebuilt disks land under a *new* config_hash.
         assert set(_built_names(cache)) - first_names
 
+    def test_no_nics_builds(self, env: tuple[CacheManager, MockDriver]) -> None:
+        # ORCH-5: the orchestrator no longer rejects a VM with no NICs — whether
+        # a build needs network access is the builder's concern, not the generic
+        # build phase's. A no-NIC VM builds and captures its OS disk.
+        cache, driver = env
+        plan = Plan(
+            "hello",
+            MockHypervisor(
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[
+                    VMRecipe(
+                        spec=VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)]),
+                        builder=CloudInitBuilder(
+                            base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+                        ),
+                        communicator=SSHCommunicator("u"),
+                    ),
+                ],
+            ),
+        )
+        build_phase(_ctx(plan, driver, cache))
+        create = [c for c in driver.calls if c[0] == "create_vm" and "build_vm" in c[1][0]]
+        assert len(create) == 1
+        assert any(n.endswith("__os") for n in _built_names(cache))
+
+    def test_no_os_disk_base_is_rejected(self, env: tuple[CacheManager, MockDriver]) -> None:
+        # ORCH-5: the build phase reads OS-disk origin via the Builder ABC seam
+        # (not isinstance). A builder with no base image (installer-based origin)
+        # is the deferred BUILD-1 path and fails loud at probe.
+        from testrange.builders.base import Builder
+        from testrange.credentials.base import Credential
+
+        class _InstallerBuilder(Builder):
+            @property
+            def credentials(self) -> tuple[Credential, ...]:
+                return ()
+
+            def os_disk_base(self) -> None:
+                return None
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=()
+            ):
+                return "0" * 16
+
+            def render_seed(self, spec, recipe, *, addressing, macs=()):  # type: ignore[no-untyped-def]
+                return b""
+
+        cache, driver = env
+        plan = Plan(
+            "hello",
+            MockHypervisor(
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[
+                    VMRecipe(
+                        spec=VMSpec(
+                            name="web",
+                            devices=[
+                                CPU(1),
+                                Memory(512),
+                                OSDrive("pool1", 8),
+                                NetworkIface("netA"),
+                            ],
+                        ),
+                        builder=_InstallerBuilder(),
+                        communicator=SSHCommunicator("u"),
+                    ),
+                ],
+            ),
+        )
+        with pytest.raises(OrchestratorError, match="installer-based OS-disk origin"):
+            build_phase(_ctx(plan, driver, cache))
+
 
 class TestBuildResultSignaling:
     """ADR §21: success keys on the serial ``ok`` token, not power-off.

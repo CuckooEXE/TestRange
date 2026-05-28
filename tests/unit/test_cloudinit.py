@@ -671,6 +671,12 @@ class TestWaitReady:
         with pytest.raises(BuildNotReadyError, match="exited 1"):
             b.wait_ready(spec, _recipe(b, spec), ex)
 
+    def test_os_disk_base_returns_base_image(self) -> None:
+        # ORCH-5: the orchestrator reads OS-disk origin through this ABC seam.
+        base = CacheEntry("debian-13")
+        b = CloudInitBuilder(base=base, credentials=[PosixCred("u", password="p")])
+        assert b.os_disk_base() is base
+
     def test_abc_default_is_noop(self) -> None:
         from testrange.builders.base import Builder
         from testrange.credentials.base import Credential
@@ -680,7 +686,12 @@ class TestWaitReady:
             def credentials(self) -> tuple[Credential, ...]:
                 return ()
 
-            def config_hash(self, spec, recipe, *, addressing, base_sha="", macs=()):  # type: ignore[no-untyped-def]
+            def os_disk_base(self):  # type: ignore[no-untyped-def]
+                return None
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=()
+            ):
                 return "0" * 16
 
             def render_seed(self, spec, recipe, *, addressing, macs=()):  # type: ignore[no-untyped-def]

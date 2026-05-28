@@ -138,6 +138,10 @@ class CloudInitBuilder(Builder):
     def credentials(self) -> tuple[Credential, ...]:
         return self._credentials
 
+    def os_disk_base(self) -> CacheEntry:
+        """The base image bytes are uploaded onto the OS disk and grown."""
+        return self.base
+
     def find_credential(self, username: str) -> Credential | None:
         """Look up a credential by username. Returns None if not found."""
         for c in self._credentials:

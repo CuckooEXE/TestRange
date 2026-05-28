@@ -24,7 +24,6 @@ from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import (
     BuildNotReadyError,
     BuildTimeoutError,
-    OrchestratorError,
     PreflightError,
 )
 from testrange.networks import Network, Sidecar, Switch
@@ -277,39 +276,6 @@ class TestEnterAndExit:
         # Pool was created and then destroyed during teardown
         assert "create_pool" in names
         assert "destroy_pool" in names
-
-    def test_no_nics_rejected(
-        self,
-        fake_driver: MockDriver,
-        populated_cache: tuple[CacheManager, Path],
-    ) -> None:
-        del fake_driver
-        mgr, _ = populated_cache
-        plan = Plan(
-            "hello",
-            MockHypervisor(
-                networks=[
-                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
-                ],
-                pools=[StoragePool("pool1", 32)],
-                vms=[
-                    VMRecipe(
-                        spec=VMSpec(
-                            name="web",
-                            devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
-                        ),
-                        builder=CloudInitBuilder(
-                            base=CacheEntry("debian-13"),
-                            credentials=[PosixCred("u", password="p")],
-                        ),
-                        communicator=SSHCommunicator("u"),
-                    ),
-                ],
-            ),
-        )
-        with pytest.raises(OrchestratorError, match="no NICs"):
-            with Orchestrator(plan, cache_manager=mgr):
-                pass
 
 
 class TestStateFileRecord:
