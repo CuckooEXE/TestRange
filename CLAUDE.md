@@ -61,6 +61,26 @@ reflect reality:
 - A change that alters design or scope is incomplete until PLAN and the board
   are updated to match.
 
+### 4. New capabilities land in `examples/capabilities.py`
+
+`examples/capabilities.py` is the canonical "everything a driver must
+support" survey — the broad-coverage portable plan plus its `TESTS` list.
+It's how a backend gets *certified working*.
+
+- Any new feature / knob / capability that touches a driver-facing contract
+  (devices, networks, communicators, builders, packages, credentials,
+  snapshots, power state, pools, sidecar behavior, etc.) must be added to
+  `examples/capabilities.py` **in the same change**: extend the plan (new
+  VM, NIC, device, or builder setting) and add a corresponding entry to
+  `TESTS` that verifies the capability end-to-end.
+- The example stays *portable* — backend-agnostic `Hypervisor`, no host /
+  credentials / build switch in the file. Backend binding happens at run
+  time via `--connect`.
+- Driver-specific capabilities examples (`examples/capabilities-<driver>.py`)
+  will be added once a backend is *certified working* against the portable
+  example. Until then, backend-specific behavior is exercised by binding
+  the portable plan with `--connect <profile>`.
+
 ## Project state (orientation)
 
 - **Driver layer is multi-backend** (ADR-0008). `MockDriver` / `MockHypervisor`
