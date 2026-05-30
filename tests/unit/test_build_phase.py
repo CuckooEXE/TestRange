@@ -81,7 +81,6 @@ def _ctx(plan: Plan, driver: MockDriver, cache: CacheManager) -> RunContext:
         plan=plan,
         resolved=ResolvedBackend(
             driver=driver,
-            build_switch=getattr(plan.hypervisor, "build_switch", None),
             driver_uri="",
         ),
         store=store,

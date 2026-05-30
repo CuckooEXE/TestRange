@@ -32,7 +32,7 @@ class DriverError(TestRangeError):
 
 
 class ProfileError(TestRangeError):
-    """A ``--connect`` connection profile is missing, unreadable, or malformed."""
+    """A ``--profile`` connection profile is missing, unreadable, or malformed."""
 
 
 class GuestAgentError(DriverError):

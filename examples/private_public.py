@@ -42,6 +42,13 @@ _CLIENT_PRIVATE_IP = "10.20.0.101"
 PLAN = Plan(
     "private-public",
     ProxmoxHypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "priv-sw",
@@ -53,14 +60,9 @@ PLAN = Plan(
                 "pub-sw",
                 Network("public-net"),
                 cidr="10.30.0.0/24",
-                uplink="vmbr9",
+                uplink="egress",
                 # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
-                sidecar=Sidecar(
-                    dhcp=True,
-                    dns=True,
-                    nat=True,
-                    addr=StaticAddr("10.10.10.3/24", gw="10.10.10.1", dns=("1.1.1.1",)),
-                ),
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],

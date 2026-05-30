@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 from collections.abc import Generator, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
@@ -27,19 +27,19 @@ from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
 from testrange.hypervisor import Hypervisor
-from testrange.networks.base import ManagedBuildSwitch
 from testrange.networks.sidecar import LEASEFILE
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
     mgmt_unsupported_findings,
+    unknown_uplink_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import ManagedEgress, Network, Switch
+    from testrange.networks.base import Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -61,9 +61,9 @@ class MockHypervisor(Hypervisor):
 
     Identical in shape to the generic :class:`~testrange.Hypervisor`; its only
     job is to assert *this topology MUST run against the mock backend* so a
-    preflight (and a human reader) can catch a mismatched ``--connect`` early.
+    preflight (and a human reader) can catch a mismatched ``--profile`` early.
     The mock-side env knobs (``pool_root`` / ``backing_capacity_gb``) live on
-    :class:`MockProfile`; connection is **always** supplied via ``--connect``.
+    :class:`MockProfile`; connection is **always** supplied via ``--profile``.
     """
 
 
@@ -89,10 +89,12 @@ class MockDriver(HypervisorDriver):
         uri: str = "mock:///",
         pool_root: Path | None = None,
         backing_capacity_gb: int | None = None,
+        uplinks: Mapping[str, str] | None = None,
     ) -> None:
         self.uri = uri
         self.pool_root = pool_root or Path(tempfile.mkdtemp(prefix="testrange-mock-"))
         self.backing_capacity_gb = backing_capacity_gb
+        self.uplinks: dict[str, str] = dict(uplinks or {})
         self.connected = False
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
@@ -146,13 +148,31 @@ class MockDriver(HypervisorDriver):
     def preflight(
         self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
     ) -> PreflightReport:
-        del cache_manager, build_switch
+        del cache_manager
         self._record("preflight")
         if self.preflight_override is not None:
             return self.preflight_override
+        switches = [*plan.hypervisor.all_switches]
+        if build_switch is not None:
+            switches.append(build_switch)
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
         findings.extend(self._pool_capacity_findings(plan))
+        findings.extend(unknown_uplink_findings(switches, self.uplinks))
         return PreflightReport(findings=tuple(findings))
+
+    def _resolve_uplink(self, name: str) -> str:
+        """Resolve a logical uplink name to a host iface (ADR-0016).
+
+        Raises :class:`DriverError` on an unmapped name — preflight catches this
+        up-front, so reaching it here is a programming error, but the driver
+        still fails loud rather than silently bridging to nothing.
+        """
+        iface = self.uplinks.get(name)
+        if iface is None:
+            raise DriverError(
+                f"uplink {name!r} is not mapped by this profile (known: {sorted(self.uplinks)})"
+            )
+        return iface
 
     def _pool_capacity_findings(self, plan: Plan) -> list[PreflightFinding]:
         """Verify the single backing store holds at least each pool's ``size_gb``."""
@@ -191,26 +211,18 @@ class MockDriver(HypervisorDriver):
 
     # -- switches & networks (driver owns L2) ------------------------------
 
-    def create_switch(
-        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
-    ) -> str | None:
+    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         nat = switch.sidecar is not None and switch.sidecar.nat
         uplink_network: str | None = None
-        if managed_egress is not None:
-            # Simulate the manufactured + fenced egress segment the sidecar's
-            # eth1 rides (a real backend SNATs + fences it; the mock just names it).
-            uplink_network = f"{backend_name}__managed_egress"
-        elif switch.uplink is not None and nat:
-            uplink_network = f"{backend_name}__uplink"
+        host_iface: str | None = None
+        if switch.uplink is not None:
+            host_iface = self._resolve_uplink(switch.uplink)
+            if nat:
+                # The out-of-band uplink iface the sidecar's eth1 rides
+                # (DHCP/route is behind it — TestRange only attaches; ADR-0016).
+                uplink_network = f"{backend_name}__uplink"
         self._switches[backend_name] = _Switch(backend_name, uplink_network)
-        self._record(
-            "create_switch",
-            backend_name,
-            switch.name,
-            switch.uplink,
-            nat,
-            managed_egress is not None,
-        )
+        self._record("create_switch", backend_name, switch.name, switch.uplink, host_iface, nat)
         return uplink_network
 
     def destroy_switch(self, backend_name: str) -> None:
@@ -425,7 +437,7 @@ class MockProfile(BackendProfile):
 
     pool_root: Path | None = None
     backing_capacity_gb: int | None = None
-    build_switch: ManagedBuildSwitch | None = None
+    uplinks: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
@@ -435,13 +447,14 @@ class MockProfile(BackendProfile):
         return cls(
             pool_root=Path(pool_root) if pool_root is not None else None,
             backing_capacity_gb=int(capacity) if capacity is not None else None,
-            build_switch=cls._parse_build_switch(table, path),
+            uplinks=cls._parse_uplinks(table, path),
         )
 
     def build_driver(self) -> MockDriver:
         return MockDriver(
             pool_root=self.pool_root,
             backing_capacity_gb=self.backing_capacity_gb,
+            uplinks=self.uplinks,
         )
 
     def describe_fields(self) -> Iterable[tuple[str, str]]:

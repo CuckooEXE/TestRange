@@ -87,10 +87,10 @@ def build_phase(ctx: RunContext) -> None:
 
     # At least one miss: stand up the ephemeral build infra (ADR-0010 §2/§9).
     build_pool_backend = _create_build_pool(ctx, misses)
-    # managed_egress instructs the driver to manufacture + fence the egress
-    # segment for a ManagedBuildSwitch (ADR-0014); None for a plain/no build switch.
-    build_switch, managed_egress = resolve_build_switch(ctx.resolved.build_switch)
-    provision_switch(ctx, build_switch, kind_prefix="build_", managed_egress=managed_egress)
+    # The build switch is portable topology on the Hypervisor now (ADR-0016);
+    # it is realized exactly like a run-phase switch.
+    build_switch = resolve_build_switch(ctx.plan.hypervisor.build_switch)
+    provision_switch(ctx, build_switch, kind_prefix="build_")
     build_net_backend = ctx.network_backends[build_switch.networks[0].name]
     materialize_sidecar_for(
         ctx,

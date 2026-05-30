@@ -27,7 +27,7 @@ def _ctx(store: StateStore, driver: _FakeDriver) -> RunContext:
     # teardown() only touches store/driver/run_id; plan and cache are unused.
     return RunContext(
         plan=cast(Any, None),
-        resolved=ResolvedBackend(driver=cast(Any, driver), build_switch=None, driver_uri=""),
+        resolved=ResolvedBackend(driver=cast(Any, driver), driver_uri=""),
         store=store,
         cache=cast(Any, None),
         run_id="r1",

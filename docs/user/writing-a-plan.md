@@ -6,7 +6,7 @@ the file and uses both.
 
 ```{note}
 A plan's Hypervisor entry can be **portable** (the generic `Hypervisor`, which
-takes its backend from a `--connect` profile) or **pinned** (a concrete
+takes its backend from a `--profile` connection profile) or **pinned** (a concrete
 `*Hypervisor` like `ProxmoxHypervisor`). See
 [Connecting to a backend](connecting-to-a-backend.md) for the split; this page
 covers the topology the entry carries either way.
@@ -39,7 +39,7 @@ PLAN = Plan(
             "build",
             Network("build"),
             cidr="10.97.99.0/24",
-            uplink="eth0",
+            uplink="egress",
             sidecar=Sidecar(dhcp=True, dns=True, nat=True),
         ),
         networks=[
@@ -47,7 +47,7 @@ PLAN = Plan(
                 "sw1",
                 Network("netA"),
                 cidr="10.0.1.0/24",
-                uplink="eth0",
+                uplink="egress",
                 sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
@@ -117,7 +117,7 @@ Switch(
     Network("netA"),
     Network("netB"),          # both on the same wire, same CIDR
     cidr="10.0.1.0/24",       # strict network form; host-form raises
-    uplink="eth0",            # physical NIC on the host (vSwitch model)
+    uplink="egress",          # logical uplink name; the profile maps it to a host iface
     mgmt=True,                # host reachable at .2 on this segment
     sidecar=Sidecar(          # services at .1; omit for a bare L2 wire
         dhcp=True,            # sidecar serves DHCP at .1
@@ -165,31 +165,33 @@ validation to skip — there is no static address to range-check.
 
 The build phase needs internet access so `apt` / `pip` can pull
 packages into the VM's disks. You declare the build network on the
-hypervisor via `build_switch` (ADR-0014) — there is **no default uplink**,
-so without a `build_switch` the build network is isolated (no egress):
+hypervisor via `build_switch` ([ADR-0016](../adr/0016-named-uplinks-out-of-band-egress.md)) —
+there is **no default uplink**, so without a `build_switch` the build network
+is isolated (no egress):
 
 ```python
-MockHypervisor(
+Hypervisor(
     build_switch=Switch(
-        "build", Network("build"), cidr="10.97.99.0/24", uplink="eth0",
+        "build", Network("build"), cidr="10.97.99.0/24", uplink="egress",
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
     ...
 )
 ```
 
-The orchestrator brings up the declared build Switch (here: a
-sidecar serving DHCP/DNS and MASQUERADE out `eth0`), runs each build
-VM against it, captures every built disk into the cache, and tears
-the whole build topology down LIFO before the run phase. Omit
+`build_switch` is an ordinary `Switch`, realized **identically to a run-phase
+switch** — there is no special "managed egress" type. The orchestrator brings
+it up (here: a sidecar serving DHCP/DNS and MASQUERADE out the `egress` uplink),
+runs each build VM against it, captures every built disk into the cache, and
+tears the whole build topology down LIFO before the run phase. Omit
 `build_switch` only if every VM already has a cache hit.
 
-On a real backend, prefer `build_switch=ManagedBuildSwitch(uplink="vmbr0")`:
-TestRange manufactures and fences the egress segment for you (an SDN
-`snat=1` vnet on Proxmox), instead of you wiring an uplink and its NAT by
-hand. It is gated by the driver capability `supports_managed_build_egress`,
-so backends without a host-NAT primitive reject it at preflight — and the
-in-memory `MockHypervisor` shown here uses the plain-`Switch` form.
+`uplink="egress"` is a logical name the bound profile's `[uplinks]` map resolves
+to a host bridge with out-of-band internet (NAT/DHCP behind it). TestRange only
+attaches to that bridge — it does not manufacture, SNAT, or fence egress; that
+is the operator's out-of-band setup. The build switch is portable topology
+(it carries no host-specific name), so the same plan runs on any backend whose
+profile maps `egress`.
 
 ### Data disks (`HardDrive`)
 

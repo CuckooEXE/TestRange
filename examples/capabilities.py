@@ -2,9 +2,10 @@
 
 This is the broad-coverage example: a single backend-agnostic :class:`Hypervisor`
 (portable topology only) whose VMs and tests touch every capability TestRange
-exposes to a driver. Bind a backend at run time with ``--connect`` — the plan
-names no host, no credentials, and no build switch, because the resolved backend
-(not the portable topology) carries connection config and build-time egress.
+exposes to a driver. Bind a backend at run time with ``--profile`` — the plan
+names no host and no credentials. Its switches reference uplinks by **logical
+name** (``egress``), which the bound profile's ``[uplinks]`` map resolves to a
+host bridge (ADR-0016); the ``build_switch`` is portable topology on the plan.
 
 Capability map (VM -> what it proves):
 
@@ -34,11 +35,12 @@ Prerequisites:
 
 Usage:
     testrange describe examples/capabilities.py
-    testrange run --connect <profile> examples/capabilities.py
+    testrange run --profile <name> examples/capabilities.py
 
-The ``--connect`` profile must provide a backend that can build (internet egress
-during the build phase) and that supports the native guest agent, a serial
-build-result sink, and memory snapshots — every capability the tests touch.
+The profile must map the ``egress`` uplink to a host bridge with out-of-band
+internet egress (NAT/DHCP behind it), and provide a backend that supports the
+native guest agent, a serial build-result sink, and memory snapshots — every
+capability the tests touch.
 """
 
 from __future__ import annotations
@@ -77,13 +79,20 @@ def _native_image(*packages: Apt, post: tuple[str, ...] = ()) -> CloudInitBuilde
 PLAN = Plan(
     "capabilities",
     Hypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "pub-sw",
                 Network("pub-a"),
                 Network("pub-b"),
                 cidr="10.30.0.0/24",
-                uplink="vmbr9",
+                uplink="egress",
                 sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
             Switch(

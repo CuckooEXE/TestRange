@@ -13,8 +13,6 @@ from testrange.communicators.ssh import SSHCommunicator
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
 from testrange.devices.network import NetworkIface
 from testrange.networks import (
-    ManagedBuildSwitch,
-    ManagedEgress,
     Network,
     NetworkAddressing,
     Sidecar,
@@ -151,51 +149,6 @@ class TestSwitch:
     def test_empty_name(self) -> None:
         with pytest.raises(ValueError):
             Switch("", Network("a"))
-
-
-class TestManagedBuildSwitch:
-    def test_minimal(self) -> None:
-        mbs = ManagedBuildSwitch(uplink="vmbr9")
-        assert mbs.uplink == "vmbr9"
-        assert mbs.cidr is None  # None => resolve_build_switch fills the default
-
-    def test_explicit_cidr(self) -> None:
-        mbs = ManagedBuildSwitch(uplink="vmbr9", cidr="10.50.0.0/24")
-        assert mbs.cidr == "10.50.0.0/24"
-
-    def test_empty_uplink_rejected(self) -> None:
-        with pytest.raises(ValueError, match="uplink"):
-            ManagedBuildSwitch(uplink="")
-
-    def test_strict_cidr_rejects_host_form(self) -> None:
-        with pytest.raises(ValueError, match=r"strict form|host address|network address"):
-            ManagedBuildSwitch(uplink="vmbr9", cidr="10.50.0.1/24")
-
-    def test_ipv6_rejected(self) -> None:
-        with pytest.raises(ValueError, match="IPv4"):
-            ManagedBuildSwitch(uplink="vmbr9", cidr="fd00::/64")
-
-    def test_frozen(self) -> None:
-        mbs = ManagedBuildSwitch(uplink="vmbr9")
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            mbs.uplink = "vmbr0"  # type: ignore[misc]
-
-    def test_not_a_switch_subclass(self) -> None:
-        # Deliberately a sibling, not a subclass (ADR-0014): it expresses a
-        # driver intent, not an L2 topology, so it must not flow where a Switch
-        # is expected without going through resolve_build_switch.
-        assert not issubclass(ManagedBuildSwitch, Switch)
-
-
-class TestManagedEgress:
-    def test_construct(self) -> None:
-        eg = ManagedEgress(egress_cidr="10.97.98.0/24")
-        assert eg.egress_cidr == "10.97.98.0/24"
-
-    def test_frozen(self) -> None:
-        eg = ManagedEgress(egress_cidr="10.97.98.0/24")
-        with pytest.raises(dataclasses.FrozenInstanceError):
-            eg.egress_cidr = "10.0.0.0/24"  # type: ignore[misc]
 
 
 class TestNetworkAddressing:

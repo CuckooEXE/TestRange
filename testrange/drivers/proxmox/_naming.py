@@ -92,16 +92,6 @@ def vnet_id(backend_name: str) -> str:
     return "v" + hashlib.sha1(backend_name.encode()).hexdigest()[:7]
 
 
-def egress_vnet_id(backend_name: str) -> str:
-    """Stable 8-char SDN vnet id for a ManagedBuildSwitch's manufactured egress segment.
-
-    Distinct from :func:`vnet_id` (``e`` prefix vs ``v``) so a switch's guest vnet
-    and its egress vnet coexist in the per-run zone; derived from the same backend
-    name so ``destroy_switch`` recomputes and removes it without extra state.
-    """
-    return "e" + hashlib.sha1(backend_name.encode()).hexdigest()[:7]
-
-
 def volid_storage(ref: str) -> str:
     """The storage id portion of a volid (the part before the first ``:``)."""
     return ref.split(":", 1)[0]

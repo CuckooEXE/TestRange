@@ -6,15 +6,18 @@ selection (its type drives ``driver_for``), connection config, and
 environment knobs. That forces a portable test to hard-code one backend.
 
 This ``Hypervisor`` carries **only** job 1 — the portable topology
-(networks/pools/vms). It selects no driver (deliberately *not* registered in
-the driver registry, which is what marks it "generic / unpinned") and carries
-no connection. The backend is supplied separately at run time via a connection
-profile (``--connect``); ``resolve_backend`` (CORE-10) folds this topology and
-that profile into the binding the orchestrator consumes.
+(networks/pools/vms, plus the optional transient ``build_switch``). It selects
+no driver (deliberately *not* registered in the driver registry, which is what
+marks it "generic / unpinned") and carries no connection. The backend is
+supplied separately at run time via a connection profile (``--profile``);
+``resolve_backend`` (CORE-10) folds this topology and that profile into the
+binding the orchestrator consumes.
 
-Build egress (``build_switch`` / ``ManagedBuildSwitch``) is **not** here: it is
-a backend-specific binding concern that rides on the resolved backend, not on
-portable topology (CORE-7/CORE-10 decision, 2026-05-26).
+The ``build_switch`` is portable topology (ADR-0016): now that ``Switch.uplink``
+is a profile-resolved logical name, the build switch carries nothing
+host-specific, so it lives here alongside the run-phase networks rather than on
+the binding (reversing the CORE-7/ADR-0014 placement, whose only rationale was
+the old host-specific uplink).
 """
 
 from __future__ import annotations
@@ -36,14 +39,20 @@ class Hypervisor:
     """A backend-agnostic Plan entry: portable topology only, no backend.
 
     Construct one from generic devices and pass it to :class:`Plan`; supply the
-    backend at run time with ``testrange run --connect <profile>``. Without a
+    backend at run time with ``testrange run --profile <name>``. Without a
     profile a plan built on this type has no driver, so ``run``/``build`` error
-    and point at ``--connect`` (CORE-10); ``describe`` still renders it.
+    and point at ``--profile`` (CORE-10); ``describe`` still renders it.
+
+    ``build_switch`` is the optional transient build-phase network (ADR-0016):
+    ``None`` => an isolated no-egress build switch; a ``Switch`` is realized
+    exactly like a run-phase one (a NAT egress build switch is
+    ``Switch(uplink="<named>", sidecar=Sidecar(dhcp=True, dns=True, nat=True))``).
     """
 
     networks: Sequence[Switch] = field(default_factory=tuple)
     pools: Sequence[StoragePool] = field(default_factory=tuple)
     vms: Sequence[VMRecipe] = field(default_factory=tuple)
+    build_switch: Switch | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "networks", tuple(self.networks))

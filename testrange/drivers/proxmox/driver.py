@@ -25,7 +25,7 @@ end-to-end ``testrange run`` smoke is PVE-9.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Generator, Sequence
+from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,13 +39,14 @@ from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
     mgmt_unsupported_findings,
+    unknown_uplink_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import ManagedEgress, Network, Switch
+    from testrange.networks.base import Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -57,7 +58,7 @@ class ProxmoxHypervisor(Hypervisor):
     Identical in shape to the generic :class:`~testrange.Hypervisor`; its only
     job is to assert *this topology MUST run on Proxmox VE* (e.g., a recipe
     relying on a PVE-specific CPU type or SDN feature) so preflight catches a
-    mismatched ``--connect`` early. Connection (host/user/password/node/...)
+    mismatched ``--profile`` early. Connection (host/user/password/node/...)
     and build egress live on :class:`ProxmoxProfile`; the per-run SDN zone is
     still minted on the driver, never an author surface.
     """
@@ -68,12 +69,18 @@ class ProxmoxDriver(HypervisorDriver):
 
     DRIVER_NAME = "ProxmoxDriver"
 
-    # Proxmox realizes ManagedBuildSwitch via an SDN snat=1 vnet + VNet firewall
-    # fence (ADR-0014; see _sdn._create_egress_vnet / _fence_egress_vnet).
-    supports_managed_build_egress = True
-
-    def __init__(self, conn: ProxmoxConn, *, client: ProxmoxClient | None = None) -> None:
+    def __init__(
+        self,
+        conn: ProxmoxConn,
+        *,
+        client: ProxmoxClient | None = None,
+        uplinks: Mapping[str, str] | None = None,
+    ) -> None:
         self._conn = conn
+        # Logical-uplink-name → host bridge (ADR-0016), from the profile. On PVE a
+        # resolved uplink names an existing host bridge (e.g. vmbr0). Empty for a
+        # teardown driver rebuilt from_uri (it never wires NICs / creates switches).
+        self._uplinks: dict[str, str] = dict(uplinks or {})
         # ``client`` is injectable so unit tests pass a duck-typed fake (api /
         # node / storage / zone / wait_task / sftp_get) and never touch a real
         # PVE or import proxmoxer.
@@ -120,7 +127,11 @@ class ProxmoxDriver(HypervisorDriver):
         type the upload path needs) land with PVE-3 alongside ``_storage``.
         """
         del cache_manager
+        switches = [*plan.hypervisor.all_switches]
+        if build_switch is not None:
+            switches.append(build_switch)
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
+        findings.extend(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))
@@ -151,27 +162,29 @@ class ProxmoxDriver(HypervisorDriver):
     def _uplink_bridge_findings(
         self, plan: Plan, build_switch: Switch | None
     ) -> tuple[PreflightFinding, ...]:
-        """Verify every ``uplink+nat`` Switch names an existing host bridge.
+        """Verify every ``uplink+nat`` Switch resolves to an existing host bridge.
 
-        On Proxmox the sidecar's ``eth1`` bridges to an existing host bridge
-        (``switch.uplink``) to reach the upstream LAN for NAT egress — including
-        the transient build Switch (resolved from the Hypervisor's
-        ``build_switch``), which is why ``testrange run`` can auto-build here. A
-        typo or a missing bridge would otherwise surface as an opaque
-        create-time failure.
+        On Proxmox the sidecar's ``eth1`` bridges to an existing host bridge to
+        reach the out-of-band network for NAT egress — including the transient
+        build Switch, which is why ``testrange run`` can auto-build here. The
+        Switch's ``uplink`` is a logical name (ADR-0016) the profile maps to the
+        bridge; here we resolve mapped names and check the bridge exists (an
+        *unmapped* name is already flagged by ``unknown_uplink_findings``). A
+        missing bridge would otherwise surface as an opaque create-time failure.
         """
-        wanted: set[str] = {
-            sw.uplink
-            for sw in plan.hypervisor.all_switches
-            if sw.uplink and sw.sidecar is not None and sw.sidecar.nat
+        switches = list(plan.hypervisor.all_switches)
+        if build_switch is not None:
+            switches.append(build_switch)
+        # (logical name, resolved bridge) for each nat+uplink switch whose name
+        # the profile actually maps.
+        wanted: set[tuple[str, str]] = {
+            (sw.uplink, self._uplinks[sw.uplink])
+            for sw in switches
+            if sw.uplink
+            and sw.uplink in self._uplinks
+            and sw.sidecar is not None
+            and sw.sidecar.nat
         }
-        if (
-            build_switch is not None
-            and build_switch.uplink
-            and build_switch.sidecar is not None
-            and build_switch.sidecar.nat
-        ):
-            wanted.add(build_switch.uplink)
         if not wanted:
             return ()
         bridges = {
@@ -181,17 +194,17 @@ class ProxmoxDriver(HypervisorDriver):
             PreflightFinding(
                 code="proxmox-uplink-bridge-missing",
                 message=(
-                    f"uplink {name!r} is not an existing bridge on node "
+                    f"uplink {name!r} maps to bridge {bridge!r}, which does not exist on node "
                     f"{self._client.node!r} (have: {sorted(bridges)})"
                 ),
                 fix_hint=(
-                    "on Proxmox, a Switch/ManagedBuildSwitch uplink names an existing host "
-                    "bridge with upstream connectivity (e.g. 'vmbr0', the one carrying the "
-                    "default gateway)"
+                    "on Proxmox, an uplink must map (via the profile's [uplinks]) to an "
+                    "existing host bridge with upstream connectivity (e.g. 'vmbr0', the one "
+                    "carrying the default gateway)"
                 ),
             )
-            for name in sorted(wanted)
-            if name not in bridges
+            for name, bridge in sorted(wanted)
+            if bridge not in bridges
         )
 
     # -- deterministic naming ----------------------------------------------
@@ -210,11 +223,16 @@ class ProxmoxDriver(HypervisorDriver):
 
     # -- switches & networks (driver owns L2; delegates to _sdn) -----------
 
-    def create_switch(
-        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
-    ) -> str | None:
+    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
+        # Resolve the logical uplink name (ADR-0016) to the host bridge the
+        # sidecar's eth1 rides; None when the switch declares no uplink.
+        resolved_uplink = (
+            self._uplinks[switch.uplink]
+            if switch.uplink is not None and switch.uplink in self._uplinks
+            else None
+        )
         return _sdn.create_switch(
-            self._client, self._sdn_zone, switch, backend_name, managed_egress=managed_egress
+            self._client, self._sdn_zone, switch, backend_name, resolved_uplink=resolved_uplink
         )
 
     def destroy_switch(self, backend_name: str) -> None:

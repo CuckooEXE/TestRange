@@ -35,7 +35,7 @@ from testrange.exceptions import (
     StateLockedError,
     TestRangeError,
 )
-from testrange.networks.base import ManagedBuildSwitch, Network, Switch
+from testrange.networks.base import Network, Switch
 from testrange.orchestrator.backend import resolve_backend
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
@@ -127,18 +127,37 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     return plan, _validate_tests(getattr(module, "TESTS", []), path)
 
 
+_DEFAULT_PROFILE_FILE = "connect.toml"
+
+
+def _parse_profile_spec(spec: str) -> tuple[Path, str]:
+    """Split a ``--profile`` value ``[<file>:]<name>`` into ``(path, name)``.
+
+    The default file is ``connect.toml`` (ADR-0016): ``foo`` → ``(connect.toml,
+    foo)``; ``other.toml:foo`` → ``(other.toml, foo)``. The split is on the last
+    ``:`` so a name itself is colon-free.
+    """
+    if ":" in spec:
+        filename, _, name = spec.rpartition(":")
+        filename = filename or _DEFAULT_PROFILE_FILE
+    else:
+        filename, name = _DEFAULT_PROFILE_FILE, spec
+    return Path(filename), name
+
+
 def _load_profile_arg(args: argparse.Namespace) -> BackendProfile | None:
-    """Load the ``--connect`` profile if given, else ``None``.
+    """Load the ``--profile [<file>:]<name>`` profile if given, else ``None``.
 
     A missing/malformed profile is a usage error (exit 2): the loader's
     :class:`ProfileError` is printed and the process exits here, before any
     backend work begins.
     """
-    path = getattr(args, "connect", None)
-    if not path:
+    spec = getattr(args, "profile", None)
+    if not spec:
         return None
+    path, name = _parse_profile_spec(spec)
     try:
-        return load_profile(Path(path))
+        return load_profile(path, name)
     except ProfileError as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(Exit.USAGE)
@@ -151,7 +170,7 @@ def _build(args: argparse.Namespace) -> int:
     try:
         run_id = build_range(plan, cache_manager=mgr, profile=profile)
     except DriverError as e:
-        # Binding/pin mismatch or a backend-agnostic plan with no --connect.
+        # Binding/pin mismatch or a backend-agnostic plan with no --profile.
         print(f"error: {e}", file=sys.stderr)
         return Exit.USAGE
     except PreflightError as e:
@@ -278,21 +297,22 @@ def _describe(args: argparse.Namespace) -> int:
 
 
 def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
-    """Print the resolved backend binding (or UNBOUND when ``--connect`` is missing).
+    """Print the resolved backend binding (or UNBOUND when ``--profile`` is missing).
 
     Under CORE-19 a concrete ``*Hypervisor`` is a topology-only scheme marker,
-    so *every* runnable plan needs ``--connect``; the unbound message names the
+    so *every* runnable plan needs ``--profile``; the unbound message names the
     pinned scheme (when known) so the dev sees which profile flavor is needed.
     The per-backend field list comes from ``profile.describe_fields()`` (each
-    backend renders its own representative bits, with passwords masked).
+    backend renders its own representative bits, with passwords masked). Build
+    egress is the plan's ``build_switch`` now (ADR-0016), not a binding knob.
     """
     hyp = plan.hypervisor
     if profile is None:
         scheme = scheme_for_hypervisor(hyp)
         if scheme is not None:
-            print(f"  backend: UNBOUND (pinned to {scheme!r}; pass --connect <{scheme}-profile>)")
+            print(f"  backend: UNBOUND (pinned to {scheme!r}; pass --profile <{scheme}-profile>)")
         else:
-            print("  backend: UNBOUND (pass --connect <profile> to run)")
+            print("  backend: UNBOUND (pass --profile <name> to run)")
         print()
         return
     try:
@@ -306,13 +326,16 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
     print(f"    driver: {profile.scheme} ({resolved.driver.DRIVER_NAME})")
     for label, value in profile.describe_fields():
         print(f"    {label}: {value}")
-    bs = resolved.build_switch
+    if profile.uplinks:
+        rendered = ", ".join(f"{k}→{v}" for k, v in sorted(profile.uplinks.items()))
+        print(f"    uplinks: {rendered}")
+    else:
+        print("    uplinks: none")
+    bs = getattr(hyp, "build_switch", None)
     if bs is None:
         print("    build egress: none (isolated build network)")
-    elif isinstance(bs, ManagedBuildSwitch):
-        print(f"    build egress: managed (uplink={bs.uplink})")
     else:
-        print(f"    build egress: switch {bs.name!r}")
+        print(f"    build egress: switch {bs.name!r} (uplink={bs.uplink or 'none'})")
     print()
 
 
@@ -633,18 +656,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_connect_arg(parser: argparse.ArgumentParser) -> None:
-    """Attach ``--connect PATH`` to a plan-taking verb (run/build/repl/describe).
+    """Attach ``--profile [FILE:]NAME`` to a plan-taking verb (run/build/repl/describe).
 
-    Binds a backend-agnostic plan to a backend via a local TOML profile (CORE-9).
-    A concrete ``*Hypervisor`` plan runs without it; a generic ``Hypervisor``
-    plan requires it. There is no environment fallback — the flag is the only
-    knob, so an invocation is fully self-describing.
+    Binds a plan to a backend via a named profile in a local TOML file (ADR-0016).
+    The default file is ``connect.toml`` (``--profile myProxmox``); a different
+    file is ``--profile other.toml:myProxmox``. Every runnable plan needs it
+    (CORE-19). There is no environment fallback — the flag is the only knob, so
+    an invocation is fully self-describing.
     """
     parser.add_argument(
-        "--connect",
-        metavar="PATH",
+        "--profile",
+        metavar="[FILE:]NAME",
         default=None,
-        help="path to a connection profile (TOML) binding the plan to a backend",
+        help="connection profile binding the plan to a backend ([<file>:]<name>; "
+        "default file connect.toml)",
     )
 
 

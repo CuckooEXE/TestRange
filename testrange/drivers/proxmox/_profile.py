@@ -1,7 +1,7 @@
 """Connection profile for the Proxmox VE driver (CORE-9 / CORE-18).
 
 :class:`ProxmoxProfile` is the concrete :class:`~testrange.connect.BackendProfile`
-the ``--connect`` path dispatches to when the TOML names ``driver = "proxmox"``.
+the ``--profile`` path dispatches to when the TOML names ``driver = "proxmox"``.
 It declares the PVE-specific connection keys (REST + SSH), applies the same
 defaulting :class:`ProxmoxHypervisor` does on the Plan-time path (bare ``user``
 takes ``@pam``; SSH user/password reuse the API user's local part and the API
@@ -12,14 +12,13 @@ identically to an in-Plan one, and builds a :class:`ProxmoxDriver` against it.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from testrange.connect import BackendProfile, register_profile
 from testrange.drivers.proxmox._client import ProxmoxConn, normalize_realm
 from testrange.drivers.proxmox.driver import ProxmoxDriver
-from testrange.networks.base import ManagedBuildSwitch
 
 
 @dataclass(frozen=True)
@@ -58,7 +57,7 @@ class ProxmoxProfile(BackendProfile):
     ssh_user: str | None = None
     ssh_password: str | None = None
     ssh_port: int = 22
-    build_switch: ManagedBuildSwitch | None = None
+    uplinks: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Early-fail authoring check that used to live on ProxmoxHypervisor
@@ -81,13 +80,13 @@ class ProxmoxProfile(BackendProfile):
             ssh_user=str(table["ssh_user"]) if "ssh_user" in table else None,
             ssh_password=str(ssh_password) if ssh_password is not None else None,
             ssh_port=int(table.get("ssh_port", 22)),
-            build_switch=cls._parse_build_switch(table, path),
+            uplinks=cls._parse_uplinks(table, path),
         )
 
     def build_driver(self) -> ProxmoxDriver:
         # Defaulting mirrors ProxmoxHypervisor.conn(): bare user takes @pam; SSH
         # reuses the API user's local part and the API password unless overridden.
-        # The in-Plan path and the --connect path must resolve identically here so
+        # The in-Plan path and the --profile path must resolve identically here so
         # a pinned-vs-portable plan can't drift.
         user = normalize_realm(self.user)
         ssh_user = self.ssh_user or user.split("@", 1)[0]
@@ -104,7 +103,8 @@ class ProxmoxProfile(BackendProfile):
                 ssh_user=ssh_user,
                 ssh_password=ssh_password,
                 ssh_port=self.ssh_port,
-            )
+            ),
+            uplinks=self.uplinks,
         )
 
     def describe_fields(self) -> Iterable[tuple[str, str]]:

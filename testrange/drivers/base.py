@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import ManagedEgress, Network, Switch
+    from testrange.networks.base import Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -65,15 +65,6 @@ class HypervisorDriver(ABC):
 
     DRIVER_NAME: str = "HypervisorDriver"
 
-    # Whether this backend can realize a ManagedBuildSwitch — manufacture and
-    # fence the build network's internet-egress segment (ADR-0014). Default
-    # False: a backend opts in by overriding to True once it implements the
-    # egress path in create_switch. The orchestrator's preflight (CORE-19
-    # moved this check out of the driver onto
-    # :func:`testrange.preflight.managed_build_egress_findings`) rejects a
-    # ManagedBuildSwitch where this is False.
-    supports_managed_build_egress: bool = False
-
     @abstractmethod
     def connect(self) -> None: ...
 
@@ -92,9 +83,10 @@ class HypervisorDriver(ABC):
 
         ``build_switch`` is the transient Switch the orchestrator will
         bring up for the build phase, resolved from the Hypervisor's
-        user-declared ``build_switch`` (ADR-0014). Preflight includes it in
-        CIDR-overlap checks so a colliding user Switch is caught here rather
-        than blowing up at build time.
+        user-declared ``build_switch`` (ADR-0016). Preflight includes it in
+        CIDR-overlap checks (and the ``[uplinks]`` resolution check) so a
+        colliding or unmapped build switch is caught here rather than at build
+        time.
         """
 
     @abstractmethod
@@ -113,9 +105,7 @@ class HypervisorDriver(ABC):
         """
 
     @abstractmethod
-    def create_switch(
-        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
-    ) -> str | None:
+    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         """Realize a Switch's L2 fabric on the backend.
 
         The driver owns *all* L2 topology — the orchestrator never names a
@@ -126,22 +116,20 @@ class HypervisorDriver(ABC):
         - Proxmox: an SDN zone (or vmbr); networks become vnets
         - Hyper-V: a VMSwitch; networks become per-vNIC VLANs
 
+        ``switch.uplink`` is a **logical name** (ADR-0016); the driver resolves it
+        against the profile-supplied ``[uplinks]`` map to a host iface (an
+        unmapped name raises :class:`DriverError`, though preflight catches it
+        first). Egress is out-of-band — the driver only attaches to that iface;
+        it never manufactures, SNATs, or fences it.
+
         When ``switch.uplink`` is set and the switch's ``Sidecar`` has ``nat``,
         the driver also provisions an uplink-facing segment for the sidecar's
-        second NIC and returns its backend network name; the orchestrator
-        attaches the sidecar's ``eth1`` to it. Returns ``None`` when there is no
-        uplink segment.
+        second NIC (enslaving the resolved iface) and returns its backend network
+        name; the orchestrator attaches the sidecar's ``eth1`` to it. Returns
+        ``None`` when there is no uplink segment.
 
-        ``managed_egress`` (ADR-0014) changes how that uplink-facing segment is
-        realized for a ``ManagedBuildSwitch``: rather than bridge ``eth1`` to a
-        pre-existing host interface, the driver *manufactures* the egress segment
-        on its ``egress_cidr`` (``.1`` gateway), SNATs it to the internet, and
-        fences it default-deny — then returns that segment's backend name. Only
-        ever set for the transient build switch, and only on drivers with
-        ``supports_managed_build_egress`` (preflight rejects it otherwise).
-
-        ``destroy_switch`` tears the whole fabric down, including any uplink or
-        managed-egress segment created here.
+        ``destroy_switch`` tears the whole fabric down, including any uplink
+        segment created here.
         """
 
     @abstractmethod

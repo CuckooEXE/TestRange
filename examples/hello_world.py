@@ -4,9 +4,11 @@ Portable plan — it declares topology only and pins no backend. Supply the
 backend at run time with a connection profile:
 
     testrange describe examples/hello_world.py
-    testrange describe examples/hello_world.py --connect connect.toml
-    testrange run examples/hello_world.py --connect connect.toml
+    testrange describe examples/hello_world.py --profile mybackend
+    testrange run examples/hello_world.py --profile mybackend
 
+``--profile mybackend`` reads the ``[mybackend]`` profile from ``./connect.toml``
+(use ``--profile other.toml:mybackend`` for a different file).
 See examples/connect.toml.example for the profile shape, and
 docs/user/connecting-to-a-backend.md for the full workflow. Prerequisites:
 
@@ -37,6 +39,13 @@ _KEY = SSHKey.generate(comment="testrange-hello")
 PLAN = Plan(
     "hello-world",
     Hypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "switch1",

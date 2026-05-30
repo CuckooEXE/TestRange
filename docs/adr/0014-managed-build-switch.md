@@ -1,7 +1,15 @@
 # ADR-0014: The build switch is user-declared; `ManagedBuildSwitch` manufactures fenced egress
 
-Status: Accepted
+Status: **Superseded by [ADR-0016](0016-named-uplinks-out-of-band-egress.md)** (2026-05-29)
 Date: 2026-05-26
+
+> **Superseded.** `ManagedBuildSwitch` and the manufactured/fenced egress segment
+> are removed. Egress is now an out-of-band host bridge TestRange merely attaches
+> to via a NAT `Sidecar` (named by an `[uplinks]` profile entry); the build switch
+> is a plain portable `Switch | None` on the `Hypervisor`. The §1 placement
+> argument ("build egress is a binding concern") is reversed by ADR-0016: it held
+> only because the uplink was host-specific, which is no longer true. The rest of
+> this ADR is retained for history.
 
 Supersedes [ADR-0013](0013-switch-sidecar-split.md) §3 ("The driver/orchestrator
 boundary is unchanged") — the build phase no longer synthesizes its switch from

@@ -7,11 +7,12 @@ warning/informational tier — that state belongs in logs, not here.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
-    from testrange.networks.base import ManagedBuildSwitch, Switch
+    from testrange.networks.base import Switch
     from testrange.plan import Plan
 
 
@@ -49,39 +50,37 @@ class PreflightReport:
         return "preflight:\n" + "\n".join(lines)
 
 
-def managed_build_egress_findings(
-    user_build_switch: Switch | ManagedBuildSwitch | None,
+def unknown_uplink_findings(
+    switches: Iterable[Switch],
+    uplinks: Mapping[str, str],
     *,
-    supports_managed_egress: bool,
+    profile_hint: str = "the connection profile",
 ) -> tuple[PreflightFinding, ...]:
-    """Reject a ``ManagedBuildSwitch`` on a backend that can't realize its egress.
+    """Reject a ``Switch.uplink`` whose logical name the bound profile doesn't map.
 
-    A :class:`~testrange.networks.base.ManagedBuildSwitch` asks the driver to
-    *manufacture* and fence the build network's internet egress (ADR-0014). A
-    backend with no host-NAT primitive (e.g., ESXi) cannot, and must reject it
-    at preflight rather than bring up a build network with no way out. CORE-19
-    moved this off the driver (the user-declared build switch lives on the
-    profile now, not on the topology-only Hypervisor); the orchestrator passes
-    both forms in.
+    ``Switch.uplink`` is a logical name (ADR-0016) the driver resolves against the
+    profile's ``[uplinks]`` map to a host iface. A name the bound profile does not
+    map cannot be realized, so it fails loud here rather than at ``create_switch``.
+    Shared across drivers; each calls it from ``preflight`` with its own resolved
+    ``uplinks`` and the run + build switches. One finding per offending Switch.
     """
-    from testrange.networks.base import ManagedBuildSwitch
-
-    if supports_managed_egress or not isinstance(user_build_switch, ManagedBuildSwitch):
-        return ()
-    return (
-        PreflightFinding(
-            code="managed-build-egress-unsupported",
-            message=(
-                f"build_switch is a ManagedBuildSwitch(uplink={user_build_switch.uplink!r}), but "
-                "this backend cannot manufacture managed build egress"
-            ),
-            fix_hint=(
-                "use a plain Switch build_switch on an uplink that already has its own "
-                "NAT/route, or run on a backend that supports managed build egress "
-                "(e.g. Proxmox)"
-            ),
-        ),
-    )
+    out: list[PreflightFinding] = []
+    for sw in switches:
+        if sw.uplink is not None and sw.uplink not in uplinks:
+            out.append(
+                PreflightFinding(
+                    code="unknown-uplink",
+                    message=(
+                        f"switch {sw.name!r} uses uplink {sw.uplink!r}, but {profile_hint} "
+                        f"maps no such uplink (known: {sorted(uplinks)})"
+                    ),
+                    fix_hint=(
+                        f'add `{sw.uplink} = "<host-iface>"` under the profile\'s [uplinks] '
+                        f"table, or change the switch's uplink= to a mapped name"
+                    ),
+                )
+            )
+    return tuple(out)
 
 
 def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:

@@ -1,36 +1,48 @@
-# Connection profile for a portable testrange plan (ADR-0015).
+# Connection profiles for a portable testrange plan (ADR-0015 / ADR-0016).
 #
-# Copy this to a local, gitignored `connect.toml` and point `--connect` at it:
+# Copy this to a local, gitignored `connect.toml` and select a profile by name:
 #
 #     cp examples/connect.toml.example connect.toml
-#     # edit host/password for your backend
-#     testrange run examples/hello_world.py --connect connect.toml
+#     # edit host/password + the [<profile>.uplinks] map for your backend
+#     testrange run examples/hello_world.py --profile pve
 #
-# A real `connect.toml` (and any `*.connect.toml`) is gitignored: it carries a
-# password. The `.example` is the only profile tracked in git. Secrets live
-# inline as plain strings — testrange backends are firewalled lab environments.
+# `--profile pve` reads the [pve] table from ./connect.toml; use
+# `--profile other.toml:pve` to read it from a different file.
+#
+# One file holds MANY profiles, one per top-level table. A real `connect.toml`
+# (and any `*.connect.toml`) is gitignored: it carries a password. The `.example`
+# is the only profile tracked in git. Secrets live inline as plain strings —
+# testrange backends are firewalled lab environments.
 
-# Driver scheme (required): "proxmox" | "libvirt" | "mock".
-driver = "proxmox"
-
-# --- connection ---
+[pve]
+driver = "proxmox"          # required: "proxmox" | "libvirt" | "mock"
 host = "10.0.0.5"
-user = "root@pam"        # optional; a bare "root" takes the @pam realm
+user = "root@pam"           # optional; a bare "root" takes the @pam realm
 password = "Target123!"
-port = 8006              # optional
-verify_ssl = false       # optional (PVE ships a self-signed cert)
-node = ""                # optional; "" auto-detects the single node
-backing_storage = "local"  # optional
+port = 8006                 # optional
+verify_ssl = false          # optional (PVE ships a self-signed cert)
+node = ""                   # optional; "" auto-detects the single node
+backing_storage = "local"   # optional
 
 # SSH is used only for volume byte I/O; it defaults to the API user/password.
 # ssh_user = "root"
 # ssh_password = "..."
 # ssh_port = 22
 
-# --- build-time internet egress (optional) ---
-# TestRange manufactures and fences an egress segment for the build network and
-# SNATs it out the named host interface (ManagedBuildSwitch; ADR-0014). Without
-# this table the build network is isolated, so a build that needs apt/pip fails.
-[build_switch]
-uplink = "vmbr0"
-# cidr = "10.10.10.0/24"   # optional internal build subnet
+# Named uplinks (ADR-0016): a plan's `Switch(uplink="<name>")` resolves here to a
+# host iface/bridge. `egress` is the out-of-band bridge a NAT sidecar routes out
+# of (it must already have NAT/DHCP behind it — testrange only attaches). Map as
+# many as your plans reference; an unmapped name fails at preflight.
+[pve.uplinks]
+egress = "vmbr0"            # the host bridge carrying the default gateway
+# lab = "vmbr3"            # another physical bridge a plain Switch(uplink=) can use
+
+# A second profile in the same file — e.g. a local libvirt host (localhost
+# default; no host/password needed).
+[libvirt-local]
+driver = "libvirt"
+# uri = "qemu:///system"
+# backing_pool = "default"
+
+[libvirt-local.uplinks]
+egress = "virbr0"

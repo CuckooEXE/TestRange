@@ -21,7 +21,7 @@ Switch(
     name: str,
     *networks: Network,
     cidr: str = "192.168.10.0/24",   # strict network form; ValueError on host-form
-    uplink: str | None = None,        # physical NIC on the hypervisor host
+    uplink: str | None = None,        # logical uplink name; profile maps it to a host iface
     mgmt: bool = False,               # host adapter at .2 on the segment
     sidecar: Sidecar | None = None,   # services at .1, or None for a bare wire
 )
@@ -58,12 +58,15 @@ Constants live in `testrange/networks/_addressing_consts.py`.
 
 ## Switch knobs (L2 topology)
 
-### `uplink="<nic>"`
+### `uplink="<name>"`
 
-The physical NIC on the hypervisor host the Switch attaches to. ESXi
-calls this a `vmnic`. The driver — not the user — realizes the L2 segment
-and attaches the NIC (ADR-0008 §1). The user never names a pre-existing
-bridge/vSwitch.
+A **logical uplink name** (ADR-0016), not a host NIC. The bound connection
+profile's `[uplinks]` map resolves it to a host iface/bridge; the driver — not
+the user — realizes the L2 segment and attaches that iface (ADR-0008 §1). An
+unmapped name fails at preflight (`unknown-uplink`). Keeping the name logical is
+what keeps the plan host-free. Egress is **out-of-band**: a named uplink is a
+host bridge the operator provisions (NAT/DHCP/route behind it) — TestRange only
+attaches; it never manufactures, SNATs, or fences it.
 
 Without a NAT sidecar, the Switch segment IS the uplink segment: guest frames
 egress with their own MACs and IPs. No NAT. Useful for "plug the VM into the
@@ -179,18 +182,22 @@ realization (`create_switch`/`create_network`) is driver-specific.
 
 | Knob        | MockDriver (reference)        | Proxmox (single-node)         | ESXi / Hyper-V (future)            |
 |-------------|-------------------------------|-------------------------------|------------------------------------|
-| `uplink`    | Simulated segment record      | Create SDN zone + vnet, attach physical | vSwitch + vmnic / external vSwitch |
+| `uplink`    | Resolve name → iface; segment record | Resolve name → host bridge; SDN zone + vnet | Resolve name → vmnic / external vSwitch |
 | `mgmt`      | Simulated `.2` adapter        | Bridge IP via SDN             | vmkernel adapter / share with mgmt OS |
 | `Sidecar`   | Sidecar VM model              | Same                          | Same                               |
+
+The `uplink` logical name resolves through the profile's `[uplinks]` map
+(ADR-0016); the driver receives the resolved host iface. An unmapped name is a
+preflight `unknown-uplink` finding.
 
 **General limits** (driver-agnostic):
 
 - Host-local L2 realization (e.g. netlink bridge management) is local-only;
   a Switch with `uplink`/`mgmt` or a NAT sidecar over a remote backend
   connection is caught by preflight (`remote_uplink_unsupported`).
-- The sidecar's `eth1` DHCPs from the upstream LAN — if the LAN doesn't lease
-  (MAC whitelist, isolated VLAN), NAT silently breaks. Pin it with
-  `Sidecar(addr=...)` (NET-7) when that's the case.
+- The sidecar's `eth1` DHCPs from the out-of-band network behind the uplink — if
+  it doesn't lease (MAC whitelist, isolated VLAN), NAT silently breaks. Pin it
+  with `Sidecar(addr=...)` (NET-7) when that's the case.
 - One Switch is one CIDR. If you need two subnets, declare two Switches.
 
 **Sidecar build** (needed once for any Switch carrying a `Sidecar`):
@@ -235,13 +242,13 @@ Switch("mgmt-only", Network("a"), cidr="10.51.0.0/24", mgmt=True)
 Switch("intranet", Network("a"), cidr="10.52.0.0/24",
        mgmt=True, sidecar=Sidecar(dhcp=True, dns=True))
 
-# Full internet — guests DHCP, resolve, and NAT out the uplink.
+# Full internet — guests DHCP, resolve, and NAT out the named uplink.
 Switch("internet", Network("a"), cidr="10.53.0.0/24",
-       uplink="eth0", mgmt=True, sidecar=Sidecar(dhcp=True, dns=True, nat=True))
+       uplink="egress", mgmt=True, sidecar=Sidecar(dhcp=True, dns=True, nat=True))
 
-# Pure bridged — guests join the host's LAN with their own MACs/IPs.
-# Upstream DHCP gives them addresses; no testrange sidecar runs.
-Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="eth0")
+# Pure bridged — guests join the named uplink's LAN with their own MACs/IPs.
+# Out-of-band DHCP gives them addresses; no testrange sidecar runs.
+Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="egress")
 ```
 
 The shipped `examples/network_modes.py` exercises four of these in one
@@ -251,37 +258,33 @@ plan (`bare-sw`, `mgmt-sw`, `uplink-sw`, `both-sw`).
 
 The build phase brings up its own transient switch so build VMs can reach the
 internet for `apt` / `pip`. It is **user-declared** on the hypervisor via
-`build_switch` (ADR-0014) — there is no default uplink, so **no `build_switch`
-means no build-time egress**. Three forms:
+`build_switch` ([ADR-0016](../../adr/0016-named-uplinks-out-of-band-egress.md)) —
+there is no default uplink, so **no `build_switch` means no build-time egress**.
+A build switch is an ordinary `Switch`, realized identically to a run-phase one
+(there is no special managed-egress type). Two forms:
 
 ```python
-# 1. Managed: TestRange manufactures + fences the egress (recommended).
-ProxmoxHypervisor(
-    build_switch=ManagedBuildSwitch(uplink="vmbr0"),
-    networks=[...],
-)
-
-# 2. Bring-your-own: a plain Switch you shape yourself.
-ProxmoxHypervisor(
+# 1. A NAT switch routing out a named, out-of-band uplink. The sidecar serves
+#    DHCP/DNS on the isolated build segment and MASQUERADEs eth1 out the `egress`
+#    host bridge (which already has NAT/route behind it — TestRange only attaches).
+Hypervisor(
     build_switch=Switch(
-        "build", Network("build"), cidr="10.97.99.0/24", uplink="vmbr9",
-        sidecar=Sidecar(dhcp=True, dns=True, nat=True,
-                        addr=StaticAddr("10.10.10.2/24", gw="10.10.10.1", dns=("1.1.1.1",))),
+        "build", Network("build"), cidr="10.97.99.0/24", uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
     networks=[...],
 )
 
-# 3. None (default): isolated build network, no egress. Only viable when every
+# 2. None (default): isolated build network, no egress. Only viable when every
 #    VM is already a cache hit (the full _built_<config_hash>__* disk set is cached).
-ProxmoxHypervisor(networks=[...])
+Hypervisor(networks=[...])
 ```
 
-`ManagedBuildSwitch(uplink, cidr=...)` automates the otherwise-manual "internal
-bridge + host NAT + firewall" recipe: an always-present sidecar serves DHCP/DNS
-on the isolated switch segment, and the driver manufactures a separate egress
-segment the sidecar's `eth1` rides — SNAT'd to the internet and fenced
-default-deny (allow established + destinations outside RFC1918; drop the host
-LAN / other segments). It is gated by the driver capability
-`supports_managed_build_egress` (Proxmox: yes, via an SDN `snat=1` vnet + VNet
-firewall; backends without a host-NAT primitive reject it at preflight). The
-build switch is brought up before build VMs boot and torn down LIFO at phase end.
+`uplink="egress"` resolves through the bound profile's `[uplinks]` map to a host
+bridge with out-of-band internet. If that bridge does not DHCP the sidecar's MAC
+(MAC whitelist, single-public-IP box), pin `eth1` with `Sidecar(addr=...)`
+(NET-7). The build switch is brought up before build VMs boot and torn down LIFO
+at phase end.
+
+For the per-driver recipe to set up that out-of-band egress bridge (and why
+TestRange leaves it to you), see [Out-of-band egress](out-of-band-egress.md).

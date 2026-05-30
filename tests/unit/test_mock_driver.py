@@ -1,7 +1,7 @@
 """MockDriver + the new ABC contracts it exercises.
 
 Covers the switch-ownership L2 boundary (create_switch / no bridge methods),
-mgmt + managed-build-egress preflight gating, and the pool minimum-capacity
+mgmt + unknown-uplink preflight gating, and the pool minimum-capacity
 preflight check.
 """
 
@@ -21,6 +21,7 @@ from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, Storag
 from testrange.devices.network import NetworkIface
 from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.mock import MockDriver, MockHypervisor
+from testrange.exceptions import DriverError
 from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.preflight import mgmt_unsupported_findings
@@ -73,12 +74,14 @@ class TestSwitchOwnership:
             assert not hasattr(MockDriver(), name)
 
     def test_create_switch_returns_uplink_segment_for_nat(self) -> None:
-        d = MockDriver()
+        # uplink is a logical name (ADR-0016) the driver resolves against its
+        # profile-supplied map; an unmapped name would fail at preflight.
+        d = MockDriver(uplinks={"egress": "br-egress"})
         nat_switch = Switch(
             "s",
             Network("a"),
             cidr="10.0.0.0/24",
-            uplink="eth0",
+            uplink="egress",
             sidecar=Sidecar(dhcp=True, nat=True),
         )
         assert d.create_switch(nat_switch, "tr_switch_s") == "tr_switch_s__uplink"
@@ -87,6 +90,14 @@ class TestSwitchOwnership:
         d = MockDriver()
         plain = Switch("s2", Network("b"), cidr="10.0.1.0/24")
         assert d.create_switch(plain, "tr_switch_s2") is None
+
+    def test_create_switch_raises_on_unmapped_uplink(self) -> None:
+        d = MockDriver()  # no uplinks mapped
+        sw = Switch(
+            "s", Network("a"), cidr="10.0.0.0/24", uplink="egress", sidecar=Sidecar(nat=True)
+        )
+        with pytest.raises(DriverError, match="not mapped"):
+            d.create_switch(sw, "tr_switch_s")
 
 
 class TestDiskPrimitives:
@@ -213,21 +224,63 @@ class TestMgmtGating:
         report = MockDriver().preflight(
             self._mgmt_plan(),
             cache_manager=CacheManager(),
-            build_switch=resolve_build_switch(None)[0],
+            build_switch=resolve_build_switch(None),
         )
         assert bool(report) is False
         assert any(f.code == "mgmt-unsupported" for f in report.findings)
 
 
-class TestManagedBuildEgressGating:
-    """A ManagedBuildSwitch is preflight-rejected on a backend that can't realize it."""
+class TestUnknownUplinkGating:
+    """A Switch.uplink the bound profile doesn't map is preflight-rejected (ADR-0016)."""
 
-    def test_mock_does_not_support_managed_egress(self) -> None:
-        # MockDriver inherits the ABC default; it has no host-NAT to manufacture.
-        # The orchestrator's managed_build_egress_findings (CORE-19) reads this
-        # capability flag and rejects the ManagedBuildSwitch on the profile;
-        # coverage of that flow lives in test_preflight.py.
-        assert MockDriver().supports_managed_build_egress is False
+    def test_unmapped_uplink_is_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        plan = Plan(
+            "t",
+            MockHypervisor(
+                networks=[
+                    Switch(
+                        "sw1",
+                        Network("netA"),
+                        cidr="10.0.0.0/24",
+                        uplink="egress",
+                        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+                    )
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[_vm()],
+            ),
+        )
+        report = MockDriver().preflight(  # no uplinks mapped
+            plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)
+        )
+        assert bool(report) is False
+        assert any(f.code == "unknown-uplink" for f in report.findings)
+
+    def test_mapped_uplink_is_clean(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        plan = Plan(
+            "t",
+            MockHypervisor(
+                networks=[
+                    Switch(
+                        "sw1",
+                        Network("netA"),
+                        cidr="10.0.0.0/24",
+                        uplink="egress",
+                        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+                    )
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[_vm()],
+            ),
+        )
+        report = MockDriver(uplinks={"egress": "br0"}).preflight(
+            plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)
+        )
+        assert not any(f.code == "unknown-uplink" for f in report.findings)
 
 
 class TestPoolCapacityPreflight:
@@ -236,7 +289,7 @@ class TestPoolCapacityPreflight:
     ) -> object:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         return driver.preflight(
-            plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)[0]
+            plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)
         )
 
     def test_pool_exceeding_backing_capacity_errors(

@@ -2,7 +2,7 @@
 
 Includes the realm-normalization + SSH-defaulting contract: a profile-supplied
 connection must resolve identically to the in-Plan ``ProxmoxHypervisor.conn``
-path (CORE-18), so a portable plan running under ``--connect`` and a pinned
+path (CORE-18), so a portable plan running under ``--profile`` and a pinned
 plan agree on what counts as the same backend.
 """
 
@@ -16,7 +16,6 @@ from testrange.connect import load_profile
 from testrange.drivers.proxmox import ProxmoxProfile
 from testrange.drivers.proxmox.driver import ProxmoxDriver
 from testrange.exceptions import ProfileError
-from testrange.networks.base import ManagedBuildSwitch
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -31,6 +30,7 @@ class TestParse:
             _write(
                 tmp_path,
                 """
+                [p]
                 driver = "proxmox"
                 host = "10.0.0.5"
                 user = "root@pam"
@@ -43,11 +43,12 @@ class TestParse:
                 ssh_password = "sshpw"
                 ssh_port = 2222
 
-                [build_switch]
-                uplink = "vmbr9"
-                cidr = "10.10.10.0/24"
+                [p.uplinks]
+                egress = "vmbr9"
+                lab = "vmbr3"
                 """,
-            )
+            ),
+            "p",
         )
         assert isinstance(prof, ProxmoxProfile)
         assert prof.host == "10.0.0.5"
@@ -60,21 +61,21 @@ class TestParse:
         assert prof.ssh_user == "root"
         assert prof.ssh_password == "sshpw"
         assert prof.ssh_port == 2222
-        assert prof.build_switch == ManagedBuildSwitch(uplink="vmbr9", cidr="10.10.10.0/24")
+        assert dict(prof.uplinks) == {"egress": "vmbr9", "lab": "vmbr3"}
 
     def test_minimal(self, tmp_path: Path) -> None:
-        prof = load_profile(_write(tmp_path, 'driver = "proxmox"\nhost = "h"\n'))
+        prof = load_profile(_write(tmp_path, '[p]\ndriver = "proxmox"\nhost = "h"\n'), "p")
         assert isinstance(prof, ProxmoxProfile)
         assert prof.host == "h"
         assert prof.user == "root@pam"
         assert prof.password == ""
         assert prof.ssh_user is None
         assert prof.ssh_password is None
-        assert prof.build_switch is None
+        assert dict(prof.uplinks) == {}
 
     def test_unknown_key_named(self, tmp_path: Path) -> None:
         with pytest.raises(ProfileError, match=r"unknown key\(s\) \['nost'\]"):
-            load_profile(_write(tmp_path, 'driver = "proxmox"\nnost = "typo"\n'))
+            load_profile(_write(tmp_path, '[p]\ndriver = "proxmox"\nnost = "typo"\n'), "p")
 
 
 class TestBuildDriver:
@@ -109,6 +110,10 @@ class TestBuildDriver:
         assert conn.ssh_user == "builder"
         assert conn.ssh_password == "sshpw"
         assert conn.ssh_port == 2222
+
+    def test_uplinks_land_on_driver(self) -> None:
+        drv = ProxmoxProfile(host="h", uplinks={"egress": "vmbr9"}).build_driver()
+        assert drv._uplinks == {"egress": "vmbr9"}
 
 
 class TestDescribeFields:

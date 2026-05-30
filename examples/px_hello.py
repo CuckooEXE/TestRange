@@ -2,30 +2,29 @@
 
 This is the **scheme-pinned** example: it uses :class:`ProxmoxHypervisor` to
 assert *this topology MUST run on Proxmox VE* (CORE-19), but the plan still
-carries no connection — host/password/node/etc. come from a ``--connect``
-profile (``examples/connect.toml.example``) at run time. For a fully
-backend-agnostic plan that pins no scheme, see ``examples/hello_world.py``
-(ADR-0015).
+carries no connection — host/password/node/etc. come from a ``--profile``
+(``examples/connect.toml.example``) at run time. For a fully backend-agnostic
+plan that pins no scheme, see ``examples/hello_world.py`` (ADR-0015).
 
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
     sudo tools/build-sidecar-image/build.sh
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
-    cp examples/connect.toml.example my-pve.toml   # then edit host/password
+    cp examples/connect.toml.example my-pve.toml   # then edit host/password + [pve.uplinks]
 Usage:
-    testrange describe examples/px_hello.py --connect my-pve.toml
-    testrange --log-level debug run examples/px_hello.py --connect my-pve.toml
+    testrange describe examples/px_hello.py --profile my-pve.toml:pve
+    testrange --log-level debug run examples/px_hello.py --profile my-pve.toml:pve
 
 The VM is reached over the QEMU guest agent, so the orchestrator host needs no
 route to it.
 
-Build egress is opt-in (ADR-0014) and now lives on the profile too: the
-``[build_switch]`` table in the TOML maps to a
-:class:`~testrange.networks.base.ManagedBuildSwitch` that has TestRange
-manufacture and fence the build network's internet egress (an SDN SNAT segment
-on Proxmox). Without a ``[build_switch]`` the build network is isolated, so a
-build that needs apt/pip must declare one.
+Build egress is the plan's ``build_switch`` (ADR-0016): an ordinary NAT
+``Switch`` that routes out the ``egress`` uplink. ``egress`` is a logical name
+the profile's ``[uplinks]`` map resolves to a host bridge with out-of-band
+internet (TestRange attaches; it does not manufacture egress). Without a
+``build_switch`` the build network is isolated, so a build that needs apt/pip
+must declare one.
 """
 
 from __future__ import annotations
@@ -46,6 +45,13 @@ from testrange.vms import VMRecipe, VMSpec
 PLAN = Plan(
     "pve-smoke",
     ProxmoxHypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "switch1",

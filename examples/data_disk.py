@@ -48,7 +48,7 @@ PLAN = Plan(
                 "switch1",
                 Network("netA"),
                 cidr="172.31.0.0/24",
-                uplink="vmbr9",
+                uplink="egress",
                 sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],

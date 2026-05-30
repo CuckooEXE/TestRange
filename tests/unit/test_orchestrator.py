@@ -109,7 +109,6 @@ def fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> MockDriver:
     def _fake_resolve(plan: Plan, profile: object) -> ResolvedBackend:
         return ResolvedBackend(
             driver=driver,
-            build_switch=getattr(plan.hypervisor, "build_switch", None),
             driver_uri="",
         )
 

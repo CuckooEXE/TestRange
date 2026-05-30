@@ -1,10 +1,8 @@
-"""Top-level network declarations: Network, Switch, Sidecar, and the build switch."""
+"""Top-level network declarations: Network, Switch, Sidecar."""
 
 from __future__ import annotations
 
 from testrange.networks.base import (
-    ManagedBuildSwitch,
-    ManagedEgress,
     Network,
     NetworkAddressing,
     Sidecar,
@@ -12,8 +10,6 @@ from testrange.networks.base import (
 )
 
 __all__ = [
-    "ManagedBuildSwitch",
-    "ManagedEgress",
     "Network",
     "NetworkAddressing",
     "Sidecar",

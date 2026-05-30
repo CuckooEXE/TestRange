@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from testrange.networks import ManagedBuildSwitch, Network, Sidecar, Switch
+from testrange.networks import Network, Sidecar, Switch
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
-    managed_build_egress_findings,
+    unknown_uplink_findings,
 )
 
 
@@ -40,32 +40,37 @@ class TestReport:
         assert "fix:" in text
 
 
-class TestManagedBuildEgressFindings:
-    """The egress gate (CORE-19) is a free function the orchestrator runs.
-
-    It takes the user-declared build switch (lives on the profile) plus the
-    driver's :attr:`supports_managed_build_egress` capability flag.
+class TestUnknownUplinkFindings:
+    """The uplink-resolution gate (ADR-0016): a Switch.uplink logical name the
+    bound profile's [uplinks] map doesn't define is rejected at preflight. Shared
+    across drivers; each calls it with its own resolved map + the run/build
+    switches.
     """
 
-    def test_unsupported_backend_rejects_managed_build_switch(self) -> None:
-        findings = managed_build_egress_findings(
-            ManagedBuildSwitch(uplink="vmbr9"),
-            supports_managed_egress=False,
-        )
-        assert [f.code for f in findings] == ["managed-build-egress-unsupported"]
-
-    def test_supporting_backend_is_clean(self) -> None:
-        assert (
-            managed_build_egress_findings(
-                ManagedBuildSwitch(uplink="vmbr9"),
-                supports_managed_egress=True,
-            )
-            == ()
+    def _sw(self, name: str, uplink: str | None) -> Switch:
+        return Switch(
+            name,
+            Network(f"{name}-net"),
+            cidr="10.9.9.0/24",
+            uplink=uplink,
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True) if uplink else Sidecar(dhcp=True),
         )
 
-    def test_plain_switch_is_clean_even_when_unsupported(self) -> None:
-        plain = Switch("b", Network("n"), cidr="10.9.9.0/24", sidecar=Sidecar(dhcp=True))
-        assert managed_build_egress_findings(plain, supports_managed_egress=False) == ()
+    def test_mapped_name_is_clean(self) -> None:
+        sw = self._sw("a", "egress")
+        assert unknown_uplink_findings([sw], {"egress": "vmbr9"}) == ()
 
-    def test_no_build_switch_is_clean(self) -> None:
-        assert managed_build_egress_findings(None, supports_managed_egress=False) == ()
+    def test_unmapped_name_is_flagged(self) -> None:
+        sw = self._sw("a", "egress")
+        findings = unknown_uplink_findings([sw], {"other": "vmbr3"})
+        assert [f.code for f in findings] == ["unknown-uplink"]
+        assert "egress" in findings[0].message
+
+    def test_no_uplink_is_clean(self) -> None:
+        sw = self._sw("a", None)
+        assert unknown_uplink_findings([sw], {}) == ()
+
+    def test_one_finding_per_offending_switch(self) -> None:
+        switches = [self._sw("a", "x"), self._sw("b", "y"), self._sw("c", "egress")]
+        findings = unknown_uplink_findings(switches, {"egress": "vmbr9"})
+        assert len(findings) == 2  # a and b unmapped; c is fine

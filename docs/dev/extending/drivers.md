@@ -22,10 +22,11 @@ the full contract. The deviation analysis behind this shape is
    - `connect()` / `disconnect()` — connection lifecycle.
    - `preflight(plan, *, cache_manager, build_switch)` — **read-only** checks.
      Must not mutate backend state. Call `preflight.mgmt_unsupported_findings(plan)`
-     and `self.managed_build_egress_findings(plan)` to reject `mgmt=True` and a
-     `ManagedBuildSwitch` this backend can't realize; verify each pool's
-     `size_gb` fits its backing store; include `build_switch` in subnet-overlap
-     checks.
+     to reject `mgmt=True`, and `preflight.unknown_uplink_findings(switches,
+     self.uplinks)` to reject a `Switch.uplink` logical name your profile's
+     `[uplinks]` map doesn't define (pass the run switches + `build_switch`);
+     verify each pool's `size_gb` fits its backing store; include `build_switch`
+     in subnet-overlap checks.
    - `compose_resource_name(run_id, kind, name)` — deterministic backend-safe
      name.
    - `compose_mac(plan_name, vm_name, nic_idx)` — stable MAC under your OUI.
@@ -34,10 +35,12 @@ the full contract. The deviation analysis behind this shape is
      storage where you control filenames (e.g. constrain Proxmox to `dir`/`nfs`).
    - **Switch (L2) — the driver owns it.** `create_switch(switch, backend_name)`
      realizes the full fabric (host bridge / vSwitch / vmbr+SDN / VMSwitch);
-     the orchestrator never names a bridge. For a `uplink+nat` Switch, also
-     provision the uplink-facing segment the sidecar's `eth1` rides and return
-     its backend network name (else return `None`). `destroy_switch` tears the
-     whole fabric down. Attach port-groups with
+     the orchestrator never names a bridge. `switch.uplink` is a logical name —
+     resolve it through your `uplinks` map (from the profile) to a host iface
+     (ADR-0016); egress is out-of-band, so just attach to that iface. For a
+     `uplink+nat` Switch, also provision the uplink-facing segment the sidecar's
+     `eth1` rides and return its backend network name (else return `None`).
+     `destroy_switch` tears the whole fabric down. Attach port-groups with
      `create_network(network, switch, backend_name, *, switch_backend_name)` /
      `destroy_network`.
    - Pools: `create_pool` / `destroy_pool`. A "pool" is a **named namespace in

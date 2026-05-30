@@ -143,7 +143,7 @@ class TestConnectFlag:
     ) -> None:
         plan_path = _write_generic_plan(tmp_path)
         prof = tmp_path / "connect.toml"
-        prof.write_text('driver = "mock"\n')
+        prof.write_text('[p]\ndriver = "mock"\n')
 
         captured: dict[str, object] = {}
 
@@ -152,7 +152,7 @@ class TestConnectFlag:
             return []
 
         monkeypatch.setattr(cli, "run_tests", fake_run_tests)
-        rc = cli.main(["run", plan_path, "--connect", str(prof)])
+        rc = cli.main(["run", plan_path, "--profile", f"{prof}:p"])
         assert rc == 0
         from testrange.connect import BackendProfile
 
@@ -164,7 +164,7 @@ class TestConnectFlag:
     ) -> None:
         plan_path = _write_generic_plan(tmp_path)
         prof = tmp_path / "connect.toml"
-        prof.write_text('driver = "mock"\n')
+        prof.write_text('[p]\ndriver = "mock"\n')
         captured: dict[str, object] = {}
 
         def fake_build_range(plan: object, **kwargs: object) -> str:
@@ -172,7 +172,7 @@ class TestConnectFlag:
             return "run-xyz"
 
         monkeypatch.setattr(cli, "build_range", fake_build_range)
-        rc = cli.main(["build", plan_path, "--connect", str(prof)])
+        rc = cli.main(["build", plan_path, "--profile", f"{prof}:p"])
         assert rc == 0
         assert captured["profile"] is not None
 
@@ -196,7 +196,7 @@ class TestConnectFlag:
     ) -> None:
         plan_path = _write_generic_plan(tmp_path)
         with pytest.raises(SystemExit) as exc:
-            cli.main(["run", plan_path, "--connect", str(tmp_path / "nope.toml")])
+            cli.main(["run", plan_path, "--profile", f"{tmp_path / 'nope.toml'}:p"])
         assert exc.value.code == 2
         assert "not found" in capsys.readouterr().err
 
@@ -226,8 +226,8 @@ class TestDescribeBinding:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         plan_path = _write_generic_plan(tmp_path)
         prof = tmp_path / "connect.toml"
-        prof.write_text('driver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
-        rc = cli.main(["describe", plan_path, "--connect", str(prof)])
+        prof.write_text('[p]\ndriver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
+        rc = cli.main(["describe", plan_path, "--profile", f"{prof}:p"])
         assert rc == 0
         out = capsys.readouterr().out
         assert "driver: proxmox (ProxmoxDriver)" in out
@@ -240,22 +240,22 @@ class TestDescribeBinding:
     ) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         # CORE-19: px_hello.py is scheme-pinned (ProxmoxHypervisor) but carries no
-        # connection, so describe without --connect renders an UNBOUND binding
+        # connection, so describe without --profile renders an UNBOUND binding
         # that names the pinned scheme so the dev knows which profile to point at.
         rc = cli.main(["describe", str(EXAMPLES / "px_hello.py")])
         assert rc == 0
         out = capsys.readouterr().out
         assert "Plan (ProxmoxHypervisor)" in out
         assert "backend: UNBOUND (pinned to 'proxmox'" in out
-        assert "--connect <proxmox-profile>" in out
+        assert "--profile <proxmox-profile>" in out
 
     def test_concrete_plan_with_matching_connect_shows_binding(
         self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         prof = tmp_path / "connect.toml"
-        prof.write_text('driver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
-        rc = cli.main(["describe", str(EXAMPLES / "px_hello.py"), "--connect", str(prof)])
+        prof.write_text('[p]\ndriver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
+        rc = cli.main(["describe", str(EXAMPLES / "px_hello.py"), "--profile", f"{prof}:p"])
         assert rc == 0
         out = capsys.readouterr().out
         assert "Plan (ProxmoxHypervisor)" in out

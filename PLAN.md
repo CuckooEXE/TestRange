@@ -181,14 +181,13 @@ MASQUERADE out of, and the Switch is the only object seeing both topology and
 services, so it owns that one cross-cutting rule.
 
 `addr` (NET-7) pins the sidecar's MASQUERADE NIC (`eth1`) to a **static**
-address + gateway + DNS instead of DHCP-from-the-upstream-LAN. Use it when the
-host won't DHCP the sidecar's MAC — e.g. a single-public-IP box where `uplink`
-is an internal bridge the **host** NATs out its real NIC. The build phase gets
-the same static `eth1` config from its `build_switch` — explicitly on a BYO
-`Switch`, or TestRange-assigned (on the manufactured egress subnet) for a
-`ManagedBuildSwitch` (ADR-0014). With a static uplink the sidecar's `eth1` never
-populates `resolv.conf`, so its dnsmasq is pointed at `addr.dns` explicitly
-(`no-resolv` + `server=`).
+address + gateway + DNS instead of DHCP-from-the-out-of-band-egress-network. Use
+it when that network won't DHCP the sidecar's MAC — e.g. a single-public-IP box
+where `uplink` is an internal bridge the **host** NATs out its real NIC. The
+default (no `addr`) is `eth1` DHCPs from the network behind the uplink, which is
+the common case (ADR-0016 — egress is out-of-band; TestRange never manufactures
+it). With a static uplink the sidecar's `eth1` never populates `resolv.conf`, so
+its dnsmasq is pointed at `addr.dns` explicitly (`no-resolv` + `server=`).
 
 **Addressing pinning** (`testrange/networks/_addressing_consts.py`):
 
@@ -227,41 +226,49 @@ materialized only when `switch.needs_sidecar` (= `switch.sidecar is not None`).
 Per-run config is delivered as a tiny ISO9660 (label `TR_SIDECAR_CFG`)
 carrying `dnsmasq.conf`, `interfaces`, `nftables.nft`, `sysctl.conf`.
 
-**NAT topology** (`Sidecar(nat=True)` + `uplink="eth0"`): the driver realizes
+**Named uplinks (ADR-0016).** `Switch.uplink` is a **logical name**, not a host
+NIC. The bound connection profile carries an `[uplinks]` map (`name → host iface`)
+that rides on the driver exactly like `backing_storage`; the driver resolves
+`switch.uplink` → host iface inside `create_switch`. An unmapped name fails at
+preflight (`unknown-uplink`). This keeps the last host-specific value out of the
+portable plan. Egress is **out-of-band**: a named uplink is a host bridge the
+operator provisions (NAT/DHCP behind it); TestRange never manufactures, SNATs, or
+fences it — it only attaches.
+
+**NAT topology** (`Sidecar(nat=True)` + `uplink="<named>"`): the driver realizes
 TWO L2 segments — an isolated switch segment (guests + sidecar's eth0 at `.1`,
 plus the host's `.2` if `mgmt`) and a separate uplink segment enslaving the
-physical NIC (sidecar's eth1, DHCP from upstream LAN). The sidecar's
-`nftables` ruleset MASQUERADEs eth0→eth1. Without a NAT sidecar, an uplinked
-switch is one segment (guests bridge directly to LAN with their own MACs).
+resolved host NIC (sidecar's eth1, DHCP from the out-of-band network behind it).
+The sidecar's `nftables` ruleset MASQUERADEs eth0→eth1. Without a NAT sidecar, an
+uplinked switch is one segment (guests bridge directly to the LAN with their own
+MACs).
 
 **Driver owns L2 (ADR-0008 §1):** the driver realizes the full topology for a
 Switch via `create_switch(switch, backend_name)` (and the uplink-facing
 segment when `switch.uplink and switch.sidecar` has `nat`); `create_network`
 attaches a network to an already-created switch. The orchestrator never names
-a bridge — all bridge/vSwitch/SDN mechanics live inside the driver. No
+a bridge — it shuttles the logical uplink name in the `Switch` and the driver
+resolves it; all bridge/vSwitch/SDN mechanics live inside the driver. No
 backend-native NAT/DHCP/DNS anywhere — the sidecar owns those uniformly across
 backends.
 
-**Build phase** uses the same machinery, with a **user-declared** build switch
-([ADR-0014](docs/adr/0014-managed-build-switch.md)). The Hypervisor carries a
-`build_switch: Switch | ManagedBuildSwitch | None`, folded by
+**Build phase** uses the same machinery, with a **user-declared** build switch on
+the `Hypervisor` ([ADR-0016](docs/adr/0016-named-uplinks-out-of-band-egress.md)).
+`build_switch: Switch | None` is portable topology (it references uplinks by
+logical name, so it carries nothing host-specific), folded by
 `resolve_build_switch` (`testrange/orchestrator/build.py`) into the transient
 Switch the build phase brings up and tears down LIFO (ADR-0010 §9):
 
 - `None` — an isolated `cidr="10.97.99.0/24"` switch, `Sidecar(dhcp=True,
   dns=True)`, **no uplink and so no egress**. A build needing apt/pip must
-  declare a build switch (no magic default uplink — that's the deliberate
-  retirement of the old `build_uplink="vmbr0"` default).
-- `Switch(...)` — honored as declared (bring-your-own uplink + sidecar; the
-  sidecar may even be `None` for a builder carrying its own static L3).
-- `ManagedBuildSwitch(uplink, cidr=...)` — TestRange manufactures and fences the
-  egress segment: an always-present sidecar serves DHCP/DNS on the isolated
-  switch segment, and the driver (where `supports_managed_build_egress`) builds a
-  second egress segment its `eth1` rides — SNAT'd to the internet, fenced
-  default-deny (allow established + non-RFC1918; drop the rest). On Proxmox this
-  is an SDN `snat=1` vnet + VNet firewall; the sidecar's `eth1` is a static `.2`
-  on the manufactured subnet (gateway `.1`). This retires the former
-  `build_uplink` / `build_uplink_addr` env-knobs.
+  declare a build switch (no magic default uplink).
+- `Switch(...)` — honored as declared, **identical to a run-phase switch**: a
+  bring-your-own uplink + sidecar (the sidecar may even be `None` for a builder
+  carrying its own static L3). A NAT egress build switch is
+  `Switch(uplink="<named>", sidecar=Sidecar(dhcp=True, dns=True, nat=True))`.
+
+There is no managed/manufactured egress and no `supports_managed_build_egress`
+capability — egress is the out-of-band uplink, same as a run switch.
 
 **Known limits** (TODO.md): host-local L2 (e.g. netlink-based bridge mgmt) is
 local-only — a `Switch.uplink` or a NAT sidecar over a remote backend
@@ -828,8 +835,9 @@ Key shape invariants this demonstrates:
   name; infra knobs (`cidr`, `uplink`, `mgmt`, `dhcp`, `dns`, `nat`) are
   keyword-only on the Switch (not on Networks). Per §10.
 - `build_switch=Switch(...)` on the Hypervisor — the user-declared transient
-  build network (here a BYO NAT Switch; `ManagedBuildSwitch(...)` on a real
-  backend, or omit for an isolated no-egress build). §10, ADR-0014, ADR-0010 §9.
+  build network (here a NAT Switch routing out a named uplink; omit for an
+  isolated no-egress build). `uplink=` is a logical name resolved by the bound
+  profile's `[uplinks]` map. §10, ADR-0016, ADR-0010 §9.
 - `SSHKey.generate(...)` returns `.auth_line` (single-line `authorized_keys`
   format) for `pubkey=` and `.priv` (OpenSSH PEM) for `privkey=`.
 - `NetworkIface` is exported from `testrange.devices.network` (and re-exported

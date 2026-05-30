@@ -26,7 +26,7 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.vms import VMRecipe, VMSpec
 
-_BUILD_SW = resolve_build_switch(None)[0]  # an isolated default build switch (unused by preflight)
+_BUILD_SW = resolve_build_switch(None)  # an isolated default build switch
 
 
 def _vm(name: str = "web", *, comm: object | None = None) -> VMRecipe:
@@ -120,11 +120,31 @@ class TestPreflight:
         )
         assert bool(report) is True
 
-    def test_supports_managed_build_egress_is_false_until_realized(self) -> None:
-        # Capability flag — the orchestrator's managed_build_egress_findings
-        # (CORE-19) rejects a ManagedBuildSwitch against this driver until
-        # BACKEND-1.2 lands the egress realization.
-        assert LibvirtDriver(LibvirtConn()).supports_managed_build_egress is False
+    def test_unmapped_uplink_is_rejected(self) -> None:
+        # ADR-0016: a Switch.uplink the profile doesn't map fails at preflight,
+        # even though L2 realization itself is still BACKEND-1.2.
+        plan = Plan(
+            "t",
+            LibvirtHypervisor(
+                networks=[
+                    Switch(
+                        "sw1",
+                        Network("netA"),
+                        cidr="10.0.0.0/24",
+                        uplink="egress",
+                        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+                    )
+                ],
+                pools=[StoragePool("pool1", 16)],
+                vms=[_vm()],
+            ),
+        )
+        report = LibvirtDriver(LibvirtConn()).preflight(
+            plan,
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert any(f.code == "unknown-uplink" for f in report.findings)
 
 
 class TestUnimplementedSurfaceFailsLoud:

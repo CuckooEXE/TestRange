@@ -1,23 +1,22 @@
 """Connection profile for the libvirt driver (CORE-9 / CORE-18).
 
 :class:`LibvirtProfile` is the concrete :class:`~testrange.connect.BackendProfile`
-that the ``--connect`` path dispatches to when the TOML names ``driver =
+that the ``--profile`` path dispatches to when the TOML names ``driver =
 "libvirt"``. It declares the two libvirt-specific connection keys (``uri``,
-``backing_pool``), self-registers, and builds a :class:`LibvirtDriver` against
-that connection.
+``backing_pool``), the named-uplink map, self-registers, and builds a
+:class:`LibvirtDriver` against that connection.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from testrange.connect import BackendProfile, register_profile
 from testrange.drivers.libvirt._conn import LibvirtConn
 from testrange.drivers.libvirt.driver import LibvirtDriver
-from testrange.networks.base import ManagedBuildSwitch
 
 
 @dataclass(frozen=True)
@@ -36,7 +35,7 @@ class LibvirtProfile(BackendProfile):
 
     uri: str = "qemu:///system"
     backing_pool: str = "default"
-    build_switch: ManagedBuildSwitch | None = None
+    uplinks: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
@@ -44,12 +43,13 @@ class LibvirtProfile(BackendProfile):
         return cls(
             uri=str(table.get("uri", "qemu:///system")),
             backing_pool=str(table.get("backing_pool", "default")),
-            build_switch=cls._parse_build_switch(table, path),
+            uplinks=cls._parse_uplinks(table, path),
         )
 
     def build_driver(self) -> LibvirtDriver:
         return LibvirtDriver(
             LibvirtConn(libvirt_uri=self.uri, backing_pool=self.backing_pool),
+            uplinks=self.uplinks,
         )
 
     def describe_fields(self) -> Iterable[tuple[str, str]]:

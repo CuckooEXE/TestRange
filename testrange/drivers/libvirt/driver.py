@@ -27,14 +27,15 @@ from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightReport,
     mgmt_unsupported_findings,
+    unknown_uplink_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
-    from testrange.networks.base import ManagedEgress, Network, Switch
+    from testrange.networks.base import Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -46,8 +47,8 @@ class LibvirtHypervisor(Hypervisor):
     Identical in shape to the generic :class:`~testrange.Hypervisor`; its only
     job is to assert *this topology MUST run against libvirt* (e.g., a recipe
     that relies on a libvirt-specific NIC model) so preflight catches a
-    mismatched ``--connect`` early. Connection (``uri`` / ``backing_pool``) and
-    build egress live on :class:`LibvirtProfile`.
+    mismatched ``--profile`` early. Connection (``uri`` / ``backing_pool``) and
+    named uplinks live on :class:`LibvirtProfile`.
     """
 
 
@@ -56,17 +57,21 @@ class LibvirtDriver(HypervisorDriver):
 
     DRIVER_NAME = "LibvirtDriver"
 
-    # Flipped on in BACKEND-1.2 when the managed-egress realization (a libvirt
-    # NAT network + nwfilter fence) lands; until then the orchestrator's
-    # preflight rejects a ManagedBuildSwitch on this backend.
-    supports_managed_build_egress = False
-
-    def __init__(self, conn: LibvirtConn, *, client: LibvirtClient | None = None) -> None:
+    def __init__(
+        self,
+        conn: LibvirtConn,
+        *,
+        client: LibvirtClient | None = None,
+        uplinks: Mapping[str, str] | None = None,
+    ) -> None:
         self._conn = conn
         # ``client`` is injectable so unit tests pass a duck-typed fake (exposing
         # ``raw`` + the libvirt calls the concern modules use) and never import
         # libvirt or touch a real hypervisor.
         self._client = client if client is not None else LibvirtClient(conn)
+        # Logical-uplink-name → host iface (ADR-0016); consumed by create_switch
+        # when L2 lands (BACKEND-1.2). Empty for a from_uri teardown driver.
+        self._uplinks: dict[str, str] = dict(uplinks or {})
 
     # -- construction paths ------------------------------------------------
 
@@ -91,12 +96,17 @@ class LibvirtDriver(HypervisorDriver):
     ) -> PreflightReport:
         """Plan-side read-only checks.
 
-        Runs the cross-driver mgmt gate. Managed-egress capability is checked
-        in the orchestrator (CORE-19). Live libvirt-side checks (backing pool
-        present, uplink bridge present) land with their phases (storage / L2).
+        Runs the cross-driver mgmt gate and the named-uplink resolution check
+        (ADR-0016). Live libvirt-side checks (backing pool present, resolved
+        uplink bridge present) land with their phases (storage / L2).
         """
-        del cache_manager, build_switch
-        return PreflightReport(findings=tuple(mgmt_unsupported_findings(plan)))
+        del cache_manager
+        switches = [*plan.hypervisor.all_switches]
+        if build_switch is not None:
+            switches.append(build_switch)
+        findings = list(mgmt_unsupported_findings(plan))
+        findings.extend(unknown_uplink_findings(switches, self._uplinks))
+        return PreflightReport(findings=tuple(findings))
 
     # -- naming (pure) -----------------------------------------------------
 
@@ -118,9 +128,7 @@ class LibvirtDriver(HypervisorDriver):
         raise DriverError(f"LibvirtDriver.{method}: not implemented yet ({phase})")
 
     # L2 — BACKEND-1.2
-    def create_switch(
-        self, switch: Switch, backend_name: str, *, managed_egress: ManagedEgress | None = None
-    ) -> str | None:
+    def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         self._todo("create_switch", "BACKEND-1.2")
 
     def destroy_switch(self, backend_name: str) -> None:

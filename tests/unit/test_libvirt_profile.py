@@ -20,31 +20,38 @@ def _write(tmp_path: Path, text: str) -> Path:
 
 class TestParse:
     def test_defaults(self, tmp_path: Path) -> None:
-        prof = load_profile(_write(tmp_path, 'driver = "libvirt"\n'))
+        prof = load_profile(_write(tmp_path, '[p]\ndriver = "libvirt"\n'), "p")
         assert isinstance(prof, LibvirtProfile)
         assert prof.uri == "qemu:///system"
         assert prof.backing_pool == "default"
+        assert dict(prof.uplinks) == {}
 
     def test_explicit(self, tmp_path: Path) -> None:
         prof = load_profile(
             _write(
                 tmp_path,
-                'driver = "libvirt"\nuri = "qemu:///session"\nbacking_pool = "lab"\n',
-            )
+                '[p]\ndriver = "libvirt"\nuri = "qemu:///session"\nbacking_pool = "lab"\n'
+                '[p.uplinks]\negress = "virbr0"\n',
+            ),
+            "p",
         )
         assert isinstance(prof, LibvirtProfile)
         assert prof.uri == "qemu:///session"
         assert prof.backing_pool == "lab"
+        assert dict(prof.uplinks) == {"egress": "virbr0"}
 
     def test_unknown_key_named(self, tmp_path: Path) -> None:
         with pytest.raises(ProfileError, match=r"unknown key\(s\) \['nost'\]"):
-            load_profile(_write(tmp_path, 'driver = "libvirt"\nnost = "typo"\n'))
+            load_profile(_write(tmp_path, '[p]\ndriver = "libvirt"\nnost = "typo"\n'), "p")
 
 
 class TestBuildDriver:
     def test_builds_libvirt_driver_with_conn(self) -> None:
-        drv = LibvirtProfile(uri="qemu:///session", backing_pool="lab").build_driver()
+        drv = LibvirtProfile(
+            uri="qemu:///session", backing_pool="lab", uplinks={"egress": "virbr0"}
+        ).build_driver()
         assert isinstance(drv, LibvirtDriver)
+        assert drv._uplinks == {"egress": "virbr0"}
         # Round-trip the teardown URI to confirm both knobs land on the
         # driver-side LibvirtConn (drv.uri itself is the wrapped teardown form
         # with the connect-URI url-quoted inside).

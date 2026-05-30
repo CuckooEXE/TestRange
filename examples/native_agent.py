@@ -29,12 +29,19 @@ from testrange.vms import VMRecipe, VMSpec
 PLAN = Plan(
     "qga-demo",
     ProxmoxHypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "switch1",
                 Network("netA"),
                 cidr="172.31.0.0/24",
-                uplink="vmbr9",
+                uplink="egress",
                 sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],

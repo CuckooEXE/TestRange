@@ -1,7 +1,15 @@
 # ADR-0015: The Plan entry is topology; the backend is bound separately at run time
 
-Status: Accepted (amended 2026-05-28 — see Addendum)
+Status: Accepted (amended 2026-05-28 + 2026-05-29 — see Addenda)
 Date: 2026-05-27
+
+> **Amended 2026-05-29 by [ADR-0016](0016-named-uplinks-out-of-band-egress.md).**
+> The build switch leaves the binding and returns to portable topology on the
+> `Hypervisor` (now that `uplink` is a profile-resolved logical name, the build
+> switch is host-free); `ResolvedBackend.build_switch` and the profile's
+> `[build_switch]` table are removed. The profile becomes one file with many
+> named `[profile]` tables (each with its own `driver` key) plus an `[uplinks]`
+> map; `--connect PATH` becomes `--profile [<file>:]<name>`. See ADR-0016.
 
 Relates to [ADR-0008](0008-driver-abc-multi-backend.md) (the driver ABC this
 binds a plan to), [ADR-0010](0010-build-run-split.md) (build/run phases the

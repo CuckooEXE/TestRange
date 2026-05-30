@@ -32,7 +32,8 @@ Plan(name, MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]))
   backend until the real ones are written). Each backend ships its own such
   dataclass; the driver is constructed from its class via the driver registry
   (`testrange.drivers.driver_for`). `build_switch` is the user-declared build
-  network (`Switch | ManagedBuildSwitch | None`, ADR-0014); `None` means an
+  network (`Switch | None`, ADR-0016 — portable topology, realized like a
+  run-phase switch); `None` means an
   isolated build network with no egress (see the build phase below).
 - **`VMSpec`** — hardware-only (`name`, `devices=[CPU, Memory,
   OSDrive, HardDrive, NetworkIface]`). Singleton-device runtime
@@ -115,7 +116,7 @@ tests (`--require-cache` makes a miss fail fast instead of building). The
    a VM is cached only if **all** its artifacts are present. **Only if at least
    one VM misses** does it stand up a single ephemeral build pool + a transient
    build Switch (resolved from the Hypervisor's `build_switch` via
-   `resolve_build_switch`, ADR-0014) + the per-Switch sidecar,
+   `resolve_build_switch`, ADR-0016) + the per-Switch sidecar,
    and loop over only the missing VMs. Each missing VM is provisioned as a unit:
    its base is `upload_to_pool`-ed straight onto its own OS-disk ref and
    `resize_volume`-d up; each `HardDrive` is a `create_blank_volume`; the seed is

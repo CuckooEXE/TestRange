@@ -2,8 +2,9 @@
 
 Folds a Plan entry and the required connection profile into a single
 :class:`ResolvedBackend` the orchestrator consumes — the one place that decides
-*which* driver runs, *how* it connects, and *what* build egress and teardown URI
-it carries.
+*which* driver runs, *how* it connects (incl. the named-uplink map and the
+teardown URI it carries). The build switch is portable topology on the plan now
+(ADR-0016), not a binding concern.
 
 Under CORE-19 the matrix has only two cells that actually bind, because a
 concrete ``*Hypervisor`` is a topology-only scheme marker now (it carries no
@@ -14,12 +15,11 @@ connection):
 ==================  ====================================================
 concrete + given    profile.scheme MUST equal the entry's scheme, else a
                     hard error; driver = ``profile.build_driver()``;
-                    build egress + teardown URI from the profile/driver.
-concrete + none     hard error: pass ``--connect <profile>`` (a concrete
+                    teardown URI from the driver.
+concrete + none     hard error: pass ``--profile <name>`` (a concrete
                     entry only constrains *which* scheme is allowed).
-generic  + given    driver = ``profile.build_driver()``; build egress
-                    from the profile.
-generic  + none     hard error: backend-agnostic plan; pass ``--connect``.
+generic  + given    driver = ``profile.build_driver()``.
+generic  + none     hard error: backend-agnostic plan; pass ``--profile``.
 ==================  ====================================================
 
 Compatibility preflight is three layers; this module owns the first two:
@@ -44,7 +44,6 @@ from testrange.preflight import PreflightFinding
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.connect import BackendProfile
-    from testrange.networks.base import ManagedBuildSwitch, Switch
     from testrange.plan import Plan
 
 
@@ -52,16 +51,14 @@ if TYPE_CHECKING:  # pragma: no cover
 class ResolvedBackend:
     """The single backend binding the orchestrator runs against.
 
-    ``build_switch`` is the user-*declared* build switch (the binding's env-knob,
-    a :class:`~testrange.networks.base.ManagedBuildSwitch` or ``None``) —
-    ``resolve_build_switch`` later folds it into the transient build Switch the
-    build phase brings up. ``driver_uri`` is the teardown URI persisted into
-    state.json so a later ``cleanup`` rebuilds the driver via
+    The build switch is **not** here — it is portable topology on the plan's
+    ``Hypervisor`` now (ADR-0016), so the orchestrator reads it from
+    ``plan.hypervisor.build_switch`` directly. ``driver_uri`` is the teardown URI
+    persisted into state.json so a later ``cleanup`` rebuilds the driver via
     :func:`~testrange.drivers.driver_for_name`.
     """
 
     driver: HypervisorDriver
-    build_switch: Switch | ManagedBuildSwitch | None
     driver_uri: str
 
 
@@ -79,12 +76,12 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
             scheme = scheme_for_hypervisor(hyp)
             raise DriverError(
                 f"plan entry {type(hyp).__name__} pins the {scheme!r} backend but no "
-                f"connection profile was supplied; pass --connect <profile> (the entry is "
+                f"connection profile was supplied; pass --profile <name> (the entry is "
                 f"a topology-only scheme marker — it carries no connection)"
             )
         raise DriverError(
             f"plan entry {type(hyp).__name__} is backend-agnostic and selects no driver; "
-            f"pass --connect <profile> to bind it to a backend"
+            f"pass --profile <name> to bind it to a backend"
         )
 
     if pinned:
@@ -100,7 +97,6 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
     driver = profile.build_driver()
     return ResolvedBackend(
         driver=driver,
-        build_switch=profile.build_switch,
         driver_uri=_driver_uri(driver),
     )
 

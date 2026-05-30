@@ -7,16 +7,16 @@ registry now (CORE-19 collapsed the third):
   cleanup entry point (``driver_for_name``);
 - by **Hypervisor data type** for pin introspection (``scheme_for_hypervisor``,
   ``is_pinned``) — the binding resolver (CORE-10) uses this to detect a
-  topology-only scheme marker (CORE-19) and to enforce that ``--connect``'s
+  topology-only scheme marker (CORE-19) and to enforce that ``--profile``'s
   scheme matches.
 
 The Plan-entry-type-to-driver path (``driver_for(hyp)``) is gone with CORE-19:
 a concrete ``*Hypervisor`` is now a topology-only scheme marker carrying no
-connection, so the driver is *always* built from the ``--connect`` profile
+connection, so the driver is *always* built from the ``--profile`` profile
 (``BackendProfile.build_driver``) or, on cleanup, rebuilt from the persisted
 teardown URI via ``driver_for_name``.
 
-The ``--connect`` profile dispatch lives separately in
+The ``--profile`` profile dispatch lives separately in
 :mod:`testrange.connect` (``_PROFILE_BY_SCHEME``); the ``scheme`` recorded here
 is what the binding resolver compares the profile's scheme against.
 """
@@ -46,7 +46,7 @@ def register(
     state.json (the cleanup entry point). ``hypervisor_cls`` is the concrete
     topology-only ``*Hypervisor`` subclass that scheme-pins to this backend;
     ``scheme`` is the short token (``"mock"``, ``"proxmox"``, ``"libvirt"``)
-    the binding resolver matches a ``--connect`` profile against.
+    the binding resolver matches a ``--profile`` profile against.
     """
     _FROM_NAME[driver_name] = from_uri
     _SCHEME_FOR_HYP[hypervisor_cls] = scheme
@@ -67,7 +67,7 @@ def scheme_for_hypervisor(hypervisor: Any) -> str | None:
 
     ``None`` means the entry's type is unregistered — the backend-agnostic
     :class:`~testrange.hypervisor.Hypervisor` — so it pins no scheme and the
-    binding resolver accepts any registered ``--connect`` profile.
+    binding resolver accepts any registered ``--profile`` profile.
     """
     return _SCHEME_FOR_HYP.get(type(hypervisor))
 

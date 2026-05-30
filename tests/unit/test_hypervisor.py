@@ -87,10 +87,13 @@ class TestGenericHypervisor:
         plan = Plan("t", hyp)
         assert plan.hypervisor is hyp
 
-    def test_carries_no_build_switch_field(self) -> None:
-        # Build egress is a backend BINDING concern (CORE-10), not portable
-        # topology; the generic type must not grow a build_switch field.
-        assert not hasattr(Hypervisor(), "build_switch")
+    def test_build_switch_is_portable_topology(self) -> None:
+        # ADR-0016: now that uplink is a profile-resolved logical name, the build
+        # switch carries nothing host-specific, so it is portable topology on the
+        # Hypervisor. Defaults to None (isolated no-egress build).
+        assert Hypervisor().build_switch is None
+        bs = Switch("build", Network("b"), cidr="10.97.99.0/24", sidecar=Sidecar(dhcp=True))
+        assert Hypervisor(build_switch=bs).build_switch is bs
 
     def test_not_pinned(self) -> None:
         # Unregistered by design: it selects no scheme. is_pinned must report

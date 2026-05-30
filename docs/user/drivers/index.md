@@ -7,10 +7,14 @@ the driver matching your hypervisor and follow that page's prereqs.
 :maxdepth: 1
 
 networking-modes
+out-of-band-egress
 ```
 
 [Networking modes](networking-modes.md) covers the `Switch` API and
 how each driver realizes the flags (uplink/mgmt/dhcp/dns/nat).
+[Out-of-band egress](out-of-band-egress.md) is the per-driver recipe for the
+host NAT bridge a named `uplink` points at — TestRange attaches to it but never
+builds it ([ADR-0016](../../adr/0016-named-uplinks-out-of-band-egress.md)).
 
 ## Status
 
