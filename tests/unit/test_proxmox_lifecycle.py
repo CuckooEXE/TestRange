@@ -123,9 +123,11 @@ _SEED = VolumeRef("local:iso/p1__tr-vm-x-web-seed.iso")
 
 
 def _create(c: Any, **kw: Any) -> str:
-    base: dict[str, Any] = dict(
-        os_disk_ref=_OS_REF, seed_iso_ref=None, network_refs={"netA": "vneta"}
-    )
+    base: dict[str, Any] = {
+        "os_disk_ref": _OS_REF,
+        "seed_iso_ref": None,
+        "network_refs": {"netA": "vneta"},
+    }
     base.update(kw)
     return _vm.create_vm(c, "tr-vm-x-web", _spec(), "plan", **base)
 

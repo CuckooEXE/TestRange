@@ -21,6 +21,7 @@ modules (`_sdn`, `_storage`, `_vm`, `_guest`) take it as their first argument.
 
 from __future__ import annotations
 
+import contextlib
 import ssl
 import urllib.parse
 from dataclasses import dataclass
@@ -98,10 +99,8 @@ def _sftp_makedirs(sftp: Any, remote_dir: str) -> None:
         try:
             sftp.stat(str(cur))
         except FileNotFoundError:
-            try:
+            with contextlib.suppress(OSError):  # created concurrently / already present
                 sftp.mkdir(str(cur))
-            except OSError:
-                pass  # created concurrently / already present
 
 
 def parse_connection(uri: str) -> tuple[str, int, str, str]:

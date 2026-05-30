@@ -145,7 +145,9 @@ class LocalCache:
         tmp = self.isos / ".download.partial"
         _log.info("fetching %s", url)
         # urlopen verifies TLS via the system CA store by default in Python 3.6+.
-        with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:
+        # S310: the scheme is pre-validated by add() (http/https only) before we
+        # ever reach here, so file:/custom schemes cannot slip through.
+        with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:  # noqa: S310
             shutil.copyfileobj(resp, out)
         return tmp, url
 
@@ -261,7 +263,7 @@ class LocalCache:
         text = json.dumps(body, indent=2, sort_keys=True) + "\n"
         tmp = path.with_suffix(path.suffix + ".partial")
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        tmp.replace(path)
 
     def _append_alias(
         self,
@@ -295,7 +297,7 @@ def _atomic_copy(src: Path, dst: Path) -> None:
     tmp = dst.with_suffix(dst.suffix + ".partial")
     with src.open("rb") as r, tmp.open("wb") as w:
         shutil.copyfileobj(r, w)
-    os.replace(tmp, dst)
+    tmp.replace(dst)
 
 
 def _now_utc_iso() -> str:

@@ -83,17 +83,31 @@ select = [
     "B",      # flake8-bugbear
     "UP",     # pyupgrade
     "TID",    # flake8-tidy-imports (banned-api)
+    "S",      # flake8-bandit (security) — replaces a standalone bandit pass
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "RET",    # flake8-return
+    "PTH",    # flake8-use-pathlib (reinforces the subprocess/os ban)
+    "T20",    # flake8-print (no stray prints in library code)
     "RUF",    # ruff-specific
 ]
 ignore = [
     "E501",   # line length (let formatter handle)
+    "S101",   # assert: the codebase's deliberate invariant / mypy type-narrowing idiom
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "subprocess".msg = "subprocess is banned project-wide (PLAN.md decision 15). Use a Python library instead. If you have a justified need, add an ADR and the sanctioned module."
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011"]
+# Tests carry dummy credentials and temp-file paths as fixtures, and use bare
+# asserts/with-statements freely — these bandit rules are noise in test code.
+"tests/**" = ["B011", "S105", "S106", "S108"]
+# Examples show dummy demo credentials as API shape; an inline noqa would
+# violate the "no comments in examples" rule, so ignore S106 here instead.
+"examples/**" = ["S106"]
+# The CLI's job is to print to stdout; T201 guards library code, not the CLI.
+"testrange/cli.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -128,3 +142,12 @@ markers = [
     "proxmox: integration tests against a live Proxmox VE host (needs TESTRANGE_PVE_HOST)",
     "libvirt: integration tests against a live local libvirt (qemu:///system; needs root)",
 ]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+# Read/write the canonical version from [project].version (PEP 621), so
+# `cz bump` keeps the package version, the git tag, and CHANGELOG.md in lockstep.
+version_provider = "pep621"
+tag_format = "v$version"
+update_changelog_on_bump = true
+major_version_zero = true  # stay in 0.x — breaking changes bump minor, not major

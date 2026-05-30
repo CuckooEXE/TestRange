@@ -89,7 +89,7 @@ def volume_suffix(kind: str) -> str:
 
 def vnet_id(backend_name: str) -> str:
     """Stable 8-char SDN vnet id (alnum, leading letter) for a switch backend name."""
-    return "v" + hashlib.sha1(backend_name.encode()).hexdigest()[:7]
+    return "v" + hashlib.sha1(backend_name.encode(), usedforsecurity=False).hexdigest()[:7]
 
 
 def volid_storage(ref: str) -> str:

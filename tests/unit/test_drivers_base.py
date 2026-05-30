@@ -52,7 +52,7 @@ def _stub(*_a: object, **_k: object) -> None:
 _NoAgentDriver = type(
     "_NoAgentDriver",
     (HypervisorDriver,),
-    {name: _stub for name in _ABSTRACT_METHODS},
+    dict.fromkeys(_ABSTRACT_METHODS, _stub),
 )
 
 
@@ -101,7 +101,7 @@ class TestDestroyDispatcher:
 
             return _stub
 
-        attrs: dict[str, object] = {name: _stub for name in _ABSTRACT_METHODS}
+        attrs: dict[str, object] = dict.fromkeys(_ABSTRACT_METHODS, _stub)
         attrs["destroy_network"] = _record("destroy_network")
         attrs["destroy_pool"] = _record("destroy_pool")
         attrs["destroy_vm"] = _record("destroy_vm")

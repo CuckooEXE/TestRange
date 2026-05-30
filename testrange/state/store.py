@@ -7,6 +7,7 @@ against a still-running owner with a meaningful error.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -125,10 +126,8 @@ class StateStore:
         if self.state_path.exists():
             self.state_path.unlink(missing_ok=True)
         self.pid_path.unlink(missing_ok=True)
-        try:
+        with contextlib.suppress(OSError):  # non-empty (foreign files) — leave it
             self.run_dir.rmdir()
-        except OSError:
-            pass  # non-empty (foreign files) — leave it
 
     def exists(self) -> bool:
         return self.state_path.exists()
@@ -219,9 +218,9 @@ class StateStore:
         text = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"
         tmp = self.state_path.with_suffix(".json.partial")
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, self.state_path)
+        tmp.replace(self.state_path)
 
     def _write_pid_atomic(self, pid: int) -> None:
         tmp = self.pid_path.with_suffix(".pid.partial")
         tmp.write_text(f"{pid}\n", encoding="utf-8")
-        os.replace(tmp, self.pid_path)
+        tmp.replace(self.pid_path)

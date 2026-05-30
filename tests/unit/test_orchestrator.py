@@ -236,9 +236,8 @@ class TestEnterAndExit:
         fake_driver.preflight_override = PreflightReport(
             findings=(PreflightFinding(code="x", message="nope"),)
         )
-        with pytest.raises(PreflightError):
-            with Orchestrator(_plan(), cache_manager=mgr):
-                pass
+        with pytest.raises(PreflightError), Orchestrator(_plan(), cache_manager=mgr):
+            pass
         # No state.json was written
         names = [c[0] for c in fake_driver.calls]
         assert "create_pool" not in names
@@ -253,9 +252,11 @@ class TestEnterAndExit:
         # closes (heartbeats forever), so only the watchdog can fire.
         fake_driver.build_result_wedge = True
         # Tiny timeout so the test isn't slow
-        with pytest.raises(BuildTimeoutError):
-            with Orchestrator(_plan(), cache_manager=mgr, build_timeout_s=0.01):
-                pass
+        with (
+            pytest.raises(BuildTimeoutError),
+            Orchestrator(_plan(), cache_manager=mgr, build_timeout_s=0.01),
+        ):
+            pass
 
     def test_failure_during_bringup_triggers_teardown(
         self,
@@ -263,14 +264,16 @@ class TestEnterAndExit:
         populated_cache: tuple[CacheManager, Path],
     ) -> None:
         mgr, _ = populated_cache
-        with patch.object(
-            fake_driver,
-            "create_vm",
-            side_effect=RuntimeError("boom"),
+        with (
+            patch.object(
+                fake_driver,
+                "create_vm",
+                side_effect=RuntimeError("boom"),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+            Orchestrator(_plan(), cache_manager=mgr),
         ):
-            with pytest.raises(RuntimeError, match="boom"):
-                with Orchestrator(_plan(), cache_manager=mgr):
-                    pass
+            pass
         names = [c[0] for c in fake_driver.calls]
         # Pool was created and then destroyed during teardown
         assert "create_pool" in names
@@ -480,9 +483,11 @@ class TestBuilderReadiness:
             return ExecResult(exit_code=3, stdout=b"", stderr=b"degraded", duration=0.1)
 
         monkeypatch.setattr(SSHCommunicator, "execute", failing_execute)
-        with pytest.raises(BuildNotReadyError, match="exited 3"):
-            with Orchestrator(_plan(), cache_manager=mgr):
-                pass
+        with (
+            pytest.raises(BuildNotReadyError, match="exited 3"),
+            Orchestrator(_plan(), cache_manager=mgr),
+        ):
+            pass
         # Teardown ran even though bring-up failed.
         names = [c[0] for c in fake_driver.calls]
         assert "destroy_vm" in names

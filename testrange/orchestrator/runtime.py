@@ -10,6 +10,7 @@ and hands it over.
 
 from __future__ import annotations
 
+import contextlib
 import signal
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -273,10 +274,8 @@ class Orchestrator:
 
     def _restore_signal_handlers(self) -> None:
         for sig, prior in getattr(self, "_prior_signal_handlers", {}).items():
-            try:
+            with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, prior)
-            except (ValueError, OSError):
-                pass
 
     def _build_handle(self) -> OrchestratorHandle:
         vms_map: dict[str, VMHandle] = {

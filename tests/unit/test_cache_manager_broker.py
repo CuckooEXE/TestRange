@@ -29,8 +29,7 @@ def _make_blob(path: Path, payload: bytes = b"hello\n") -> Path:
 
 def _http_mock() -> MagicMock:
     """Build an HttpCache-shaped mock."""
-    m = MagicMock(spec=HttpCache)
-    return m
+    return MagicMock(spec=HttpCache)
 
 
 class TestNoHttpConfigured:

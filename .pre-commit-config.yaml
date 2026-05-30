@@ -1,3 +1,7 @@
+# Wire both the pre-commit and commit-msg stages on `pre-commit install`
+# (commit-msg is needed for the commitizen hook below).
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
   # --- generic hygiene ---
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -9,6 +13,32 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: debug-statements
+
+  # --- pygrep: forbid blanket suppressions (enforces CLAUDE.md gate #2) ---
+  - repo: https://github.com/pre-commit/pygrep-hooks
+    rev: v1.10.0
+    hooks:
+      - id: python-check-blanket-noqa       # every noqa must carry a code
+      - id: python-check-blanket-type-ignore  # every type:ignore must carry a code
+
+  # --- shellcheck: lint tracked shell scripts (e.g. tools/*/build.sh) ---
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
+  # --- validate pyproject.toml against the PEP 621 + setuptools schema ---
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: v0.25
+    hooks:
+      - id: validate-pyproject
 
   # --- ruff: lint + format, check-only (no file modifications) ---
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -23,6 +53,15 @@ repos:
     rev: v8.21.2
     hooks:
       - id: gitleaks
+
+  # --- commit-message format: Conventional Commits (real commits only;
+  #     the auto-commit Stop hook uses --no-verify, so wip(claude): checkpoints
+  #     are exempt and only squashed/manual commits are validated) ---
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.16.3
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
 
   # --- project-local checks: run in the project venv (real deps + stubs) ---
   # Pinned to the venv interpreters so `git commit` from a shell where
@@ -42,4 +81,11 @@ repos:
         entry: .venv/bin/pytest -m "not proxmox"
         language: system
         types: [python]
+        pass_filenames: false
+
+      - id: uv-lock-check
+        name: uv lock (in sync with pyproject)
+        entry: uv lock --check
+        language: system
+        files: ^(pyproject\.toml|uv\.lock)$
         pass_filenames: false

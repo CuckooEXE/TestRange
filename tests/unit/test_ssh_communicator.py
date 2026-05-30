@@ -57,8 +57,7 @@ class _FakeSFTP:
 
     def open(self, path: str, mode: str) -> _FakeSFTPFile:
         self.opened.append((path, mode))
-        f = self.files.setdefault(path, _FakeSFTPFile())
-        return f
+        return self.files.setdefault(path, _FakeSFTPFile())
 
     def close(self) -> None:
         pass

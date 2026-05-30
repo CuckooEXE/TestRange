@@ -361,9 +361,11 @@ class TestBuildResultSignaling:
             b'TESTRANGE-RESULT: fail rc=1 cmd="false"\n'
             b"TESTRANGE-LOG-BEGIN\n" + log + b"\nTESTRANGE-LOG-END\n",
         ]
-        with caplog.at_level(logging.DEBUG, logger="testrange.orchestrator.build_phase.console"):
-            with pytest.raises(BuildFailedError):
-                build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        with (
+            caplog.at_level(logging.DEBUG, logger="testrange.orchestrator.build_phase.console"),
+            pytest.raises(BuildFailedError),
+        ):
+            build_phase(_ctx(_plan(data_disks=0), driver, cache))
         streamed = [r.getMessage() for r in caplog.records if r.name.endswith(".console")]
         assert any("Setting up nginx" in m for m in streamed)  # build chatter shown
         assert not any("TESTRANGE-RESULT" in m for m in streamed)  # framing hidden
