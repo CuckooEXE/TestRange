@@ -14,10 +14,10 @@ from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator import Orchestrator, run_tests
 from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockHypervisor
 
 
 @pytest.fixture(autouse=True)
@@ -89,8 +89,8 @@ def _plan() -> Plan:
 
 
 def _install_fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    from testrange.drivers.mock import MockDriver
     from testrange.orchestrator.backend import ResolvedBackend
+    from tests.mock_driver import MockDriver
 
     driver = MockDriver(pool_root=tmp_path / "pools")
 

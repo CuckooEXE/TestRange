@@ -11,10 +11,10 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockHypervisor
 
 
 def _basic_recipe(name: str = "web", net: str = "netA", pool: str = "pool1") -> VMRecipe:

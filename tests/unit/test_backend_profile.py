@@ -23,9 +23,9 @@ import pytest
 
 from testrange.connect import BackendProfile, load_profile
 from testrange.drivers.libvirt import LibvirtProfile
-from testrange.drivers.mock import MockProfile
 from testrange.drivers.proxmox import ProxmoxProfile
 from testrange.exceptions import ProfileError
+from tests.mock_driver import MockProfile
 
 
 def _write(tmp_path: Path, text: str) -> Path:

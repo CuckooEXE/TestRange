@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from testrange.connect import load_profile
-from testrange.drivers.mock import MockDriver, MockProfile
 from testrange.exceptions import ProfileError
+from tests.mock_driver import MockDriver, MockProfile
 
 
 def _write(tmp_path: Path, text: str) -> Path:

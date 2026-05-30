@@ -272,7 +272,7 @@ class TestTestsValidation:
         f = tmp_path / "plan.py"
         f.write_text(
             "from testrange import Plan\n"
-            "from testrange.drivers.mock import MockHypervisor\n"
+            "from tests.mock_driver import MockHypervisor\n"
             'PLAN = Plan("t", MockHypervisor())\n'
             f"{tests_src}\n"
         )

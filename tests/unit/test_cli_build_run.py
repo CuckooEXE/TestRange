@@ -18,9 +18,9 @@ import pytest
 from testrange import cli
 from testrange.cache import CacheManager, LocalCache
 from testrange.communicators import ExecResult, SSHCommunicator
-from testrange.drivers.mock import MockDriver
 from testrange.orchestrator import run_tests
 from testrange.orchestrator.backend import ResolvedBackend
+from tests.mock_driver import MockDriver
 
 _PLAN_SRC = """
 from testrange import Plan
@@ -30,7 +30,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers.mock import MockHypervisor
+from tests.mock_driver import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
@@ -70,7 +70,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers.mock import MockHypervisor
+from tests.mock_driver import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 

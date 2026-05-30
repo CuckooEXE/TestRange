@@ -20,7 +20,6 @@ from testrange.communicators import ExecResult, NativeCommunicator, SSHCommunica
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import (
     BuildNotReadyError,
     BuildTimeoutError,
@@ -33,6 +32,7 @@ from testrange.orchestrator.backend import ResolvedBackend
 from testrange.packages import Apt
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockDriver, MockHypervisor
 
 
 def _plan(name: str = "hello") -> Plan:

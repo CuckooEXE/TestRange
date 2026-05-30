@@ -55,7 +55,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
-from testrange.packages import Apt  # Pip re-added with keybox's cowsay (BUILD-4)
+from testrange.packages import Apt, Pip
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
@@ -157,7 +157,7 @@ PLAN = Plan(
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     credentials=[_ADMIN],
-                    packages=[Apt("nginx")],  # Pip("cowsay") disabled pending BUILD-4
+                    packages=[Apt("nginx"), Apt("python3-pip"), Pip("cowsay")],
                     post_install_commands=("systemctl enable --now nginx",),
                 ),
                 communicator=SSHCommunicator("admin", nic_idx=1),
@@ -375,7 +375,10 @@ def ops_user_is_admin(orch: OrchestratorHandle) -> None:
 
 
 def users_uses_explicit_resolver(orch: OrchestratorHandle) -> None:
-    r = orch.vms["users"].communicator.execute(["cat", "/etc/resolv.conf"])
+    # /etc/resolv.conf is the systemd-resolved stub (127.0.0.53) on Debian; the
+    # netplan-rendered upstream resolver lands as the link DNS, shown by
+    # `resolvectl status` (readable as the non-root SSH user).
+    r = orch.vms["users"].communicator.execute(["resolvectl", "status"])
     assert b"9.9.9.9" in r.stdout, f"explicit DNS not applied: {r.stdout!r}"
 
 
@@ -397,7 +400,8 @@ def data_disks_carry_their_own_content(orch: OrchestratorHandle) -> None:
 def data_disk_bytes_survived_capture(orch: OrchestratorHandle) -> None:
     com = orch.vms["fileserver"].communicator
     for dev, mount in (("/dev/vdb", "/srv/b"), ("/dev/vdc", "/srv/c")):
-        live = com.execute(["blkid", "-s", "UUID", "-o", "value", dev]).stdout.strip()
+        # blkid reads the raw block device → needs root (the SSH user is non-root).
+        live = com.execute(["sudo", "blkid", "-s", "UUID", "-o", "value", dev]).stdout.strip()
         seeded = com.execute(["cat", f"{mount}/uuid"]).stdout.strip()
         assert live and live == seeded, f"{dev} fs UUID changed: live={live!r} seeded={seeded!r}"
 
@@ -495,7 +499,7 @@ TESTS = [
     multihome_one_default_route,
     keybox_bound_to_dhcp_nic,
     keybox_apt_package_present,
-    # keybox_pip_package_importable,  # disabled with Pip("cowsay") (BUILD-4)
+    keybox_pip_package_importable,
     keybox_os_drive_grew,
     keybox_file_roundtrips_over_ssh,
     keybox_exec_honors_cwd,
@@ -503,10 +507,10 @@ TESTS = [
     viewer_cannot_sudo,
     viewer_in_declared_group,
     ops_user_is_admin,
-    # users_uses_explicit_resolver,  # static-DNS not in resolv.conf (BUILD-5)
+    users_uses_explicit_resolver,
     data_disks_mounted,
     data_disks_carry_their_own_content,
-    # data_disk_bytes_survived_capture,  # blkid needs root in the test (CORE-24)
+    data_disk_bytes_survived_capture,
     disk_snapshot_lifecycle,
     memory_snapshot_restores_running_state,
     client_can_reach_private_web,

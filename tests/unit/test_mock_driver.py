@@ -20,12 +20,12 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers.base import HypervisorDriver
-from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import DriverError
 from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.preflight import mgmt_unsupported_findings
 from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockDriver, MockHypervisor
 
 _Addr = DHCPAddr | StaticAddr | None
 

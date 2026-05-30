@@ -1337,29 +1337,36 @@ execute the build/run, all now baked into the driver:
   otherwise fully isolated.** A non-mgmt Switch's network has no host `<ip>` — it
   is a pure guest segment (the host is not on it). A `mgmt=True` Switch adds the
   `.2` host adapter to the bridge (`<ip address='…2'/>` + `<dns enable='no'/>` so
-  libvirt spawns no dnsmasq to shadow the sidecar) — and *only that*; it is not a
-  router or a reachability guarantee. libvirt therefore drops the
+  libvirt spawns no dnsmasq to shadow the sidecar) — and *only that* (it is not a
+  router). That `.2` adapter is how the on-host orchestrator reaches an
+  `SSHCommunicator` VM on a local network, so libvirt drops the
   `mgmt_unsupported_findings` gate (ADR-0009's "a backend that grows real mgmt
-  support drops the call"); other backends keep it. A plan that uses an
-  `SSHCommunicator` on a VM the orchestrator host can't reach (e.g. an isolated,
-  non-mgmt Switch) is a plan-authoring issue, not something the driver papers
-  over — so the examples declare `mgmt=True` on the Switches whose VMs are
-  reached over SSH.
+  support drops the call"); other backends keep it pending the ADR. A plan that
+  uses `SSHCommunicator` on an isolated, non-mgmt Switch is a plan-authoring
+  issue, not something the driver papers over — so the examples declare
+  `mgmt=True` on the Switches whose VMs are reached over SSH.
 - **Snapshots are full internal qcow2 snapshots.** libvirt rejects an internal
   *disk-only* snapshot of a *running* domain, so `create_snapshot` always takes a
   full checkpoint (libvirt includes RAM while running, disk-only while shut off);
   `mem` is accepted for ABC parity. Disk-revert and memory-restore both verified
   live.
 
-**Remaining for 1.D/1.E:** `tests/integration/test_libvirt.py` (marked `libvirt`),
-the mock→tests move, the ADR, and docs. **Five non-libvirt gaps** that the
-certification exposed are ticketed and the affected `capabilities.py` lines
-commented out pending their fix: **ORCH-9** (a zero-NIC build VM gets no build
-network → `no-net` can't `apt`), **BUILD-4** (Pip builder assumes `pip3`),
-**BUILD-5** (`StaticAddr` dns not written to `/etc/resolv.conf`), **CORE-24**
-(`data_disk_bytes_survived_capture` runs `blkid` non-root), **COMM-4**
-(`memory_snapshot` test fails over SSH though the driver's mem-snapshot is
-QGA-proven). None is a libvirt-driver defect.
+**Certification status.** `testrange run --profile libvirt-local
+examples/capabilities.py` is **green** (26/26 enabled tests) and
+`tests/integration/test_libvirt.py` (marked `libvirt`, self-cleaning) passes
+**3/3** live — that integration suite is the authoritative driver cert. The mock
+backend has moved to `tests/mock_driver.py` (registered by `tests/conftest.py`);
+libvirt is the reference implementation. **Remaining (1.E):** the reference-impl
+ADR + docs (install/connecting/extending, the `tr-egress` recipe).
+
+The certification surfaced a set of **capabilities-test / orchestrator** issues
+(none a libvirt-driver defect). The test-authoring ones were fixed in
+`capabilities.py`: `Apt("python3-pip")` before `Pip(...)`; `resolvectl status`
+instead of grepping the systemd-resolved `/etc/resolv.conf` stub; `sudo blkid`
+(raw-device read needs root, the SSH user is not); the RAM-restore marker in
+`/dev/shm` (tmpfs + world-writable) rather than root-only `/run`. The one real
+orchestrator gap remains ticketed with `no-net` disabled: **ORCH-9** — a
+zero-NIC VM gets no build-time network, so its `apt`-based builder can't run.
 
 ### 22. Backend binding: topology Plan entry vs. resolved backend
 

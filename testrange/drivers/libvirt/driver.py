@@ -109,10 +109,12 @@ class LibvirtDriver(HypervisorDriver):
     ) -> PreflightReport:
         """Plan-side read-only checks (the named-uplink resolution check, ADR-0016).
 
-        libvirt **supports** ``Switch(mgmt=True)`` — the daemon puts the host's
-        ``.2`` adapter on the bridge — so it does NOT call
-        ``mgmt_unsupported_findings`` (the gate other backends still apply until
-        they realize mgmt; ADR-0009). Live libvirt-side checks (the resolved
+        libvirt **supports** ``Switch(mgmt=True)``: the daemon puts the host's
+        ``.2`` adapter on the bridge (``_net.create_switch``), which is how the
+        on-host orchestrator reaches an SSH-communicator VM on a local network.
+        So libvirt does NOT call ``mgmt_unsupported_findings`` — it is the
+        backend that realizes mgmt (the "drops the call" path other backends
+        still defer pending ADR-0009). Live libvirt-side checks (the resolved
         uplink network present on the host) land with the L2 phase.
         """
         del cache_manager

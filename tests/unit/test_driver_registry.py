@@ -16,8 +16,8 @@ from testrange.drivers import (
     scheme_for_hypervisor,
 )
 from testrange.drivers.libvirt.driver import LibvirtHypervisor
-from testrange.drivers.mock import MockHypervisor
 from testrange.drivers.proxmox.driver import ProxmoxHypervisor
+from tests.mock_driver import MockHypervisor
 
 
 class TestPinIntrospection:

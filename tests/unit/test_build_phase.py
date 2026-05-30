@@ -24,7 +24,6 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.drivers.mock import MockDriver, MockHypervisor
 from testrange.exceptions import BuildFailedError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
@@ -34,6 +33,7 @@ from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockDriver, MockHypervisor
 
 
 def _plan(*, data_disks: int = 1) -> Plan:

@@ -13,7 +13,6 @@ from __future__ import annotations
 import pytest
 
 from testrange import Hypervisor, Plan
-from testrange.drivers.mock import MockDriver, MockHypervisor, MockProfile
 from testrange.drivers.proxmox import ProxmoxProfile
 from testrange.drivers.proxmox.driver import ProxmoxDriver, ProxmoxHypervisor
 from testrange.exceptions import DriverError
@@ -22,6 +21,7 @@ from testrange.orchestrator.backend import (
     compatibility_findings,
     resolve_backend,
 )
+from tests.mock_driver import MockDriver, MockHypervisor, MockProfile
 
 
 class TestPinMatrix:
