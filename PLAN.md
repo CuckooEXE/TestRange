@@ -214,9 +214,14 @@ infrastructure; each *NIC* declares how it takes a run-phase address via
   gateway/DNS resolves to "isolated, no default route", which is valid. This is
   what lets a NIC point at an unmanaged gateway (a guest acting as a router).
 
-The install phase always renders DHCP regardless of `addr` (install needs
-internet); the run-phase netplan is staged separately via cloud-init
-`write_files`.
+There is no install-vs-run netplan split (ADR-0017). A build VM is given one
+dedicated **build NIC** on the build switch (statically addressed from the
+build switch's `.3` infra slot) in place of its declared NICs, and cloud-init's
+`network-config` is a single match-by-MAC netplan covering the build NIC plus
+every declared NIC. During build only the build NIC is present (so `apt`
+egresses through it); at run only the declared NICs are (the build NIC's stanza
+is inert) — the same baked file serves both phases. A
+`99-testrange-disable-network.cfg` drop-in pins it across the seed-less run boot.
 
 **Sidecar VM** (`testrange/networks/sidecar.py`,
 `testrange/builders/sidecar_iso.py`): a pre-built Alpine image with
@@ -875,7 +880,9 @@ be cleaned up via state-file-driven `testrange cleanup`.
      misses; only if ≥1 miss stand up the ephemeral build pool/switch/sidecar.
    - For each missing VM: push the base onto the VM's own OS disk + resize,
      `create_blank_volume` each data disk, render + attach the self-terminating
-     seed, boot, **read the serial build-result sink** (§21, ADR-0012) until the
+     seed, attach **one dedicated build NIC** on the build switch in place of the
+     declared NICs (ADR-0017), boot, **read the serial build-result sink** (§21,
+     ADR-0012) until the
      guest reports `ok`, then `download_from_pool` every writable disk and
      `cache.add` each (push upstream if an HTTP tier is configured). A `fail`
      record or a power-off without `ok` raises `BuildFailedError` *before*

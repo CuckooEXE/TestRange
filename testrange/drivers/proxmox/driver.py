@@ -46,7 +46,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import Network, Switch
+    from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -298,6 +298,7 @@ class ProxmoxDriver(HypervisorDriver):
         seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
         data_disk_refs: Sequence[VolumeRef] = (),
+        build_nic: BuildNic | None = None,
     ) -> Any:
         # Translate composed network names → SDN vnet ids for the NIC bridges;
         # the uplink segment (vmbr0) isn't in the map and passes through.
@@ -314,6 +315,7 @@ class ProxmoxDriver(HypervisorDriver):
             seed_iso_ref=seed_iso_ref,
             network_refs=resolved_refs,
             data_disk_refs=data_disk_refs,
+            build_nic=build_nic,
         )
 
     def start_vm(self, backend_name: str) -> None:

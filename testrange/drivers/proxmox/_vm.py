@@ -35,6 +35,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from testrange.drivers.base import VolumeRef
     from testrange.drivers.proxmox._client import ProxmoxClient
+    from testrange.networks.base import BuildNic
     from testrange.vms.spec import VMSpec
 
 _log = get_logger(__name__)
@@ -140,6 +141,7 @@ def create_vm(
     seed_iso_ref: VolumeRef | None,
     network_refs: dict[str, str],
     data_disk_refs: Sequence[VolumeRef] = (),
+    build_nic: BuildNic | None = None,
 ) -> str:
     """Define a VM on PVE from the orchestrator's staged disks.
 
@@ -161,7 +163,9 @@ def create_vm(
       CDROM; boot order pinned to ``scsi0`` since the seed is data, not bootable.
     - **NICs** — ``net<i>`` for each ``spec.nics[i]`` on its backend bridge/vnet
       (``network_refs``) with the stable MAC ``compose_mac(plan, vm, i)`` so DHCP
-      hands out a predictable lease (ADR-0006).
+      hands out a predictable lease (ADR-0006). At build (``build_nic`` set,
+      ADR-0017) the declared NICs are replaced by a single ``net0`` on the build
+      network carrying the build NIC's MAC.
     """
     storage = client.storage
     vmid = int(client.api.cluster.nextid.get())
@@ -195,9 +199,13 @@ def create_vm(
             config[f"scsi{i + 1}"] = f"{storage}:0,import-from={ref}"  # run: cached built disk
     if seed_iso_ref is not None:
         config["ide2"] = f"{seed_iso_ref},media=cdrom"
-    for idx, nic in enumerate(spec.nics):
-        mac = _naming.compose_mac(plan_name, spec.name, idx)
-        config[f"net{idx}"] = f"virtio={mac},bridge={network_refs[nic.network]}"
+    if build_nic is not None:
+        # Build phase (ADR-0017): one build NIC, declared NICs not attached.
+        config["net0"] = f"virtio={build_nic.mac},bridge={network_refs[build_nic.network]}"
+    else:
+        for idx, nic in enumerate(spec.nics):
+            mac = _naming.compose_mac(plan_name, spec.name, idx)
+            config[f"net{idx}"] = f"virtio={mac},bridge={network_refs[nic.network]}"
 
     _await(client, client.api.nodes(client.node).qemu.post(**config))
     _wait_unlocked(client, vmid)

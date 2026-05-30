@@ -9,7 +9,11 @@ host bridge (ADR-0016); the ``build_switch`` is portable topology on the plan.
 
 Capability map (VM -> what it proves):
 
-- ``no-net``      no NICs at all; reached over the native guest agent.
+- ``no-net``      no NICs at all; reached over the native guest agent. Builds
+                  over a dedicated build NIC (ADR-0017) despite declaring none.
+- ``static-build`` one static-only NIC; apt runs at build via the dedicated
+                  build NIC (the declared static has no route on the build
+                  switch), and the static address comes up at run.
 - ``unmanaged``   one NIC, no DHCP and no static address; native agent.
 - ``multihome``   three NICs of different modes (static / DHCP / unmanaged) on
                   one VM; native agent; doubles as the air-gap client.
@@ -104,17 +108,27 @@ PLAN = Plan(
         ],
         pools=[StoragePool("pool1", 64)],
         vms=[
-            # no-net (zero-NIC, QGA-only) disabled pending ORCH-9: a zero-NIC VM
-            # gets no build-time network, so its apt-based builder can't install
-            # qemu-guest-agent. Re-enable (here + in TESTS) once ORCH-9 lands.
-            # VMRecipe(
-            #     spec=VMSpec(
-            #         name="no-net",
-            #         devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
-            #     ),
-            #     builder=_native_image(),
-            #     communicator=NativeCommunicator(),
-            # ),
+            VMRecipe(
+                spec=VMSpec(
+                    name="no-net",
+                    devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
+                ),
+                builder=_native_image(),
+                communicator=NativeCommunicator(),
+            ),
+            VMRecipe(
+                spec=VMSpec(
+                    name="static-build",
+                    devices=[
+                        CPU(1),
+                        Memory(512),
+                        OSDrive("pool1", 8),
+                        NetworkIface("pub-a", addr=StaticAddr("10.30.0.140")),
+                    ],
+                ),
+                builder=_native_image(Apt("curl")),
+                communicator=NativeCommunicator(),
+            ),
             VMRecipe(
                 spec=VMSpec(
                     name="unmanaged",
@@ -273,6 +287,21 @@ def no_net_has_no_ethernet(orch: OrchestratorHandle) -> None:
     r = orch.vms["no-net"].communicator.execute(["ip", "-o", "-4", "addr"])
     addrs = [ln for ln in r.stdout.decode().splitlines() if " lo " not in ln]
     assert not addrs, f"NIC-less guest has an IPv4 address: {addrs!r}"
+
+
+# --- static-build: apt egresses via the build NIC, static comes up at run -----
+
+
+def static_build_installed_apt_via_build_nic(orch: OrchestratorHandle) -> None:
+    # The declared static (10.30.0.140) has no route on the build switch, so apt
+    # could only have egressed via the dedicated build NIC (ADR-0017).
+    r = orch.vms["static-build"].communicator.execute(["dpkg", "-l", "curl"])
+    assert r.ok, f"curl missing — apt did not egress via the build NIC: {r}"
+
+
+def static_build_static_address_at_run(orch: OrchestratorHandle) -> None:
+    out = orch.vms["static-build"].communicator.execute(["ip", "-o", "-4", "addr"]).stdout.decode()
+    assert "10.30.0.140" in out, f"declared static NIC did not come up at run: {out!r}"
 
 
 # --- unmanaged: NIC present, no DHCP, no static -> no runtime address ---------
@@ -490,8 +519,10 @@ def public_web_can_reach_internet(orch: OrchestratorHandle) -> None:
 
 
 TESTS = [
-    # no_net_agent_executes,  # disabled with the no-net VM (ORCH-9)
-    # no_net_has_no_ethernet,  # disabled with the no-net VM (ORCH-9)
+    no_net_agent_executes,
+    no_net_has_no_ethernet,
+    static_build_installed_apt_via_build_nic,
+    static_build_static_address_at_run,
     unmanaged_nic_has_link_no_address,
     unmanaged_file_roundtrips_over_agent,
     multihome_static_nic_addressed,

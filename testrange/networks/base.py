@@ -147,6 +147,35 @@ class NetworkAddressing:
 
 
 @dataclass(frozen=True)
+class BuildNic:
+    """The single dedicated build NIC a build VM is provisioned with (ADR-0017).
+
+    Independent of the VM's declared ``spec.nics``: every build VM gets exactly
+    one of these on the build switch, and its declared NICs are *not* attached
+    during build. The orchestrator's build phase synthesizes it; two consumers
+    read disjoint halves of it:
+
+    - the **builder** renders its netplan stanza from ``addr`` + ``addressing``,
+      matched by ``mac`` — the same per-NIC logic a declared :class:`StaticAddr`
+      uses, deriving prefix/gateway/DNS from ``addressing``;
+    - the **driver** attaches one interface at ``create_vm`` time, wiring ``mac``
+      onto the backend network keyed by ``network`` in its ``network_refs``.
+
+    ``addr`` is a :class:`~testrange.devices.network.StaticAddr` from the build
+    switch's ``.3`` infra slot (:data:`~testrange.networks._addressing_consts.BUILD_NIC_OFFSET`):
+    deterministic, and — when the build switch is ``nat`` — its gateway/DNS
+    resolve to the sidecar at ``.1`` so ``apt``/``pip`` egress during build. The
+    stanza is inert at run (its MAC is absent), so the same baked netplan serves
+    both phases.
+    """
+
+    mac: str
+    network: str
+    addr: StaticAddr
+    addressing: NetworkAddressing
+
+
+@dataclass(frozen=True)
 class Switch:
     """An L2 broadcast domain that owns the network's L2 topology.
 

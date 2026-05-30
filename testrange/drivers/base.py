@@ -14,9 +14,23 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import Network, Switch
+    from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
+
+
+BUILD_NIC_NIC_IDX = -1
+"""Reserved ``nic_idx`` sentinel for the dedicated build NIC (ADR-0017).
+
+A build VM is provisioned with one transient build NIC that is *not* one of its
+declared ``spec.nics`` (indices ``0..n-1``). Its stable MAC is composed via
+``compose_mac(plan, vm, BUILD_NIC_NIC_IDX)`` — ``-1`` is disjoint from every
+declared index, so the build NIC's MAC can never collide with a declared NIC's
+and never enters the declared-NIC MAC tuple that feeds the run netplan and
+``config_hash``. Every driver's ``compose_mac`` hashes the index directly, so the
+sentinel needs no special-casing in the concretes; it only needs to stay outside
+``range(len(spec.nics))``, which ``-1`` always is.
+"""
 
 
 VolumeRef = NewType("VolumeRef", str)
@@ -93,7 +107,15 @@ class HypervisorDriver(ABC):
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str: ...
 
     @abstractmethod
-    def compose_mac(self, plan_name: str, vm_name: str, nic_idx: int) -> str: ...
+    def compose_mac(self, plan_name: str, vm_name: str, nic_idx: int) -> str:
+        """Deterministic, locally-administered unicast MAC for one NIC.
+
+        Pure: same ``(plan_name, vm_name, nic_idx)`` → same MAC, so a stable
+        MAC yields the same DHCP lease across runs (ADR-0006). ``nic_idx`` is a
+        declared NIC's position in ``spec.nics`` (``0..n-1``); the reserved
+        sentinel :data:`BUILD_NIC_NIC_IDX` addresses the dedicated build NIC
+        (ADR-0017) and must never collide with a declared index.
+        """
 
     @abstractmethod
     def compose_volume_ref(self, pool_backend_name: str, vol_name: str) -> VolumeRef:
@@ -252,6 +274,7 @@ class HypervisorDriver(ABC):
         seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
         data_disk_refs: Sequence[VolumeRef] = (),
+        build_nic: BuildNic | None = None,
     ) -> Any:
         """Define a VM on the backend.
 
@@ -267,13 +290,21 @@ class HypervisorDriver(ABC):
             earlier ``write_to_pool`` call, or ``None`` for VMs that don't
             need a seed (run-phase VMs).
           network_refs:  ``{plan_network_name: backend_network_name}`` map
-            so the driver can wire NICs declared in ``spec`` to the right
-            backend network.
+            so the driver can wire NICs to the right backend network. At run
+            it keys every declared ``spec.nics`` entry; at build (``build_nic``
+            set) it carries the single build network.
           data_disk_refs: Locators for the VM's ``HardDrive`` data disks, in
             spec order — attached alongside the OS disk. Empty for VMs with
             no data disks (the common case). Per ADR-0010 §4 a build VM boots
             with every writable disk attached so the install payload can
             populate it.
+          build_nic:     The dedicated build NIC (ADR-0017), set only at build
+            time. When present, the driver attaches **exactly one** interface —
+            ``build_nic.mac`` on ``network_refs[build_nic.network]`` — and does
+            **not** attach the declared ``spec.nics`` (they are physically
+            absent during build; their MAC-matched netplan stanzas stay inert).
+            ``None`` at run/sidecar time → the driver wires ``spec.nics`` as
+            usual.
         """
 
     @abstractmethod

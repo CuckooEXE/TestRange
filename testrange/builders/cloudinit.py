@@ -15,28 +15,27 @@ The orchestrator treats the ``ok`` token as the *only* success signal. Package
 installs live in the trapped script (not cloud-init's ``packages:`` directive)
 so a package failure is caught fail-fast under the ``ERR`` trap.
 
-Network rendering uses **interface-name matching** (``match: name: ...``)
-so the cached disk doesn't bake in the install VM's MAC.
+Network rendering (ADR-0017)
+----------------------------
+The cloud-init ``network-config`` is the **single, final netplan** — there is no
+install-vs-run split. It matches every interface by **MAC** (the sole strategy;
+the old ``match: name: en*`` fallback is gone) and contains:
 
-Static IPs
-----------
-When any NIC declares a static ``ipv4``, the install seed still uses DHCP
-(install runs on a transient internet-attached subnet; static IPs from the
-user's real subnets have no route there). To make the run-phase clone come
-up on the user's networks with the right static address, the builder stages
-two cloud-init ``write_files`` entries:
+* the **dedicated build NIC** — a transient NIC on the build switch the build
+  phase attaches in place of the declared NICs (ADR-0017 §1), statically
+  addressed from the build switch's ``.3`` infra slot;
+* every **declared** NIC, with its real run-phase address.
 
-* ``/etc/netplan/50-cloud-init.yaml`` — the *real* run-phase netplan, mode
-  ``0600``. Cloud-init writes the install-time DHCP netplan at this path in
-  its ``init`` stage; our ``write_files`` (``config`` stage) overwrites it
-  later in the same boot, so the cached post-install disk already contains
-  the static-aware netplan.
-* ``/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg`` —
-  ``network: {config: disabled}`` so cloud-init never re-renders the
-  netplan on later boots.
+The same baked file serves both phases because an absent-MAC stanza is inert:
+during build only the build NIC is physically present (the declared stanzas
+match nothing, so ``apt`` egresses via the build NIC with no carrier-wait), and
+at run only the declared NICs are present (the build NIC's stanza is inert).
 
-No ``netplan apply`` during install. The new file is consumed at the
-run-phase boot, when the VM is attached to the user's real networks.
+One ``write_files`` entry is retained,
+``/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg``
+(``network: {config: disabled}``): it pins the build-boot-rendered netplan
+across the seed-less run boot so cloud-init never re-renders it. It is
+unconditional.
 """
 
 from __future__ import annotations
@@ -52,9 +51,9 @@ from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
-from testrange.devices.network import DHCPAddr
+from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.exceptions import BuilderError, BuildNotReadyError
-from testrange.networks.base import NetworkAddressing
+from testrange.networks.base import BuildNic, NetworkAddressing
 from testrange.packages.apt import Apt
 from testrange.packages.base import Package
 from testrange.packages.pip import Pip
@@ -149,29 +148,16 @@ class CloudInitBuilder(Builder):
                 return c
         return None
 
-    def render_user_data(
-        self,
-        spec: VMSpec,
-        recipe: VMRecipe,
-        *,
-        addressing: Mapping[str, NetworkAddressing],
-        macs: Sequence[str] = (),
-    ) -> str:
+    def render_user_data(self, spec: VMSpec, recipe: VMRecipe) -> str:
         """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header).
 
-        When any NIC has a static ``ipv4``, the run-phase netplan and a
-        cloud-init disable drop-in are spliced into ``write_files`` so the
-        cached post-install disk boots on the user's real networks with the
-        right addressing. See module docstring.
-
-        ``macs`` (when provided, one entry per NIC in spec order) switches
-        the run-phase netplan to MAC-based matching, which is the only
-        reliable way to address NICs positionally on guests with
-        predictable interface names (``enp1s0``/``enp2s0``/...). When
-        empty, falls back to name-pattern matching for backwards compat
-        with callers that don't have stable MACs available.
+        Covers users/credentials, package + post-install provisioning (the
+        fail-fast build-result script), and ``write_files``. Network addressing
+        is *not* here — it lives entirely in ``network-config`` now (ADR-0017);
+        the only network-related ``write_files`` entry is the unconditional
+        ``99-testrange-disable-network.cfg`` guard (see module docstring).
         """
-        del recipe  # not used yet; reserved for future per-recipe hooks
+        del spec, recipe  # not used; reserved for future per-recipe hooks
         # NOTE: any plaintext password below is baked into the cloud-init seed
         # ISO, which lives in the backend storage pool in cleartext — anyone
         # with read access to the pool can recover it. Acceptable only for
@@ -206,9 +192,8 @@ class CloudInitBuilder(Builder):
             "users": users or [{"name": "root", "lock_passwd": False}],
         }
         write_files = _render_insecure_write_files(insecure=self.insecure_pkg_manager)
-        write_files.extend(_render_run_netplan_write_files(spec, addressing, macs))
-        if write_files:
-            body["write_files"] = write_files
+        write_files.append(_DISABLE_NETWORK_WRITE_FILE)
+        body["write_files"] = write_files
         if chpasswd_users:
             body["chpasswd"] = {
                 "users": chpasswd_users,
@@ -248,34 +233,56 @@ class CloudInitBuilder(Builder):
         recipe: VMRecipe,
         *,
         addressing: Mapping[str, NetworkAddressing],
+        build_nic: BuildNic,
+        macs: Sequence[str] = (),
     ) -> str:
-        """Render cloud-init ``network-config`` (netplan v2) for **install**.
+        """Render the single, final cloud-init ``network-config`` (netplan v2).
 
-        Always DHCP-only — the install VM runs on the transient install
-        network, and any static address from the user's real subnets would
-        have no route there. Static IPs are honored at run-phase via the
-        netplan staged into ``write_files`` (see module docstring).
+        One match-by-MAC netplan applied live on the build boot and persisted
+        unchanged into the cached image (ADR-0017 §3). It carries the dedicated
+        ``build_nic`` (present only during build) plus every declared NIC
+        (present only at run); an absent-MAC stanza is inert, so the same file
+        serves both phases. Returned **unwrapped** (no top-level ``network:``) —
+        cloud-init wraps ``network-config`` before writing it.
 
-        Matches interfaces by **kernel name** (``match: name: ...``), not
-        MAC, so the cached disk works regardless of MAC stability (the
-        stable-MAC TODO is belt-and-suspenders).
+        Per-NIC addressing follows the :class:`StaticAddr` resolution rule
+        (explicit wins, else derive from the NIC's ``NetworkAddressing``):
+
+        - ``None`` => ``dhcp4: false, dhcp6: false, optional: true`` (no DHCP wait);
+        - :class:`DHCPAddr` => ``dhcp4: true``;
+        - :class:`StaticAddr` => address + (first-static-only) default route + DNS.
+
+        The build NIC computes its default route independently of the declared
+        NICs: it is the only present interface during build (so it needs the
+        route to egress), and it is inert at run, so it never competes with a
+        declared static NIC's route.
+
+        ``macs`` (one per declared NIC, in spec order) is required when the VM
+        has NICs — match-by-MAC is the sole strategy (ADR-0006/0017); a mismatch
+        raises.
         """
-        del recipe, addressing
-        # Match NICs by kernel interface name pattern. Index 0 takes any en*
-        # (the first PCI-attached NIC); subsequent NICs use a per-index prefix
-        # so order is stable regardless of how the backend numbers slots.
-        ethernets: dict[str, Any] = {}
-        for idx, _nic in enumerate(spec.nics):
-            iface_name = f"id{idx}"
-            ethernets[iface_name] = {
-                "match": {"name": "en*"} if idx == 0 else {"name": f"en{idx}*"},
-                "dhcp4": True,
-                "dhcp6": False,
-            }
-        body = {
-            "version": 2,
-            "ethernets": ethernets,
+        del recipe
+        if len(macs) != len(spec.nics):
+            raise ValueError(
+                f"macs has {len(macs)} entries but spec.nics has {len(spec.nics)}; "
+                "match-by-MAC requires one MAC per declared NIC (ADR-0017)"
+            )
+        ethernets: dict[str, Any] = {
+            "build0": _nic_netplan_entry(
+                build_nic.addr, build_nic.mac, build_nic.addressing, emit_default_route=True
+            )
         }
+        first_static_seen = False
+        for idx, nic in enumerate(spec.nics):
+            is_static = isinstance(nic.addr, StaticAddr)
+            ethernets[f"id{idx}"] = _nic_netplan_entry(
+                nic.addr,
+                macs[idx],
+                addressing.get(nic.network),
+                emit_default_route=is_static and not first_static_seen,
+            )
+            first_static_seen = first_static_seen or is_static
+        body = {"version": 2, "ethernets": ethernets}
         return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
 
     def config_hash(
@@ -287,17 +294,19 @@ class CloudInitBuilder(Builder):
         base_sha: str = "",
         sidecar_sha: str = "",
         macs: Sequence[str] = (),
+        build_nic: BuildNic,
     ) -> str:
         """Deterministic 16-char hex hash keying the built **disk set**.
 
-        Inputs: rendered seed text (which folds in the staged run-phase
-        netplan for static-IP VMs) + the base disk's content sha + the
-        sidecar image's content sha + the writable-disk declarations
+        Inputs: rendered seed text (which folds in the single match-by-MAC
+        netplan — build NIC + declared NICs) + the base disk's content sha +
+        the sidecar image's content sha + the writable-disk declarations
         (OS-drive ``size_gb`` and each ``HardDrive``'s ``size_gb``, in spec
         order). Pure: no clocks, no run_id, no I/O. Static-IP changes flow
-        into the hash via ``write_files`` so different addresses get different
-        cache entries. ``macs`` flows in via the rendered run-phase netplan:
-        stable MACs for the same plan/VM produce a stable hash.
+        into the hash via the rendered netplan so different addresses get
+        different cache entries. ``macs`` and ``build_nic`` flow in the same
+        way: stable MACs and a stable build-NIC address for the same plan/VM
+        produce a stable hash.
 
         ``sidecar_sha`` is the content sha of the ``testrange-sidecar`` image
         (CI-1). Every build boots on the build switch's sidecar for DHCP/DNS/
@@ -312,9 +321,11 @@ class CloudInitBuilder(Builder):
         disk's size, the data-disk count, the OS-disk size) must move the
         hash — otherwise a resized disk would silently reuse a stale artifact.
         """
-        u = self.render_user_data(spec, recipe, addressing=addressing, macs=macs)
+        u = self.render_user_data(spec, recipe)
         m = self.render_meta_data(spec, recipe)
-        n = self.render_network_config(spec, recipe, addressing=addressing)
+        n = self.render_network_config(
+            spec, recipe, addressing=addressing, build_nic=build_nic, macs=macs
+        )
         disks = "|".join(
             [f"os:{spec.os_drive.size_gb}"]
             + [f"data{i}:{d.size_gb}" for i, d in enumerate(spec.data_drives)]
@@ -351,17 +362,16 @@ class CloudInitBuilder(Builder):
         *,
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
+        build_nic: BuildNic,
     ) -> bytes:
         """Build the ISO9660 ``cidata`` seed image as bytes."""
         pycdlib = _import_pycdlib()
 
-        user_data = self.render_user_data(spec, recipe, addressing=addressing, macs=macs).encode(
-            "utf-8"
-        )
+        user_data = self.render_user_data(spec, recipe).encode("utf-8")
         meta_data = self.render_meta_data(spec, recipe).encode("utf-8")
-        network_config = self.render_network_config(spec, recipe, addressing=addressing).encode(
-            "utf-8"
-        )
+        network_config = self.render_network_config(
+            spec, recipe, addressing=addressing, build_nic=build_nic, macs=macs
+        ).encode("utf-8")
 
         iso = pycdlib.PyCdlib()
         # interchange_level=3 (relaxed ISO9660 names), joliet=3 (Windows-style
@@ -511,113 +521,55 @@ def _render_pip_install_lines(pips: Sequence[Pip]) -> list[str]:
     return lines
 
 
-# Run-phase netplan staging.
-#
-# Why this exists: the install VM runs on a transient DHCP-only "install"
-# network so apt etc. work. The user's real subnets only attach at run-phase.
-# Baking a static address into the install-time netplan would have no route
-# during install and break apt mid-boot. Instead we write the *real* netplan
-# at install time via cloud-init's `write_files` (config stage runs AFTER
-# init-stage netplan rendering, so our file wins) and disable cloud-init's
-# network module on subsequent boots so it doesn't undo our work.
+# The cloud-init disable-network drop-in (ADR-0017 §4). cloud-init renders the
+# combined netplan live on the build boot; this pins it across the seed-less run
+# boot so cloud-init's network module can't re-render and undo our MAC matching.
+# Unconditional — every cached disk carries it.
+_DISABLE_NETWORK_WRITE_FILE = {
+    "path": "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg",
+    "content": "network: {config: disabled}\n",
+    "owner": "root:root",
+    "permissions": "0644",
+}
 
 
-def _render_run_netplan_yaml(
-    spec: VMSpec,
-    addressing: Mapping[str, NetworkAddressing],
-    macs: Sequence[str] = (),
-) -> str:
-    """Render the netplan the guest should use at run-phase.
+def _nic_netplan_entry(
+    addr: DHCPAddr | StaticAddr | None,
+    mac: str,
+    sub: NetworkAddressing | None,
+    *,
+    emit_default_route: bool,
+) -> dict[str, Any]:
+    """One netplan ``ethernets`` stanza, matched by MAC (ADR-0017).
 
-    Per-NIC, keyed on ``nic.addr``:
+    Keyed on the address mode, identical for the build NIC and every declared
+    NIC (``sub`` is the NIC's network addressing — the build switch's for the
+    build NIC, ``addressing[nic.network]`` for a declared one):
 
-    - ``None`` => ``dhcp4: false, dhcp6: false, optional: true`` — the NIC is
-      left unconfigured (no address, and crucially no DHCP wait).
-    - :class:`DHCPAddr` => ``dhcp4: true``.
-    - :class:`StaticAddr` => static address + (first-static-only) default
-      route + nameservers; prefix/gateway/DNS are taken from the ``StaticAddr``
-      when listed, else derived from the Switch's :class:`NetworkAddressing`.
-
-    Wraps under a top-level ``network:`` because this file goes directly
-    into ``/etc/netplan/`` (cloud-init's ``network-config`` is unwrapped
-    because cloud-init wraps it before writing).
-
-    When ``macs`` is provided (one per NIC in spec order), matches by
-    MAC — the only reliable way to address NICs positionally on guests
-    with predictable interface names. When empty, falls back to a name
-    pattern; this fallback is only safe for single-NIC VMs.
+    - ``None`` => ``dhcp4: false, dhcp6: false, optional: true`` (no DHCP wait);
+    - :class:`DHCPAddr` => ``dhcp4: true``;
+    - :class:`StaticAddr` => address + DNS + (when ``emit_default_route`` and a
+      gateway resolves) a default route; prefix/gateway/DNS are the explicit
+      ``StaticAddr`` values, else derived from ``sub``.
     """
-    if macs and len(macs) != len(spec.nics):
-        raise ValueError(f"macs has {len(macs)} entries but spec.nics has {len(spec.nics)}")
-    first_static_seen = False
-    ethernets: dict[str, Any] = {}
-    for idx, nic in enumerate(spec.nics):
-        iface_name = f"id{idx}"
-        if macs:
-            match: dict[str, Any] = {"macaddress": macs[idx].lower()}
-        else:
-            match = {"name": "en*"} if idx == 0 else {"name": f"en{idx}*"}
-        cfg: dict[str, Any] = {"match": match}
-        a = nic.addr
-        if a is None:
-            # NIC present but unconfigured: leave it to the OS. Must NOT emit
-            # dhcp4: true — that hangs boot waiting for a lease nothing serves.
-            cfg["dhcp4"] = False
-            cfg["dhcp6"] = False
-            cfg["optional"] = True
-        elif isinstance(a, DHCPAddr):
-            cfg["dhcp4"] = True
-            cfg["dhcp6"] = False
-        else:  # StaticAddr — explicit wins, else derive from the Switch.
-            sub = addressing.get(nic.network)
-            cfg["addresses"] = [a.cidr(sub.prefix_len if sub is not None else None)]
-            dns = (
-                list(a.dns)
-                if a.dns
-                else ([sub.dns_server] if sub is not None and sub.dns_server is not None else [])
-            )
-            if dns:
-                cfg["nameservers"] = {"addresses": dns}
-            gw = a.gw if a.gw is not None else (sub.gateway if sub is not None else None)
-            if gw is not None and not first_static_seen:
-                cfg["routes"] = [{"to": "default", "via": gw}]
-                first_static_seen = True
-        ethernets[iface_name] = cfg
-    body = {"network": {"version": 2, "ethernets": ethernets}}
-    return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
-
-
-def _render_run_netplan_write_files(
-    spec: VMSpec,
-    addressing: Mapping[str, NetworkAddressing],
-    macs: Sequence[str] = (),
-) -> list[dict[str, Any]]:
-    """Cloud-init ``write_files`` entries that stage the run-phase netplan.
-
-    Returns an empty list for single-NIC all-DHCP VMs — the install-time
-    DHCP netplan already matches the single NIC by name pattern and works
-    at run-phase too. Anything else needs the run-phase netplan: a static
-    address must be baked in, an unconfigured (``addr=None``) NIC must render
-    ``dhcp4: false`` (which the install netplan does *not* do), and multi-NIC
-    matching by interface name is unreliable on guests with predictable names
-    (only MAC matching disambiguates positionally).
-    """
-    all_dhcp = all(isinstance(nic.addr, DHCPAddr) for nic in spec.nics)
-    if len(spec.nics) <= 1 and all_dhcp:
-        return []
-    staged = _render_run_netplan_yaml(spec, addressing, macs)
-    return [
-        {
-            "path": "/etc/netplan/50-cloud-init.yaml",
-            "content": staged,
-            "owner": "root:root",
-            # netplan 0.106+ warns/errors on world-readable netplan files.
-            "permissions": "0600",
-        },
-        {
-            "path": "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg",
-            "content": "network: {config: disabled}\n",
-            "owner": "root:root",
-            "permissions": "0644",
-        },
-    ]
+    cfg: dict[str, Any] = {"match": {"macaddress": mac.lower()}}
+    if addr is None:
+        cfg["dhcp4"] = False
+        cfg["dhcp6"] = False
+        cfg["optional"] = True
+    elif isinstance(addr, DHCPAddr):
+        cfg["dhcp4"] = True
+        cfg["dhcp6"] = False
+    else:  # StaticAddr — explicit wins, else derive from the network addressing.
+        cfg["addresses"] = [addr.cidr(sub.prefix_len if sub is not None else None)]
+        dns = (
+            list(addr.dns)
+            if addr.dns
+            else ([sub.dns_server] if sub is not None and sub.dns_server is not None else [])
+        )
+        if dns:
+            cfg["nameservers"] = {"addresses": dns}
+        gw = addr.gw if addr.gw is not None else (sub.gateway if sub is not None else None)
+        if gw is not None and emit_default_route:
+            cfg["routes"] = [{"to": "default", "via": gw}]
+    return cfg

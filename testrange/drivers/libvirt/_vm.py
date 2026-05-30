@@ -15,6 +15,8 @@ map, crash-safe teardown.
   libvirt network named by ``network_refs`` (every L2 segment, including the
   resolved uplink, is a libvirt network here), with the stable MAC
   ``compose_mac(plan, vm, i)`` so DHCP hands out a predictable lease (ADR-0006).
+  At build (``build_nic`` set, ADR-0017) the declared NICs are replaced by a
+  single build-NIC interface on the build network.
 - **serial build-result sink** — a seed-carrying VM (build / sidecar) gets a
   ``<serial type='unix' mode='connect'>`` pointing at a socket the driver already
   listens on (see ``_conn``); a run VM gets a throwaway ``pty`` console (no
@@ -45,6 +47,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
     from testrange.drivers.base import VolumeRef
     from testrange.drivers.libvirt._conn import LibvirtClient
+    from testrange.networks.base import BuildNic
     from testrange.vms.spec import VMSpec
 
 _log = get_logger(__name__)
@@ -185,6 +188,7 @@ def create_vm(
     seed_iso_ref: VolumeRef | None,
     network_refs: dict[str, str],
     data_disk_refs: Sequence[VolumeRef] = (),
+    build_nic: BuildNic | None = None,
 ) -> str:
     """Define a libvirt domain from the orchestrator's staged disks.
 
@@ -193,14 +197,22 @@ def create_vm(
     expands the rootfs on first boot. A seed-carrying VM (``seed_iso_ref`` set —
     build VM or sidecar) gets the unix-socket serial sink, its listener opened
     here so the socket exists when ``start_vm`` boots QEMU.
+
+    When ``build_nic`` is set (build phase, ADR-0017) the domain gets a *single*
+    ``<interface>`` for the build NIC and the declared ``spec.nics`` are not
+    attached; otherwise one ``<interface>`` per ``spec.nics[i]`` with its stable
+    MAC ``compose_mac(plan, vm, i)`` (ADR-0006).
     """
     os_path = _vol_path(client, os_disk_ref)
     data_paths = [_vol_path(client, ref) for ref in data_disk_refs]
     seed_path = _vol_path(client, seed_iso_ref) if seed_iso_ref is not None else None
-    nics = [
-        (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
-        for idx, nic in enumerate(spec.nics)
-    ]
+    if build_nic is not None:
+        nics = [(build_nic.mac, network_refs[build_nic.network])]
+    else:
+        nics = [
+            (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
+            for idx, nic in enumerate(spec.nics)
+        ]
     serial_sock = client.open_serial_listener(backend_name) if seed_iso_ref is not None else None
     xml = _domain_xml(
         backend_name,

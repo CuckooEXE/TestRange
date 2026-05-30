@@ -256,11 +256,11 @@ class TestBuildPhase:
                 return None
 
             def config_hash(  # type: ignore[no-untyped-def]
-                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=()
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
             ):
                 return "0" * 16
 
-            def render_seed(self, spec, recipe, *, addressing, macs=()):  # type: ignore[no-untyped-def]
+            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
                 return b""
 
         cache, driver = env

@@ -24,8 +24,9 @@ from pathlib import Path
 from testrange._log import get_logger
 from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
+from testrange.devices.network import StaticAddr
 from testrange.devices.pool.base import StoragePool
-from testrange.drivers.base import VolumeRef
+from testrange.drivers.base import BUILD_NIC_NIC_IDX, VolumeRef
 from testrange.exceptions import (
     BuildFailedError,
     BuildTimeoutError,
@@ -33,8 +34,8 @@ from testrange.exceptions import (
     CacheMissError,
     OrchestratorError,
 )
-from testrange.networks._addressing_consts import SIDECAR_CACHE_NAME
-from testrange.networks.base import Switch
+from testrange.networks._addressing_consts import BUILD_NIC_OFFSET, SIDECAR_CACHE_NAME
+from testrange.networks.base import BuildNic, NetworkAddressing, Switch
 from testrange.networks.sidecar import _uplink_network_name
 from testrange.orchestrator.artifacts import (
     built_artifact_name,
@@ -69,10 +70,31 @@ class _VMBuildPlan:
     builder: Builder
     config_hash: str
     macs: tuple[str, ...]
+    build_nic: BuildNic
     base_path: Path
     roles: tuple[str, ...]
     # role -> cached path on a full hit; None when any role misses (whole-VM miss).
     cached_paths: dict[str, Path] | None
+
+
+def _build_nic_for(ctx: RunContext, build_switch: Switch, vm_name: str) -> BuildNic:
+    """Synthesize the dedicated build NIC for one VM (ADR-0017).
+
+    One transient NIC on the build switch, statically addressed from the build
+    switch's ``.3`` infra slot (:data:`BUILD_NIC_OFFSET`) with a reserved-slot
+    MAC (:data:`BUILD_NIC_NIC_IDX`) disjoint from the VM's declared NICs. When
+    the build switch is ``nat`` the address derives its gateway/DNS from the
+    sidecar at ``.1``, so the build boot egresses for ``apt``/``pip``. Serial
+    build uses this one fixed slot per VM (ORCH-4 widens to a per-in-flight slot).
+    """
+    network = build_switch.networks[0]
+    build_ip = str(build_switch.network.network_address + BUILD_NIC_OFFSET)
+    return BuildNic(
+        mac=ctx.driver.compose_mac(ctx.plan_name, vm_name, BUILD_NIC_NIC_IDX),
+        network=network.name,
+        addr=StaticAddr(build_ip),
+        addressing=NetworkAddressing.from_switch(build_switch),
+    )
 
 
 def build_phase(ctx: RunContext) -> None:
@@ -128,10 +150,15 @@ def _probe_all(
     # sha once — fetch=False keeps this to a metadata read (the bytes are only
     # needed if we actually build) — and fold it into each VM's config_hash.
     sidecar_sha = ctx.cache.resolve(CacheEntry(SIDECAR_CACHE_NAME), fetch=False).sha256
+    # The build switch is portable topology on the Hypervisor (ADR-0016);
+    # resolving it is pure, so the probe can synthesize each VM's build NIC
+    # (whose MAC + static address now feed config_hash, ADR-0017) without
+    # standing any backend resources up.
+    build_switch = resolve_build_switch(ctx.plan.hypervisor.build_switch)
     misses: list[_VMBuildPlan] = []
     hits: dict[str, dict[str, Path]] = {}
     for vm in ctx.plan.hypervisor.vms:
-        bp = _probe_vm(ctx, vm, sidecar_sha)
+        bp = _probe_vm(ctx, vm, sidecar_sha, build_switch)
         if bp.cached_paths is None:
             _log.info("vm %s: cache miss on %s; will build", vm.name, bp.config_hash)
             misses.append(bp)
@@ -141,7 +168,9 @@ def _probe_all(
     return misses, hits
 
 
-def _probe_vm(ctx: RunContext, vm: VMRecipe, sidecar_sha: str) -> _VMBuildPlan:
+def _probe_vm(
+    ctx: RunContext, vm: VMRecipe, sidecar_sha: str, build_switch: Switch
+) -> _VMBuildPlan:
     builder = vm.builder
     base = builder.os_disk_base()
     if base is None:
@@ -158,6 +187,7 @@ def _probe_vm(ctx: RunContext, vm: VMRecipe, sidecar_sha: str) -> _VMBuildPlan:
     macs = tuple(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
     )
+    build_nic = _build_nic_for(ctx, build_switch, vm.name)
     config_hash = builder.config_hash(
         vm.spec,
         vm,
@@ -165,6 +195,7 @@ def _probe_vm(ctx: RunContext, vm: VMRecipe, sidecar_sha: str) -> _VMBuildPlan:
         base_sha=base_info.sha256,
         sidecar_sha=sidecar_sha,
         macs=macs,
+        build_nic=build_nic,
     )
     roles = built_artifact_roles(len(vm.spec.data_drives))
     cached = _resolve_full_set(ctx, config_hash, roles)
@@ -173,6 +204,7 @@ def _probe_vm(ctx: RunContext, vm: VMRecipe, sidecar_sha: str) -> _VMBuildPlan:
         builder=builder,
         config_hash=config_hash,
         macs=macs,
+        build_nic=build_nic,
         base_path=base_info.path,
         roles=roles,
         cached_paths=cached,
@@ -266,7 +298,9 @@ def build_one_vm(
     # --- Seed ISO (optional: a builder that needs no seed medium returns None).
     seed_ref: VolumeRef | None = None
     seed_name: str | None = None
-    seed_bytes = bp.builder.render_seed(spec, vm, addressing=ctx.addressing, macs=bp.macs)
+    seed_bytes = bp.builder.render_seed(
+        spec, vm, addressing=ctx.addressing, macs=bp.macs, build_nic=bp.build_nic
+    )
     if seed_bytes is not None:
         seed_name = f"{build_vm_backend}-seed{ctx.driver.volume_suffix('build_seed')}"
         seed_ref = ctx.driver.compose_volume_ref(build_pool_backend, seed_name)
@@ -280,7 +314,11 @@ def build_one_vm(
         ctx.store.confirm(seed_name, pool_backend=build_pool_backend)
 
     # --- Define + start the build VM with every writable disk attached.
-    network_refs = {nic.network: build_net_backend for nic in spec.nics}
+    # ADR-0017: the build VM gets one dedicated build NIC on the build switch,
+    # NOT its declared spec.nics — so a zero-NIC VM still builds with network,
+    # and a static-NIC VM builds without its unroutable real address. network_refs
+    # therefore carries only the build network.
+    network_refs = {bp.build_nic.network: build_net_backend}
     ctx.store.record_intent(kind="build_vm", backend_name=build_vm_backend, plan_name=vm.name)
     ctx.driver.create_vm(
         build_vm_backend,
@@ -290,6 +328,7 @@ def build_one_vm(
         seed_iso_ref=seed_ref,
         network_refs=network_refs,
         data_disk_refs=[ref for _, ref in data_disk_refs],
+        build_nic=bp.build_nic,
     )
     ctx.store.confirm(build_vm_backend)
     ctx.driver.start_vm(build_vm_backend)

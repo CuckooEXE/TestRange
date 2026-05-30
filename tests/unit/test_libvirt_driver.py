@@ -104,6 +104,17 @@ class TestNaming:
         assert mac == d.compose_mac("plan", "web", 0)
         assert int(mac.split(":")[0], 16) & 0x02  # locally-administered bit
 
+    def test_build_nic_mac_disjoint_from_declared(self) -> None:
+        # BACKEND-7/ADR-0017: the reserved build-NIC sentinel must yield a stable
+        # MAC that never collides with any declared NIC index (0..n-1).
+        from testrange.drivers.base import BUILD_NIC_NIC_IDX
+
+        d = LibvirtDriver(LibvirtConn())
+        build_mac = d.compose_mac("plan", "web", BUILD_NIC_NIC_IDX)
+        assert build_mac == d.compose_mac("plan", "web", BUILD_NIC_NIC_IDX)  # deterministic
+        declared = {d.compose_mac("plan", "web", i) for i in range(16)}
+        assert build_mac not in declared
+
     def test_volume_ref_and_suffix(self) -> None:
         d = LibvirtDriver(LibvirtConn())
         assert d.compose_volume_ref("poolX", "web.qcow2") == "poolX/web.qcow2"

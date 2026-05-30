@@ -39,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
-    from testrange.networks.base import Network, Switch
+    from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
 
@@ -320,11 +320,21 @@ class MockDriver(HypervisorDriver):
         seed_iso_ref: VolumeRef | None,
         network_refs: dict[str, str],
         data_disk_refs: Sequence[VolumeRef] = (),
+        build_nic: BuildNic | None = None,
     ) -> Any:
-        del plan_name, os_disk_ref, seed_iso_ref, network_refs
+        del plan_name, os_disk_ref, seed_iso_ref
         if self.fail_create_vm:
             raise RuntimeError("simulated create_vm failure")
-        self._record("create_vm", backend_name, spec.name, tuple(str(r) for r in data_disk_refs))
+        # The NICs actually attached: the single build NIC at build (ADR-0017),
+        # else the declared spec.nics. Recorded so tests can assert the build VM
+        # carries exactly one build NIC and the run VM carries the declared set.
+        if build_nic is not None:
+            nics: tuple[str, ...] = (build_nic.mac,)
+        else:
+            nics = tuple(network_refs[nic.network] for nic in spec.nics)
+        self._record(
+            "create_vm", backend_name, spec.name, tuple(str(r) for r in data_disk_refs), nics
+        )
         self._vms[backend_name] = "shutoff"
         return f"vm:{backend_name}"
 

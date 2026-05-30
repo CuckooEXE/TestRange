@@ -50,7 +50,7 @@ drift:
 |---------------|------------------------|----------------------------|--------------------------------------------------------|
 | Sidecar       | `network_address + 1`  | `sidecar is not None`      | Gateway when the sidecar has `nat`; resolver when `dns`|
 | Mgmt          | `network_address + 2`  | `mgmt=True`                | Host adapter on the segment (no NAT, no forwarding)    |
-| Reserved      | `.3`–`.9`              | always                     | Future infra; not assignable                           |
+| Reserved      | `.3`–`.9`              | always                     | Infra: the build NIC (`.3`, ADR-0017) + future use; not assignable |
 | DHCP pool     | `.10`–`.99`            | sidecar has `dhcp`         | Lease range served by the sidecar                      |
 | User statics  | `.100`–`.254`          | always                     | Free for `NetworkIface(..., addr=StaticAddr("..."))`        |
 
@@ -285,6 +285,21 @@ bridge with out-of-band internet. If that bridge does not DHCP the sidecar's MAC
 (MAC whitelist, single-public-IP box), pin `eth1` with `Sidecar(addr=...)`
 (NET-7). The build switch is brought up before build VMs boot and torn down LIFO
 at phase end.
+
+### The dedicated build NIC (ADR-0017)
+
+A build VM is **not** wired to its declared `spec.nics` during build. Instead it
+gets one transient build NIC on the build switch, statically addressed from the
+build switch's `.3` infra slot (gateway/DNS at the sidecar `.1` when the build
+switch is `nat`). Its declared NICs are attached only at run. This decouples
+build connectivity from the declared topology: a zero-NIC VM (reached only over
+the guest agent at run) and a single-static-NIC VM (whose real address has no
+route on the build switch) both build uniformly over the build NIC.
+
+The cached disk carries one match-by-MAC netplan covering the build NIC plus
+every declared NIC. An absent-MAC stanza is inert, so during build only the
+build NIC comes up and at run only the declared NICs do — the same file serves
+both phases with no install-vs-run staging.
 
 For the per-driver recipe to set up that out-of-band egress bridge (and why
 TestRange leaves it to you), see [Out-of-band egress](out-of-band-egress.md).

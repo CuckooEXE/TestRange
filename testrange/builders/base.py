@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.entry import CacheEntry
     from testrange.credentials.base import Credential
     from testrange.guest_io import GuestExec
-    from testrange.networks.base import NetworkAddressing
+    from testrange.networks.base import BuildNic, NetworkAddressing
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
 
@@ -86,11 +86,12 @@ class Builder(ABC):
         base_sha: str = "",
         sidecar_sha: str = "",
         macs: Sequence[str] = (),
+        build_nic: BuildNic,
     ) -> str:
         """16-char hex hash that uniquely identifies the VM's built disk set.
 
         Pure and deterministic: same ``(spec, recipe, addressing, base_sha,
-        sidecar_sha, macs)`` -> same hash, every time, with no
+        sidecar_sha, macs, build_nic)`` -> same hash, every time, with no
         ``run_id``/clock/random input. This is the build cache key; the
         rationale and the contract for builder authors live in ADR-0007.
 
@@ -100,7 +101,9 @@ class Builder(ABC):
         drifted sidecar must invalidate the cache. ``macs`` (one per NIC in
         spec order) lets concretes that bake positional NIC config into the
         install payload key the cache on the stable MACs the orchestrator will
-        assign at run-phase.
+        assign at run-phase. ``build_nic`` is the dedicated build NIC the build
+        phase attaches (ADR-0017); its MAC/address are baked into the netplan,
+        so they are part of the key.
         """
 
     @abstractmethod
@@ -111,6 +114,7 @@ class Builder(ABC):
         *,
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
+        build_nic: BuildNic,
     ) -> bytes | None:
         """Render the install payload (e.g., a cloud-init seed ISO) as bytes.
 
@@ -123,9 +127,10 @@ class Builder(ABC):
         docstring) the rendered payload MUST run fail-fast, emit the framed
         ``TESTRANGE-RESULT:`` record to the guest serial console, and power off.
 
-        ``macs`` (one per NIC in spec order) lets concretes bake
-        positional NIC config (run-phase netplan match-by-MAC etc.) into
-        the payload.
+        ``macs`` (one per NIC in spec order) lets concretes bake positional NIC
+        config (the match-by-MAC netplan) into the payload. ``build_nic`` is the
+        dedicated build NIC the build phase attaches in place of the declared
+        NICs (ADR-0017) — the install boot egresses through it.
         """
 
     def wait_ready(self, spec: VMSpec, recipe: VMRecipe, execute: GuestExec) -> None:
