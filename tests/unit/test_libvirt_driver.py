@@ -1,9 +1,9 @@
-"""LibvirtDriver keystone (BACKEND-1.1): construction, registry, naming, preflight.
+"""LibvirtDriver keystone (BACKEND-1.0): construction, registry, naming, preflight.
 
-No real libvirt and no libvirt-python/pyroute2 needed: the slice's live surface
-is connection + naming + preflight (plan-side, read-only), and the not-yet-built
-methods raise a clear DriverError. The lazy SDK imports mean the package
-registers and these tests run with neither SDK touched.
+No real libvirt and no libvirt-python needed: the keystone's live surface is
+connection + naming + preflight (plan-side, read-only), and the not-yet-built
+concern methods raise a clear, phase-tagged DriverError. The lazy SDK import
+means the package registers and these tests run with libvirt untouched.
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ class TestConstruction:
         assert hyp.networks == () and hyp.pools == () and hyp.vms == ()
 
     def test_registry_dispatch_by_name_roundtrips_uri(self) -> None:
-        drv = LibvirtProfile(uri="qemu:///system", backing_pool="images").build_driver()
+        drv = LibvirtProfile(uri="qemu:///system").build_driver()
         d = driver_for_name("LibvirtDriver", drv.uri)
         assert isinstance(d, LibvirtDriver)
         assert d.uri == drv.uri
@@ -81,7 +81,7 @@ class TestConstruction:
 
 class TestConnRoundTrip:
     def test_to_from_uri(self) -> None:
-        conn = LibvirtConn(libvirt_uri="qemu+ssh://root@host/system", backing_pool="images")
+        conn = LibvirtConn(libvirt_uri="qemu+ssh://root@host/system")
         back = LibvirtConn.from_uri(conn.to_uri())
         assert back == conn
 
@@ -145,16 +145,3 @@ class TestPreflight:
             build_switch=_BUILD_SW,
         )
         assert any(f.code == "unknown-uplink" for f in report.findings)
-
-
-class TestUnimplementedSurfaceFailsLoud:
-    def test_l2_storage_vm_snapshot_raise_clear_errors(self) -> None:
-        d = LibvirtDriver(LibvirtConn())
-        for call in (
-            lambda: d.destroy_switch("x"),
-            lambda: d.create_pool(StoragePool("p", 8), "x"),
-            lambda: d.start_vm("x"),
-            lambda: d.list_snapshots("x"),
-        ):
-            with pytest.raises(DriverError, match="BACKEND-1"):
-                call()

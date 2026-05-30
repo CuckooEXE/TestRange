@@ -23,48 +23,43 @@ class TestParse:
         prof = load_profile(_write(tmp_path, '[p]\ndriver = "libvirt"\n'), "p")
         assert isinstance(prof, LibvirtProfile)
         assert prof.uri == "qemu:///system"
-        assert prof.backing_pool == "default"
         assert dict(prof.uplinks) == {}
 
     def test_explicit(self, tmp_path: Path) -> None:
         prof = load_profile(
             _write(
                 tmp_path,
-                '[p]\ndriver = "libvirt"\nuri = "qemu:///session"\nbacking_pool = "lab"\n'
-                '[p.uplinks]\negress = "virbr0"\n',
+                '[p]\ndriver = "libvirt"\nuri = "qemu:///session"\n'
+                '[p.uplinks]\negress = "tr-egress"\n',
             ),
             "p",
         )
         assert isinstance(prof, LibvirtProfile)
         assert prof.uri == "qemu:///session"
-        assert prof.backing_pool == "lab"
-        assert dict(prof.uplinks) == {"egress": "virbr0"}
+        assert dict(prof.uplinks) == {"egress": "tr-egress"}
 
     def test_unknown_key_named(self, tmp_path: Path) -> None:
-        with pytest.raises(ProfileError, match=r"unknown key\(s\) \['nost'\]"):
-            load_profile(_write(tmp_path, '[p]\ndriver = "libvirt"\nnost = "typo"\n'), "p")
+        # backing_pool was removed (BACKEND-1): a stale knob is now an unknown key.
+        with pytest.raises(ProfileError, match=r"unknown key\(s\) \['backing_pool'\]"):
+            load_profile(
+                _write(tmp_path, '[p]\ndriver = "libvirt"\nbacking_pool = "default"\n'), "p"
+            )
 
 
 class TestBuildDriver:
     def test_builds_libvirt_driver_with_conn(self) -> None:
-        drv = LibvirtProfile(
-            uri="qemu:///session", backing_pool="lab", uplinks={"egress": "virbr0"}
-        ).build_driver()
+        drv = LibvirtProfile(uri="qemu:///session", uplinks={"egress": "tr-egress"}).build_driver()
         assert isinstance(drv, LibvirtDriver)
-        assert drv._uplinks == {"egress": "virbr0"}
-        # Round-trip the teardown URI to confirm both knobs land on the
-        # driver-side LibvirtConn (drv.uri itself is the wrapped teardown form
-        # with the connect-URI url-quoted inside).
+        assert drv._uplinks == {"egress": "tr-egress"}
+        # Round-trip the teardown URI to confirm the uri lands on the driver-side
+        # LibvirtConn (drv.uri itself is the wrapped teardown form with the
+        # connect-URI url-quoted inside).
         from testrange.drivers.libvirt._conn import LibvirtConn
 
         round_tripped = LibvirtConn.from_uri(drv.uri)
         assert round_tripped.libvirt_uri == "qemu:///session"
-        assert round_tripped.backing_pool == "lab"
 
 
 class TestDescribeFields:
-    def test_yields_uri_and_backing_pool(self) -> None:
-        assert list(LibvirtProfile().describe_fields()) == [
-            ("uri", "qemu:///system"),
-            ("backing_pool", "default"),
-        ]
+    def test_yields_uri(self) -> None:
+        assert list(LibvirtProfile().describe_fields()) == [("uri", "qemu:///system")]

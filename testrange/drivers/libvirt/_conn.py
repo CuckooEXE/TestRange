@@ -1,21 +1,34 @@
 """Connection plumbing for the libvirt driver.
 
 The control plane is **libvirt-python** against a local hypervisor
-(``qemu:///system`` by default). :class:`LibvirtConn` is the connection config
-(round-trips through the teardown URI persisted in ``state.json``);
-:class:`LibvirtClient` wraps a live ``virConnect``. The driver holds exactly one
-``LibvirtClient``; the concern modules (``_net``, ``_storage``, ``_vm``,
-``_guest``) take it as their first argument.
+(``qemu:///system`` by default) — the sole libvirt dependency. L2 is realized
+through the libvirt *network* API (``networkDefineXML``/``networkCreate``), so
+the daemon builds the bridge + dnsmasq and the driver needs no ``pyroute2`` and
+no ``CAP_NET_ADMIN`` (ADR-0016, BACKEND-1). Membership in the ``libvirt`` group
+is the only host requirement; no root, no pre-install.
 
-Remote URIs (``qemu+ssh://…``) connect fine for the control plane, but host-local
-L2 (the pyroute2 bridges) can't reach a remote host — so remote L2 is out of
-scope here and tracked separately (BACKEND-5).
+:class:`LibvirtConn` is the connection config (round-trips through the teardown
+URI persisted in ``state.json``); :class:`LibvirtClient` wraps a live
+``virConnect``. The driver holds exactly one ``LibvirtClient``; the concern
+modules (``_net``, ``_storage``, ``_vm``, ``_guest``, ``_serial``) take it as
+their first argument.
+
+Remote URIs (``qemu+ssh://…``) connect fine — and because L2 is realized by the
+*daemon*, even the bridge/dnsmasq are built on the remote host — but a remote
+connection still needs its named uplink bridge to pre-exist remotely and its
+serial unix-socket path is on the remote host; that surface is tracked
+separately (BACKEND-5).
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import socket
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from testrange._log import get_logger
@@ -40,15 +53,20 @@ def _import_libvirt() -> Any:
     return libvirt
 
 
-def _import_pyroute2() -> Any:
-    """Lazy import. ``pyroute2`` builds the isolated host bridges for L2."""
+def _import_libvirt_qemu() -> Any:
+    """Lazy import of the ``libvirt_qemu`` helper module.
+
+    The QGA native transport (``_guest``) drives ``qemuAgentCommand``, which
+    lives in ``libvirt_qemu`` — a separate module shipped by the same
+    ``libvirt-python`` wheel, not the top-level ``libvirt``.
+    """
     try:
-        import pyroute2
+        import libvirt_qemu
     except ImportError as e:
         raise DriverError(
-            "pyroute2 is not installed; install with `pip install -e .[libvirt]`"
+            "libvirt-python is not installed; install with `pip install -e .[libvirt]`"
         ) from e
-    return pyroute2
+    return libvirt_qemu
 
 
 @dataclass(frozen=True)
@@ -56,18 +74,17 @@ class LibvirtConn:
     """Everything needed to reach a libvirt hypervisor.
 
     ``libvirt_uri`` is the connect URI (default ``qemu:///system`` — the
-    system-wide QEMU instance, which needs root). ``backing_pool`` is the name of
-    a pre-existing libvirt **dir** storage pool the per-run pools carve into; it
-    is static driver config (not provisioned here) and must survive into the
-    teardown URI so cleanup rebuilds the same context.
+    system-wide QEMU instance, reachable non-root by a ``libvirt``-group member).
+    There is no ``backing_pool`` knob: per-run dir pools are driver-created under
+    ``/var/lib/libvirt/images`` and torn down with the run (BACKEND-1), so the
+    only connection state is the URI itself.
     """
 
     libvirt_uri: str = "qemu:///system"
-    backing_pool: str = "default"
 
     def to_uri(self) -> str:
         """Round-trip to the URI persisted in state.json (cleanup entry point)."""
-        query = urllib.parse.urlencode({"conn": self.libvirt_uri, "pool": self.backing_pool})
+        query = urllib.parse.urlencode({"conn": self.libvirt_uri})
         return f"{_TEARDOWN_SCHEME}://?{query}"
 
     @classmethod
@@ -76,10 +93,7 @@ class LibvirtConn:
         if parsed.scheme != _TEARDOWN_SCHEME:
             raise DriverError(f"expected a {_TEARDOWN_SCHEME}:// teardown URI, got {uri!r}")
         q = urllib.parse.parse_qs(parsed.query)
-        return cls(
-            libvirt_uri=q.get("conn", ["qemu:///system"])[0],
-            backing_pool=q.get("pool", ["default"])[0],
-        )
+        return cls(libvirt_uri=q.get("conn", ["qemu:///system"])[0])
 
 
 class LibvirtClient:
@@ -94,6 +108,14 @@ class LibvirtClient:
     def __init__(self, conn: LibvirtConn) -> None:
         self._conn = conn
         self._lv: Any | None = None
+        # Serial build-result sink plumbing. A guest's <serial type='unix'> is
+        # mode='connect' (QEMU connects to a socket WE listen on) — the inverse
+        # of mode='bind', which fails non-root because the qemu-owned socket is
+        # not connect-able by uid 1000. We must be listening *before* the domain
+        # starts (libvirt's security driver stats the path at start), so the
+        # listener is opened in create_vm and accept()ed later by the sink.
+        self._serial_dir: Path | None = None
+        self._serial_listeners: dict[str, tuple[Any, str]] = {}
 
     def connect(self) -> None:
         libvirt = _import_libvirt()
@@ -103,6 +125,12 @@ class LibvirtClient:
         _log.info("connected to libvirt at %s", self._conn.libvirt_uri)
 
     def close(self) -> None:
+        for backend_name in list(self._serial_listeners):
+            self.close_serial_listener(backend_name)
+        if self._serial_dir is not None:
+            with contextlib.suppress(OSError):
+                self._serial_dir.rmdir()
+            self._serial_dir = None
         if self._lv is not None:
             self._lv.close()
             self._lv = None
@@ -114,6 +142,113 @@ class LibvirtClient:
             raise DriverError("LibvirtClient used before connect()")
         return self._lv
 
-    @property
-    def backing_pool(self) -> str:
-        return self._conn.backing_pool
+    # The libvirt-specific "does this object exist?" translation lives here so
+    # the concern modules never touch libvirt error codes: a hit returns the
+    # object, a clean absence returns None, and any *other* libvirt error
+    # propagates (a permission/transport failure must not read as "gone").
+
+    def lookup_pool(self, name: str) -> Any | None:
+        libvirt = _import_libvirt()
+        try:
+            return self.raw.storagePoolLookupByName(name)
+        except libvirt.libvirtError as e:
+            if e.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_POOL:
+                return None
+            raise
+
+    def lookup_volume(self, pool_name: str, vol_name: str) -> Any | None:
+        libvirt = _import_libvirt()
+        pool = self.lookup_pool(pool_name)
+        if pool is None:
+            return None
+        try:
+            return pool.storageVolLookupByName(vol_name)
+        except libvirt.libvirtError as e:
+            if e.get_error_code() == libvirt.VIR_ERR_NO_STORAGE_VOL:
+                return None
+            raise
+
+    def lookup_domain(self, name: str) -> Any | None:
+        libvirt = _import_libvirt()
+        try:
+            return self.raw.lookupByName(name)
+        except libvirt.libvirtError as e:
+            if e.get_error_code() == libvirt.VIR_ERR_NO_DOMAIN:
+                return None
+            raise
+
+    def lookup_network(self, name: str) -> Any | None:
+        libvirt = _import_libvirt()
+        try:
+            return self.raw.networkLookupByName(name)
+        except libvirt.libvirtError as e:
+            if e.get_error_code() == libvirt.VIR_ERR_NO_NETWORK:
+                return None
+            raise
+
+    def _ensure_serial_dir(self) -> Path:
+        """A driver-owned dir under ``/tmp`` to hold serial sockets.
+
+        Two constraints fix the location:
+
+        - **Traversable by the daemon.** QEMU (``libvirt-qemu``) must connect to
+          our ``mode='connect'`` socket, so every parent dir needs ``o+x``. We
+          create directly under ``/tmp`` (``1777``) rather than honoring
+          ``$TMPDIR`` (often a private ``0700`` dir the daemon can't enter), and
+          chmod the dir ``0755``.
+        - **Cleanable.** libvirt's security driver relabels each socket to
+          ``libvirt-qemu`` at domain start; because we *own* this (non-sticky)
+          dir, we can still unlink the relabeled socket and rmdir afterward.
+
+        (A host whose libvirtd runs with systemd ``PrivateTmp=yes`` would not
+        share this ``/tmp``; that is a remote/hardened-host concern tracked under
+        BACKEND-5, not the local-cert path.)
+        """
+        if self._serial_dir is None:
+            d = Path(tempfile.mkdtemp(prefix="tr-lv-serial-", dir="/tmp"))
+            d.chmod(0o755)
+            self._serial_dir = d
+        return self._serial_dir
+
+    def open_serial_listener(self, backend_name: str) -> str:
+        """Bind+listen a unix socket for ``backend_name``'s serial console.
+
+        Returns the socket path to embed in the domain XML (mode='connect'). Must
+        be called before ``start_vm`` so the socket exists when QEMU connects;
+        the connection waits in the listen backlog until :meth:`accept_serial`.
+        """
+        sock_dir = self._ensure_serial_dir()
+        token = hashlib.sha256(backend_name.encode()).hexdigest()[:12]
+        path = str(sock_dir / f"{token}.sock")
+        with contextlib.suppress(FileNotFoundError):
+            Path(path).unlink()
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        Path(path).chmod(0o777)  # qemu (libvirt-qemu) must be able to connect
+        srv.listen(1)
+        self._serial_listeners[backend_name] = (srv, path)
+        return path
+
+    def accept_serial(self, backend_name: str, *, timeout: float) -> Any:
+        """Accept QEMU's connection to ``backend_name``'s serial listener.
+
+        Raises :class:`DriverError` if no listener was opened for this VM.
+        """
+        entry = self._serial_listeners.get(backend_name)
+        if entry is None:
+            raise DriverError(f"no serial listener open for {backend_name!r}")
+        srv, _path = entry
+        srv.settimeout(timeout)
+        conn, _ = srv.accept()
+        return conn
+
+    def close_serial_listener(self, backend_name: str) -> None:
+        """Close + unlink ``backend_name``'s serial listener. Tolerant of absence."""
+        entry = self._serial_listeners.pop(backend_name, None)
+        if entry is None:
+            return
+        srv, path = entry
+        with contextlib.suppress(OSError):
+            srv.close()
+        with contextlib.suppress(OSError):
+            Path(path).unlink()

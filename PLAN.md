@@ -270,10 +270,19 @@ Switch the build phase brings up and tears down LIFO (ADR-0010 §9):
 There is no managed/manufactured egress and no `supports_managed_build_egress`
 capability — egress is the out-of-band uplink, same as a run switch.
 
-**Known limits** (TODO.md): host-local L2 (e.g. netlink-based bridge mgmt) is
-local-only — a `Switch.uplink` or a NAT sidecar over a remote backend
-connection are caught by preflight (`remote_uplink_unsupported`). Multi-Network mgmt collapses
-naturally now that Switches own one CIDR.
+**L2 realization is per-backend, daemon-mediated.** Each driver realizes the
+fabric through its backend's own API — the libvirt driver defines a libvirt
+`<network>` (the daemon builds the bridge, as root, on our behalf), Proxmox an
+SDN vnet, ESXi a vSwitch. TestRange creates **no** host bridge itself: there is
+no `pyroute2`/netlink path and no `CAP_NET_ADMIN` requirement (BACKEND-1, 2026).
+Egress uplinks (`Switch.uplink`) resolve to a **pre-existing** host bridge the
+operator provisions out-of-band; the driver only attaches to it.
+
+**Known limits** (TODO.md): because libvirt's L2 is realized by the *daemon*,
+a remote `qemu+ssh://` connection mostly works (the remote daemon builds the
+bridge remotely) — the only constraint is that the named uplink bridge must
+already exist *on the remote host* (BACKEND-5 reframed accordingly).
+Multi-Network mgmt collapses naturally now that Switches own one CIDR.
 
 ### 11. ISOs / base disks referenced ONLY via `CacheEntry`
 
@@ -1006,10 +1015,13 @@ the install->build split) have been executed and are dropped; their decisions
 live in the ADRs and the design sections above. Current state:
 
 - **Suite green:** 434 unit tests pass; `ruff` + `mypy --strict` clean.
-- **Reference backend:** `MockDriver` / `MockHypervisor` implement the full
-  `HypervisorDriver` ABC (ADR-0008). The Proxmox driver is in progress on
-  `feature/proxmox` (keystone + L2 landed — see *Proxmox backend* below); the
-  libvirt driver is deleted pending a rebuild against the same ABC.
+- **Reference backend (in transition):** `MockDriver` / `MockHypervisor`
+  currently implement the full `HypervisorDriver` ABC (ADR-0008) and drive the
+  unit suite. Per the **libvirt rebuild** (BACKEND-1, see *libvirt backend*
+  below), libvirt becomes the **reference implementation** and the mock moves to
+  `tests/` as a unit-only fixture — the mock simulates a backend but cannot run a
+  real guest, so a live-certified driver is the better reference. The Proxmox
+  driver is in progress on `feature/proxmox` (see *Proxmox backend* below).
 - **Build/run split (ADR-0010) complete:** `build_phase` warms the cache and
   nothing else; `run_phase` creates the user's pools, gates sidecar readiness,
   pushes every built disk (OS + each data disk) per VM, and runs tests.
@@ -1241,6 +1253,113 @@ driver manufacture a `snat=1` SDN vnet + fence for the sidecar's static `eth1`,
 so no host-side bridge/NAT/DHCP fiddling is needed. (A plain `Switch` build
 switch with a static `Sidecar.addr` still expresses the manual recipe for
 operators who want to own the bridge themselves.)
+
+### libvirt backend (full rewrite in progress, BACKEND-1)
+
+The pre-existing libvirt skeleton (connection/naming/profile/preflight + the
+`_todo()`-gated surface) is being **rewritten from zero** against the current
+ABC — libvirt becomes the **reference implementation** and the mock retires to
+`tests/`. Sequenced on the board as `BACKEND-1.0`…`1.E`. The earlier BACKEND-1.1
+slice and its managed-egress framing (pyroute2 bridges + `nwfilter` fence +
+`supports_managed_build_egress`) are **superseded** — by ADR-0016 (egress is
+out-of-band) and by the decisions below.
+
+**Decisions (proven on the dev host, non-root, 2026-05-30):**
+
+- **`libvirt-python` is the only libvirt dependency. `pyroute2` is dropped.** L2
+  is realized through the libvirt **network API** (`networkDefineXML` /
+  `networkCreate`), not netlink. The daemon builds the bridge; we never hold
+  `CAP_NET_ADMIN`. (`pyroute2` removed from the `[libvirt]` extra and `_conn`.)
+- **No root, no pre-install step. Membership in the `libvirt` group is the only
+  requirement.** Verified end-to-end as uid 1000: `qemu:///system` connect; pool
+  `defineXML → build → create`; qcow2 `vol create`; stream `upload`/`download`;
+  full teardown; isolated-network define/undefine. `pool.build()` makes the
+  target dir under the root-owned `/var/lib/libvirt/images` *as the daemon*, so
+  no host directory has to be pre-created or made user-writable.
+- **Per-run storage pools, driver-created.** The driver creates a `dir` pool per
+  run (target under `/var/lib/libvirt/images/tr-<run8>-<pool>`) on run start and
+  tears it down on cleanup (`destroy → delete → undefine`), exactly the
+  `create_pool` / `destroy_pool` lifecycle the orchestrator already drives for
+  the mock and Proxmox. **No pre-existing pool dependency; the `backing_pool`
+  profile knob is removed.** Volume bytes ride the libvirt **stream API**
+  (`virStorageVol.upload/download`) both directions — qemu-readable at VM-start,
+  no host-file ownership games, no `qemu-img` (subprocess ban holds).
+- **`LibvirtProfile` shrinks to `uri` (+ the named-uplink map).** `backing_pool`
+  gone.
+- **Egress uplink is a pre-existing host bridge** (`tr-egress`, *not* libvirt's
+  `default`/`virbr0`), provisioned out-of-band as a libvirt NAT network whose
+  built-in `dnsmasq` serves DHCP and whose `forward mode='nat'` masquerades out
+  the host's real NIC. Mapped `egress = "tr-egress"` in the profile; the driver
+  only attaches the sidecar's `eth1`. Recipe in
+  `docs/user/drivers/out-of-band-egress.md`.
+
+**Build sequence (thin vertical slice → green, then widen):**
+
+- **1.0** — rip out `drivers/libvirt/*` + `test_libvirt_*`; drop `pyroute2`;
+  lay the concern-module skeleton (`_conn _naming _profile _net _storage _vm
+  _guest _serial driver.py`).
+- **1.A** — storage: per-run pools + stream volume I/O (TDD against a faked
+  `LibvirtClient`).
+- **1.B** — VM + serial build-result sink + QGA, **no network**: domain XML
+  (qcow2 disks, stable-MAC NICs, `<serial type='unix'>`, an
+  `org.qemu.guest_agent.0` virtio channel, seed CD-ROM); lifecycle; the serial
+  sink live-tail; `native_guest_*` over `libvirt_qemu.qemuAgentCommand`. First
+  real end-to-end green: a no-net VM builds (serial `ok`) and runs over
+  `NativeCommunicator`.
+- **1.C** — L2 via libvirt networks: isolated segment + NAT uplink segment onto
+  `tr-egress` + mgmt `.2`; sidecar boot/readiness → DHCP-lease discovery via the
+  native guest transport. **`examples/hello_world.py` green.**
+- **1.D** — widen to certification: snapshots (disk + memory), data disks,
+  static/unmanaged NICs, password users. **`testrange run --profile
+  libvirt-local examples/capabilities.py` green + `pytest -m libvirt` green, as
+  plain `user`.** Adds `tests/integration/test_libvirt.py`.
+- **1.E** — move `drivers/mock.py` → `tests/`, register the `mock` scheme in
+  `tests/conftest.py`, drop its side-effect import from `drivers/__init__.py`;
+  ADR + docs (install/connecting/extending, the `tr-egress` recipe).
+
+**Status (2026-05-30): 1.0–1.D driver code complete and live-certified.**
+`testrange run --profile libvirt-local examples/{hello_world,capabilities}.py`
+are **green** on real `qemu:///system` as a plain `libvirt`-group user (no root).
+Three non-obvious realities surfaced by being the first backend to *really*
+execute the build/run, all now baked into the driver:
+
+- **A headless domain still needs a `<video>` device.** Under libvirt's
+  `-nodefaults` there is no implicit VGA, and the Debian cloud image's GRUB
+  `gfxterm` loops forever ("Booting `Debian GNU/Linux'") with no adapter — the
+  kernel never starts. The domain XML carries `<video><model type='vga'/></video>`
+  (no `<graphics>` backend; we still drive the console over the serial sink).
+- **The serial build-result sink is `mode='connect'`, not `mode='bind'`.** A
+  qemu-owned bind socket (`0775 libvirt-qemu`) is not connect-able by uid 1000,
+  so the driver *listens* (socket pre-bound in `create_vm`, under a `/tmp`-rooted
+  0755 dir the daemon can traverse) and QEMU connects in. Run VMs get a throwaway
+  `<serial type='pty'>` (nothing to drain).
+- **`Switch(mgmt=True)` is implemented (the `.2` host adapter); the network is
+  otherwise fully isolated.** A non-mgmt Switch's network has no host `<ip>` — it
+  is a pure guest segment (the host is not on it). A `mgmt=True` Switch adds the
+  `.2` host adapter to the bridge (`<ip address='…2'/>` + `<dns enable='no'/>` so
+  libvirt spawns no dnsmasq to shadow the sidecar) — and *only that*; it is not a
+  router or a reachability guarantee. libvirt therefore drops the
+  `mgmt_unsupported_findings` gate (ADR-0009's "a backend that grows real mgmt
+  support drops the call"); other backends keep it. A plan that uses an
+  `SSHCommunicator` on a VM the orchestrator host can't reach (e.g. an isolated,
+  non-mgmt Switch) is a plan-authoring issue, not something the driver papers
+  over — so the examples declare `mgmt=True` on the Switches whose VMs are
+  reached over SSH.
+- **Snapshots are full internal qcow2 snapshots.** libvirt rejects an internal
+  *disk-only* snapshot of a *running* domain, so `create_snapshot` always takes a
+  full checkpoint (libvirt includes RAM while running, disk-only while shut off);
+  `mem` is accepted for ABC parity. Disk-revert and memory-restore both verified
+  live.
+
+**Remaining for 1.D/1.E:** `tests/integration/test_libvirt.py` (marked `libvirt`),
+the mock→tests move, the ADR, and docs. **Five non-libvirt gaps** that the
+certification exposed are ticketed and the affected `capabilities.py` lines
+commented out pending their fix: **ORCH-9** (a zero-NIC build VM gets no build
+network → `no-net` can't `apt`), **BUILD-4** (Pip builder assumes `pip3`),
+**BUILD-5** (`StaticAddr` dns not written to `/etc/resolv.conf`), **CORE-24**
+(`data_disk_bytes_survived_capture` runs `blkid` non-root), **COMM-4**
+(`memory_snapshot` test fails over SSH though the driver's mem-snapshot is
+QGA-proven). None is a libvirt-driver defect.
 
 ### 22. Backend binding: topology Plan entry vs. resolved backend
 

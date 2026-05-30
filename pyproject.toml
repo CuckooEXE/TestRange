@@ -33,12 +33,10 @@ proxmox = [
     "paramiko>=3",
     "websocket-client>=1.7",
 ]
-# libvirt-python is the control plane (qemu:///system); pyroute2 builds the
-# isolated host bridges for L2 (the driver owns L2 per ADR-0008). Both import
-# lazily (only on connect / L2), so the package registers without them present.
+# libvirt-python is the only libvirt dependency; it imports lazily (on connect),
+# so the package registers without it installed.
 libvirt = [
     "libvirt-python>=10",
-    "pyroute2>=0.7",
 ]
 docs = [
     "sphinx>=8",
@@ -103,9 +101,11 @@ ignore = [
 # Tests carry dummy credentials and temp-file paths as fixtures, and use bare
 # asserts/with-statements freely — these bandit rules are noise in test code.
 "tests/**" = ["B011", "S105", "S106", "S108"]
-# Examples show dummy demo credentials as API shape; an inline noqa would
-# violate the "no comments in examples" rule, so ignore S106 here instead.
-"examples/**" = ["S106"]
+# Examples show dummy demo credentials as API shape and use well-known guest
+# paths (e.g. /dev/shm) as plain strings; an inline noqa would violate the "no
+# comments in examples" rule, so ignore S106 (hardcoded password) + S108
+# (temp-dir path) here instead.
+"examples/**" = ["S106", "S108"]
 # The CLI's job is to print to stdout; T201 guards library code, not the CLI.
 "testrange/cli.py" = ["T201"]
 
@@ -131,7 +131,7 @@ module = [
     "websocket",
     "websocket.*",
     "libvirt",
-    "pyroute2",
+    "libvirt_qemu",
 ]
 ignore_missing_imports = true
 
@@ -140,7 +140,7 @@ testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "proxmox: integration tests against a live Proxmox VE host (needs TESTRANGE_PVE_HOST)",
-    "libvirt: integration tests against a live local libvirt (qemu:///system; needs root)",
+    "libvirt: integration tests against a live local libvirt (qemu:///system; needs only 'libvirt' group, no root)",
 ]
 
 [tool.commitizen]

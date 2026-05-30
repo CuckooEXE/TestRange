@@ -52,6 +52,7 @@ PLAN = Plan(
                 Network("netA"),
                 Network("netB"),
                 cidr="172.31.0.0/24",
+                mgmt=True,
                 sidecar=Sidecar(dhcp=True, dns=True),
             ),
         ],

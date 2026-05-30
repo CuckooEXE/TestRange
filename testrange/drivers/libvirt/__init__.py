@@ -4,8 +4,8 @@ Exposes ``LibvirtHypervisor`` (the Plan-time entry), ``LibvirtDriver``, and
 ``LibvirtProfile`` (the ``driver = "libvirt"`` connection profile). Importing
 this package registers both the driver and the profile (a ``register()`` call
 at ``driver`` module scope and a ``register_profile()`` call in ``_profile``).
-libvirt-python and pyroute2 import lazily (only on ``connect()`` / L2), so the
-package registers without them installed.
+libvirt-python is the sole libvirt dependency and imports lazily (only on
+``connect()``), so the package registers without it installed.
 """
 
 from __future__ import annotations

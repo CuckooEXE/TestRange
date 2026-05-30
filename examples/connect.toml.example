@@ -37,12 +37,15 @@ backing_storage = "local"   # optional
 egress = "vmbr0"            # the host bridge carrying the default gateway
 # lab = "vmbr3"            # another physical bridge a plain Switch(uplink=) can use
 
-# A second profile in the same file — e.g. a local libvirt host (localhost
-# default; no host/password needed).
+# A second profile in the same file — a local libvirt host. No host/password:
+# qemu:///system is reachable by any 'libvirt'-group member (no root). Per-run
+# storage pools are driver-created, so there is no backing_pool knob.
 [libvirt-local]
 driver = "libvirt"
 # uri = "qemu:///system"
-# backing_pool = "default"
 
+# `egress` is the out-of-band host bridge a NAT sidecar routes out of. Use a
+# dedicated libvirt NAT network (`tr-egress`, provisioned out-of-band — see
+# docs/user/drivers/out-of-band-egress.md), NOT the shared `default`/`virbr0`.
 [libvirt-local.uplinks]
-egress = "virbr0"
+egress = "tr-egress"

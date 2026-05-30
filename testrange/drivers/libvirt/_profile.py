@@ -2,9 +2,10 @@
 
 :class:`LibvirtProfile` is the concrete :class:`~testrange.connect.BackendProfile`
 that the ``--profile`` path dispatches to when the TOML names ``driver =
-"libvirt"``. It declares the two libvirt-specific connection keys (``uri``,
-``backing_pool``), the named-uplink map, self-registers, and builds a
-:class:`LibvirtDriver` against that connection.
+"libvirt"``. It declares the one libvirt connection key (``uri``) plus the
+named-uplink map, self-registers, and builds a :class:`LibvirtDriver` against
+that connection. There is no ``backing_pool`` knob — per-run dir pools are
+driver-created and torn down with the run (BACKEND-1).
 """
 
 from __future__ import annotations
@@ -23,18 +24,18 @@ from testrange.drivers.libvirt.driver import LibvirtDriver
 class LibvirtProfile(BackendProfile):
     """Connection profile for the libvirt backend (BACKEND-1).
 
-    ``uri`` is the libvirt connect URI; ``backing_pool`` is the name of a
-    pre-existing libvirt **dir** storage pool the per-run pools carve into.
-    Both default to the same values :class:`LibvirtConn` uses (``qemu:///system``
-    / ``default``), keeping a no-knobs ``driver = "libvirt"`` profile workable
-    on a stock host.
+    ``uri`` is the libvirt connect URI; it defaults to the same value
+    :class:`LibvirtConn` uses (``qemu:///system``), keeping a no-knobs ``driver =
+    "libvirt"`` profile workable on a stock host where the user is in the
+    ``libvirt`` group. ``uplinks`` maps a plan's logical ``Switch.uplink`` names
+    to host bridges (ADR-0016) — e.g. ``egress`` to the out-of-band ``tr-egress``
+    NAT bridge a sidecar routes out of.
     """
 
     scheme: ClassVar[str] = "libvirt"
-    _FIELDS: ClassVar[frozenset[str]] = frozenset({"uri", "backing_pool"})
+    _FIELDS: ClassVar[frozenset[str]] = frozenset({"uri"})
 
     uri: str = "qemu:///system"
-    backing_pool: str = "default"
     uplinks: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
@@ -42,19 +43,14 @@ class LibvirtProfile(BackendProfile):
         cls._validate_keys(table, cls._FIELDS, path)
         return cls(
             uri=str(table.get("uri", "qemu:///system")),
-            backing_pool=str(table.get("backing_pool", "default")),
             uplinks=cls._parse_uplinks(table, path),
         )
 
     def build_driver(self) -> LibvirtDriver:
-        return LibvirtDriver(
-            LibvirtConn(libvirt_uri=self.uri, backing_pool=self.backing_pool),
-            uplinks=self.uplinks,
-        )
+        return LibvirtDriver(LibvirtConn(libvirt_uri=self.uri), uplinks=self.uplinks)
 
     def describe_fields(self) -> Iterable[tuple[str, str]]:
         yield ("uri", self.uri)
-        yield ("backing_pool", self.backing_pool)
 
 
 register_profile(LibvirtProfile)

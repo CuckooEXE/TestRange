@@ -136,65 +136,84 @@ step ADR-0016 deliberately leaves to you.
 ## libvirt
 
 `egress` resolves to a host bridge the libvirt driver attaches the sidecar's
-`eth1` to.
+`eth1` to. Create a **dedicated** NAT network for it — `tr-egress` — rather than
+reusing libvirt's built-in `default`/`virbr0`, so test egress is isolated from
+anything else on the host and the recipe is self-contained.
 
-### Option A — the built-in `default` network (`virbr0`)
+The whole recipe runs **non-root** — membership in the `libvirt` group is the
+only requirement (the same group that lets TestRange reach `qemu:///system`).
+libvirt's daemon does the privileged work (creating the bridge, spawning
+`dnsmasq`, installing the NAT rules).
 
-libvirt ships a `default` NAT network: bridge `virbr0`, subnet
-`192.168.122.0/24`, with `dnsmasq` serving DHCP and `forward mode='nat'` already
-masquerading out the host's real NIC. Make sure it's running and map it:
+### Create the `tr-egress` NAT network
 
-```sh
-virsh net-start default        # if not already active
-virsh net-autostart default
-```
-
-```toml
-[libvirt-local.uplinks]
-egress = "virbr0"
-```
-
-The sidecar's `eth1` DHCPs from `192.168.122.0/24` and NATs out — zero extra host
-setup.
-
-### Option B — a dedicated NAT network
-
-To keep test egress off the `default` network, define your own. Save as
-`tr-egress.xml`:
+Save as `tr-egress.xml`:
 
 ```xml
 <network>
   <name>tr-egress</name>
   <forward mode='nat'/>
-  <bridge name='virbr9'/>
-  <ip address='10.255.255.1' netmask='255.255.255.0'>
+  <bridge name='tr-egress' stp='on' delay='0'/>
+  <ip address='192.168.199.1' netmask='255.255.255.0'>
     <dhcp>
-      <range start='10.255.255.10' end='10.255.255.99'/>
+      <range start='192.168.199.2' end='192.168.199.254'/>
     </dhcp>
   </ip>
 </network>
 ```
 
 ```sh
-virsh net-define tr-egress.xml
-virsh net-start tr-egress
-virsh net-autostart tr-egress
+virsh -c qemu:///system net-define   tr-egress.xml
+virsh -c qemu:///system net-autostart tr-egress
+virsh -c qemu:///system net-start     tr-egress
 ```
+
+Verify (`net-info` should show `Active: yes`, `Persistent: yes`,
+`Autostart: yes`, and a `tr-egress` bridge at `192.168.199.1/24`):
+
+```sh
+virsh -c qemu:///system net-info tr-egress
+ip -br addr show tr-egress
+```
+
+Then map the name in your profile:
 
 ```toml
 [libvirt-local.uplinks]
-egress = "virbr9"
+egress = "tr-egress"
 ```
 
-`forward mode='nat'` gives the route out and `<dhcp>` leases the sidecar's `eth1`,
-so no static `addr=` is needed.
+Pick a `<ip address>`/subnet that doesn't collide with any existing network on
+the host (`ip -4 route` to check) — `192.168.199.0/24` is a safe default on a
+typical box; adjust if it clashes.
+
+### What this network provides (and why it's needed)
+
+The two requirements from ["What egress has to provide"](#what-egress-actually-has-to-provide)
+are both satisfied **by libvirt's own services on this network** — there is no
+separate daemon for you to run:
+
+- **an address for the sidecar's `eth1`** — the `<dhcp>` block makes libvirt run
+  a **`dnsmasq`** instance bound to the `tr-egress` bridge that leases addresses
+  from `192.168.199.2–254`. The sidecar's `eth1` DHCPs from it, so **no static
+  `Sidecar(addr=...)` is needed**. (libvirt writes the config under
+  `/var/lib/libvirt/dnsmasq/tr-egress.conf` and manages the process lifecycle
+  with the network.)
+- **a route to the internet** — `<forward mode='nat'>` makes libvirtd install the
+  `MASQUERADE`/forwarding rules (nftables or iptables, whichever the host uses)
+  that NAT `192.168.199.0/24` out the host's real NIC.
+
+So `tr-egress` depends on **`dnsmasq`** (for the lease) and the host's
+**nft/iptables NAT** (for the route) — both stood up and torn down by libvirtd
+together with the network. If you instead point `egress` at a bridge with **no**
+DHCP behind it, libvirt won't lease `eth1`; pin it statically in the plan with
+`Sidecar(..., addr=StaticAddr(...))` (NET-7).
 
 ```{note}
-The libvirt driver's L2 realization (attaching the sidecar's `eth1` to the named
-bridge) lands with **BACKEND-1.2**; the recipes above are the intended shape.
-Host-local bridge management is **local-only** — a named uplink over a remote
-`qemu+ssh://` connection is a separate piece of work (BACKEND-5) and is caught at
-preflight (`remote_uplink_unsupported`) until then.
+A remote `qemu+ssh://` connection works too — the **remote** daemon builds the
+`tr-egress` bridge and runs its `dnsmasq`/NAT there — provided the network exists
+on the remote host. (This is the BACKEND-5 case; the driver attaches the sidecar
+to a daemon-built bridge either way, with no local netlink.)
 ```
 
 ## See also
