@@ -206,6 +206,21 @@ class LocalCache:
         _log.info("deleted cache entry %s", info.short_sha)
         return info
 
+    def purge(self) -> list[CacheEntryInfo]:
+        """Delete every entry (``.bin`` + ``.json``). Returns the removed infos.
+
+        Local-only: there is no shared-tier coordination here (see
+        :meth:`CacheManager.purge`). A snapshot of the entries is taken before
+        deleting so iteration is not invalidated mid-walk.
+        """
+        removed = self.list_entries()
+        for info in removed:
+            (self.isos / f"{info.sha256}.bin").unlink(missing_ok=True)
+            (self.isos / f"{info.sha256}.json").unlink(missing_ok=True)
+        if removed:
+            _log.info("purged %d cache entr%s", len(removed), "y" if len(removed) == 1 else "ies")
+        return removed
+
     def add_name(
         self,
         identifier: str,

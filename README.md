@@ -74,6 +74,7 @@ TESTS = [my_test]
 ```
 testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
 testrange cache list / del / rename / forget-name
+testrange cache purge --yes                        # delete every local entry
 testrange cache push / pull <sha-or-name> --cache <url>
 testrange describe <plan.py> [--profile <name>]
 testrange build <plan.py> --profile <name>

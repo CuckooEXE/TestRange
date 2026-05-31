@@ -552,6 +552,25 @@ def _cache_push(args: argparse.Namespace) -> int:
 
 
 @_cache_errors
+def _cache_purge(args: argparse.Namespace) -> int:
+    mgr = _build_manager(args)
+    entries = mgr.local.list_entries()
+    if not entries:
+        print("cache is empty; nothing to purge")
+        return Exit.OK
+    total = _format_size(sum(e.size for e in entries))
+    if args.dry_run or not args.yes:
+        print(f"would purge {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} ({total}):")
+        _print_list(entries)
+        if not args.dry_run:
+            print("\nre-run with --yes to delete them")
+        return Exit.OK
+    removed = mgr.purge()
+    print(f"purged {len(removed)} entr{'y' if len(removed) == 1 else 'ies'} ({total})")
+    return Exit.OK
+
+
+@_cache_errors
 def _cache_pull(args: argparse.Namespace) -> int:
     info = _build_manager(args).pull(args.identifier)
     print(f"pulled {info.short_sha} <- http cache")
@@ -631,6 +650,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_del = cache_sub.add_parser("del", help="delete an entry by sha or name")
     p_del.add_argument("identifier", help="content sha (or prefix >= 16 hex) or pretty-name")
     p_del.set_defaults(func=_cache_del)
+
+    p_purge = cache_sub.add_parser(
+        "purge",
+        help="delete ALL local cache entries (requires --yes)",
+        description=(
+            "Delete every entry from the local cache. Without --yes this only "
+            "lists what would go (a no-op). Local-only: the shared HTTP cache "
+            "(--cache) is never touched; remove a shared entry with `cache del`."
+        ),
+    )
+    p_purge.add_argument("--yes", action="store_true", help="confirm: actually delete every entry")
+    p_purge.add_argument(
+        "--dry-run", action="store_true", help="list what would be deleted, then stop"
+    )
+    p_purge.set_defaults(func=_cache_purge)
 
     p_rename = cache_sub.add_parser("rename", help="add a pretty-name alias to an entry")
     p_rename.add_argument("identifier", help="content sha or existing name")

@@ -188,6 +188,25 @@ class TestLocalCacheMutate:
         with pytest.raises(CacheMissError):
             cache.resolve(info.sha256)
 
+    def test_purge_removes_every_entry(self, tmp_path: Path) -> None:
+        cache = LocalCache(root=tmp_path / "c")
+        a = _make_blob(tmp_path / "a.bin", b"a")
+        b = _make_blob(tmp_path / "b.bin", b"b")
+        cache.add(a, name="alpha")
+        cache.add(b, name="beta")
+        removed = cache.purge()
+        assert {i.sha256 for i in removed} == {
+            hashlib.sha256(b"a").hexdigest(),
+            hashlib.sha256(b"b").hexdigest(),
+        }
+        assert cache.list_entries() == []
+        assert not any((tmp_path / "c" / "isos").glob("*.bin"))
+        assert not any((tmp_path / "c" / "isos").glob("*.json"))
+
+    def test_purge_empty_returns_nothing(self, tmp_path: Path) -> None:
+        cache = LocalCache(root=tmp_path / "c")
+        assert cache.purge() == []
+
     def test_add_name(self, tmp_path: Path) -> None:
         cache = LocalCache(root=tmp_path / "c")
         src = _make_blob(tmp_path / "src.bin")

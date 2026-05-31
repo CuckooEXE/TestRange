@@ -64,6 +64,50 @@ class TestCacheList:
         assert "SHA" in out
 
 
+class TestCachePurge:
+    def _seed(self, tmp_path: Path) -> None:
+        for n, payload in (("one", b"1"), ("two", b"2")):
+            src = tmp_path / f"{n}.bin"
+            src.write_bytes(payload)
+            cli.main(["cache", "add", str(src), "--name", n])
+
+    def test_purge_without_yes_is_noop(
+        self, cache_env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path)
+        capsys.readouterr()
+        rc = cli.main(["cache", "purge"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "--yes" in out  # tells the user how to actually do it
+        assert len(list(cache_env.glob("*.bin"))) == 2  # nothing deleted
+
+    def test_purge_dry_run_lists_without_deleting(
+        self, cache_env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path)
+        capsys.readouterr()
+        rc = cli.main(["cache", "purge", "--dry-run"])
+        assert rc == 0
+        assert len(list(cache_env.glob("*.bin"))) == 2  # nothing deleted
+
+    def test_purge_yes_deletes_everything(
+        self, cache_env: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._seed(tmp_path)
+        capsys.readouterr()
+        rc = cli.main(["cache", "purge", "--yes"])
+        assert rc == 0
+        assert "2" in capsys.readouterr().out
+        assert not any(cache_env.glob("*.bin"))
+        assert not any(cache_env.glob("*.json"))
+
+    def test_purge_empty_cache(self, cache_env: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["cache", "purge", "--yes"])
+        assert rc == 0
+        assert "empty" in capsys.readouterr().out.lower()
+
+
 class TestCacheDelRename:
     def test_del_by_name(
         self,

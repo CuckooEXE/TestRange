@@ -125,6 +125,17 @@ class CacheManager:
                 _log.warning("http cache: delete %s failed: %s", info.short_sha, e)
         return info
 
+    def purge(self) -> list[CacheEntryInfo]:
+        """Delete every local entry. Returns the removed infos.
+
+        Local-only by design — unlike :meth:`delete`, purge does **not** mirror
+        to the HTTP tier. The shared cache has no listing protocol, and bulk
+        deleting a remote that other build hosts depend on, from one
+        workstation, is a worse footgun than the local wipe. Remove a specific
+        shared entry with :meth:`delete` instead.
+        """
+        return self.local.purge()
+
     def add_name(self, identifier: str, new_name: str) -> CacheEntryInfo:
         """Alias on local + mirror to http (best-effort)."""
         info = self.local.add_name(identifier, new_name)
