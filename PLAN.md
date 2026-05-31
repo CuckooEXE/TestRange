@@ -241,6 +241,14 @@ portable plan. Egress is **out-of-band**: a named uplink is a host bridge the
 operator provisions (NAT/DHCP behind it); TestRange never manufactures, SNATs, or
 fences it — it only attaches.
 
+An uplink value may be a **string** (the bridge — the sidecar DHCPs on it) or a
+**table** (NET-8, ADR-0016 addendum): `{bridge, sidecar_addr, gateway, dns}` for
+a bare host-NAT bridge that NATs but runs no DHCP/DNS (a Proxmox `vmbr`). The
+driver still gets only `name → bridge`; the static addressing rides
+`profile.uplink_addrs` → `ResolvedBackend` → the orchestrator injects it into
+`Switch.sidecar.addr` (`provision._effective_switch`, both phases) so a host-NAT
+uplink egresses + resolves without the plan naming any host address.
+
 **NAT topology** (`Sidecar(nat=True)` + `uplink="<named>"`): the driver realizes
 TWO L2 segments — an isolated switch segment (guests + sidecar's eth0 at `.1`,
 plus the host's `.2` if `mgmt`) and a separate uplink segment enslaving the

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from testrange.connect import BackendProfile, register_profile
+from testrange.devices.network import StaticAddr
 from testrange.drivers.proxmox._client import ProxmoxConn, normalize_realm
 from testrange.drivers.proxmox.driver import ProxmoxDriver
 
@@ -58,6 +59,7 @@ class ProxmoxProfile(BackendProfile):
     ssh_password: str | None = None
     ssh_port: int = 22
     uplinks: Mapping[str, str] = field(default_factory=dict)
+    uplink_addrs: Mapping[str, StaticAddr] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Early-fail authoring check that used to live on ProxmoxHypervisor
@@ -69,6 +71,7 @@ class ProxmoxProfile(BackendProfile):
     def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
         cls._validate_keys(table, cls._FIELDS, path)
         ssh_password = table.get("ssh_password")
+        uplinks, uplink_addrs = cls._parse_uplinks(table, path)
         return cls(
             host=str(table.get("host", "")),
             user=str(table.get("user", "root@pam")),
@@ -80,7 +83,8 @@ class ProxmoxProfile(BackendProfile):
             ssh_user=str(table["ssh_user"]) if "ssh_user" in table else None,
             ssh_password=str(ssh_password) if ssh_password is not None else None,
             ssh_port=int(table.get("ssh_port", 22)),
-            uplinks=cls._parse_uplinks(table, path),
+            uplinks=uplinks,
+            uplink_addrs=uplink_addrs,
         )
 
     def build_driver(self) -> ProxmoxDriver:

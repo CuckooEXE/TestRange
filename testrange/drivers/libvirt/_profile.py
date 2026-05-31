@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from testrange.connect import BackendProfile, register_profile
+from testrange.devices.network import StaticAddr
 from testrange.drivers.libvirt._conn import LibvirtConn
 from testrange.drivers.libvirt.driver import LibvirtDriver
 
@@ -37,13 +38,16 @@ class LibvirtProfile(BackendProfile):
 
     uri: str = "qemu:///system"
     uplinks: Mapping[str, str] = field(default_factory=dict)
+    uplink_addrs: Mapping[str, StaticAddr] = field(default_factory=dict)
 
     @classmethod
     def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
         cls._validate_keys(table, cls._FIELDS, path)
+        uplinks, uplink_addrs = cls._parse_uplinks(table, path)
         return cls(
             uri=str(table.get("uri", "qemu:///system")),
-            uplinks=cls._parse_uplinks(table, path),
+            uplinks=uplinks,
+            uplink_addrs=uplink_addrs,
         )
 
     def build_driver(self) -> LibvirtDriver:
