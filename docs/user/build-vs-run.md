@@ -9,8 +9,8 @@ two CLI verbs over the same plan ([ADR-0010](../adr/0010-build-run-split.md)):
   the plan's `TESTS`.
 
 ```sh
-testrange build examples/data_disk.py   # warm the cache; exits when done
-testrange run   examples/data_disk.py    # pure warm-cache bring-up + tests
+testrange build examples/hello_world.py   # warm the cache; exits when done
+testrange run   examples/hello_world.py    # pure warm-cache bring-up + tests
 ```
 
 ## What `build` does
@@ -44,15 +44,15 @@ each builder's readiness check, and executes `TESTS`.
 missing VMs first, so a cold cache just works:
 
 ```sh
-testrange run examples/data_disk.py     # builds what's missing, then runs
+testrange run examples/hello_world.py     # builds what's missing, then runs
 ```
 
 For CI that wants build and run as distinct, auditable steps, `--require-cache`
 makes a miss **fail fast** instead of building:
 
 ```sh
-testrange build examples/data_disk.py            # step 1: warm the cache
-testrange run --require-cache examples/data_disk.py   # step 2: never builds
+testrange build examples/hello_world.py            # step 1: warm the cache
+testrange run --require-cache examples/hello_world.py   # step 2: never builds
 ```
 
 A `run --require-cache` against a cold cache exits non-zero with a "run

@@ -73,7 +73,7 @@ python -m testrange.cli --log-level DEBUG run examples/<plan>.py
 
 This cannot pass against `MockDriver` (it serves no real guest), so it is not
 part of the offline gate above; it lands as a gate the moment a real driver is
-wired up (Proxmox today via `examples/px_hello.py` with PVE credentials; see
+wired up (Proxmox today via `examples/capabilities-px.py` with PVE credentials; see
 [drivers](../user/drivers/index.md)).
 
 ## Common gotchas
