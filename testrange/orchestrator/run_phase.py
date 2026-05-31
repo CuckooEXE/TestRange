@@ -119,8 +119,17 @@ def bind_communicators(ctx: RunContext) -> None:
         if isinstance(comm, SSHCommunicator):
             ip = discover_ip(ctx, vm, comm.nic_idx)
             cred = lookup_credential(vm)
-            comm.bind(host=ip, credential=cred)
-            _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
+            # The driver decides whether guests are directly routable (gateway
+            # None) or only reachable through an off-box gateway (a remote
+            # hypervisor); the orchestrator brokers it onto the SSH transport.
+            gateway = ctx.driver.guest_gateway()
+            comm.bind(host=ip, credential=cred, gateway=gateway)
+            _log.info(
+                "vm %s: bound SSHCommunicator at %s%s",
+                vm.name,
+                ip,
+                " via gateway" if gateway is not None else "",
+            )
         elif isinstance(comm, NativeCommunicator):
             backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
             comm.bind(

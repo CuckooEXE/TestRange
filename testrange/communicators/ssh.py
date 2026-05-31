@@ -22,12 +22,15 @@ import shlex
 import socket
 import time
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from testrange._log import get_logger
 from testrange.communicators.base import Communicator, ExecResult
 from testrange.credentials.posix import PosixCred
 from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError
+
+if TYPE_CHECKING:
+    from testrange.gateways.base import GuestGateway
 
 _log = get_logger(__name__)
 
@@ -87,6 +90,7 @@ class SSHCommunicator(Communicator):
         self._host: str | None = None
         self._port: int = 22
         self._credential: PosixCred | None = None
+        self._gateway: GuestGateway | None = None
         self._client: Any | None = None
 
     @property
@@ -107,8 +111,22 @@ class SSHCommunicator(Communicator):
     def host(self) -> str | None:
         return self._host
 
-    def bind(self, *, host: str, credential: PosixCred, port: int = 22) -> None:
-        """Bind to a live VM. Called by the orchestrator at run-phase bring-up."""
+    def bind(
+        self,
+        *,
+        host: str,
+        credential: PosixCred,
+        port: int = 22,
+        gateway: GuestGateway | None = None,
+    ) -> None:
+        """Bind to a live VM. Called by the orchestrator at run-phase bring-up.
+
+        ``gateway`` is an optional :class:`~testrange.gateways.base.GuestGateway`
+        for backends whose guests are not directly routable from the orchestrator
+        (a remote hypervisor): when set, the connection is tunnelled through it
+        instead of dialled directly. ``host`` is always the guest's own address —
+        the gateway, not the communicator, knows how to reach it.
+        """
         if self._bound:
             raise CommunicatorAlreadyBoundError(
                 f"SSHCommunicator({self._username!r}) already bound; "
@@ -126,6 +144,7 @@ class SSHCommunicator(Communicator):
         self._host = host
         self._port = port
         self._credential = credential
+        self._gateway = gateway
         self._bound = True
 
     def _ensure_connected(self) -> Any:
@@ -177,6 +196,12 @@ class SSHCommunicator(Communicator):
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
             try:
+                # When a gateway is bound, tunnel through it: open a fresh socket
+                # to the guest each attempt (the prior one is spent on failure,
+                # and the gateway's channel-open is what fails while the guest's
+                # sshd is still coming up). paramiko dials over the supplied sock.
+                if self._gateway is not None:
+                    kwargs["sock"] = self._gateway.open_socket(self._host, self._port)
                 client.connect(**kwargs)
                 self._client = client
                 _log.info("ssh connected to %s@%s:%d", self._username, self._host, self._port)
@@ -265,3 +290,5 @@ class SSHCommunicator(Communicator):
             except Exception as e:
                 _log.warning("ssh close failed: %s", e)
             self._client = None
+        if self._gateway is not None:
+            self._gateway.close()

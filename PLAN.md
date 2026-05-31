@@ -1119,6 +1119,16 @@ but empty).
   host), not promised to a remote test runner; clusters stay out of scope
   (PVE-31). Live-validated through `_sdn` against the cert host.
 
+- **`ORCH-16` — off-box guest reachability (`GuestGateway`, ADR-0020).** A remote
+  orchestrator can't route to guests on the isolated SDN vnet, so SSH transports
+  ride a backend-agnostic `GuestGateway` (`testrange/gateways/`): the driver
+  returns one from `guest_gateway()` (default `None` = directly routable, e.g.
+  local libvirt), the orchestrator brokers it onto `SSHCommunicator.bind`, and
+  the communicator opens its socket through it without knowing the mechanism.
+  `ProxmoxDriver` returns an `SSHJumpGateway` that ProxyJumps through the PVE
+  host (which carries the mgmt `.2` — PVE-44), reusing the SFTP host creds. QGA
+  transports ignore it (they ride the REST control plane).
+
 - **`PVE-6` — stamped-name → vmid resolution.** `create_vm` stamps the composed
   backend name into the VM's PVE `name`; `_vm.resolve_vmid` recovers the vmid by
   scanning the node's guest list (no external map; a `from_uri` teardown driver

@@ -451,6 +451,23 @@ class TestL2:
         assert c.api.vnets == {}
         assert c.api.zones == {}  # zone dropped once its last vnet is gone
 
+    def test_guest_gateway_is_ssh_jump_through_the_host(self) -> None:
+        # ORCH-16: guests live on isolated SDN vnets the off-box orchestrator
+        # can't route to, so SSH transports jump through the PVE host (reusing
+        # the SFTP host creds). QGA transports don't consult this.
+        from testrange.drivers.proxmox._client import ProxmoxConn
+        from testrange.gateways import SSHJumpGateway
+
+        d = ProxmoxDriver(
+            ProxmoxConn(host="pve.example", user="root@pam", password="secret"),
+            client=_FakeClient(),  # type: ignore[arg-type]
+        )
+        gw = d.guest_gateway()
+        assert isinstance(gw, SSHJumpGateway)
+        assert gw.host == "pve.example"
+        assert gw.username == "root"  # ssh_user default
+        assert gw.password == "secret"  # ssh_password falls back to the API password
+
     def test_mgmt_switch_adds_subnet_with_dot2_gateway(self) -> None:
         # PVE-44 / ADR-0009(B): a mgmt=True Switch plants the host .2 adapter as
         # an SDN subnet (gateway=.2) on the vnet — the PVE analog of libvirt's
