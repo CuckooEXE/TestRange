@@ -5,10 +5,13 @@ from __future__ import annotations
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from testrange._log import get_logger
+from testrange._tui import capture_test_output
 from testrange.cache.manager import CacheManager
+from testrange.connect import BackendProfile
 from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
 from testrange.plan import Plan
 
@@ -32,6 +35,23 @@ class TestResult:
         return line
 
 
+def build_range(
+    plan: Plan,
+    *,
+    cache_manager: CacheManager | None = None,
+    profile: BackendProfile | None = None,
+) -> str:
+    """Warm the cache for ``plan`` (``testrange build``); run no tests.
+
+    Runs preflight + the build phase only, tearing down all build infra. The
+    backend holds nothing afterward. Returns the run id (for logging).
+    ``profile`` binds a backend-agnostic plan to a backend (CORE-10/-11).
+    """
+    o = Orchestrator(plan, cache_manager=cache_manager, profile=profile)
+    o.build()
+    return o.run_id
+
+
 def run_tests(
     tests: list[Callable[[OrchestratorHandle], None]],
     plan: Plan,
@@ -39,9 +59,14 @@ def run_tests(
     cache_manager: CacheManager | None = None,
     fail_fast: bool = False,
     leak_on_failure: bool = False,
+    require_cache: bool = False,
+    profile: BackendProfile | None = None,
+    verbose: bool = False,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
+    Auto-builds any cache miss before running (so a cold cache just works);
+    ``require_cache=True`` instead fails fast on a miss without building.
     Tests run sequentially. Continue-on-failure is the default;
     ``fail_fast=True`` stops on the first failure. With
     ``leak_on_failure=True``, if any test fails the orchestrator skips
@@ -49,9 +74,11 @@ def run_tests(
     ``testrange cleanup <run_id>``.
     """
     results: list[TestResult] = []
-    o = Orchestrator(plan, cache_manager=cache_manager)
+    o = Orchestrator(
+        plan, cache_manager=cache_manager, require_cache=require_cache, profile=profile
+    )
     with o as orch:
-        _execute_tests(orch, tests, results, fail_fast=fail_fast)
+        _execute_tests(orch, tests, results, fail_fast=fail_fast, verbose=verbose)
         if leak_on_failure and any(not r.passed for r in results):
             _log.warning("--leak-on-failure: skipping teardown; run_id=%s", o.run_id)
             o.leak()
@@ -64,13 +91,19 @@ def _execute_tests(
     results: list[TestResult],
     *,
     fail_fast: bool,
+    verbose: bool = False,
 ) -> None:
-    """Run tests sequentially, capture failures, append to ``results``."""
+    """Run tests sequentially, capture failures, append to ``results``.
+
+    Under ``verbose`` each test's ``stdout``/``stderr`` is teed into the live
+    tail (CORE-6); otherwise prints pass straight through as before.
+    """
     for t in tests:
         name = getattr(t, "__name__", repr(t))
         start = time.monotonic()
         try:
-            t(orch)
+            with capture_test_output(name) if verbose else nullcontext():
+                t(orch)
         except Exception as e:
             tb = traceback.format_exc()
             results.append(
@@ -88,4 +121,4 @@ def _execute_tests(
         results.append(TestResult(name=name, passed=True, duration=time.monotonic() - start))
 
 
-__all__ = ["TestResult", "run_tests"]
+__all__ = ["TestResult", "build_range", "run_tests"]

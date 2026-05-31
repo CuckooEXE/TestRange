@@ -15,10 +15,29 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-libvirt = ["libvirt-python>=10", "pyroute2>=0.7"]
 ssh = ["paramiko>=3"]
 cloudinit = ["pycdlib>=1.14", "pyyaml>=6"]
 http = ["requests>=2.31"]
+# proxmoxer's `https` backend rides on requests; the driver opens its own
+# paramiko SFTP channel for download_from_pool (PVE has no REST byte-download).
+# requests-toolbelt lets proxmoxer *stream* multipart uploads — without it the
+# backend buffers in memory and caps uploads at 2 GiB, too small for a captured
+# OS disk (run-phase upload_to_pool / create_vm import source).
+# websocket-client reads the build-result serial console: PVE serves serial0
+# only over termproxy->vncwebsocket (a websocket proxmoxer can't speak), the
+# second sanctioned transport exception (PVE-17, ADR-0012).
+proxmox = [
+    "proxmoxer>=2",
+    "requests>=2.31",
+    "requests-toolbelt>=1",
+    "paramiko>=3",
+    "websocket-client>=1.7",
+]
+# libvirt-python is the only libvirt dependency; it imports lazily (on connect),
+# so the package registers without it installed.
+libvirt = [
+    "libvirt-python>=10",
+]
 docs = [
     "sphinx>=8",
     "furo>=2024.8",
@@ -28,7 +47,7 @@ docs = [
 dev = [
     "pytest>=8",
     "pytest-cov>=5",
-    "ruff>=0.6",
+    "ruff>=0.15",
     "mypy>=1.10",
     "types-paramiko",
     "types-pyyaml",
@@ -37,10 +56,10 @@ dev = [
     "pyyaml>=6",
     "paramiko>=3",
     "requests>=2.31",
-    "pyroute2>=0.7",
+    "proxmoxer>=2",
 ]
 all = [
-    "testrange[libvirt,ssh,cloudinit,http]",
+    "testrange[ssh,cloudinit,http,proxmox,libvirt]",
 ]
 
 [project.scripts]
@@ -62,17 +81,33 @@ select = [
     "B",      # flake8-bugbear
     "UP",     # pyupgrade
     "TID",    # flake8-tidy-imports (banned-api)
+    "S",      # flake8-bandit (security) — replaces a standalone bandit pass
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "RET",    # flake8-return
+    "PTH",    # flake8-use-pathlib (reinforces the subprocess/os ban)
+    "T20",    # flake8-print (no stray prints in library code)
     "RUF",    # ruff-specific
 ]
 ignore = [
     "E501",   # line length (let formatter handle)
+    "S101",   # assert: the codebase's deliberate invariant / mypy type-narrowing idiom
 ]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "subprocess".msg = "subprocess is banned project-wide (PLAN.md decision 15). Use a Python library instead. If you have a justified need, add an ADR and the sanctioned module."
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["B011"]
+# Tests carry dummy credentials and temp-file paths as fixtures, and use bare
+# asserts/with-statements freely — these bandit rules are noise in test code.
+"tests/**" = ["B011", "S105", "S106", "S108"]
+# Examples show dummy demo credentials as API shape and use well-known guest
+# paths (e.g. /dev/shm) as plain strings; an inline noqa would violate the "no
+# comments in examples" rule, so ignore S106 (hardcoded password) + S108
+# (temp-dir path) here instead.
+"examples/**" = ["S106", "S108"]
+# The CLI's job is to print to stdout; T201 guards library code, not the CLI.
+"testrange/cli.py" = ["T201"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -88,12 +123,31 @@ warn_unused_configs = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["libvirt", "libvirt.*", "libvirt_qemu", "pycdlib", "pycdlib.*", "pyroute2", "pyroute2.*"]
+module = [
+    "pycdlib",
+    "pycdlib.*",
+    "proxmoxer",
+    "proxmoxer.*",
+    "websocket",
+    "websocket.*",
+    "libvirt",
+    "libvirt_qemu",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = [
-    "libvirt: requires a working libvirt + KVM setup; skipped otherwise",
-]
 addopts = "-ra"
+markers = [
+    "proxmox: integration tests against a live Proxmox VE host (needs TESTRANGE_PVE_HOST)",
+    "libvirt: integration tests against a live local libvirt (qemu:///system; needs only 'libvirt' group, no root)",
+]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+# Read/write the canonical version from [project].version (PEP 621), so
+# `cz bump` keeps the package version, the git tag, and CHANGELOG.md in lockstep.
+version_provider = "pep621"
+tag_format = "v$version"
+update_changelog_on_bump = true
+major_version_zero = true  # stay in 0.x — breaking changes bump minor, not major

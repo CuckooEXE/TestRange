@@ -1,7 +1,7 @@
 # Adding a communicator
 
 A `Communicator` is the test-code-facing transport into a running VM.
-`SSHCommunicator` and `QGACommunicator` (QEMU Guest Agent) are the
+`SSHCommunicator` and `NativeCommunicator` (a hypervisor's native in-guest agent: QGA, VMware Tools, Hyper-V integration) are the
 built-ins; future ones include VMware Tools, WinRM, and serial console.
 
 The contract is in `testrange/communicators/base.py`:
@@ -49,7 +49,7 @@ orchestrator dispatches by communicator type at run-phase bring-up.
    # SSHCommunicator — addressing the orchestrator discovers:
    def bind(self, *, host: str, credential: PosixCred, port: int = 22) -> None: ...
 
-   # QGACommunicator — VM-bound callables the orchestrator pulls off
+   # NativeCommunicator — VM-bound callables the orchestrator pulls off
    # the driver. The communicator never imports a driver type:
    def bind(self, *, execute: GuestExec, read_file: GuestReadFile,
             write_file: GuestWriteFile) -> None: ...
@@ -60,23 +60,23 @@ orchestrator dispatches by communicator type at run-phase bring-up.
    property. For network transports, connection should be **lazy** —
    the first `execute` opens the connection with a retry loop (see
    `SSHCommunicator._ensure_connected`). A shim over driver callables
-   (`QGACommunicator`) has nothing to connect — it just delegates.
+   (`NativeCommunicator`) has nothing to connect — it just delegates.
 
-3. **Wire orchestrator dispatch.** In `Orchestrator._bind_communicators`
-   (`testrange/orchestrator/runtime.py`), add a branch to the
+3. **Wire orchestrator dispatch.** In `bind_communicators`
+   (`testrange/orchestrator/run_phase.py`), add a branch to the
    `isinstance` ladder:
 
    ```python
    elif isinstance(comm, WinRMCommunicator):
-       ip = self._discover_ip(vm)
-       cred = self._lookup_credential(vm)
+       ip = discover_ip(ctx, vm)
+       cred = lookup_credential(vm)
        comm.bind(host=ip, credential=cred)
    ```
 
-   The orchestrator already has the driver, the VM's backend name
-   (`driver.compose_resource_name(self.run_id, "vm", vm.name)`), and
-   the discovered IP available at bind time. It is the only broker —
-   the communicator never reaches into the driver itself.
+   The `RunContext` already carries the driver, and the VM's backend name
+   (`ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)`) and the
+   discovered IP are available at bind time. The orchestrator is the only
+   broker — the communicator never reaches into the driver itself.
 
 4. **Native-agent communicators: use `testrange.guest_io`.** If your
    transport rides a hypervisor's native in-guest agent rather than the
@@ -85,9 +85,10 @@ orchestrator dispatches by communicator type at run-phase bring-up.
    `native_guest_write_file` (typed as the `GuestExec` /
    `GuestReadFile` / `GuestWriteFile` Protocols in
    `testrange/guest_io.py`). Your communicator's `bind` takes those
-   callables and delegates to them — that's all `QGACommunicator` is.
-   The driver-side wire protocol lives in the driver (e.g.,
-   `_LibvirtGuestAgent`), never in the communicator.
+   callables and delegates to them — that's all `NativeCommunicator` is.
+   The driver-side wire protocol (the QGA client, the VMware Tools
+   guest-ops calls, the PowerShell Direct session) lives in the driver,
+   never in the communicator.
 
 5. **Don't reuse a communicator across VMs.** Communicators have a
    single-use guard (the `_bound` flag); reusing one is a programmer
@@ -111,6 +112,6 @@ import.
 transport: mock the underlying SDK at the import point
 (`monkeypatch.setattr("testrange.communicators.ssh._import_paramiko",
 lambda: fake)`), then drive the full lifecycle (construct, bind,
-execute, close, re-execute). `tests/unit/test_qga_communicator.py` is
+execute, close, re-execute). `tests/unit/test_native_communicator.py` is
 the template for a shim — bind with fake callables and assert it
 delegates.

@@ -3,6 +3,11 @@
 Status: Accepted
 Date: 2026-05-11
 
+Extended by [ADR-0010](0010-build-run-split.md): every writable disk — the
+``OSDrive`` and each ``HardDrive`` — is built and captured into the cache as
+its own artifact, so ``HardDrive`` data disks are provisioned for the first
+time (declared, built, cached, restored).
+
 ## Context
 
 PLAN.md decision 8. .bak's convention was "the first ``HardDrive`` in

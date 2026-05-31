@@ -1,27 +1,44 @@
 # Networking modes
 
-`testrange` exposes one Switch API across every driver. Each driver
-realizes the flags using its backend's native primitives. This page is
-the per-flag reference plus the per-driver mapping table.
+`testrange` exposes one Switch API across every driver. A Switch owns the
+**L2 topology** (`cidr`, `uplink`, `mgmt`); the **services** a sidecar VM
+serves at `.1` (`dhcp`, `dns`, `nat`) are bundled into an optional `Sidecar`
+the Switch carries. Each driver realizes the topology using its backend's
+native primitives; the sidecar story is uniform across backends. This page is
+the per-knob reference plus the per-driver mapping table.
 
 ## Switch shape (driver-agnostic)
 
 ```python
+Sidecar(
+    dhcp: bool = False,               # sidecar serves DHCP at .1
+    dns:  bool = False,               # sidecar serves DNS at .1
+    nat:  bool = False,               # sidecar MASQUERADEs out the uplink at .1
+    addr: StaticAddr | None = None,   # static sidecar eth1 (NET-7); else DHCP-from-LAN
+)
+
 Switch(
     name: str,
     *networks: Network,
     cidr: str = "192.168.10.0/24",   # strict network form; ValueError on host-form
-    uplink: str | None = None,        # physical NIC on the hypervisor host
+    uplink: str | None = None,        # logical uplink name; profile maps it to a host iface
     mgmt: bool = False,               # host adapter at .2 on the segment
-    dns: bool = False,                # sidecar serves DNS at .1
-    dhcp: bool = False,               # sidecar serves DHCP at .1
-    nat: bool = False,                # sidecar MASQUERADEs out the uplink at .1
+    sidecar: Sidecar | None = None,   # services at .1, or None for a bare wire
 )
 ```
 
-The flags are orthogonal except for one rule: **`nat=True` requires
-`uplink=`** (the sidecar needs a physical NIC to MASQUERADE out of).
-Setting `nat=True` without `uplink=` is a `ValueError` at construction.
+`sidecar=None` is a bare switch — a pure L2 wire with no services. There is no
+all-off `Sidecar`: one that serves nothing is a `ValueError` (use `sidecar=None`).
+
+Two validation rules to know:
+
+- **`Sidecar(nat=True)` requires `uplink=`** on the Switch (the sidecar needs a
+  physical NIC to MASQUERADE out of). A NAT sidecar on an uplink-less Switch is
+  a `ValueError` at construction — and `Switch` is where it's caught, because it
+  is the only object that sees both the uplink and the services.
+- **`Sidecar(addr=...)` requires `nat=True`** and an explicit prefix (the
+  sidecar's `eth1` lives on the uplink's own subnet, not the Switch CIDR). Both
+  are `ValueError`s from `Sidecar` itself.
 
 ## Addressing layout
 
@@ -29,31 +46,36 @@ Every Switch's CIDR carves up the same way, picked up by both the
 validator and the sidecar's `dnsmasq` config so the two can never
 drift:
 
-| Slot          | Address                | Present when            | Purpose                                                |
-|---------------|------------------------|-------------------------|--------------------------------------------------------|
-| Sidecar       | `network_address + 1`  | `dhcp \| dns \| nat`    | Gateway when `nat=True`; resolver when `dns=True`      |
-| Mgmt          | `network_address + 2`  | `mgmt=True`             | Host adapter on the segment (no NAT, no forwarding)    |
-| Reserved      | `.3`–`.9`              | always                  | Future infra; not assignable                           |
-| DHCP pool     | `.10`–`.99`            | `dhcp=True`             | Lease range served by the sidecar                      |
-| User statics  | `.100`–`.254`          | always                  | Free for `LibvirtNetworkIface(..., addr=StaticAddr("..."))` |
+| Slot          | Address                | Present when               | Purpose                                                |
+|---------------|------------------------|----------------------------|--------------------------------------------------------|
+| Sidecar       | `network_address + 1`  | `sidecar is not None`      | Gateway when the sidecar has `nat`; resolver when `dns`|
+| Mgmt          | `network_address + 2`  | `mgmt=True`                | Host adapter on the segment (no NAT, no forwarding)    |
+| Reserved      | `.3`–`.9`              | always                     | Infra: the build NIC (`.3`, ADR-0017) + future use; not assignable |
+| DHCP pool     | `.10`–`.99`            | sidecar has `dhcp`         | Lease range served by the sidecar                      |
+| User statics  | `.100`–`.254`          | always                     | Free for `NetworkIface(..., addr=StaticAddr("..."))`        |
 
 Constants live in `testrange/networks/_addressing_consts.py`.
 
-## Per-flag behavior
+## Switch knobs (L2 topology)
 
-### `uplink="<nic>"`
+### `uplink="<name>"`
 
-The physical NIC on the hypervisor host the Switch is bridged to. ESXi
-calls this a `vmnic`. testrange — not the user — creates the bridge
-and attaches the NIC. The user never names a pre-existing bridge.
+A **logical uplink name** (ADR-0016), not a host NIC. The bound connection
+profile's `[uplinks]` map resolves it to a host iface/bridge; the driver — not
+the user — realizes the L2 segment and attaches that iface (ADR-0008 §1). An
+unmapped name fails at preflight (`unknown-uplink`). Keeping the name logical is
+what keeps the plan host-free. Egress is **out-of-band**: a named uplink is a
+host bridge the operator provisions (NAT/DHCP/route behind it) — TestRange only
+attaches; it never manufactures, SNATs, or fences it.
 
-When `nat=False`, the Switch bridge IS the uplink bridge: guest frames
-egress with their own MACs and IPs. No NAT. Useful for "plug the VM
-into the same LAN as the host."
+Without a NAT sidecar, the Switch segment IS the uplink segment: guest frames
+egress with their own MACs and IPs. No NAT. Useful for "plug the VM into the
+same LAN as the host" — and note this works with `sidecar=None`, which is
+exactly why `uplink` is a Switch knob and not a sidecar service.
 
-When `nat=True`, the Switch bridge stays isolated; testrange creates a
-**second** bridge enslaving the physical NIC, and the sidecar straddles
-both. See `nat` below for the topology.
+With a `Sidecar(nat=True)`, the Switch segment stays isolated; the driver
+realizes a **second** uplink-facing segment enslaving the physical NIC, and the
+sidecar straddles both. See `nat` below for the topology.
 
 ### `mgmt=True`
 
@@ -65,19 +87,23 @@ Switch can `ping 192.168.10.2` and reach the host kernel; the host can
 A future `Switch(router=True)` is where actual routing semantics will
 land. Today `mgmt` is host-on-the-wire only.
 
-### `dhcp=True`
+## Sidecar services
 
-A per-Switch sidecar VM appears at `.1` and serves DHCP leases in
-`.10`–`.99` via `dnsmasq`. The sidecar pins the lease file at
-`/var/lib/misc/dnsmasq.leases`; the orchestrator reads it back via the
-QEMU Guest Agent (the sidecar bakes in `qemu-guest-agent`) when a
-test asks for an IP discovered via DHCP.
+Pass these inside `sidecar=Sidecar(...)`. Any non-`None` sidecar materializes
+one per-Switch VM at `.1`; the fields select which services it runs.
+
+### `Sidecar(dhcp=True)`
+
+The sidecar at `.1` serves DHCP leases in `.10`–`.99` via `dnsmasq`. The
+sidecar pins the lease file at `/var/lib/misc/dnsmasq.leases`; the orchestrator
+reads it back via the driver's native guest agent (the sidecar bakes in
+`qemu-guest-agent`) when a test asks for an IP discovered via DHCP.
 
 Each guest's DHCP lease is keyed on a stable MAC derived from
 `(plan_name, vm_name, nic_idx)`, so leases persist across re-creations
 of the same VM.
 
-### `dns=True`
+### `Sidecar(dns=True)`
 
 The sidecar's `dnsmasq` also resolves `<vmname>.<networkname>` to the
 guest's IP — static IPs become `host-record` entries, DHCP-assigned
@@ -86,13 +112,13 @@ sidecar advertises itself as the DNS server (DHCP option 6); with
 `dhcp=True` and `dns=False`, the DNS listener is disabled (`port=0` in
 dnsmasq).
 
-### `nat=True` (requires `uplink=`)
+### `Sidecar(nat=True)` (requires `Switch(uplink=...)`)
 
 The sidecar MASQUERADEs guest traffic out the uplink. Implementation:
 
-- testrange creates two bridges via pyroute2: an isolated **switch
-  bridge** (guests + sidecar `eth0` at `.1`) and a separate **uplink
-  bridge** enslaving the physical NIC (sidecar `eth1`, DHCP-from-LAN).
+- The driver realizes two L2 segments: an isolated **switch
+  segment** (guests + sidecar `eth0` at `.1`) and a separate **uplink
+  segment** enslaving the physical NIC (sidecar `eth1`, DHCP-from-LAN).
 - The sidecar's `/etc/nftables.nft` defines one POSTROUTING chain with
   `oifname "eth1" masquerade`.
 - `net.ipv4.ip_forward=1` is set via `/etc/sysctl.d/99-testrange.conf`.
@@ -100,16 +126,24 @@ The sidecar MASQUERADEs guest traffic out the uplink. Implementation:
   `dhcp=True` guests pick it up automatically; with static-IP guests
   the orchestrator bakes `gateway=.1` into the cloud-init netplan.
 
-Topology with `uplink=eth0, nat=True`:
+By default the sidecar's `eth1` DHCPs an address from the upstream LAN. Set
+`Sidecar(addr=StaticAddr("10.10.10.2/24", gw=..., dns=[...]))` (NET-7) to pin it
+to a static address instead — for hosts that won't lease the sidecar's MAC
+(single-public-IP boxes where `uplink` is an internal bridge the host itself
+NATs). The address needs an explicit prefix (the uplink is its own subnet, not
+the Switch CIDR), and with a static `eth1` the sidecar's `dnsmasq` is pointed at
+`addr.dns` explicitly (it can't read a DHCP-populated `resolv.conf`).
+
+Topology with `uplink="eth0", sidecar=Sidecar(nat=True)`:
 
 ```
   Guests (.100-.254)
     │
     ▼
-  ┌─────────────────────────────────────┐
-  │ switch bridge: tr-<hash> (isolated) │
-  │ ──── host .2 (if mgmt=True) ─────   │
-  └───────────────────┬─────────────────┘
+  ┌──────────────────────────────────────┐
+  │ switch segment (isolated)            │
+  │ ──── host .2 (if mgmt=True) ─────    │
+  └───────────────────┬──────────────────┘
                       │
               sidecar eth0 (.1, dnsmasq, gateway)
                       │
@@ -117,56 +151,56 @@ Topology with `uplink=eth0, nat=True`:
                       │
               sidecar eth1 (DHCP from upstream LAN)
                       │
-  ┌─────────────────────────────────────┐
-  │ uplink bridge: tr-<hash> (enslaves eth0) │
-  └───────────────────┬─────────────────┘
+  ┌──────────────────────────────────────┐
+  │ uplink segment (enslaves eth0)       │
+  └───────────────────┬──────────────────┘
                       │
                     eth0 → physical LAN
 ```
 
-Topology with `uplink=eth0, nat=False`:
+Topology with `uplink="eth0", sidecar=None`:
 
 ```
   Guests (their own MACs/IPs)
     │
     ▼
-  ┌──────────────────────────────────────────┐
-  │ switch bridge: tr-<hash> (enslaves eth0) │
-  │ ──── host .2 (if mgmt=True) ─────        │
-  └───────────────────┬──────────────────────┘
+  ┌──────────────────────────────────────┐
+  │ switch segment (enslaves eth0)       │
+  │ ──── host .2 (if mgmt=True) ─────    │
+  └───────────────────┬──────────────────┘
                       │
                     eth0 → physical LAN
 ```
 
 ## Per-driver mapping
 
-### libvirt (`LibvirtDriver`)
+Each driver realizes the same Switch topology with its backend's native L2
+primitives (ADR-0008 §1: the driver owns the Switch; the orchestrator never
+names a bridge). The sidecar-served `dhcp`/`dns`/`nat` story is uniform — one
+Alpine image, one config-ISO contract, no per-driver branching. Only the L2
+realization (`create_switch`/`create_network`) is driver-specific.
 
-| Flag       | Realized via                                                                                                                                          |
-|------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `uplink`   | pyroute2 creates a bridge (`tr-<hash>`) and enslaves the NIC. libvirt network XML uses `<forward mode='bridge'/><bridge name='tr-...'/>`.             |
-| `mgmt`     | pyroute2 assigns `.2/<prefix>` to the bridge. No libvirt `<ip>` element — even on isolated mgmt switches we create our own bridge for a uniform path. |
-| `dhcp`     | Sidecar VM runs `dnsmasq` on `eth0`; orchestrator renders one `dhcp-range` per Switch.                                                                |
-| `dns`      | Same sidecar `dnsmasq` (or a separate listener if `dhcp=False`); `host-record` per static NIC.                                                         |
-| `nat`      | Two-bridge topology + sidecar's `nftables` MASQUERADE on `eth1` + `ip_forward=1`.                                                                     |
+| Knob        | MockDriver (reference)        | Proxmox (single-node)         | ESXi / Hyper-V (future)            |
+|-------------|-------------------------------|-------------------------------|------------------------------------|
+| `uplink`    | Resolve name → iface; segment record | Resolve name → host bridge; SDN zone + vnet | Resolve name → vmnic / external vSwitch |
+| `mgmt`      | Simulated `.2` adapter        | Bridge IP via SDN             | vmkernel adapter / share with mgmt OS |
+| `Sidecar`   | Sidecar VM model              | Same                          | Same                               |
 
-**Requirements**: `pyroute2`, `nftables` (in the sidecar image),
-`libvirt-python`, and `CAP_NET_ADMIN` for bridge creation (typically
-root, or a granted capability).
+The `uplink` logical name resolves through the profile's `[uplinks]` map
+(ADR-0016); the driver receives the resolved host iface. An unmapped name is a
+preflight `unknown-uplink` finding.
 
-**Limits**:
+**General limits** (driver-agnostic):
 
-- `pyroute2` is local-netlink only. Any Switch with `uplink`, `nat`,
-  or `mgmt` plus a remote libvirt URI (`qemu+ssh://...`) fails
-  preflight with `remote_uplink_unsupported`. Bare or
-  sidecar-only Switches on remote URIs are fine.
-- The sidecar's `eth1` DHCPs from the upstream LAN — if the LAN
-  doesn't lease (MAC whitelist, isolated VLAN), NAT silently breaks.
-  Future preflight hook can verify the lease via QGA.
-- One Switch is one CIDR. If you need two subnets, declare two
-  Switches.
+- Host-local L2 realization (e.g. netlink bridge management) is local-only;
+  a Switch with `uplink`/`mgmt` or a NAT sidecar over a remote backend
+  connection is caught by preflight (`remote_uplink_unsupported`).
+- The sidecar's `eth1` DHCPs from the out-of-band network behind the uplink — if
+  it doesn't lease (MAC whitelist, isolated VLAN), NAT silently breaks. Pin it
+  with `Sidecar(addr=...)` (NET-7) when that's the case.
+- One Switch is one CIDR. If you need two subnets, declare two Switches.
 
-**Sidecar build**:
+**Sidecar build** (needed once for any Switch carrying a `Sidecar`):
 
 ```sh
 sudo ./tools/build-sidecar-image/build.sh
@@ -174,35 +208,19 @@ testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 \
     --name testrange-sidecar
 ```
 
-### ESXi / Proxmox / Hyper-V (future)
-
-The same `Switch` API will translate as:
-
-| Flag       | ESXi                                 | Proxmox                       | Hyper-V                            |
-|------------|--------------------------------------|-------------------------------|------------------------------------|
-| `uplink`   | Create vSwitch + attach vmnic        | Create Zone + attach physical | Create vSwitch (external) on NIC   |
-| `mgmt`     | Add vmkernel adapter on the vSwitch  | Bridge IP via SDN             | Allow management OS to share NIC   |
-| `dhcp/dns` | Same sidecar VM model                | Same                          | Same                               |
-| `nat`      | Same sidecar VM model                | Same                          | Same                               |
-
-Sidecar-served `dhcp`/`dns`/`nat` is uniform across drivers by design:
-one Alpine image, one config-ISO contract, no per-driver branching for
-the DHCP/DNS/NAT story. Only the bridge-creation primitive is
-driver-specific.
-
 ## Plan-level rules (driver-agnostic)
 
-The validator applied at `LibvirtHypervisor` construction (and at any
-future hypervisor's construction) enforces:
+The validator applied at Hypervisor construction (`MockHypervisor` today,
+and any future hypervisor) enforces:
 
 - Static IP must be inside the owning Switch's CIDR.
 - Static IP can't equal network/broadcast.
-- Static IP can't collide with `.1` (sidecar) when `needs_sidecar`, or
-  `.2` (mgmt) when `mgmt=True`.
-- Static IP can't fall in `.10`–`.99` when `dhcp=True`.
+- Static IP can't collide with `.1` (sidecar) when the Switch has a sidecar,
+  or `.2` (mgmt) when `mgmt=True`.
+- Static IP can't fall in `.10`–`.99` when the sidecar serves `dhcp`.
 - A NIC with no address (`addr=None`) is allowed on any Switch,
-  including `dhcp=False`: it renders unconfigured (`dhcp4: false`) and
-  the guest OS decides what to do. There is no static address to
+  including one with no DHCP sidecar: it renders unconfigured (`dhcp4: false`)
+  and the guest OS decides what to do. There is no static address to
   range-check, so plan-time validation skips it.
 - Duplicate static IPs within the same Network across VMs are rejected.
 
@@ -222,37 +240,66 @@ Switch("mgmt-only", Network("a"), cidr="10.51.0.0/24", mgmt=True)
 # DHCP + DNS, no internet — guests get leases and resolve each other,
 # but cannot reach upstream.
 Switch("intranet", Network("a"), cidr="10.52.0.0/24",
-       mgmt=True, dhcp=True, dns=True)
+       mgmt=True, sidecar=Sidecar(dhcp=True, dns=True))
 
-# Full internet — guests DHCP, resolve, and NAT out the uplink.
+# Full internet — guests DHCP, resolve, and NAT out the named uplink.
 Switch("internet", Network("a"), cidr="10.53.0.0/24",
-       uplink="eth0", mgmt=True, dhcp=True, dns=True, nat=True)
+       uplink="egress", mgmt=True, sidecar=Sidecar(dhcp=True, dns=True, nat=True))
 
-# Pure bridged — guests join the host's LAN with their own MACs/IPs.
-# Upstream DHCP gives them addresses; no testrange sidecar runs.
-Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="eth0")
+# Pure bridged — guests join the named uplink's LAN with their own MACs/IPs.
+# Out-of-band DHCP gives them addresses; no testrange sidecar runs.
+Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="egress")
 ```
 
 The shipped `examples/network_modes.py` exercises four of these in one
 plan (`bare-sw`, `mgmt-sw`, `uplink-sw`, `both-sw`).
 
-## Where to set `install_uplink`
+## The build switch (`build_switch`)
 
-The install phase needs internet for `apt` / `pip`. Set the physical
-uplink on the hypervisor:
+The build phase brings up its own transient switch so build VMs can reach the
+internet for `apt` / `pip`. It is **user-declared** on the hypervisor via
+`build_switch` ([ADR-0016](../../adr/0016-named-uplinks-out-of-band-egress.md)) —
+there is no default uplink, so **no `build_switch` means no build-time egress**.
+A build switch is an ordinary `Switch`, realized identically to a run-phase one
+(there is no special managed-egress type). Two forms:
 
 ```python
-LibvirtHypervisor(
-    connection="qemu:///system",
-    install_uplink="eth0",
+# 1. A NAT switch routing out a named, out-of-band uplink. The sidecar serves
+#    DHCP/DNS on the isolated build segment and MASQUERADEs eth1 out the `egress`
+#    host bridge (which already has NAT/route behind it — TestRange only attaches).
+Hypervisor(
+    build_switch=Switch(
+        "build", Network("build"), cidr="10.97.99.0/24", uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    ),
     networks=[...],
-    ...
 )
+
+# 2. None (default): isolated build network, no egress. Only viable when every
+#    VM is already a cache hit (the full _built_<config_hash>__* disk set is cached).
+Hypervisor(networks=[...])
 ```
 
-The orchestrator synthesizes a transient `Switch("__install", ...,
-uplink=install_uplink, dhcp=True, dns=True, nat=True)` (CIDR
-`10.97.99.0/24`), brings up the sidecar, runs the install VMs, then
-tears it all down LIFO. Skip `install_uplink=` only if every VM
-already has a cache hit (i.e. `_post_install_<config_hash>` is already
-in the cache).
+`uplink="egress"` resolves through the bound profile's `[uplinks]` map to a host
+bridge with out-of-band internet. If that bridge does not DHCP the sidecar's MAC
+(MAC whitelist, single-public-IP box), pin `eth1` with `Sidecar(addr=...)`
+(NET-7). The build switch is brought up before build VMs boot and torn down LIFO
+at phase end.
+
+### The dedicated build NIC (ADR-0017)
+
+A build VM is **not** wired to its declared `spec.nics` during build. Instead it
+gets one transient build NIC on the build switch, statically addressed from the
+build switch's `.3` infra slot (gateway/DNS at the sidecar `.1` when the build
+switch is `nat`). Its declared NICs are attached only at run. This decouples
+build connectivity from the declared topology: a zero-NIC VM (reached only over
+the guest agent at run) and a single-static-NIC VM (whose real address has no
+route on the build switch) both build uniformly over the build NIC.
+
+The cached disk carries one match-by-MAC netplan covering the build NIC plus
+every declared NIC. An absent-MAC stanza is inert, so during build only the
+build NIC comes up and at run only the declared NICs do — the same file serves
+both phases with no install-vs-run staging.
+
+For the per-driver recipe to set up that out-of-band egress bridge (and why
+TestRange leaves it to you), see [Out-of-band egress](out-of-band-egress.md).

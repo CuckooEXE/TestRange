@@ -1,6 +1,6 @@
 """Orchestrator runtime.
 
-Drives the lifecycle: preflight -> install -> run -> test -> cleanup. The
+Drives the lifecycle: preflight -> build -> run -> test -> cleanup. The
 Orchestrator brokers between Plan-time data and the driver/cache, respecting
 the stovepipe rule — nothing in `testrange.builders`,
 `testrange.communicators`, or `testrange.credentials` reaches into the
@@ -10,6 +10,7 @@ and hands it over.
 
 from __future__ import annotations
 
+import contextlib
 import signal
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -19,20 +20,27 @@ from typing import Any
 
 from testrange._log import get_logger
 from testrange.cache.manager import CacheManager
-from testrange.drivers import driver_for
+from testrange.connect import BackendProfile
 from testrange.drivers.base import HypervisorDriver
-from testrange.exceptions import PreflightError
+from testrange.exceptions import BuildRequiredError, PreflightError
 from testrange.networks.base import NetworkAddressing, Switch
+from testrange.orchestrator.backend import (
+    ResolvedBackend,
+    compatibility_findings,
+    resolve_backend,
+)
+from testrange.orchestrator.build import resolve_build_switch
+from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
-from testrange.orchestrator.install import _install_switch
-from testrange.orchestrator.install_phase import install_phase
 from testrange.orchestrator.run_phase import (
+    await_guest_readiness,
     bind_communicators,
     run_phase,
-    wait_builder_ready,
+    wait_communicators_ready,
 )
 from testrange.orchestrator.teardown import teardown
 from testrange.plan import Plan
+from testrange.preflight import PreflightReport
 from testrange.state.schema import PHASE_LEAKED
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms.handle import VMHandle
@@ -64,7 +72,7 @@ class Orchestrator:
     """Lifecycle context manager.
 
     ``with Orchestrator(plan) as orch:`` brings the range up
-    (preflight -> install -> run) and tears it down on `__exit__`. Every
+    (preflight -> build -> run) and tears it down on `__exit__`. Every
     exception path goes through cleanup unless ``leak()`` has been called.
     """
 
@@ -74,20 +82,29 @@ class Orchestrator:
         *,
         cache_manager: CacheManager | None = None,
         run_id: str | None = None,
-        install_timeout_s: float = 600.0,
+        build_timeout_s: float = 600.0,
         lease_timeout_s: float = 120.0,
+        sidecar_ready_timeout_s: float = 120.0,
+        require_cache: bool = False,
+        profile: BackendProfile | None = None,
     ) -> None:
         self.plan = plan
+        self._require_cache = require_cache
+        # Fold the Plan entry + optional connection profile into the single
+        # backend binding (CORE-10). A pin/driver mismatch or a backend-agnostic
+        # plan with no profile raises here, at construction.
+        self._resolved: ResolvedBackend = resolve_backend(plan, profile)
         run_id = run_id or new_run_id()
         self.ctx = RunContext(
             plan=plan,
-            driver=self._build_driver(),
+            resolved=self._resolved,
             store=StateStore(run_dir_for(run_id)),
             cache=cache_manager or CacheManager(),
             run_id=run_id,
             plan_name=plan.name,
-            install_timeout_s=install_timeout_s,
+            build_timeout_s=build_timeout_s,
             lease_timeout_s=lease_timeout_s,
+            sidecar_ready_timeout_s=sidecar_ready_timeout_s,
             addressing={
                 n.name: NetworkAddressing.from_switch(s)
                 for s in self._all_switches()
@@ -110,8 +127,8 @@ class Orchestrator:
         return self.ctx.cache
 
     @property
-    def install_timeout_s(self) -> float:
-        return self.ctx.install_timeout_s
+    def build_timeout_s(self) -> float:
+        return self.ctx.build_timeout_s
 
     @property
     def lease_timeout_s(self) -> float:
@@ -123,34 +140,76 @@ class Orchestrator:
             return ()
         return tuple(switches)
 
-    def _build_driver(self) -> HypervisorDriver:
-        return driver_for(self.plan.hypervisor)
+    def _preflight_and_initialize(self) -> None:
+        """Run read-only preflight (abort on error) and open the state file."""
+        build_switch = resolve_build_switch(self.plan.hypervisor.build_switch)
+        report = self.ctx.driver.preflight(
+            self.plan,
+            cache_manager=self.ctx.cache,
+            build_switch=build_switch,
+        )
+        # Merge the portability-lint layer (CORE-10 layer 2) with the driver's
+        # own live findings (layer 3); pin/driver-match (layer 1) already ran in
+        # resolve_backend at construction. The driver's preflight owns the
+        # uplink-resolution check (it holds the profile's [uplinks] map and sees
+        # the build switch passed above) — ADR-0016.
+        report = report.merged(
+            PreflightReport(findings=compatibility_findings(self.plan, self.ctx.driver))
+        )
+        if not report:
+            raise PreflightError(report.render())
+        self.ctx.store.initialize(
+            run_id=self.ctx.run_id,
+            plan_name=self.ctx.plan_name,
+            driver_class=self.ctx.driver.DRIVER_NAME,
+            driver_uri=self._resolved.driver_uri,
+        )
+
+    def build(self) -> None:
+        """Warm the cache only: preflight + build phase, no run VMs, no tests.
+
+        The ``testrange build`` verb. The build phase tears down its own
+        ephemeral infra; on success the backend holds nothing and the state
+        file is drained and removed. On failure, in-flight build resources are
+        torn down before the error propagates.
+        """
+        self._install_signal_handlers()
+        self.ctx.driver.connect()
+        try:
+            self._preflight_and_initialize()
+            try:
+                build_phase(self.ctx)
+            except Exception:
+                _log.exception("build failed; tearing down")
+                teardown(self.ctx)
+                raise
+            teardown(self.ctx)  # drain bookkeeping; build_phase already destroyed its infra
+        finally:
+            self._restore_signal_handlers()
+            self.ctx.driver.disconnect()
 
     def __enter__(self) -> OrchestratorHandle:
         self._install_signal_handlers()
         self.ctx.driver.connect()
         try:
-            report = self.ctx.driver.preflight(
-                self.plan,
-                cache_manager=self.ctx.cache,
-                install_switch=_install_switch(
-                    getattr(self.plan.hypervisor, "install_uplink", None)
-                ),
-            )
-            if not report:
-                raise PreflightError(report.render())
-            self.ctx.store.initialize(
-                run_id=self.ctx.run_id,
-                plan_name=self.ctx.plan_name,
-                driver_class=self.ctx.driver.DRIVER_NAME,
-                driver_uri=getattr(self.plan.hypervisor, "connection", ""),
-            )
+            self._preflight_and_initialize()
             try:
-                install_phase(self.ctx)
+                if self._require_cache:
+                    # Verify the cache instead of building: a miss fails fast so
+                    # CI keeps build and run as distinct invocations (ADR-0010 §1).
+                    misses = probe_misses(self.ctx)
+                    if misses:
+                        raise BuildRequiredError(
+                            f"{len(misses)} VM(s) not in cache: {', '.join(sorted(misses))}; "
+                            f"run `testrange build` first (or drop --require-cache)"
+                        )
+                else:
+                    build_phase(self.ctx)  # auto-build any cache miss
                 run_phase(self.ctx)
                 self._handle = self._build_handle()
                 bind_communicators(self.ctx)
-                wait_builder_ready(self.ctx)
+                wait_communicators_ready(self.ctx)
+                await_guest_readiness(self.ctx)
             except Exception:
                 _log.exception("bring-up failed; tearing down")
                 teardown(self.ctx)
@@ -215,10 +274,8 @@ class Orchestrator:
 
     def _restore_signal_handlers(self) -> None:
         for sig, prior in getattr(self, "_prior_signal_handlers", {}).items():
-            try:
+            with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, prior)
-            except (ValueError, OSError):
-                pass
 
     def _build_handle(self) -> OrchestratorHandle:
         vms_map: dict[str, VMHandle] = {

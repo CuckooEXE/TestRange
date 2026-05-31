@@ -1,27 +1,25 @@
-"""Network and Switch — Plan-level network declarations on a Hypervisor.
+"""Network, Switch, and Sidecar — Plan-level network declarations.
 
-A Switch is an L2 broadcast domain that owns the networking-infrastructure
-decisions (``cidr``, ``uplink``, ``mgmt``, ``dhcp``, ``dns``, ``nat``).
-A Network is a logical label — a port-group — within a Switch. Every
-Network on a Switch shares the Switch's CIDR (one wire, multiple labels;
-ESXi port-groups on one VLAN). VMs attach to a Network by name; the
-orchestrator resolves which Switch owns it.
+A Switch is an L2 broadcast domain that owns the network's *topology*
+(``cidr``, ``uplink``, ``mgmt``). The *services* a sidecar VM provides
+(``dhcp``/``dns``/``nat``) are bundled into an optional :class:`Sidecar`
+the Switch carries. A Network is a logical label — a port-group — within
+a Switch. Every Network on a Switch shares the Switch's CIDR (one wire,
+multiple labels; ESXi port-groups on one VLAN). VMs attach to a Network
+by name; the orchestrator resolves which Switch owns it.
 
-The bare Switch is a pure L2 broadcast domain with nothing attached.
-Setting any of ``dhcp``/``dns``/``nat`` causes a sidecar VM to be
-materialized at ``.1`` of the Switch's subnet. ``mgmt=True`` puts a
-host adapter at ``.2``. ``uplink="<nic>"`` asks the driver to bridge
-the Switch to a physical NIC.
+The bare Switch (``sidecar=None``) is a pure L2 broadcast domain with
+nothing attached. ``sidecar=Sidecar(...)`` materializes a sidecar VM at
+``.1`` of the Switch's subnet. ``mgmt=True`` puts a host adapter at ``.2``.
+``uplink="<nic>"`` asks the driver to bridge the Switch to a physical NIC.
 
-``uplink`` is a physical NIC name on the hypervisor host; what the driver
-does with it is backend-specific:
-
-    ========  ==========================================================
-    Driver    ``uplink`` semantics
-    ========  ==========================================================
-    libvirt   create a host bridge and enslave the NIC via pyroute2
-    ESXi      the NIC is a ``vmnic`` attached to a vSwitch (planned)
-    ========  ==========================================================
+``uplink`` is a **logical name** (ADR-0016), resolved per-run against the bound
+connection profile's ``[uplinks]`` map to a host iface; the driver owns the
+lookup and what it does with the iface (host bridge + NIC enslavement for
+libvirt, a ``vmnic`` on a vSwitch for ESXi, a vmbr port for Proxmox, an External
+VMSwitch for Hyper-V). The orchestrator never realizes L2 itself. Egress is
+out-of-band — a named uplink is a host bridge the operator provisions (NAT/DHCP
+behind it); TestRange only attaches to it.
 """
 
 from __future__ import annotations
@@ -29,6 +27,7 @@ from __future__ import annotations
 import ipaddress
 from dataclasses import dataclass, field
 
+from testrange.devices.network import StaticAddr
 from testrange.networks._addressing_consts import (
     MGMT_OFFSET,
     SIDECAR_OFFSET,
@@ -49,10 +48,65 @@ class Network:
 
     def __post_init__(self) -> None:
         # Only the backend-agnostic check here: a name must be non-empty.
-        # Charset rules (dnsmasq/XML safety) are libvirt-specific and live at
-        # the LibvirtHypervisor boundary, so other backends can set their own.
+        # Backend charset rules (dnsmasq/XML/vnet-length safety) are the
+        # driver's concern and live at each driver's boundary.
         if not self.name:
             raise ValueError("Network.name must be a non-empty string")
+
+
+@dataclass(frozen=True)
+class Sidecar:
+    """The services a Switch's sidecar VM provides.
+
+    A Switch carrying a ``Sidecar`` materializes one sidecar VM at the sidecar
+    slot (``SIDECAR_OFFSET``) of its subnet; the flags here describe what
+    *TestRange's* sidecar serves, not wire reality (an out-of-band DHCP/DNS
+    server on the segment is a legitimate topology — the flags don't police it).
+    The reserved-slot and pool layout is defined once in
+    :mod:`testrange.networks._addressing_consts`:
+
+    - ``dhcp`` — sidecar serves DHCP; the lease pool is the
+      ``DHCP_RANGE_LO``..``DHCP_RANGE_HI`` band.
+    - ``dns`` — sidecar serves DNS (one ``<vmname>.<networkname>`` record per VM).
+    - ``nat`` — sidecar MASQUERADEs guest traffic out the Switch's uplink (the
+      sidecar is the gateway). The matching ``uplink`` lives on the
+      :class:`Switch` (it is L2 topology); the *only* object seeing both the
+      service and the uplink — ``Switch.__init__`` — enforces that ``nat``
+      has one.
+    - ``addr`` — a static address for the sidecar's MASQUERADE uplink NIC
+      (``eth1``) instead of DHCP from the upstream LAN (NET-7), for hosts that
+      won't lease the sidecar's MAC. Only meaningful with ``nat``, and since
+      the uplink is its own subnet (not the Switch CIDR) it must carry an
+      explicit prefix.
+
+    A ``Sidecar`` with no service set is forbidden — ``sidecar=None`` is the
+    way to ask for a bare Switch with nothing attached.
+    """
+
+    dhcp: bool = False
+    dns: bool = False
+    nat: bool = False
+    addr: StaticAddr | None = None
+
+    def __post_init__(self) -> None:
+        if not (self.dhcp or self.dns or self.nat):
+            raise ValueError(
+                "Sidecar requires at least one of dhcp/dns/nat — an all-off "
+                "sidecar serves nothing; use sidecar=None for a bare Switch."
+            )
+        if self.addr is not None:
+            if not self.nat:
+                raise ValueError(
+                    "Sidecar(addr=...) requires nat=True — the static address "
+                    "configures the sidecar's MASQUERADE uplink NIC."
+                )
+            if "/" not in self.addr.addr:
+                raise ValueError(
+                    f"Sidecar.addr needs an explicit prefix "
+                    f"(e.g. StaticAddr('10.10.10.2/24', gw=...)); got {self.addr.addr!r} "
+                    "— the uplink is its own subnet, not the Switch CIDR, so the "
+                    "netmask cannot be derived."
+                )
 
 
 @dataclass(frozen=True)
@@ -82,37 +136,71 @@ class NetworkAddressing:
 
     @classmethod
     def from_switch(cls, switch: Switch) -> NetworkAddressing:
+        sidecar = switch.sidecar
         return cls(
             cidr=switch.cidr,
             prefix_len=switch.network.prefixlen,
-            dhcp=switch.dhcp,
-            gateway=switch.sidecar_ip if switch.nat else None,
-            dns_server=switch.sidecar_ip if switch.dns else None,
+            dhcp=sidecar.dhcp if sidecar is not None else False,
+            gateway=switch.sidecar_ip if sidecar is not None and sidecar.nat else None,
+            dns_server=switch.sidecar_ip if sidecar is not None and sidecar.dns else None,
         )
 
 
 @dataclass(frozen=True)
-class Switch:
-    """An L2 broadcast domain that owns the networking-infrastructure knobs.
+class BuildNic:
+    """The single dedicated build NIC a build VM is provisioned with (ADR-0017).
 
-    Holds one or more Networks (logical labels) sharing a single CIDR.
-    All infrastructure flags default off — the bare Switch is pure L2
-    with nothing attached:
+    Independent of the VM's declared ``spec.nics``: every build VM gets exactly
+    one of these on the build switch, and its declared NICs are *not* attached
+    during build. The orchestrator's build phase synthesizes it; two consumers
+    read disjoint halves of it:
+
+    - the **builder** renders its netplan stanza from ``addr`` + ``addressing``,
+      matched by ``mac`` — the same per-NIC logic a declared :class:`StaticAddr`
+      uses, deriving prefix/gateway/DNS from ``addressing``;
+    - the **driver** attaches one interface at ``create_vm`` time, wiring ``mac``
+      onto the backend network keyed by ``network`` in its ``network_refs``.
+
+    ``addr`` is a :class:`~testrange.devices.network.StaticAddr` from the build
+    switch's ``.3`` infra slot (:data:`~testrange.networks._addressing_consts.BUILD_NIC_OFFSET`):
+    deterministic, and — when the build switch is ``nat`` — its gateway/DNS
+    resolve to the sidecar at ``.1`` so ``apt``/``pip`` egress during build. The
+    stanza is inert at run (its MAC is absent), so the same baked netplan serves
+    both phases.
+    """
+
+    mac: str
+    network: str
+    addr: StaticAddr
+    addressing: NetworkAddressing
+
+
+@dataclass(frozen=True)
+class Switch:
+    """An L2 broadcast domain that owns the network's L2 topology.
+
+    Holds one or more Networks (logical labels) sharing a single CIDR. The
+    Switch owns *topology* (``cidr``, ``uplink``, ``mgmt``); the services a
+    sidecar provides (DHCP/DNS/NAT) are bundled into an optional
+    :class:`Sidecar`. The bare Switch (``sidecar=None``) is pure L2 with
+    nothing attached:
 
     - ``cidr`` — the IPv4 subnet for every Network on this Switch.
       Strict network form (``192.168.10.0/24``); host-form raises.
-    - ``uplink`` — physical NIC on the hypervisor host. When set, the
-      driver bridges the Switch to that NIC. Without ``nat``, guests
-      egress with their own MACs and IPs (pure L2 to the LAN). With
-      ``nat``, the bridge stays isolated and the sidecar MASQUERADEs
-      out a second NIC on a separate uplink bridge.
+    - ``uplink`` — a **logical name** (ADR-0016) resolved against the bound
+      profile's ``[uplinks]`` map to a host iface. When set, the driver
+      attaches the Switch to that iface. Without a NAT sidecar, guests
+      egress with their own MACs and IPs (pure L2 to the LAN behind it).
+      With a ``Sidecar(nat=True)``, the guest segment stays isolated and the
+      sidecar MASQUERADEs out a second NIC on a driver-provided uplink
+      segment. An unmapped name fails at preflight.
     - ``mgmt`` — host adapter at ``.2`` on the Switch's subnet. Just an
       adapter — no NAT, no forwarding, no router semantics.
-    - ``dns`` — sidecar serves DNS at ``.1`` (one ``<vmname>.<networkname>``
-      record per VM).
-    - ``dhcp`` — sidecar serves DHCP at ``.1``; pool is ``.10``-``.99``.
-    - ``nat`` — sidecar MASQUERADEs guest traffic out the uplink at
-      ``.1`` (the sidecar is the gateway). **Requires** ``uplink``.
+    - ``sidecar`` — an optional :class:`Sidecar` bundling the services to
+      run at ``.1`` (DHCP/DNS/NAT). ``None`` => bare switch. A
+      ``Sidecar(nat=True)`` **requires** ``uplink`` — the only invariant
+      spanning topology and services, enforced here since ``Switch`` is the
+      only object seeing both.
     """
 
     name: str
@@ -120,9 +208,7 @@ class Switch:
     cidr: str = _DEFAULT_CIDR
     uplink: str | None = None
     mgmt: bool = False
-    dns: bool = False
-    dhcp: bool = False
-    nat: bool = False
+    sidecar: Sidecar | None = None
 
     def __init__(
         self,
@@ -131,9 +217,7 @@ class Switch:
         cidr: str = _DEFAULT_CIDR,
         uplink: str | None = None,
         mgmt: bool = False,
-        dns: bool = False,
-        dhcp: bool = False,
-        nat: bool = False,
+        sidecar: Sidecar | None = None,
     ) -> None:
         if not name:
             raise ValueError("Switch.name must be a non-empty string")
@@ -149,11 +233,26 @@ class Switch:
             ) from e
         if not isinstance(parsed, ipaddress.IPv4Network):
             raise ValueError(f"Switch.cidr must be IPv4 (v0 limitation); got {cidr!r}")
-
-        if nat and uplink is None:
+        # The reserved-address layout (_addressing_consts: .1 sidecar, .2 mgmt,
+        # .3-.9 infra, .10-.99 DHCP, .100-.254 user static) assumes a full /24
+        # host space. A longer prefix (/25+) overruns the subnet broadcast — the
+        # DHCP pool and static range would silently land outside the subnet — so
+        # reject it loudly here instead of mis-leasing later (H7).
+        if parsed.prefixlen > 24:
             raise ValueError(
-                f"Switch({name!r}, nat=True) requires uplink=<nic-name> — the "
-                "sidecar needs a physical NIC to MASQUERADE traffic out of."
+                f"Switch.cidr must be /24 or larger (prefix <= 24): a /{parsed.prefixlen} "
+                f"can't hold the .1-.254 reserved/DHCP/static layout; got {cidr!r}"
+            )
+
+        # nat-requires-uplink is the one invariant spanning L2 topology
+        # (uplink, on the Switch) and services (nat, on the Sidecar); the
+        # Switch is the only object seeing both, so it lives here. The
+        # addr-requires-nat / explicit-prefix checks are intrinsic to the
+        # Sidecar and live in Sidecar.__post_init__.
+        if sidecar is not None and sidecar.nat and uplink is None:
+            raise ValueError(
+                f"Switch({name!r}, sidecar=Sidecar(nat=True)) requires uplink=<nic-name> "
+                "— the sidecar needs a physical NIC to MASQUERADE traffic out of."
             )
 
         object.__setattr__(self, "name", name)
@@ -161,9 +260,7 @@ class Switch:
         object.__setattr__(self, "cidr", cidr)
         object.__setattr__(self, "uplink", uplink)
         object.__setattr__(self, "mgmt", bool(mgmt))
-        object.__setattr__(self, "dns", bool(dns))
-        object.__setattr__(self, "dhcp", bool(dhcp))
-        object.__setattr__(self, "nat", bool(nat))
+        object.__setattr__(self, "sidecar", sidecar)
 
     @property
     def network(self) -> ipaddress.IPv4Network:
@@ -173,27 +270,15 @@ class Switch:
 
     @property
     def sidecar_ip(self) -> str:
-        """The sidecar's pinned address: ``network_address + 1``."""
+        """The sidecar's pinned address: ``network_address + SIDECAR_OFFSET``."""
         return str(self.network.network_address + SIDECAR_OFFSET)
 
     @property
     def mgmt_ip(self) -> str:
-        """The host mgmt adapter's pinned address: ``network_address + 2``."""
+        """The host mgmt adapter's pinned address: ``network_address + MGMT_OFFSET``."""
         return str(self.network.network_address + MGMT_OFFSET)
 
     @property
     def needs_sidecar(self) -> bool:
-        """Whether this Switch requires a sidecar VM (DHCP, DNS, or NAT)."""
-        return self.dhcp or self.dns or self.nat
-
-    @property
-    def needs_bridge(self) -> bool:
-        """Whether the driver must create a testrange-managed host bridge.
-
-        True whenever the driver has to assign IPs or shape topology that
-        libvirt's own bridge management cannot reach: any uplink (NIC
-        enslavement), or ``mgmt`` (host IP on the bridge — libvirt's
-        ``<ip>`` element doesn't compose with bridge-mode forwards, so the
-        driver owns the bridge in either case for uniformity).
-        """
-        return self.uplink is not None or self.mgmt
+        """Whether this Switch requires a sidecar VM (carries a :class:`Sidecar`)."""
+        return self.sidecar is not None

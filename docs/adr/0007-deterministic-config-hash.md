@@ -3,12 +3,23 @@
 Status: Accepted
 Date: 2026-05-19
 
+Extended by [ADR-0010](0010-build-run-split.md): the key now identifies the
+whole *disk set* a build produces, not one disk. The OS-drive `size_gb` and
+each data disk's declaration (count + `size_gb`, in spec order) fold into the
+hash, since they change the artifacts the build emits.
+
+Extended by CI-1: the sidecar image's content sha (`sidecar_sha`) folds in
+too. Every build boots on the build switch's sidecar for DHCP/DNS/NAT, so the
+sidecar is part of the build *environment* — a drifted sidecar can produce
+byte-different disks. Folding its sha keeps a sidecar rebuild from silently
+serving disks built against the old one.
+
 ## Context
 
-The expensive part of bringing up a range is the install pass — booting a
+The expensive part of bringing up a range is the build pass — booting a
 VM, running cloud-init / package installs, powering off. testrange caches
-the resulting post-install disk so that an unchanged VM declaration skips
-the install pass on the next run. That cache needs a key.
+the resulting built disks so that an unchanged VM declaration skips
+the build pass on the next run. That cache needs a key.
 
 The key must satisfy two properties that are in tension with the rest of
 the system:
@@ -19,7 +30,8 @@ the system:
 - **Sensitive to everything that changes the disk.** If the rendered
   install payload, the base image, or the run-phase MACs change, the disk
   is different and the key must change too — otherwise we serve a stale
-  disk that no longer matches the declaration.
+  disk that no longer matches the declaration. The build-time sidecar
+  (DHCP/DNS/NAT for the build network) is part of that environment.
 
 The MAC point is subtle: the orchestrator assigns stable MACs at run phase
 (see [ADR-0006](0006-driver-stable-mac.md)), and a builder may bake
@@ -29,8 +41,12 @@ its cache key.
 
 ## Decision
 
-`Builder.config_hash(spec, recipe, *, addressing, base_sha, macs) -> str`
-is defined on the `Builder` ABC as a **pure function**:
+`Builder.config_hash(spec, recipe, *, addressing, base_sha, macs) -> str` is
+defined on the `Builder` ABC as a **pure function**. (The `sidecar_sha` input
+from CI-1 is *not* on the ABC signature; it is a concrete extension —
+`CloudInitBuilder.config_hash` adds the keyword and the orchestrator passes it
+on the build-cache probe. A builder that does not boot against the sidecar
+need not accept it.) The ABC contract:
 
 - It MUST NOT depend on `run_id`, clocks, or any non-deterministic input.
 - The same `(spec, recipe, addressing, base_sha, macs)` MUST yield the same

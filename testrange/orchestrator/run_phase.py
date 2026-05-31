@@ -12,19 +12,21 @@ import time
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
-from testrange.communicators.qga import QGACommunicator
+from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
 from testrange.devices.network import StaticAddr
-from testrange.exceptions import BuildNotReadyError, GuestAgentError, OrchestratorError
-from testrange.networks.base import Switch
-from testrange.networks.sidecar import LEASEFILE, parse_dnsmasq_leases
-from testrange.orchestrator.context import RunContext
-from testrange.orchestrator.provision import (
-    ensure_base_in_pool,
-    materialize_sidecar_for,
-    provision_switch,
+from testrange.exceptions import (
+    BuildNotReadyError,
+    CommunicatorError,
+    GuestAgentError,
+    OrchestratorError,
 )
+from testrange.networks.base import Switch
+from testrange.networks.sidecar import LEASEFILE, SIDECAR_DNSMASQ_CONF, parse_dnsmasq_leases
+from testrange.orchestrator.artifacts import data_disk_role
+from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.state.schema import PHASE_RUN
 from testrange.vms.recipe import VMRecipe
 
@@ -35,37 +37,69 @@ def run_phase(ctx: RunContext) -> None:
     ctx.store.set_phase(PHASE_RUN)
     hyp = ctx.plan.hypervisor
 
+    # The build phase tears down its own ephemeral pool and no longer leaves the
+    # user's declared pools behind (ADR-0010 §9), so the run phase owns creating
+    # them before any disk is pushed or sidecar materialized.
+    for pool in hyp.pools:
+        backend = ctx.driver.compose_resource_name(ctx.run_id, "pool", pool.name)
+        ctx.store.record_intent(kind="pool", backend_name=backend, plan_name=pool.name)
+        ctx.driver.create_pool(pool, backend)
+        ctx.store.confirm(backend)
+        ctx.pool_backends[pool.name] = backend
+
     for switch in hyp.networks:
         provision_switch(ctx, switch)
         materialize_sidecar_for(ctx, switch)
 
+    # Block until every sidecar is serving before any user VM boots, so a guest
+    # can never ask for a DHCP lease the sidecar isn't ready to hand out yet
+    # (ADR-0010 §8).
+    wait_sidecars_ready(ctx)
+
     for vm in hyp.vms:
         pool_backend = ctx.pool_backends[vm.spec.os_drive.pool]
-        run_disk_name = f"{vm.name}{ctx.driver.volume_suffix('run_disk')}"
-        run_disk_ref = ctx.driver.compose_volume_ref(pool_backend, run_disk_name)
+        built = ctx.built_disk_paths[vm.name]  # {role: cached path}
+        vm_backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
+
+        # OS disk: push the cached built OS bytes straight onto this VM's own
+        # ref — no shared base, no clone (ADR-0010 §3). The captured disk is
+        # already full-size, so run VMs need neither a seed nor a resize (§6).
+        os_disk_name = f"{vm_backend}{ctx.driver.volume_suffix('run_disk')}"
+        os_disk_ref = ctx.driver.compose_volume_ref(pool_backend, os_disk_name)
         ctx.store.record_intent(
             kind="run_disk",
-            backend_name=run_disk_name,
+            backend_name=os_disk_name,
             plan_name=vm.name,
             pool_backend=pool_backend,
         )
-        base_ref = ensure_base_in_pool(ctx, pool_backend, ctx.post_install_paths[vm.name])
-        ctx.driver.create_disk_from_base(run_disk_ref, base_ref)
-        ctx.store.confirm(run_disk_name, pool_backend=pool_backend)
+        ctx.driver.upload_to_pool(os_disk_ref, built["os"])
+        ctx.store.confirm(os_disk_name, pool_backend=pool_backend)
 
-        vm_backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
-        ctx.store.record_intent(
-            kind="vm",
-            backend_name=vm_backend,
-            plan_name=vm.name,
-        )
+        # Data disks: push each cached built data disk onto its own ref.
+        data_disk_refs = []
+        for i, _hd in enumerate(vm.spec.data_drives):
+            role = data_disk_role(i)
+            name = f"{vm_backend}-{role}{ctx.driver.volume_suffix('data_disk')}"
+            ref = ctx.driver.compose_volume_ref(pool_backend, name)
+            ctx.store.record_intent(
+                kind="data_disk",
+                backend_name=name,
+                plan_name=vm.name,
+                pool_backend=pool_backend,
+            )
+            ctx.driver.upload_to_pool(ref, built[role])
+            ctx.store.confirm(name, pool_backend=pool_backend)
+            data_disk_refs.append(ref)
+
+        ctx.store.record_intent(kind="vm", backend_name=vm_backend, plan_name=vm.name)
         ctx.driver.create_vm(
             vm_backend,
             vm.spec,
             ctx.plan_name,
-            os_disk_ref=run_disk_ref,
+            os_disk_ref=os_disk_ref,
             seed_iso_ref=None,
             network_refs=ctx.network_backends,
+            data_disk_refs=data_disk_refs,
         )
         ctx.store.confirm(vm_backend)
         ctx.driver.start_vm(vm_backend)
@@ -87,14 +121,14 @@ def bind_communicators(ctx: RunContext) -> None:
             cred = lookup_credential(vm)
             comm.bind(host=ip, credential=cred)
             _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
-        elif isinstance(comm, QGACommunicator):
+        elif isinstance(comm, NativeCommunicator):
             backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
             comm.bind(
                 execute=ctx.driver.native_guest_execute(backend),
                 read_file=ctx.driver.native_guest_read_file(backend),
                 write_file=ctx.driver.native_guest_write_file(backend),
             )
-            _log.info("vm %s: bound QGACommunicator via %s", vm.name, backend)
+            _log.info("vm %s: bound NativeCommunicator via %s", vm.name, backend)
         else:
             _log.debug(
                 "vm %s: communicator %s not bindable; skipping",
@@ -103,8 +137,80 @@ def bind_communicators(ctx: RunContext) -> None:
             )
 
 
-def wait_builder_ready(ctx: RunContext) -> None:
+def wait_sidecars_ready(ctx: RunContext) -> None:
+    """Block until every materialized sidecar is serving (ADR-0010 §8).
+
+    A sidecar is **ready** when its native guest agent answers *and* the
+    orchestrator can read back the dnsmasq config it delivered — proof the
+    sidecar has booted, the agent is up, and the config has been applied, so
+    DHCP/DNS/NAT is live before the first user VM starts. Sidecars are driven
+    only through the driver's native guest channel; the orchestrator never
+    routes IP traffic to one. A sidecar whose agent never answers fails loud.
+    """
+    for switch_name, sidecar_backend in ctx.sidecar_backends.items():
+        _wait_one_sidecar_ready(ctx, switch_name, sidecar_backend)
+
+
+def _wait_one_sidecar_ready(ctx: RunContext, switch_name: str, sidecar_backend: str) -> None:
+    read_file = ctx.driver.native_guest_read_file(sidecar_backend)
+    deadline = time.monotonic() + ctx.sidecar_ready_timeout_s
+    last_err: GuestAgentError | None = None
+    while time.monotonic() < deadline:
+        try:
+            data = read_file(SIDECAR_DNSMASQ_CONF)
+        except GuestAgentError as e:
+            last_err = e  # agent not up yet
+        else:
+            if data:  # agent answered and the delivered config is present
+                _log.info("sidecar for switch %s ready", switch_name)
+                return
+        time.sleep(2.0)
+    detail = f": {last_err}" if last_err is not None else ""
+    raise OrchestratorError(
+        f"sidecar for switch {switch_name!r} not ready within "
+        f"{ctx.sidecar_ready_timeout_s:.0f}s (native guest agent unreachable or "
+        f"config not applied){detail}"
+    )
+
+
+def wait_communicators_ready(ctx: RunContext) -> None:
+    """Wait until each user VM's bound communicator can execute a command.
+
+    At run-phase boot the native guest agent (or SSH) comes up a few seconds
+    *after* the VM powers on. The first real exec — the builder's readiness
+    probe (``await_guest_readiness``) — must not race that, or it hits e.g. PVE's
+    ``QEMU guest agent is not running``. This is the user-VM analogue of
+    :func:`wait_sidecars_ready`: poll a trivial exec until the communicator
+    answers, then hand off. A VM whose communicator never answers fails loud.
+    """
+    for vm in ctx.plan.hypervisor.vms:
+        _wait_one_communicator_ready(ctx, vm)
+
+
+def _wait_one_communicator_ready(ctx: RunContext, vm: VMRecipe) -> None:
+    deadline = time.monotonic() + ctx.agent_ready_timeout_s
+    last_err: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            vm.communicator.execute(("true",), timeout=10.0)
+        except (GuestAgentError, CommunicatorError) as e:
+            last_err = e  # agent / SSH not up yet
+        else:
+            _log.info("communicator for vm %s ready", vm.name)
+            return
+        time.sleep(2.0)
+    detail = f": {last_err}" if last_err is not None else ""
+    raise OrchestratorError(
+        f"vm {vm.name!r} communicator not ready within "
+        f"{ctx.agent_ready_timeout_s:.0f}s (native guest agent or SSH unreachable){detail}"
+    )
+
+
+def await_guest_readiness(ctx: RunContext) -> None:
     """Drive each builder's readiness check via the bound communicator.
+
+    Run-phase gate (not the build phase): once a guest is up and its
+    communicator is bound, block until it passes its builder's readiness check.
 
     The builder runs its own readiness command through the injected
     ``execute`` callable (``vm.communicator.execute`` — whatever the
@@ -131,12 +237,16 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
     :class:`StaticAddr`: return the declared host address directly — the
     staged run-phase netplan applies it on the first run-phase boot.
 
-    :class:`DHCPAddr`: the per-Switch sidecar — not libvirt — serves DHCP, so
-    the lease lives in the sidecar's dnsmasq lease file. Poll that file over
-    QGA for the lease keyed on the stable MAC derived from
+    :class:`DHCPAddr`: the per-Switch sidecar — not the hypervisor — serves
+    DHCP, so the lease lives in the sidecar's dnsmasq lease file. Poll that file
+    over the native guest agent for the lease keyed on the stable MAC derived
+    from
     ``(plan_name, vm_name, nic_idx)`` until ``lease_timeout_s`` elapses. The
     orchestrator brokers: it combines the driver's guest-file read transport
-    with the sidecar's lease-file path and parser.
+    with the sidecar's lease-file path and parser. The sidecar-readiness gate
+    (:func:`wait_sidecars_ready`) has already confirmed the agent is up, so the
+    ``GuestAgentError`` catch below is now only a guard against a transient
+    blip while the lease itself is being written — not the agent-up race.
 
     Raises :class:`OrchestratorError` when the chosen NIC has no address (or no
     NIC does), when ``nic_idx`` is out of range, or on DHCP-lease timeout.
@@ -218,9 +328,11 @@ def lookup_credential(vm: VMRecipe) -> PosixCred:
 
 
 __all__ = [
+    "await_guest_readiness",
     "bind_communicators",
     "discover_ip",
     "lookup_credential",
     "run_phase",
-    "wait_builder_ready",
+    "wait_communicators_ready",
+    "wait_sidecars_ready",
 ]

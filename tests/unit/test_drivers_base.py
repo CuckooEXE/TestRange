@@ -20,13 +20,16 @@ _ABSTRACT_METHODS = (
     "compose_resource_name",
     "compose_mac",
     "compose_volume_ref",
+    "create_switch",
+    "destroy_switch",
     "create_network",
     "destroy_network",
     "create_pool",
     "destroy_pool",
     "volume_suffix",
     "write_to_pool",
-    "create_disk_from_base",
+    "create_blank_volume",
+    "resize_volume",
     "upload_to_pool",
     "download_from_pool",
     "delete_volume",
@@ -49,7 +52,7 @@ def _stub(*_a: object, **_k: object) -> None:
 _NoAgentDriver = type(
     "_NoAgentDriver",
     (HypervisorDriver,),
-    {name: _stub for name in _ABSTRACT_METHODS},
+    dict.fromkeys(_ABSTRACT_METHODS, _stub),
 )
 
 
@@ -70,10 +73,20 @@ class TestNativeGuestAccessors:
             d.native_guest_write_file("tr_vm_x")
 
 
+class TestBuildResultSinkDefault:
+    """CORE-5: a backend with no serial sink default-raises, so it fails loud
+    at build time rather than silently caching an unverified disk."""
+
+    def test_default_raises(self) -> None:
+        d = _NoAgentDriver()
+        with pytest.raises(DriverError, match="no build-result sink"):
+            d.read_build_result_sink("tr_build_vm_x")
+
+
 class TestDestroyDispatcher:
     """`destroy(kind, ...)` is the state-driven cleanup entry point.
 
-    Phase-prefixed kinds (``install_*``) must dispatch to the same
+    Phase-prefixed kinds (``build_*``) must dispatch to the same
     underlying destructor as their base kind, since the cleanup CLI
     walks state.json LIFO and never inspects phase context.
     """
@@ -88,35 +101,40 @@ class TestDestroyDispatcher:
 
             return _stub
 
-        attrs: dict[str, object] = {name: _stub for name in _ABSTRACT_METHODS}
+        attrs: dict[str, object] = dict.fromkeys(_ABSTRACT_METHODS, _stub)
         attrs["destroy_network"] = _record("destroy_network")
         attrs["destroy_pool"] = _record("destroy_pool")
         attrs["destroy_vm"] = _record("destroy_vm")
-        attrs["destroy_bridge"] = _record("destroy_bridge")
+        attrs["destroy_switch"] = _record("destroy_switch")
         attrs["delete_volume"] = _record("delete_volume")
         attrs["compose_volume_ref"] = lambda self, p, v: f"{p}/{v}"
         cls = type("_RecDriver", (HypervisorDriver,), attrs)
         return cls(), calls
 
-    def test_install_bridge_dispatches_to_destroy_bridge(self) -> None:
+    def test_build_switch_dispatches_to_destroy_switch(self) -> None:
         d, calls = self._driver_recording()
-        d.destroy("install_bridge", "tr-abc1234567")
-        assert calls == [("destroy_bridge", "tr-abc1234567")]
+        d.destroy("build_switch", "tr_switch_build")
+        assert calls == [("destroy_switch", "tr_switch_build")]
 
-    def test_bridge_dispatches_to_destroy_bridge(self) -> None:
+    def test_switch_dispatches_to_destroy_switch(self) -> None:
         d, calls = self._driver_recording()
-        d.destroy("bridge", "tr-deadbeef01")
-        assert calls == [("destroy_bridge", "tr-deadbeef01")]
+        d.destroy("switch", "tr_switch_sw1")
+        assert calls == [("destroy_switch", "tr_switch_sw1")]
 
-    def test_install_network_dispatches_to_destroy_network(self) -> None:
+    def test_build_network_dispatches_to_destroy_network(self) -> None:
         d, calls = self._driver_recording()
-        d.destroy("install_network", "tr_net_install")
-        assert calls == [("destroy_network", "tr_net_install")]
+        d.destroy("build_network", "tr_net_build")
+        assert calls == [("destroy_network", "tr_net_build")]
 
-    def test_install_vm_dispatches_to_destroy_vm(self) -> None:
+    def test_build_vm_dispatches_to_destroy_vm(self) -> None:
         d, calls = self._driver_recording()
-        d.destroy("install_vm", "tr_install_vm_x")
-        assert calls == [("destroy_vm", "tr_install_vm_x")]
+        d.destroy("build_vm", "tr_build_vm_x")
+        assert calls == [("destroy_vm", "tr_build_vm_x")]
+
+    def test_build_pool_dispatches_to_destroy_pool(self) -> None:
+        d, calls = self._driver_recording()
+        d.destroy("build_pool", "tr_build_pool_x")
+        assert calls == [("destroy_pool", "tr_build_pool_x")]
 
     def test_unknown_kind_raises(self) -> None:
         d, _ = self._driver_recording()

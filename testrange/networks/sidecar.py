@@ -1,8 +1,8 @@
 """Pure renderers for the per-Switch sidecar VM.
 
-A Switch with ``dhcp``, ``dns``, or ``nat`` gets one sidecar VM — a
-pre-built Alpine image with ``dnsmasq`` (DHCP+DNS) and ``nftables`` (NAT)
-baked in. The orchestrator materializes it; this module is the pure,
+A Switch carrying a ``Sidecar`` (dhcp/dns/nat services) gets one sidecar
+VM — a pre-built Alpine image with ``dnsmasq`` (DHCP+DNS) and ``nftables``
+(NAT) baked in. The orchestrator materializes it; this module is the pure,
 hypervisor-agnostic part: it turns Plan-time data (the Switch and the VMs
 on it) into the four text files the sidecar's config ISO carries:
 
@@ -13,19 +13,21 @@ on it) into the four text files the sidecar's config ISO carries:
 
 …and parses the lease file back.
 
-Nothing here touches libvirt or runs anything. MAC computation is the
+Nothing here touches the hypervisor or runs anything. MAC computation is the
 driver's job (``compose_mac``); :func:`render_dnsmasq_conf` takes a
 ``mac_for`` callable the orchestrator injects, so this module never
 reaches into the driver stovepipe.
 
-Addressing layout (sidecar ``.1``, mgmt ``.2``, pool ``.10``-``.99``)
-comes from :mod:`testrange.networks._addressing_consts` — the same
-source :mod:`testrange.networks.validate` reads, so the rendered
-``dhcp-range`` and the static-IP validation can never drift apart.
+The reserved-slot and DHCP-pool layout (``SIDECAR_OFFSET``, ``MGMT_OFFSET``,
+``DHCP_RANGE_LO``..``DHCP_RANGE_HI``) comes from
+:mod:`testrange.networks._addressing_consts` — the same source
+:mod:`testrange.networks.validate` reads, so the rendered ``dhcp-range`` and
+the static-IP validation can never drift apart.
 """
 
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Callable, Iterable
 
 from testrange.devices.network import DHCPAddr, StaticAddr
@@ -33,13 +35,35 @@ from testrange.networks._addressing_consts import (
     DHCP_RANGE_HI,
     DHCP_RANGE_LO,
 )
-from testrange.networks.base import Switch
+from testrange.networks.base import Sidecar, Switch
 from testrange.vms.recipe import VMRecipe
 
 LEASEFILE = "/var/lib/misc/dnsmasq.leases"
+# Where the sidecar applies the dnsmasq config delivered via its config ISO.
+# Reading it back over the native guest agent is the run-phase readiness probe
+# (ADR-0010 §8): a non-empty read proves the agent answers AND the sidecar has
+# applied its config — so DHCP is being served before any user VM boots.
+SIDECAR_DNSMASQ_CONF = "/etc/dnsmasq.conf"
 
 SIDECAR_SWITCH_NIC = "eth0"
 SIDECAR_UPLINK_NIC = "eth1"
+
+
+def _sidecar(switch: Switch) -> Sidecar:
+    """The Switch's :class:`Sidecar`, asserting the caller honored the contract.
+
+    Every renderer in this module reads the sidecar's services and is invoked
+    only when ``switch.needs_sidecar`` holds — provision.py guards on it before
+    rendering, and the transient build switch always carries one. So the sidecar
+    is non-None here; the assert turns a contract violation into a loud failure
+    instead of an ``AttributeError`` deep in a renderer.
+    """
+    sidecar = switch.sidecar
+    assert sidecar is not None, (
+        f"sidecar renderer called on switch {switch.name!r} with no Sidecar — "
+        "callers must guard on switch.needs_sidecar"
+    )
+    return sidecar
 
 
 def sidecar_nic_specs(switch: Switch) -> list[tuple[str, str | None]]:
@@ -48,20 +72,28 @@ def sidecar_nic_specs(switch: Switch) -> list[tuple[str, str | None]]:
     First entry is always the switch-facing NIC at ``switch.sidecar_ip``,
     attached to the first Network on the Switch (all Networks on the
     Switch share the bridge, so any will do; first by declaration order).
-    When ``switch.nat`` is on, a second entry is appended with ``None``
-    for the IPv4 — the orchestrator wires it onto the uplink bridge and
-    the sidecar acquires an address via the upstream LAN's DHCP.
+    When the sidecar has ``nat``, a second entry is appended for the uplink
+    NIC, wired onto the uplink bridge: ``None`` for the IPv4 (the sidecar DHCPs
+    from the upstream LAN), or ``sidecar.addr.host`` when a static uplink
+    address is set (NET-7 — for host-NAT'd uplinks that won't DHCP the sidecar).
     """
+    sidecar = _sidecar(switch)
     if not switch.networks:
         raise ValueError(f"switch {switch.name!r} has no Networks; cannot place a sidecar NIC")
     specs: list[tuple[str, str | None]] = [(switch.networks[0].name, switch.sidecar_ip)]
-    if switch.nat:
-        specs.append((_uplink_network_name(switch), None))
+    if sidecar.nat:
+        uplink_ip = sidecar.addr.host if sidecar.addr is not None else None
+        specs.append((_uplink_network_name(switch), uplink_ip))
     return specs
 
 
 def _uplink_network_name(switch: Switch) -> str:
-    """Hidden network name the orchestrator uses for the sidecar's uplink NIC."""
+    """Hidden network name the orchestrator uses for the sidecar's uplink NIC.
+
+    Shared with ``orchestrator.provision`` (which registers the uplink network
+    backend under this key) and ``orchestrator.build_phase`` (which pops it at
+    teardown), so the ``__uplink__<switch>`` convention lives in one place.
+    """
     return f"__uplink__{switch.name}"
 
 
@@ -69,9 +101,12 @@ def render_sidecar_interfaces(switch: Switch) -> str:
     """Render the sidecar's Alpine ``/etc/network/interfaces``.
 
     ``eth0`` is always a static address on the switch (``switch.sidecar_ip``).
-    When ``switch.nat`` is on, ``eth1`` is added as ``inet dhcp`` so the
-    sidecar can acquire an upstream address for MASQUERADE egress.
+    When the sidecar has ``nat``, ``eth1`` (the MASQUERADE uplink) is ``inet
+    dhcp`` by default — the sidecar acquires an upstream address from the LAN.
+    When ``sidecar.addr`` is set (NET-7), ``eth1`` is a static stanza instead,
+    for hosts that won't DHCP the sidecar's MAC (the uplink bridge is host-NAT'd).
     """
+    sidecar = _sidecar(switch)
     subnet = switch.network
     blocks = [
         "auto lo",
@@ -83,14 +118,28 @@ def render_sidecar_interfaces(switch: Switch) -> str:
         f"    netmask {subnet.netmask}",
         "",
     ]
-    if switch.nat:
-        blocks.extend(
-            [
-                f"auto {SIDECAR_UPLINK_NIC}",
-                f"iface {SIDECAR_UPLINK_NIC} inet dhcp",
-                "",
-            ]
-        )
+    if sidecar.nat:
+        if sidecar.addr is not None:
+            iface = ipaddress.IPv4Interface(sidecar.addr.cidr(None))
+            blocks.extend(
+                [
+                    f"auto {SIDECAR_UPLINK_NIC}",
+                    f"iface {SIDECAR_UPLINK_NIC} inet static",
+                    f"    address {iface.ip}",
+                    f"    netmask {iface.network.netmask}",
+                ]
+            )
+            if sidecar.addr.gw is not None:
+                blocks.append(f"    gateway {sidecar.addr.gw}")
+            blocks.append("")
+        else:
+            blocks.extend(
+                [
+                    f"auto {SIDECAR_UPLINK_NIC}",
+                    f"iface {SIDECAR_UPLINK_NIC} inet dhcp",
+                    "",
+                ]
+            )
     return "\n".join(blocks)
 
 
@@ -122,47 +171,55 @@ def render_dnsmasq_conf(
     When the Switch has no ``dhcp``, ``dns``, and no DHCP-using NICs, the
     rendered config is the bare minimum to keep dnsmasq quiescent.
     """
+    sidecar = _sidecar(switch)
     networks_on_switch = {net.name for net in switch.networks}
     lines: list[str] = ["# rendered by testrange — sidecar dnsmasq config"]
 
-    if switch.dhcp:
+    if sidecar.dhcp:
         lines.append(f"dhcp-leasefile={LEASEFILE}")
         lines.append("dhcp-authoritative")
         lines.append(f"interface={SIDECAR_SWITCH_NIC}")
         lines.append("bind-interfaces")
 
-    if not switch.dns:
+    if not sidecar.dns:
         lines.append("port=0")
 
-    if switch.dhcp:
+    # With a static uplink (NET-7) the sidecar's eth1 doesn't DHCP, so nothing
+    # populates /etc/resolv.conf and dnsmasq has no upstream to forward to.
+    # Point it explicitly at the uplink's DNS server(s) and ignore resolv.conf.
+    if sidecar.dns and sidecar.addr is not None and sidecar.addr.dns:
+        lines.append("no-resolv")
+        lines.extend(f"server={s}" for s in sidecar.addr.dns)
+
+    if sidecar.dhcp:
         subnet = switch.network
         lo = subnet.network_address + DHCP_RANGE_LO
         hi = subnet.network_address + DHCP_RANGE_HI
         lines.append(f"dhcp-range={lo!s},{hi!s},{subnet.netmask!s},12h")
-        if switch.nat:
+        if sidecar.nat:
             lines.append(f"dhcp-option=option:router,{switch.sidecar_ip}")
         else:
             lines.append("dhcp-option=3")
-        if switch.dns:
+        if sidecar.dns:
             lines.append(f"dhcp-option=option:dns-server,{switch.sidecar_ip}")
         else:
             lines.append("dhcp-option=6")
 
-    if switch.dns:
+    if sidecar.dns:
         for net in switch.networks:
             lines.append(f"domain={net.name},{switch.cidr}")
 
-    # VM and network names are interpolated raw below; they are safe because
-    # validate_name (testrange._names) rejects `, = # \n` and XML metachars at
-    # the LibvirtHypervisor boundary, so they can't break a dnsmasq directive.
+    # VM and network names are interpolated raw below. Each driver enforces
+    # its own name-charset rules at its boundary (dnsmasq-directive metachars
+    # like `, = # \n` must be rejected there) so they can't break a directive.
     for vm in vms:
         for idx, nic in enumerate(vm.spec.nics):
             if nic.network not in networks_on_switch:
                 continue
             if isinstance(nic.addr, StaticAddr):
-                if switch.dns:
+                if sidecar.dns:
                     lines.append(f"host-record={vm.name}.{nic.network},{nic.addr.host}")
-            elif isinstance(nic.addr, DHCPAddr) and switch.dhcp:
+            elif isinstance(nic.addr, DHCPAddr) and sidecar.dhcp:
                 lines.append(f"dhcp-host={mac_for(vm.name, idx)},{vm.name}")
 
     return "\n".join(lines) + "\n"
@@ -171,12 +228,12 @@ def render_dnsmasq_conf(
 def render_nftables_ruleset(switch: Switch) -> str:
     """Render the sidecar's ``/etc/nftables.nft``.
 
-    When ``switch.nat`` is on, defines one ``nat`` table with a
+    When the sidecar has ``nat``, defines one ``nat`` table with a
     ``postrouting`` MASQUERADE on the uplink NIC. Otherwise an empty
     ruleset (``flush ruleset``) — the nftables service still loads it
     cleanly but installs no rules.
     """
-    if not switch.nat:
+    if not _sidecar(switch).nat:
         return "flush ruleset\n"
     return (
         "flush ruleset\n"
@@ -192,10 +249,10 @@ def render_nftables_ruleset(switch: Switch) -> str:
 def render_sysctl_conf(switch: Switch) -> str:
     """Render the sidecar's ``/etc/sysctl.d/99-testrange.conf``.
 
-    Enables ``net.ipv4.ip_forward`` when ``nat`` is on so the kernel
+    Enables ``net.ipv4.ip_forward`` when the sidecar has ``nat`` so the kernel
     forwards between ``eth0`` and ``eth1``. Otherwise an empty file.
     """
-    if not switch.nat:
+    if not _sidecar(switch).nat:
         return ""
     return "net.ipv4.ip_forward=1\n"
 
@@ -219,6 +276,7 @@ def parse_dnsmasq_leases(text: str) -> dict[str, str]:
 
 __all__ = [
     "LEASEFILE",
+    "SIDECAR_DNSMASQ_CONF",
     "SIDECAR_SWITCH_NIC",
     "SIDECAR_UPLINK_NIC",
     "parse_dnsmasq_leases",

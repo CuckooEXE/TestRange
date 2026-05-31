@@ -14,11 +14,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from testrange.exceptions import StateError
+
 SCHEMA_VERSION = 1
 
 # Phase constants. Strings (JSON-writable without a custom encoder).
 PHASE_PREFLIGHT = "preflight"
-PHASE_INSTALL = "install"
+PHASE_BUILD = "build"
 PHASE_RUN = "run"
 PHASE_CLEANUP = "cleanup"
 PHASE_DONE = "done"
@@ -30,8 +32,8 @@ class Resource:
     """One backend resource recorded in state.json.
 
     Fields:
-      kind:         resource kind ("network", "pool", "vm", "install_vm",
-                    "install_network", "disk_volume", ...).
+      kind:         resource kind ("network", "pool", "vm", "build_vm",
+                    "build_network", "disk_volume", ...).
       backend_name: deterministic name on the backend; cleanup destroys
                     by this name.
       plan_name:    user-facing name from the Plan (None for transient
@@ -119,8 +121,18 @@ class State:
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> State:
+        # Fail loud on an unrecognized version rather than silently degrading
+        # (ADR-0003): an unknown schema means the file was written by a different
+        # testrange and we can't trust our field assumptions for cleanup.
+        version = int(data.get("schema_version", 0))
+        if version != SCHEMA_VERSION:
+            raise StateError(
+                f"state.json schema_version {version} is unsupported "
+                f"(this build reads v{SCHEMA_VERSION}); it was written by a different "
+                "testrange version — clean it up with that version, or remove the run dir"
+            )
         return cls(
-            schema_version=int(data.get("schema_version", 0)),
+            schema_version=version,
             run_id=data.get("run_id", ""),
             plan_name=data.get("plan_name", ""),
             driver_class=data.get("driver_class", ""),

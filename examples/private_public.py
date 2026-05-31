@@ -13,7 +13,6 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import sys
 
 from testrange import OrchestratorHandle, Plan, run_tests
@@ -27,15 +26,12 @@ from testrange.devices import (
     OSDrive,
     StoragePool,
 )
-from testrange.devices.network import DHCPAddr, StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
-from testrange.networks import Network, Switch
+from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
+from testrange.drivers.proxmox import ProxmoxHypervisor
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
-
-UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
 
 _KEY = SSHKey.generate(comment="testrange-private-public")
 
@@ -44,25 +40,29 @@ _CLIENT_PRIVATE_IP = "10.20.0.101"
 
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
-        install_uplink=UPLINK,
+    "private-public",
+    ProxmoxHypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "priv-sw",
                 Network("private-net"),
                 cidr="10.20.0.0/24",
-                mgmt=True,
+                # mgmt=True,  # libvirt-only so far; ProxmoxHypervisor preflight rejects mgmt (ADR-0009)
             ),
             Switch(
                 "pub-sw",
                 Network("public-net"),
                 cidr="10.30.0.0/24",
-                uplink=UPLINK,
-                mgmt=True,
-                dhcp=True,
-                dns=True,
-                nat=True,
+                uplink="egress",
+                # mgmt=True,  # libvirt-only so far; ProxmoxHypervisor preflight rejects mgmt (ADR-0009)
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],
@@ -74,7 +74,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("private-net", addr=StaticAddr(_PRIVATE_WEB_IP)),
+                        NetworkIface("private-net", addr=StaticAddr(_PRIVATE_WEB_IP)),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -85,7 +85,7 @@ PLAN = Plan(
                             "myuser",
                             password="mypass",
                             ssh_key=_KEY,
-                            sudo=True,
+                            admin=True,
                         ),
                     ],
                     packages=[Apt("nginx")],
@@ -103,7 +103,7 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("public-net", addr=DHCPAddr()),
+                        NetworkIface("public-net", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -114,7 +114,7 @@ PLAN = Plan(
                             "myuser",
                             password="mypass",
                             ssh_key=_KEY,
-                            sudo=True,
+                            admin=True,
                         ),
                     ],
                     packages=[Apt("nginx")],
@@ -132,8 +132,8 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface("private-net", addr=StaticAddr(_CLIENT_PRIVATE_IP)),
-                        LibvirtNetworkIface("public-net", addr=DHCPAddr()),
+                        NetworkIface("private-net", addr=StaticAddr(_CLIENT_PRIVATE_IP)),
+                        NetworkIface("public-net", addr=DHCPAddr()),
                     ],
                 ),
                 builder=CloudInitBuilder(
@@ -144,7 +144,7 @@ PLAN = Plan(
                             "myuser",
                             password="mypass",
                             ssh_key=_KEY,
-                            sudo=True,
+                            admin=True,
                         ),
                     ],
                     packages=[Apt("curl")],
@@ -153,7 +153,6 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="private-public",
 )
 
 

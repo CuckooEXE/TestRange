@@ -4,8 +4,10 @@ Layout:
     <root>/isos/<sha256>.bin   (opaque content)
     <root>/isos/<sha256>.json  (sidecar metadata)
 
-All writes use ``.partial`` + ``os.replace`` so a torn write never leaves
-a plausible-but-corrupt file at the canonical path.
+All writes use ``.partial`` + ``os.replace`` so a crash mid-write never
+leaves a plausible-but-corrupt file at the canonical path. This is crash
+safety for the single owning process (TestRange is single-instance — see
+ADR-0018), not a guard against concurrent writers.
 """
 
 from __future__ import annotations
@@ -58,14 +60,30 @@ def default_root() -> Path:
 class LocalCache:
     """File-backed content-addressed cache.
 
-    Methods are not thread-safe but use atomic-rename writes so a SIGKILL
-    during a write leaves the canonical path either fully-old or fully-new.
+    Single-instance by contract (ADR-0018): methods are not thread- or
+    process-safe. They use atomic-rename writes purely for crash safety, so a
+    SIGKILL during a write leaves the canonical path either fully-old or
+    fully-new — not to serialize concurrent writers (there are none).
     """
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or default_root()).resolve()
         self.isos = self.root / "isos"
         self.isos.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def staging(self) -> Path:
+        """Scratch dir on the cache filesystem for in-flight downloads/captures.
+
+        Callers that stream large content (a captured build disk) need a temp
+        file on the *same* filesystem as ``isos/`` — the system tempdir is
+        often a small tmpfs ``/tmp`` that ENOSPCs on a multi-GiB disk (CORE-4),
+        and a same-filesystem temp also keeps the subsequent ingest a cheap
+        intra-fs copy. Created on first access.
+        """
+        d = self.root / "staging"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     def add(
         self,
@@ -131,7 +149,9 @@ class LocalCache:
         tmp = self.isos / ".download.partial"
         _log.info("fetching %s", url)
         # urlopen verifies TLS via the system CA store by default in Python 3.6+.
-        with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:
+        # S310: the scheme is pre-validated by add() (http/https only) before we
+        # ever reach here, so file:/custom schemes cannot slip through.
+        with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:  # noqa: S310
             shutil.copyfileobj(resp, out)
         return tmp, url
 
@@ -143,10 +163,18 @@ class LocalCache:
         from testrange.cache.entry import CacheEntry
 
         if CacheEntry(identifier).looks_like_sha:
-            # If a short prefix (16 chars) is given, accept any sha that starts with it.
-            for info in self.iter_entries():
-                if info.sha256.startswith(identifier):
-                    return info
+            # A short prefix (e.g. 16 chars) accepts any sha that starts with it,
+            # but an ambiguous prefix matching more than one entry must fail loud
+            # rather than silently return the first sha-sorted match.
+            matches = [info for info in self.iter_entries() if info.sha256.startswith(identifier)]
+            if len(matches) > 1:
+                shas = ", ".join(m.sha256[:16] for m in matches)
+                raise CacheError(
+                    f"sha-prefix {identifier!r} is ambiguous in local cache "
+                    f"(matches {shas}); use a longer prefix"
+                )
+            if matches:
+                return matches[0]
             raise CacheMissError(f"no entry with sha-prefix {identifier!r} in local cache")
 
         for info in self.iter_entries():
@@ -177,6 +205,21 @@ class LocalCache:
         sidecar.unlink(missing_ok=True)
         _log.info("deleted cache entry %s", info.short_sha)
         return info
+
+    def purge(self) -> list[CacheEntryInfo]:
+        """Delete every entry (``.bin`` + ``.json``). Returns the removed infos.
+
+        Local-only: there is no shared-tier coordination here (see
+        :meth:`CacheManager.purge`). A snapshot of the entries is taken before
+        deleting so iteration is not invalidated mid-walk.
+        """
+        removed = self.list_entries()
+        for info in removed:
+            (self.isos / f"{info.sha256}.bin").unlink(missing_ok=True)
+            (self.isos / f"{info.sha256}.json").unlink(missing_ok=True)
+        if removed:
+            _log.info("purged %d cache entr%s", len(removed), "y" if len(removed) == 1 else "ies")
+        return removed
 
     def add_name(
         self,
@@ -247,7 +290,7 @@ class LocalCache:
         text = json.dumps(body, indent=2, sort_keys=True) + "\n"
         tmp = path.with_suffix(path.suffix + ".partial")
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
+        tmp.replace(path)
 
     def _append_alias(
         self,
@@ -281,7 +324,7 @@ def _atomic_copy(src: Path, dst: Path) -> None:
     tmp = dst.with_suffix(dst.suffix + ".partial")
     with src.open("rb") as r, tmp.open("wb") as w:
         shutil.copyfileobj(r, w)
-    os.replace(tmp, dst)
+    tmp.replace(dst)
 
 
 def _now_utc_iso() -> str:

@@ -1,7 +1,17 @@
-"""Top-level network declarations: Network and Switch."""
+"""Top-level network declarations: Network, Switch, Sidecar."""
 
 from __future__ import annotations
 
-from testrange.networks.base import Network, NetworkAddressing, Switch
+from testrange.networks.base import (
+    Network,
+    NetworkAddressing,
+    Sidecar,
+    Switch,
+)
 
-__all__ = ["Network", "NetworkAddressing", "Switch"]
+__all__ = [
+    "Network",
+    "NetworkAddressing",
+    "Sidecar",
+    "Switch",
+]

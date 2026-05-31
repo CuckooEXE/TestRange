@@ -8,7 +8,7 @@ source .venv/bin/activate
 pip install -e '.[dev]'
 ```
 
-For libvirt integration tests, install the full set of extras:
+For backend integration tests, install the full set of extras:
 
 ```sh
 pip install -e '.[all,dev]'
@@ -19,12 +19,15 @@ pip install -e '.[all,dev]'
 ```sh
 ruff check .
 ruff format --check .
-mypy --strict testrange/
-pytest -q
+mypy --strict testrange tests
+pytest -m "not proxmox"
 ```
 
-All four must pass. The ``libvirt`` mark gates integration tests; they
-skip on machines without ``libvirt-python``.
+All four must pass (this mirrors `.pre-commit-config.yaml`; note mypy covers
+both ``testrange`` and ``tests``). The ``proxmox`` mark gates integration tests against a
+live Proxmox VE host (they skip without ``TESTRANGE_PVE_HOST`` configured); the
+unit suite runs entirely against the in-memory ``MockDriver`` and needs no
+backend.
 
 ## Discipline
 

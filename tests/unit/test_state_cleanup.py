@@ -1,8 +1,7 @@
-"""Tests for state.cleanup — reverse-walking state.json + PID gating."""
+"""Tests for state.cleanup — reverse-walking state.json + flock ownership gating."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -70,8 +69,8 @@ def populated_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[st
     store.record_intent(kind="network", backend_name="bn-netB", plan_name="netB")
     store.confirm("bn-netB")
     store.set_phase(PHASE_RUN)
-    # Simulate the owner having exited
-    store.pid_path.write_text("0\n")
+    # Simulate the owner having exited: drop its advisory lock.
+    store.release()
     return run_id, store
 
 
@@ -92,7 +91,7 @@ class TestCleanupRun:
         ]
         assert fake_driver.connected is False
 
-    def test_pid_alive_refuses(
+    def test_live_owner_refuses(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
@@ -107,8 +106,7 @@ class TestCleanupRun:
             driver_class="FakeDriver",
             driver_uri="fake:///x",
         )
-        # PID file points at the current process (alive)
-        store.pid_path.write_text(f"{os.getpid()}\n")
+        # `store` still holds the advisory lock (owner alive) — cleanup must refuse.
         with pytest.raises(StateLockedError):
             cleanup_run("r-2")
 

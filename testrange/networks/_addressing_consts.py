@@ -16,7 +16,11 @@ Offsets are added to the Switch's network address (``switch.cidr``):
   the gateway when ``nat=True``.
 - ``MGMT_OFFSET`` (``.2``) — the mgmt host adapter's pinned address when
   a Switch has ``mgmt=True``. Not configurable.
-- ``.3``-``.9`` are reserved for future infra.
+- ``BUILD_NIC_OFFSET`` (``.3``) — the dedicated build NIC's static address on
+  the build switch (ADR-0017). The first of the ``.3``-``.9`` infra range; a
+  serial build uses this one fixed slot, a parallel build (ORCH-4) allocates a
+  distinct slot per in-flight VM from the same range.
+- ``.3``-``.9`` are reserved for infra (the build NIC plus future use).
 - ``.10``-``.99`` (``DHCP_RANGE_LO``..``DHCP_RANGE_HI``) is the DHCP
   lease pool, leaving ``.100``-``.254`` as one contiguous block of
   user-static space.
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 SIDECAR_OFFSET = 1
 MGMT_OFFSET = 2
+BUILD_NIC_OFFSET = 3
 
 DHCP_RANGE_LO = 10
 DHCP_RANGE_HI = 99
@@ -36,6 +41,7 @@ USER_STATIC_HI = 254
 SIDECAR_CACHE_NAME = "testrange-sidecar"
 
 __all__ = [
+    "BUILD_NIC_OFFSET",
     "DHCP_RANGE_HI",
     "DHCP_RANGE_LO",
     "MGMT_OFFSET",

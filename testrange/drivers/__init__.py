@@ -7,19 +7,31 @@ entry of a ``Plan``.
 
 Driver modules are imported here so they register themselves with the
 driver registry. To add a new driver, add it as a submodule and import it
-below.
+below. (The in-memory ``mock`` backend is **test-only**: it lives under
+``tests/`` and is registered by ``tests/conftest.py``, not here. libvirt is
+the reference implementation.)
 """
 
 from __future__ import annotations
 
 # Side-effect imports: each driver module calls register() at module scope.
+# Both backend packages import cleanly without their SDKs installed — the SDK
+# imports (proxmoxer / libvirt-python) are lazy (only on connect()), so
+# registration costs nothing at import.
 from testrange.drivers import libvirt as _libvirt  # noqa: F401
-from testrange.drivers._registry import driver_for, driver_for_name, register
+from testrange.drivers import proxmox as _proxmox  # noqa: F401
+from testrange.drivers._registry import (
+    driver_for_name,
+    is_pinned,
+    register,
+    scheme_for_hypervisor,
+)
 from testrange.drivers.base import HypervisorDriver
 
 __all__ = [
     "HypervisorDriver",
-    "driver_for",
     "driver_for_name",
+    "is_pinned",
     "register",
+    "scheme_for_hypervisor",
 ]

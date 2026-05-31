@@ -13,9 +13,6 @@ disambiguates multiple NICs on one network). Omitted, the orchestrator
 uses the first NIC that carries an address::
 
     communicator=SSHCommunicator("myuser", nic_idx=1)
-
-The private key (if provided) is loaded from text in memory — never
-written to the orchestrator host's filesystem.
 """
 
 from __future__ import annotations
@@ -200,20 +197,40 @@ class SSHCommunicator(Communicator):
         timeout: float = 60.0,
         cwd: str | None = None,
     ) -> ExecResult:
+        """Run ``argv`` over the SSH channel and return its :class:`ExecResult`.
+
+        stdout is drained before stderr. A command that floods stderr could in
+        principle fill the stderr pipe and wedge before stdout closes; ``timeout``
+        (set on the channel) bounds that — a stalled read raises rather than
+        hanging forever, and is surfaced as a :class:`CommunicatorError` here
+        (paramiko's raw ``socket.timeout`` / ``SSHException`` would otherwise leak
+        past the communicator boundary). **Not thread-safe**: the cached paramiko
+        client is shared, and TestRange is single-threaded / single-instance
+        (ADR-0002, ADR-0018), so one communicator is driven by one caller.
+        """
         if not argv:
             raise ValueError("execute(argv) requires a non-empty list")
         for a in argv:
             if not isinstance(a, str):
                 raise TypeError(f"execute(argv) entries must be str, got {type(a).__name__}")
         client = self._ensure_connected()
+        paramiko = _import_paramiko()
         cmd = shlex.join(argv)
         if cwd:
             cmd = f"cd -- {shlex.quote(cwd)} && exec {cmd}"
         start = time.monotonic()
-        _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-        stdout_bytes = stdout.read()
-        stderr_bytes = stderr.read()
-        exit_code = stdout.channel.recv_exit_status()
+        try:
+            _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+            stdout_bytes = stdout.read()
+            stderr_bytes = stderr.read()
+            exit_code = stdout.channel.recv_exit_status()
+        except (TimeoutError, OSError, EOFError, paramiko.SSHException) as e:
+            # socket.timeout is TimeoutError; OSError covers socket.error; the
+            # rest are channel-level failures. Wrap them so callers see one
+            # exception type (CommunicatorError), not paramiko internals.
+            raise CommunicatorError(
+                f"SSH exec of {cmd!r} on {self._host} failed or timed out after {timeout:.0f}s: {e}"
+            ) from e
         duration = time.monotonic() - start
         return ExecResult(
             exit_code=int(exit_code),

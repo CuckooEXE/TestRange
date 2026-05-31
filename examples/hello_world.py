@@ -1,59 +1,59 @@
-"""hello_world: one libvirt VM, cloud-init bootstraps SSH + nginx, smoke-test it.
+"""hello_world: one VM, cloud-init bootstraps SSH + nginx, smoke-test it.
 
-Prerequisites:
+Portable plan — it declares topology only and pins no backend. Supply the
+backend at run time with a connection profile:
+
+    testrange describe examples/hello_world.py
+    testrange describe examples/hello_world.py --profile mybackend
+    testrange run examples/hello_world.py --profile mybackend
+
+``--profile mybackend`` reads the ``[mybackend]`` profile from ``./connect.toml``
+(use ``--profile other.toml:mybackend`` for a different file).
+See examples/connect.toml.example for the profile shape, and
+docs/user/connecting-to-a-backend.md for the full workflow. Prerequisites:
+
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
     sudo tools/build-sidecar-image/build.sh
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
-
-Usage:
-    testrange describe examples/hello_world.py
-    testrange run examples/hello_world.py
 """
 
 from __future__ import annotations
 
-import os
 import sys
 
-from testrange import OrchestratorHandle, Plan, run_tests
+from testrange import Hypervisor, OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import (
-    CPU,
-    Memory,
-    OSDrive,
-    StoragePool,
-)
-from testrange.devices.network import StaticAddr
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
-from testrange.networks import Network, Switch
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import NetworkIface, StaticAddr
+from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
-UPLINK = os.environ.get("TESTRANGE_UPLINK", "eth0")
-
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
-    LibvirtHypervisor(
-        connection="qemu:///system",
-        install_uplink=UPLINK,
+    "hello-world",
+    Hypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
         networks=[
             Switch(
                 "switch1",
                 Network("netA"),
                 Network("netB"),
                 cidr="172.31.0.0/24",
-                uplink=UPLINK,
                 mgmt=True,
-                dhcp=True,
-                dns=True,
-                nat=True,
+                sidecar=Sidecar(dhcp=True, dns=True),
             ),
         ],
         pools=[StoragePool("pool1", 32)],
@@ -65,21 +65,14 @@ PLAN = Plan(
                         CPU(2),
                         Memory(1024),
                         OSDrive("pool1", 8),
-                        LibvirtNetworkIface(
-                            "netA", driver="virtio", addr=StaticAddr("172.31.0.150")
-                        ),
+                        NetworkIface("netA", addr=StaticAddr("172.31.0.150")),
                     ],
                 ),
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     credentials=[
                         PosixCred("root", password="root"),
-                        PosixCred(
-                            "myuser",
-                            password="mypass",
-                            ssh_key=_KEY,
-                            sudo=True,
-                        ),
+                        PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
                     ],
                     packages=[Apt("nginx")],
                     post_install_commands=("echo hi > /tmp/hi",),
@@ -88,7 +81,6 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="hello-world",
 )
 
 

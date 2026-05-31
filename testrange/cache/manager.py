@@ -44,7 +44,10 @@ class CacheManager:
     def root(self) -> Path:
         return self.local.root
 
-    # ---- resolution ------------------------------------------------------
+    @property
+    def staging(self) -> Path:
+        """Scratch dir on the cache filesystem (see :attr:`LocalCache.staging`)."""
+        return self.local.staging
 
     def resolve(self, ref: str | CacheEntry, *, fetch: bool = True) -> CacheEntryInfo:
         """Resolve a CacheEntry / identifier across both tiers.
@@ -95,8 +98,6 @@ class CacheManager:
         _log.info("fetched %s from http cache (%d bytes)", info.sha256[:16], info.size)
         return local_info
 
-    # ---- mutation --------------------------------------------------------
-
     def add(
         self,
         source: str | Path,
@@ -124,6 +125,17 @@ class CacheManager:
                 _log.warning("http cache: delete %s failed: %s", info.short_sha, e)
         return info
 
+    def purge(self) -> list[CacheEntryInfo]:
+        """Delete every local entry. Returns the removed infos.
+
+        Local-only by design — unlike :meth:`delete`, purge does **not** mirror
+        to the HTTP tier. The shared cache has no listing protocol, and bulk
+        deleting a remote that other build hosts depend on, from one
+        workstation, is a worse footgun than the local wipe. Remove a specific
+        shared entry with :meth:`delete` instead.
+        """
+        return self.local.purge()
+
     def add_name(self, identifier: str, new_name: str) -> CacheEntryInfo:
         """Alias on local + mirror to http (best-effort)."""
         info = self.local.add_name(identifier, new_name)
@@ -148,8 +160,6 @@ class CacheManager:
             except Exception as e:
                 _log.warning("http cache: forget_name %s failed: %s", name, e)
         return info
-
-    # ---- manual reconciliation ------------------------------------------
 
     def push(self, identifier: str) -> CacheEntryInfo:
         """Copy a local entry to the HTTP tier. Raises if no HTTP configured."""

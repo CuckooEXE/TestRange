@@ -29,8 +29,7 @@ def _make_blob(path: Path, payload: bytes = b"hello\n") -> Path:
 
 def _http_mock() -> MagicMock:
     """Build an HttpCache-shaped mock."""
-    m = MagicMock(spec=HttpCache)
-    return m
+    return MagicMock(spec=HttpCache)
 
 
 class TestNoHttpConfigured:
@@ -62,6 +61,22 @@ class TestNoHttpConfigured:
             mgr.push("nope")
         with pytest.raises(CacheError, match="no HTTP cache configured"):
             mgr.pull("nope")
+
+
+class TestPurge:
+    def test_purge_is_local_only(self, tmp_path: Path) -> None:
+        # purge clears the local cache; the shared HTTP tier is deliberately
+        # left untouched (no listing protocol, and bulk-wiping a shared remote
+        # from one workstation is a worse footgun than the local wipe).
+        local = _local(tmp_path)
+        http = _http_mock()
+        local.add(_make_blob(tmp_path / "a.bin", b"a"), name="alpha")
+        local.add(_make_blob(tmp_path / "b.bin", b"b"), name="beta")
+        mgr = CacheManager(local=local, http=http)
+        removed = mgr.purge()
+        assert len(removed) == 2
+        assert local.list_entries() == []
+        http.delete.assert_not_called()
 
 
 class TestResolveFallthrough:

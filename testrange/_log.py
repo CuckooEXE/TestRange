@@ -10,7 +10,6 @@ import logging
 from collections.abc import MutableMapping
 from typing import Any
 
-_CONFIGURED = False
 _DEFAULT_FORMAT = "%(asctime)s %(levelname)-5s [%(run_id)s] %(name)s: %(message)s"
 
 
@@ -31,20 +30,17 @@ class _RunIdAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
 def configure(level: str = "INFO") -> None:
     """Install a stderr StreamHandler with the standard format.
 
-    Idempotent — calling again replaces the handler config but does not
-    duplicate handlers.
+    Idempotent — calling again updates the level but does not duplicate
+    handlers (the StreamHandler we installed is left in place).
     """
-    global _CONFIGURED
     root = logging.getLogger("testrange")
-    if _CONFIGURED:
-        root.setLevel(level.upper())
+    root.setLevel(level.upper())
+    if any(isinstance(h, logging.StreamHandler) for h in root.handlers):
         return
     handler = logging.StreamHandler()
     handler.setFormatter(_RunIdFormatter(_DEFAULT_FORMAT))
     root.addHandler(handler)
-    root.setLevel(level.upper())
     root.propagate = False
-    _CONFIGURED = True
 
 
 class _RunIdFormatter(logging.Formatter):

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from testrange.state.cleanup import cleanup_run, find_run_dirs
 from testrange.state.schema import (
+    PHASE_BUILD,
     PHASE_CLEANUP,
     PHASE_DONE,
-    PHASE_INSTALL,
     PHASE_LEAKED,
     PHASE_PREFLIGHT,
     PHASE_RUN,
@@ -16,9 +16,9 @@ from testrange.state.schema import (
 from testrange.state.store import StateStore, default_state_root, new_run_id, run_dir_for
 
 __all__ = [
+    "PHASE_BUILD",
     "PHASE_CLEANUP",
     "PHASE_DONE",
-    "PHASE_INSTALL",
     "PHASE_LEAKED",
     "PHASE_PREFLIGHT",
     "PHASE_RUN",

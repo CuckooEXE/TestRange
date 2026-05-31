@@ -13,15 +13,14 @@ devices/
 ├── cpu/base.py         # CPU dataclass
 ├── memory/base.py      # Memory dataclass
 ├── disk/base.py        # OSDrive, HardDrive dataclasses
-├── network/
-│   ├── base.py         # NetworkIface ABC
-│   └── libvirt.py      # LibvirtNetworkIface (driver-specific shape)
+├── network/base.py     # NetworkIface, DHCPAddr, StaticAddr
 └── pool/base.py        # StoragePool dataclass
 ```
 
-`base.py` per kind holds the **generic** shape. Driver-specific
-variants live in a driver-named file (e.g.,
-`devices/network/libvirt.py` carries `LibvirtNetworkIface`).
+`base.py` per kind holds the **generic** shape. Every device shipped today is
+generic (a `base.py` dataclass). When a backend needs a driver-specific knob on
+a device, the variant lives in a driver-named file under the same package
+(e.g. a hypothetical `devices/network/proxmox.py`); none exist yet.
 
 ## Generic vs driver-specific
 
@@ -51,23 +50,23 @@ Re-export it from `testrange/devices/__init__.py` so users can
 
 ## Driver-specific knobs
 
-If the device exposes a driver-specific knob (e.g.,
-`LibvirtNetworkIface.driver="virtio"|"e1000"|...`), subclass the
-generic ABC in a driver-named file:
+If the device needs to expose a backend-specific knob (e.g. a NIC model
+string a particular backend understands), subclass the generic dataclass in a
+driver-named file:
 
 ```python
-# devices/widget/libvirt.py
+# devices/widget/proxmox.py
 from dataclasses import dataclass
 from testrange.devices.widget.base import Widget
 
 @dataclass(frozen=True)
-class LibvirtWidget(Widget):
-    driver: str = "default"
+class ProxmoxWidget(Widget):
+    model: str = "default"
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if not isinstance(self.driver, str) or not self.driver:
-            raise ValueError("LibvirtWidget.driver must be a non-empty string")
+        if not isinstance(self.model, str) or not self.model:
+            raise ValueError("ProxmoxWidget.model must be a non-empty string")
 ```
 
 **Do NOT** re-export driver-specific variants from
@@ -76,7 +75,7 @@ naming into the generic namespace. Users import them from the
 driver-named path:
 
 ```python
-from testrange.devices.widget.libvirt import LibvirtWidget
+from testrange.devices.widget.proxmox import ProxmoxWidget
 ```
 
 ## Adding to `VMSpec`

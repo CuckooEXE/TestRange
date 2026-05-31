@@ -6,6 +6,8 @@ Specific concerns get their own subclass so callers can catch narrowly.
 
 from __future__ import annotations
 
+from testrange._ansi import scrub_terminal_control
+
 
 class TestRangeError(Exception):
     """Base class for every error raised by testrange."""
@@ -29,6 +31,10 @@ class CacheMissError(CacheError):
 
 class DriverError(TestRangeError):
     """Hypervisor driver failure."""
+
+
+class ProfileError(TestRangeError):
+    """A ``--profile`` connection profile is missing, unreadable, or malformed."""
 
 
 class GuestAgentError(DriverError):
@@ -67,5 +73,49 @@ class OrchestratorError(TestRangeError):
     """Orchestrator-level failure (phase sequencing, lifecycle)."""
 
 
-class InstallTimeoutError(OrchestratorError):
-    """Install VM did not power off within the configured timeout."""
+class BuildFailedError(BuilderError):
+    """A build VM reported (or implied) a provisioning failure.
+
+    Raised by the orchestrator when the build-result sink yields a ``fail``
+    record, or when the build VM powers off without emitting the positive
+    ``ok`` token (a guest that crashed mid-provision). Carries the failing
+    command + its exit code and the decoded build log so the user sees *what*
+    failed and *why*, instead of a silently-cached corrupt disk.
+
+    Distinct from :class:`BuildTimeoutError`, which is the watchdog for a true
+    wedge (a guest that never emits a record *and* never powers off).
+    """
+
+    def __init__(
+        self,
+        vm: str,
+        *,
+        rc: int | None = None,
+        cmd: str | None = None,
+        log: bytes = b"",
+        detail: str | None = None,
+    ) -> None:
+        self.vm = vm
+        self.rc = rc
+        self.cmd = cmd
+        self.log = log
+        parts = [f"vm {vm!r}: build failed"]
+        if detail is not None:
+            parts.append(detail)
+        elif cmd is not None:
+            parts.append(f"command {cmd!r} exited {rc}")
+        elif rc is not None:
+            parts.append(f"exit code {rc}")
+        message = "; ".join(parts)
+        if log:
+            decoded = scrub_terminal_control(log.decode("utf-8", "replace"))
+            message += "\n--- build log ---\n" + decoded
+        super().__init__(message)
+
+
+class BuildTimeoutError(OrchestratorError):
+    """Build VM did not power off within the configured timeout."""
+
+
+class BuildRequiredError(OrchestratorError):
+    """``run --require-cache`` found one or more artifacts missing from the cache."""

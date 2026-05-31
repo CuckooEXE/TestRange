@@ -16,7 +16,10 @@ runs no auth and no rate-limit, and self-signed certs are expected.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -86,8 +89,6 @@ class HttpCache:
         requests = _import_requests()
         return requests.delete(self._url(path), verify=False, timeout=_DEFAULT_TIMEOUT)
 
-    # ---- public surface --------------------------------------------------
-
     def resolve(self, identifier: str) -> CacheEntryInfo:
         """Look up by full sha or by name. Raises ``CacheMissError`` on 404.
 
@@ -112,6 +113,12 @@ class HttpCache:
         sha: str = resp.text.strip()
         if not sha:
             raise CacheError(f"http cache: name {name!r} resolved to empty sha")
+        # The pointer body comes off the wire untrusted; make sure it's actually
+        # a sha before we go fetch /isos/<sha>.* with it.
+        from testrange.cache.entry import CacheEntry
+
+        if not (CacheEntry(sha).looks_like_sha and len(sha) == 64):
+            raise CacheError(f"http cache: name {name!r} resolved to a non-sha value {sha!r}")
         return sha
 
     def _read_sidecar(self, sha: str) -> CacheEntryInfo:
@@ -132,17 +139,42 @@ class HttpCache:
         )
 
     def fetch(self, sha: str, dest_path: Path) -> None:
-        """Stream ``/isos/<sha>.bin`` into ``dest_path``."""
+        """Stream ``/isos/<sha>.bin`` into ``dest_path``, verifying integrity.
+
+        The bytes are streamed to a temp file on the destination filesystem,
+        hashed as they arrive, and promoted to ``dest_path`` via ``os.replace``
+        only once ``sha256(tmp) == sha``. So a dropped connection (likely in the
+        multi-GB / saturated-link window this timeout is sized for) leaves no
+        truncated-but-plausible disk at the canonical path, and a body that does
+        not hash to ``sha`` — corruption, or a swapped payload, since TLS is
+        unverified here — is rejected rather than cached as a permanent "valid"
+        hit (B3). The content self-certifies against the sha the sidecar named,
+        which is what makes the unverified-TLS posture defensible.
+        """
         resp = self._get(f"/isos/{sha}.bin", stream=True)
         if resp.status_code == 404:
             raise CacheMissError(f"no entry with sha {sha[:16]} in http cache")
         if not resp.ok:
             raise CacheError(f"http cache: GET /isos/{sha}.bin → {resp.status_code}")
         _log.info("fetching %s ← http cache → %s", sha[:16], dest_path)
-        with dest_path.open("wb") as out:
-            for chunk in resp.iter_content(chunk_size=None):
-                if chunk:
-                    out.write(chunk)
+        digest = hashlib.sha256()
+        fd, tmp_name = tempfile.mkstemp(dir=dest_path.parent, suffix=".partial")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                for chunk in resp.iter_content(chunk_size=None):
+                    if chunk:
+                        digest.update(chunk)
+                        out.write(chunk)
+            actual = digest.hexdigest()
+            if actual != sha:
+                raise CacheError(
+                    f"http cache: fetched /isos/{sha[:16]}.bin but its bytes hash to "
+                    f"{actual[:16]}… — corrupt or tampered transfer; not cached"
+                )
+            tmp.replace(dest_path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def push(self, info: CacheEntryInfo, bin_path: Path) -> None:
         """Upload bin + sidecar + name aliases. Write order:
@@ -239,8 +271,6 @@ class HttpCache:
         )
         resp = self._put(f"/isos/{sha}.json", data=self._sidecar_body(new_info).encode("utf-8"))
         self._raise_for_put(resp, f"/isos/{sha}.json")
-
-    # ---- helpers ----------------------------------------------------------
 
     def _put_name(self, name: str, sha: str) -> None:
         validate_name(name)

@@ -1,4 +1,11 @@
-"""Tests for StateStore (atomic writes, PID gating)."""
+"""Tests for StateStore (single-instance crash-safe writes, PID gating).
+
+TestRange is single-instance (ADR-0018); these tests pin the contract that
+the atomic-rename writes buy crash safety for the single owner — never a
+torn canonical file — and that the PID guard refuses the ``cleanup`` recovery
+tool against a still-live owner. They are NOT concurrent-writer tests, because
+two writers against one run is unsupported by construction.
+"""
 
 from __future__ import annotations
 
@@ -58,7 +65,7 @@ class TestStateStore:
         s = store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         assert s.run_id == "r1"
@@ -72,14 +79,14 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         with pytest.raises(StateError):
             store.initialize(
                 run_id="r1",
                 plan_name="hello",
-                driver_class="LibvirtDriver",
+                driver_class="MockDriver",
                 driver_uri="qemu:///session",
             )
 
@@ -88,7 +95,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         store.record_intent(kind="network", backend_name="tr_a_b", plan_name="netA")
@@ -104,7 +111,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         with pytest.raises(StateError):
@@ -115,7 +122,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         store.record_intent(kind="pool", backend_name="bn", plan_name="pool1")
@@ -127,7 +134,7 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///system",
         )
         # No torn-write residue, and the written state.json is well-formed.
@@ -141,46 +148,103 @@ class TestStateStore:
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         with pytest.raises(StateLockedError):
             store.require_dead()
 
-    def test_require_dead_when_pid_gone(self, tmp_path: Path) -> None:
+    def test_require_dead_after_release_passes(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
-        # Simulate the owner exiting
-        store.pid_path.write_text("0\n")
+        # Owner exits: drops the advisory lock.
+        store.release()
         store.require_dead()  # no raise
+
+    def test_require_dead_ignores_recycled_pid(self, tmp_path: Path) -> None:
+        # PID-reuse regression (CORE-30): ownership is the flock, not the pid
+        # file. A live PID left in state.pid by a since-exited owner (whose PID
+        # got recycled) must NOT make require_dead think the run is still owned.
+        store = self._store(tmp_path)
+        store.initialize(
+            run_id="r1",
+            plan_name="hello",
+            driver_class="MockDriver",
+            driver_uri="qemu:///session",
+        )
+        store.release()  # owner gone (lock dropped) ...
+        store.pid_path.write_text(f"{os.getpid()}\n")  # ... but a live PID lingers
+        store.require_dead()  # no raise — the lock, not the PID, is authoritative
+
+    def test_torn_write_leaves_canonical_intact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Single-instance crash safety: if the atomic rename fails mid-write
+        # (simulated SIGKILL / power loss), the canonical state.json is left
+        # fully intact — never a torn/empty file.
+        store = self._store(tmp_path)
+        store.initialize(
+            run_id="r1",
+            plan_name="hello",
+            driver_class="MockDriver",
+            driver_uri="qemu:///session",
+        )
+        original = store.state_path.read_text()
+
+        def _boom(self: Path, target: object) -> None:
+            raise OSError("simulated crash before rename completes")
+
+        monkeypatch.setattr(Path, "replace", _boom)
+        with pytest.raises(OSError):
+            store.set_phase(PHASE_DONE)
+        # Canonical path untouched: old content still fully readable.
+        assert store.state_path.read_text() == original
+        assert store.read().phase == PHASE_PREFLIGHT
 
     def test_set_phase_persists(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///system",
         )
         store.set_phase(PHASE_DONE)
         assert store.read().phase == PHASE_DONE
+
+    def test_read_rejects_unknown_schema_version(self, tmp_path: Path) -> None:
+        # ADR-0003: an unrecognized schema_version must fail loud, not silently
+        # degrade — its field assumptions can't be trusted for cleanup.
+        store = self._store(tmp_path)
+        store.initialize(
+            run_id="r1",
+            plan_name="hello",
+            driver_class="MockDriver",
+            driver_uri="qemu:///session",
+        )
+        data = json.loads(store.state_path.read_text())
+        data["schema_version"] = 999
+        store.state_path.write_text(json.dumps(data))
+        with pytest.raises(StateError, match="schema_version"):
+            store.read()
 
     def test_remove(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.initialize(
             run_id="r1",
             plan_name="hello",
-            driver_class="LibvirtDriver",
+            driver_class="MockDriver",
             driver_uri="qemu:///session",
         )
         store.remove()
         assert not store.state_path.exists()
         assert not store.pid_path.exists()
+        assert not store.lock_path.exists()
 
 
 class TestRunDirFor:

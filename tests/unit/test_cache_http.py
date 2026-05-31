@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -129,12 +130,27 @@ class TestResolve:
 
 class TestFetch:
     def test_streams_into_dest(self, fake_requests: Any, tmp_path: Path) -> None:
-        fake_requests.get.return_value = _resp(200, body=b"PAYLOAD")
+        payload = b"PAYLOAD"
+        sha = hashlib.sha256(payload).hexdigest()
+        fake_requests.get.return_value = _resp(200, body=payload)
         c = HttpCache("https://h")
         dest = tmp_path / "out.bin"
-        c.fetch("a" * 64, dest)
-        assert dest.read_bytes() == b"PAYLOAD"
+        c.fetch(sha, dest)
+        assert dest.read_bytes() == payload
         assert fake_requests.get.call_args.kwargs["stream"] is True
+        assert list(tmp_path.glob("*.partial")) == []  # temp promoted, not left behind
+
+    def test_sha_mismatch_rejected_and_no_residue(self, fake_requests: Any, tmp_path: Path) -> None:
+        # B3: a body that doesn't hash to the requested sha (corruption, or a
+        # swapped payload over unverified TLS) is rejected — never landed at the
+        # canonical path, and no .partial residue masquerades as a valid hit.
+        fake_requests.get.return_value = _resp(200, body=b"WRONG-BYTES")
+        c = HttpCache("https://h")
+        dest = tmp_path / "out.bin"
+        with pytest.raises(CacheError, match="hash"):
+            c.fetch("a" * 64, dest)
+        assert not dest.exists()
+        assert list(tmp_path.glob("*.partial")) == []
 
     def test_404_raises_miss(self, fake_requests: Any, tmp_path: Path) -> None:
         fake_requests.get.return_value = _resp(404)

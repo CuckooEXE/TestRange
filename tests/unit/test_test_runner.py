@@ -13,11 +13,11 @@ from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StoragePool
-from testrange.devices.network.libvirt import LibvirtNetworkIface
-from testrange.drivers.libvirt import LibvirtHypervisor
-from testrange.networks import Network, Switch
+from testrange.devices.network import NetworkIface
+from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator import Orchestrator, run_tests
 from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockHypervisor
 
 
 @pytest.fixture(autouse=True)
@@ -60,9 +60,11 @@ def setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CacheManager:
 
 def _plan() -> Plan:
     return Plan(
-        LibvirtHypervisor(
-            connection="qemu:///session",
-            networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", dhcp=True)],
+        "hello",
+        MockHypervisor(
+            networks=[
+                Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+            ],
             pools=[StoragePool("pool1", 32)],
             vms=[
                 VMRecipe(
@@ -72,7 +74,7 @@ def _plan() -> Plan:
                             CPU(1),
                             Memory(512),
                             OSDrive("pool1", 8),
-                            LibvirtNetworkIface("netA", addr=DHCPAddr()),
+                            NetworkIface("netA", addr=DHCPAddr()),
                         ],
                     ),
                     builder=CloudInitBuilder(
@@ -83,15 +85,22 @@ def _plan() -> Plan:
                 ),
             ],
         ),
-        name="hello",
     )
 
 
 def _install_fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:
-    from tests.unit.test_orchestrator import _FakeDriver
+    from testrange.orchestrator.backend import ResolvedBackend
+    from tests.mock_driver import MockDriver
 
-    driver = _FakeDriver(pool_root=tmp_path / "pools")
-    monkeypatch.setattr(Orchestrator, "_build_driver", lambda self: driver)
+    driver = MockDriver(pool_root=tmp_path / "pools")
+
+    def _fake_resolve(plan: Any, profile: Any) -> ResolvedBackend:
+        return ResolvedBackend(
+            driver=driver,
+            driver_uri="",
+        )
+
+    monkeypatch.setattr("testrange.orchestrator.runtime.resolve_backend", _fake_resolve)
     return driver
 
 
@@ -162,6 +171,60 @@ class TestRunTests:
         assert len(results) == 1
         assert not results[0].passed
         assert ran_second == []
+
+    def test_verbose_tees_test_stdout_to_testout_logger(
+        self,
+        setup_env: CacheManager,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Under --verbose a test's prints are routed into the live tail via the
+        # TESTOUT_LOGGER, tagged with the test name (CORE-6). Capture with our own
+        # handler on that logger — the testrange tree has propagate=False, so a
+        # root-level caplog would miss these records.
+        import logging
+
+        from testrange._tui import TESTOUT_LOGGER
+
+        _install_fake_driver(monkeypatch, tmp_path)
+
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        sink = _Collect()
+        testout = logging.getLogger(TESTOUT_LOGGER)
+        testout.addHandler(sink)
+        testout.setLevel(logging.INFO)
+
+        def test_chatty(orch):  # type: ignore[no-untyped-def]
+            print("hello from the test")  # noqa: T201 — exercising stdout capture
+
+        try:
+            results = run_tests([test_chatty], _plan(), cache_manager=setup_env, verbose=True)
+        finally:
+            testout.removeHandler(sink)
+        assert all(r.passed for r in results)
+        assert any("hello from the test" in r.getMessage() for r in records)
+        assert all(getattr(r, "tr_step", None) == "test_chatty" for r in records)
+
+    def test_non_verbose_does_not_capture_stdout(
+        self,
+        setup_env: CacheManager,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Without --verbose, test prints pass straight through to real stdout.
+        _install_fake_driver(monkeypatch, tmp_path)
+
+        def test_chatty(orch):  # type: ignore[no-untyped-def]
+            print("straight to stdout")  # noqa: T201 — exercising stdout passthrough
+
+        run_tests([test_chatty], _plan(), cache_manager=setup_env)
+        assert "straight to stdout" in capsys.readouterr().out
 
 
 class TestCommunicatorBindDuringEnter:
