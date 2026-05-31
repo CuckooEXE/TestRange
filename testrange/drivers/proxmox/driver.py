@@ -24,16 +24,18 @@ end-to-end ``testrange run`` smoke is PVE-9.
 
 from __future__ import annotations
 
+import functools
 import secrets
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import _guest, _naming, _sdn, _serial, _storage, _vm
 from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn
+from testrange.exceptions import DriverError
 from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightFinding,
@@ -49,6 +51,49 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+@functools.cache
+def _pve_error_types() -> tuple[type[BaseException], ...]:
+    """proxmoxer/requests exception families to translate at the driver boundary.
+
+    Resolved lazily and tolerantly: the driver module imports with proxmoxer
+    absent (the SDK is optional), and when it is absent no REST call can have
+    run, so there is nothing to translate.
+    """
+    try:
+        from proxmoxer.core import AuthenticationError, ResourceException
+        from requests import RequestException
+    except ImportError:  # pragma: no cover - proxmoxer present wherever REST runs
+        return ()
+    return (AuthenticationError, ResourceException, RequestException)
+
+
+def _translates(
+    method: Callable[Concatenate[ProxmoxDriver, _P], _R],
+) -> Callable[Concatenate[ProxmoxDriver, _P], _R]:
+    """Wrap a public driver method so a raw proxmoxer/``requests`` exception
+    escaping the control plane surfaces as a :class:`DriverError` (H1 / PVE-39).
+
+    The orchestrator's teardown and error handling key on ``DriverError``; an
+    untranslated ``ResourceException`` (a 403, a transient 595) would slip past
+    it and leave the backend dirty. Only the proxmoxer/``requests`` families are
+    caught — ``DriverError`` (incl. ``GuestAgentError``) already conforms and is
+    re-raised by virtue of not being in that set, and our own bugs (``KeyError``,
+    ``TypeError``, …) still propagate as themselves rather than being masked.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: ProxmoxDriver, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        try:
+            return method(self, *args, **kwargs)
+        except _pve_error_types() as e:
+            raise DriverError(f"PVE {method.__name__} failed: {e}") from e
+
+    return cast("Callable[Concatenate[ProxmoxDriver, _P], _R]", wrapper)
 
 
 @dataclass(frozen=True)
@@ -112,12 +157,14 @@ class ProxmoxDriver(HypervisorDriver):
 
     # -- connection --------------------------------------------------------
 
+    @_translates
     def connect(self) -> None:
         self._client.connect()
 
     def disconnect(self) -> None:
         self._client.close()
 
+    @_translates
     def preflight(
         self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
     ) -> PreflightReport:
@@ -127,9 +174,10 @@ class ProxmoxDriver(HypervisorDriver):
         type the upload path needs) land with PVE-3 alongside ``_storage``.
         """
         del cache_manager
-        switches = [*plan.hypervisor.all_switches]
-        if build_switch is not None:
-            switches.append(build_switch)
+        # build_switch is always a concrete Switch here — the orchestrator runs
+        # it through resolve_build_switch (synthesizing the default isolated
+        # switch when the plan declares none), so there is no None to guard (H2).
+        switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
         findings.extend(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
@@ -160,7 +208,7 @@ class ProxmoxDriver(HypervisorDriver):
         )
 
     def _uplink_bridge_findings(
-        self, plan: Plan, build_switch: Switch | None
+        self, plan: Plan, build_switch: Switch
     ) -> tuple[PreflightFinding, ...]:
         """Verify every ``uplink+nat`` Switch resolves to an existing host bridge.
 
@@ -172,9 +220,7 @@ class ProxmoxDriver(HypervisorDriver):
         *unmapped* name is already flagged by ``unknown_uplink_findings``). A
         missing bridge would otherwise surface as an opaque create-time failure.
         """
-        switches = list(plan.hypervisor.all_switches)
-        if build_switch is not None:
-            switches.append(build_switch)
+        switches = [*plan.hypervisor.all_switches, build_switch]
         # (logical name, resolved bridge) for each nat+uplink switch whose name
         # the profile actually maps.
         wanted: set[tuple[str, str]] = {
@@ -223,21 +269,32 @@ class ProxmoxDriver(HypervisorDriver):
 
     # -- switches & networks (driver owns L2; delegates to _sdn) -----------
 
+    @_translates
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         # Resolve the logical uplink name (ADR-0016) to the host bridge the
-        # sidecar's eth1 rides; None when the switch declares no uplink.
-        resolved_uplink = (
-            self._uplinks[switch.uplink]
-            if switch.uplink is not None and switch.uplink in self._uplinks
-            else None
-        )
+        # sidecar's eth1 rides; None when the switch declares no uplink. A
+        # *declared but unmapped* uplink is a hard error here, not a silent drop
+        # to None — otherwise a NAT switch would come up with no egress path and
+        # fail opaquely at build time. preflight's unknown_uplink_findings flags
+        # this earlier; this is the driver enforcing the invariant itself rather
+        # than trusting preflight to have run.
+        resolved_uplink: str | None = None
+        if switch.uplink is not None:
+            if switch.uplink not in self._uplinks:
+                raise DriverError(
+                    f"switch {switch.name!r} declares uplink {switch.uplink!r}, which the "
+                    f"profile's [uplinks] map does not resolve (have: {sorted(self._uplinks)})"
+                )
+            resolved_uplink = self._uplinks[switch.uplink]
         return _sdn.create_switch(
             self._client, self._sdn_zone, switch, backend_name, resolved_uplink=resolved_uplink
         )
 
+    @_translates
     def destroy_switch(self, backend_name: str) -> None:
         _sdn.destroy_switch(self._client, backend_name)
 
+    @_translates
     def create_network(
         self,
         network: Network,
@@ -262,12 +319,15 @@ class ProxmoxDriver(HypervisorDriver):
 
     # -- pools & volumes (PVE-3; delegates to _storage) --------------------
 
+    @_translates
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any:
         return _storage.create_pool(self._client, pool, backend_name)
 
+    @_translates
     def destroy_pool(self, backend_name: str) -> None:
         _storage.destroy_pool(self._client, backend_name)
 
+    @_translates
     def write_to_pool(self, target_ref: VolumeRef, data: bytes) -> VolumeRef:
         return _storage.write_to_pool(self._client, target_ref, data)
 
@@ -277,17 +337,21 @@ class ProxmoxDriver(HypervisorDriver):
     def resize_volume(self, target_ref: VolumeRef, size_gb: int) -> VolumeRef:
         return _storage.resize_volume(target_ref, size_gb)
 
+    @_translates
     def upload_to_pool(self, target_ref: VolumeRef, source_path: Path) -> VolumeRef:
         return _storage.upload_to_pool(self._client, target_ref, source_path)
 
+    @_translates
     def download_from_pool(self, vol_ref: VolumeRef, dest_path: Path) -> Path:
         return _storage.download_from_pool(self._client, vol_ref, dest_path)
 
+    @_translates
     def delete_volume(self, vol_ref: VolumeRef) -> None:
         _storage.delete_volume(self._client, vol_ref)
 
     # -- VM lifecycle (PVE-8; delegates to _vm) ----------------------------
 
+    @_translates
     def create_vm(
         self,
         backend_name: str,
@@ -318,15 +382,19 @@ class ProxmoxDriver(HypervisorDriver):
             build_nic=build_nic,
         )
 
+    @_translates
     def start_vm(self, backend_name: str) -> None:
         _vm.start_vm(self._client, backend_name)
 
+    @_translates
     def shutdown_vm(self, backend_name: str, *, timeout: float = 120.0) -> None:
         _vm.shutdown_vm(self._client, backend_name, timeout=timeout)
 
+    @_translates
     def destroy_vm(self, backend_name: str) -> None:
         _vm.destroy_vm(self._client, backend_name)
 
+    @_translates
     def get_vm_power_state(self, backend_name: str) -> str:
         return _vm.get_vm_power_state(self._client, backend_name)
 
@@ -348,17 +416,21 @@ class ProxmoxDriver(HypervisorDriver):
 
     # -- snapshots (PVE-5; delegates to _vm) -------------------------------
 
+    @_translates
     def create_snapshot(
         self, vm_backend_name: str, name: str, description: str = "", *, mem: bool = False
     ) -> None:
         _vm.create_snapshot(self._client, vm_backend_name, name, description, mem=mem)
 
+    @_translates
     def list_snapshots(self, vm_backend_name: str) -> list[str]:
         return _vm.list_snapshots(self._client, vm_backend_name)
 
+    @_translates
     def delete_snapshot(self, vm_backend_name: str, name: str) -> None:
         _vm.delete_snapshot(self._client, vm_backend_name, name)
 
+    @_translates
     def restore_snapshot(self, vm_backend_name: str, name: str) -> None:
         _vm.restore_snapshot(self._client, vm_backend_name, name)
 

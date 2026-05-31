@@ -91,8 +91,13 @@ def destroy_switch(client: ProxmoxClient, backend_name: str) -> None:
     zone = target.get("zone")
     client.api.cluster.sdn.vnets(vid).delete()
     # Drop the per-run zone once it holds no more vnets (self-discovering, so a
-    # from_uri-rebuilt teardown driver needs no run_id).
-    if zone is not None and not any(v.get("zone") == zone and v["vnet"] != vid for v in vnets):
+    # from_uri-rebuilt teardown driver needs no run_id). Decide against a *fresh*
+    # vnet list, not the pre-delete one: re-fetching means we never delete a zone
+    # out from under a vnet created since the first read, nor leak one whose last
+    # sibling vanished meanwhile. (Single-instance today — ADR-0018 — but the
+    # re-fetch is cheap and keeps the GC correct if that ever changes.)
+    remaining = client.api.cluster.sdn.vnets.get()
+    if zone is not None and not any(v.get("zone") == zone for v in remaining):
         client.api.cluster.sdn.zones(zone).delete()
         _log.info("destroyed per-run SDN zone %s (last vnet removed)", zone)
     _apply(client)

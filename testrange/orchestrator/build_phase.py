@@ -17,8 +17,10 @@ import binascii
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from testrange._log import get_logger
@@ -350,17 +352,47 @@ def build_one_vm(
         captured[role] = _capture_disk(ctx, refs_by_role[role], bp.config_hash, role, vm.name)
     ctx.built_disk_paths[vm.name] = captured
 
-    # --- Delete everything on the backend (ADR-0010 §3).
-    ctx.driver.destroy_vm(build_vm_backend)
-    ctx.store.forget(build_vm_backend)
+    # --- Delete everything on the backend (ADR-0010 §3). Best-effort: the disks
+    # are already captured into the cache, so a single flaky backend delete must
+    # not abort the remaining VMs in the build loop or skip teardown_build_phase
+    # (which reclaims the build pool/switch/sidecar). A delete that fails leaves
+    # its resource recorded in state.json, so the record-before-create ledger
+    # (ADR-0003) still drives teardown/cleanup to retry it.
+    _best_effort_delete(
+        ctx, "build_vm", build_vm_backend, partial(ctx.driver.destroy_vm, build_vm_backend)
+    )
     if seed_ref is not None and seed_name is not None:
-        ctx.driver.delete_volume(seed_ref)
-        ctx.store.forget(seed_name)
+        _best_effort_delete(ctx, "volume", seed_name, partial(ctx.driver.delete_volume, seed_ref))
     for name, ref in data_disk_refs:
-        ctx.driver.delete_volume(ref)
-        ctx.store.forget(name)
-    ctx.driver.delete_volume(os_disk_ref)
-    ctx.store.forget(os_disk_name)
+        _best_effort_delete(ctx, "volume", name, partial(ctx.driver.delete_volume, ref))
+    _best_effort_delete(ctx, "volume", os_disk_name, partial(ctx.driver.delete_volume, os_disk_ref))
+
+
+def _best_effort_delete(
+    ctx: RunContext,
+    kind: str,
+    backend_name: str,
+    delete: Callable[[], None],
+) -> None:
+    """Run one post-capture backend delete without letting a single failure
+    abort the build.
+
+    On success the resource is forgotten from ``state.json``; on failure it is
+    logged and *left recorded*, so teardown/cleanup reverses it later. Never
+    raises — the caller is mid-loop over multiple VMs and must reach
+    ``teardown_build_phase`` regardless.
+    """
+    try:
+        delete()
+    except Exception as e:
+        _log.warning(
+            "post-capture delete of %s %s failed (left for teardown): %s",
+            kind,
+            backend_name,
+            e,
+        )
+        return
+    ctx.store.forget(backend_name)
 
 
 def _capture_disk(
@@ -555,6 +587,15 @@ def wait_for_build_result(ctx: RunContext, backend_name: str, vm_name: str) -> N
     Console output is mirrored to the ``…build_phase.console`` logger at DEBUG
     as it streams (see :class:`_ConsoleStreamer`), so a build's provisioning is
     watchable live with ``--log-level debug``.
+
+    **Hard dependency on the heartbeat contract.** The deadline is only checked
+    between yields from the sink, so the timeout watchdog relies on the driver
+    honoring the ``read_build_result_sink`` contract: an idle/blocked sink MUST
+    yield ``b""`` at a bounded cadence (including while waiting for the guest's
+    console to connect). A driver whose generator blocks ``__next__`` forever
+    without heartbeating would hang here — that is a driver bug, not a missing
+    guard (a true wall-clock interrupt would need a thread/signal, which ADR-0002
+    rules out). The shipped libvirt and proxmox sinks both heartbeat.
     """
     deadline = time.monotonic() + ctx.build_timeout_s
     buffer = bytearray()

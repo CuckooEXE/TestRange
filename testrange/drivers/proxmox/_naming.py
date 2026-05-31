@@ -32,6 +32,7 @@ _SUFFIXES = {
 
 # A VM name is a DNS label; everything else collapses to a hyphen.
 _NOT_DNS = re.compile(r"[^a-z0-9-]+")
+_HASH_SUFFIX_LEN = 6  # chars of sha256 appended on sanitisation/truncation
 # Storage filenames tolerate a wider set; only path-hostile chars are dropped.
 _NOT_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 _PVE_NAME_MAX = 60
@@ -47,8 +48,12 @@ def _pve_name(value: str) -> str:
     cleaned = _NOT_DNS.sub("-", value.lower()).strip("-")
     cleaned = re.sub(r"-{2,}", "-", cleaned) or "x"
     if cleaned != value.lower() or len(cleaned) > _PVE_NAME_MAX:
-        suffix = hashlib.sha256(value.encode()).hexdigest()[:6]
-        cleaned = f"{cleaned[: _PVE_NAME_MAX - 7]}-{suffix}"
+        suffix = hashlib.sha256(value.encode()).hexdigest()[:_HASH_SUFFIX_LEN]
+        # Reserve the suffix + its joining '-' so the result fits the cap; derive
+        # the head width from len(suffix) so the two never desync if the hash
+        # width changes.
+        head = _PVE_NAME_MAX - len(suffix) - 1
+        cleaned = f"{cleaned[:head]}-{suffix}"
     return cleaned
 
 

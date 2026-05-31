@@ -23,7 +23,9 @@ from testrange.drivers import driver_for_name
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import ProxmoxDriver, ProxmoxHypervisor, ProxmoxProfile
 from testrange.drivers.proxmox._client import ProxmoxConn
+from testrange.exceptions import DriverError
 from testrange.networks import Network, Sidecar, Switch
+from testrange.orchestrator.build import resolve_build_switch
 from testrange.vms import VMRecipe, VMSpec
 
 _Addr = DHCPAddr | StaticAddr | None
@@ -53,11 +55,18 @@ class _FakeApi:
         self.bridges = bridges
         self.content = content
         self.applied = 0
+        # PVE-38: model the real backend faulting. Maps an exact REST path to an
+        # exception instance (a real ``proxmoxer.core.ResourceException`` in the
+        # translation test) so we can prove the driver boundary converts a raw
+        # proxmoxer error into ``DriverError`` instead of leaking it (PVE-39).
+        self.raise_for: dict[str, BaseException] = {}
 
     def __getattr__(self, name: str) -> _Endpoint:
         return _Endpoint(self, name)
 
     def _call(self, method: str, path: str, kwargs: dict[str, Any]) -> Any:
+        if path in self.raise_for:
+            raise self.raise_for[path]
         if path.startswith("nodes/") and path.endswith("/network") and method == "get":
             return [{"iface": b, "type": "bridge"} for b in sorted(self.bridges)]
         if path.startswith("storage/") and method == "get":
@@ -384,6 +393,22 @@ class TestL2:
         assert len(c.api.vnets) == 1
         assert c.api.applied == 1
 
+    def test_raw_proxmoxer_error_translated_to_driver_error(self) -> None:
+        # PVE-38/39 (H1): a raw proxmoxer exception escaping a REST call must
+        # surface as DriverError at the driver boundary. The orchestrator's
+        # teardown/error handling keys on DriverError, so a leaked
+        # ResourceException (a 403, a transient 595) would bypass cleanup. The
+        # fake raises the *real* type so this would fail loudly if the boundary
+        # ever stopped translating.
+        pytest.importorskip("proxmoxer")
+        from proxmoxer.core import ResourceException
+
+        c = _FakeClient()
+        c.api.raise_for["cluster/sdn/vnets"] = ResourceException(403, "Permission denied", "")
+        d = _driver(c)
+        with pytest.raises(DriverError):
+            d.create_switch(Switch("sw1", Network("a"), cidr="10.0.0.0/24"), "tr-switch-x")
+
     def test_per_run_zone_is_unique_per_driver(self) -> None:
         # Two runs (two driver instances) get distinct zones — no cross-run
         # commingling in a shared zone.
@@ -458,7 +483,10 @@ class TestL2:
 class TestPreflight:
     def _run(self, plan: Plan, *, build_switch: Switch | None = None, client: Any = None) -> Any:
         d = _driver(client)
-        return d.preflight(plan, cache_manager=None, build_switch=build_switch)  # type: ignore[arg-type]
+        # Mirror the orchestrator: build_switch reaches preflight as a concrete
+        # Switch (resolve_build_switch synthesizes the default when None).
+        resolved = resolve_build_switch(build_switch)
+        return d.preflight(plan, cache_manager=None, build_switch=resolved)  # type: ignore[arg-type]
 
     def test_isolated_static_plan_is_clean(self) -> None:
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24")

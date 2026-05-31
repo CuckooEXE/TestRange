@@ -24,7 +24,8 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
-from testrange.exceptions import BuildFailedError, OrchestratorError
+from testrange.drivers.base import VolumeRef
+from testrange.exceptions import BuildFailedError, DriverError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.backend import ResolvedBackend
@@ -154,6 +155,34 @@ class TestBuildPhase:
         assert driver._pools == set()
         assert driver._switches == {}
         assert any(c[0] == "destroy_pool" for c in driver.calls)
+
+    def test_flaky_post_capture_delete_does_not_abort_build(
+        self, env: tuple[CacheManager, MockDriver], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # H4 (ORCH-13): a single failing post-capture delete must not abort the
+        # build or skip teardown_build_phase. The disk is already captured; the
+        # failed resource stays recorded so cleanup/teardown can retry it.
+        cache, driver = env
+        plan = _plan(data_disks=1)
+        ctx = _ctx(plan, driver, cache)
+
+        def _flaky(vol_ref: VolumeRef) -> None:
+            raise DriverError("simulated flaky delete")
+
+        # teardown_build_phase uses destroy_vm/destroy_network/destroy_pool, never
+        # delete_volume, so failing every delete isolates the post-capture path.
+        monkeypatch.setattr(driver, "delete_volume", _flaky)
+
+        build_phase(ctx)  # must NOT raise despite the flaky deletes
+
+        # The disks were still captured into the cache…
+        assert _built_names(cache)
+        # …teardown_build_phase still ran (build pool + switch reclaimed)…
+        assert driver._pools == set()
+        assert driver._switches == {}
+        # …and the OS disk, whose delete failed, is left recorded for cleanup
+        # to retry (record-before-create ledger, not silently forgotten).
+        assert any(r.kind == "build_disk" for r in ctx.store.read().resources)
 
     def test_capture_temp_lands_on_cache_filesystem(
         self, env: tuple[CacheManager, MockDriver]

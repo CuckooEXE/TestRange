@@ -56,10 +56,6 @@ _log = get_logger(__name__)
 _POLL_INTERVAL_S = 1.0
 
 
-def _todo(method: str, phase: str = "BACKEND-1.B") -> DriverError:
-    return DriverError(f"LibvirtDriver.{method}: not implemented yet ({phase})")
-
-
 def _resolve_domain(client: LibvirtClient, backend_name: str) -> Any:
     """The live domain stamped ``backend_name``. Raises if absent (drift)."""
     dom = client.lookup_domain(backend_name)
@@ -144,6 +140,12 @@ def _domain_xml(
     serial_sock: str | None,
 ) -> str:
     devices = [_disk_xml(os_path, "vda")]
+    if len(data_paths) > 25:
+        # vdb..vdz is 25 slots; past 'z' the chr() arithmetic silently produces
+        # "vd{" and beyond. Fail loud rather than emit a bogus target dev.
+        raise DriverError(
+            f"libvirt backend supports at most 25 data disks (vdb..vdz); got {len(data_paths)}"
+        )
     for i, path in enumerate(data_paths):
         devices.append(_disk_xml(path, f"vd{chr(ord('b') + i)}"))
     if seed_path is not None:

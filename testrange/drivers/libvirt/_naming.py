@@ -32,14 +32,19 @@ _SUFFIXES = {
 # libvirt names are permissive; collapse anything outside this set to a hyphen.
 _NOT_LV = re.compile(r"[^A-Za-z0-9_.-]+")
 _LV_NAME_MAX = 60
+_HASH_SUFFIX_LEN = 6  # chars of sha256 appended on sanitisation/truncation
 
 
 def _lv_name(value: str) -> str:
     cleaned = _NOT_LV.sub("-", value).strip("-") or "x"
     cleaned = re.sub(r"-{2,}", "-", cleaned)
     if cleaned != value or len(cleaned) > _LV_NAME_MAX:
-        suffix = hashlib.sha256(value.encode()).hexdigest()[:6]
-        cleaned = f"{cleaned[: _LV_NAME_MAX - 7]}-{suffix}"
+        suffix = hashlib.sha256(value.encode()).hexdigest()[:_HASH_SUFFIX_LEN]
+        # Reserve the suffix + its joining '-' so the result fits the cap; derive
+        # the head width from len(suffix) so the two never desync if the hash
+        # width changes.
+        head = _LV_NAME_MAX - len(suffix) - 1
+        cleaned = f"{cleaned[:head]}-{suffix}"
     return cleaned
 
 

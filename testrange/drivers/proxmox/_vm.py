@@ -168,9 +168,8 @@ def create_vm(
       network carrying the build NIC's MAC.
     """
     storage = client.storage
-    vmid = int(client.api.cluster.nextid.get())
     config: dict[str, Any] = {
-        "vmid": vmid,
+        # vmid is allocated + filled in by _post_new_vm (cluster/nextid is racy).
         "name": backend_name,
         "cores": spec.cpu.count,
         "memory": spec.memory.size_mb,
@@ -207,13 +206,37 @@ def create_vm(
             mac = _naming.compose_mac(plan_name, spec.name, idx)
             config[f"net{idx}"] = f"virtio={mac},bridge={network_refs[nic.network]}"
 
-    _await(client, client.api.nodes(client.node).qemu.post(**config))
+    vmid = _post_new_vm(client, config)
     _wait_unlocked(client, vmid)
     if seed_iso_ref is not None:
         _resize_os_disk(client, vmid, spec.os_drive.size_gb)
         _wait_unlocked(client, vmid)
     _log.info("created PVE vm %s (vmid %d)", backend_name, vmid)
     return f"vm:{vmid}"
+
+
+def _post_new_vm(client: ProxmoxClient, config: dict[str, Any], *, attempts: int = 3) -> int:
+    """Allocate a vmid from ``cluster/nextid`` and POST the VM config; return the vmid.
+
+    ``cluster/nextid`` → ``qemu.post`` is not atomic: the id can be claimed
+    between the two calls. TestRange is single-instance (ADR-0018), so a real
+    collision requires a *concurrent* creator racing the same node — out of scope
+    today — but we re-allocate on an "already exists" rejection rather than abort,
+    both as defensive hardening and as the seam future multi-instance support
+    (ORCH-11/12) will build on.
+    """
+    for attempt in range(1, attempts + 1):
+        vmid = int(client.api.cluster.nextid.get())
+        config["vmid"] = vmid
+        try:
+            _await(client, client.api.nodes(client.node).qemu.post(**config))
+            return vmid
+        except Exception as e:
+            if attempt < attempts and "already exists" in str(e).lower():
+                _log.info("vmid %d already allocated (raced nextid); reallocating", vmid)
+                continue
+            raise
+    raise DriverError("vmid allocation exhausted retries")  # pragma: no cover - loop returns/raises
 
 
 def _wait_unlocked(client: ProxmoxClient, vmid: int, *, timeout: float = 300.0) -> None:
@@ -235,9 +258,14 @@ def _resize_os_disk(
 
     Even after the import-from task completes and the config lock clears,
     ``qemu-img`` briefly cannot acquire the freshly-imported image's file lock,
-    so the resize task fails with "got timeout" (validated against the live host:
-    it clears within a few seconds). Since this is the *task* failing (not a
-    config lock), we retry the resize itself with a short backoff.
+    so the resize fails with "got timeout" (validated against the live host: it
+    clears within a few seconds). That failure surfaces two ways: as a failed
+    *task* (``wait_task`` raises ``DriverError``) when the resize returns a UPID,
+    or **synchronously** when ``.resize.put()`` itself raises a raw proxmoxer
+    exception instead of a UPID. We must catch both, or the synchronous case
+    escapes the retry entirely (H3). The transient substring match gates the
+    retry; anything else (a real config/permission error, a bug) re-raises
+    immediately and is translated to ``DriverError`` at the driver boundary.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -248,7 +276,7 @@ def _resize_os_disk(
                 .resize.put(disk="scsi0", size=f"{size_gb}G"),
             )
             return
-        except DriverError as e:
+        except Exception as e:
             msg = str(e).lower()
             transient = "timeout" in msg or "lock" in msg
             if attempt == attempts or not transient:

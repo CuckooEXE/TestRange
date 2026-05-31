@@ -21,7 +21,6 @@ modules (`_sdn`, `_storage`, `_vm`, `_guest`) take it as their first argument.
 
 from __future__ import annotations
 
-import contextlib
 import ssl
 import urllib.parse
 from dataclasses import dataclass
@@ -99,8 +98,17 @@ def _sftp_makedirs(sftp: Any, remote_dir: str) -> None:
         try:
             sftp.stat(str(cur))
         except FileNotFoundError:
-            with contextlib.suppress(OSError):  # created concurrently / already present
+            try:
                 sftp.mkdir(str(cur))
+            except OSError as e:
+                # Tolerate a concurrent/already-created dir, but NOT a genuine
+                # failure (e.g. permission): re-check and only swallow if the
+                # dir now exists, else re-raise so the real cause surfaces here
+                # instead of as a confusing later "put failed".
+                try:
+                    sftp.stat(str(cur))
+                except FileNotFoundError:
+                    raise e from None
 
 
 def parse_connection(uri: str) -> tuple[str, int, str, str]:
@@ -414,6 +422,12 @@ class ProxmoxClient:
             )
         node = self.node  # the *resolved* node (conn.node may be "" under auto-detect)
         resp = self.api.nodes(node).qemu(vmid).termproxy.post()
+        # PVE session tickets live ~2h; a long build can cross that, and the
+        # PVEAuthCookie below must be valid *at connect time*. The termproxy POST
+        # above is an authenticated request, so proxmoxer transparently
+        # re-authenticates if the ticket had expired — re-read it here to pick up
+        # the refreshed cookie rather than send the stale one (PVE-41).
+        ticket, _csrf = self.api.get_tokens()
         query = urllib.parse.urlencode({"port": resp["port"], "vncticket": resp["ticket"]})
         url = (
             f"wss://{self._conn.host}:{self._conn.port}"

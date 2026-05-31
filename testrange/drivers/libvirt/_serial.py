@@ -38,7 +38,8 @@ _log = get_logger(__name__)
 _ACCEPT_TIMEOUT_S = 60.0
 
 # Per-read timeout: the cadence at which a silent guest yields a heartbeat so the
-# orchestrator can re-check its build-timeout deadline.
+# orchestrator can re-check its build-timeout deadline. The same cadence is used
+# while waiting for QEMU to connect, so the connect-wait heartbeats too.
 _RECV_TIMEOUT_S = 1.0
 
 _CHUNK = 1 << 16
@@ -48,13 +49,23 @@ def read_build_result_sink(
     client: LibvirtClient, backend_name: str
 ) -> Generator[bytes, None, None]:
     """Live-stream a build VM's serial console as the build-result sink."""
-    try:
-        conn = client.accept_serial(backend_name, timeout=_ACCEPT_TIMEOUT_S)
-    except TimeoutError as e:
-        raise DriverError(
-            f"serial console for {backend_name!r}: QEMU never connected within "
-            f"{_ACCEPT_TIMEOUT_S:.0f}s; build result not determined"
-        ) from e
+    # Poll the accept in short slices, yielding a heartbeat between attempts, so
+    # the orchestrator can re-check its build deadline *during* the connect-wait
+    # — a single blocking 60s accept would otherwise hold off every deadline
+    # check until QEMU connects (ORCH-15).
+    conn = None
+    waited = 0.0
+    while conn is None:
+        try:
+            conn = client.accept_serial(backend_name, timeout=_RECV_TIMEOUT_S)
+        except TimeoutError as e:
+            waited += _RECV_TIMEOUT_S
+            if waited >= _ACCEPT_TIMEOUT_S:
+                raise DriverError(
+                    f"serial console for {backend_name!r}: QEMU never connected within "
+                    f"{_ACCEPT_TIMEOUT_S:.0f}s; build result not determined"
+                ) from e
+            yield b""  # heartbeat: still waiting for QEMU to connect
     conn.settimeout(_RECV_TIMEOUT_S)
     try:
         while True:

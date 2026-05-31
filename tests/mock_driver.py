@@ -152,9 +152,9 @@ class MockDriver(HypervisorDriver):
         self._record("preflight")
         if self.preflight_override is not None:
             return self.preflight_override
-        switches = [*plan.hypervisor.all_switches]
-        if build_switch is not None:
-            switches.append(build_switch)
+        # build_switch is always a concrete Switch here (resolve_build_switch) —
+        # no None to guard (H2).
+        switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
         findings.extend(self._pool_capacity_findings(plan))
         findings.extend(unknown_uplink_findings(switches, self.uplinks))

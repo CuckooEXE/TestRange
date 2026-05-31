@@ -118,9 +118,10 @@ class LibvirtDriver(HypervisorDriver):
         uplink network present on the host) land with the L2 phase.
         """
         del cache_manager
-        switches = [*plan.hypervisor.all_switches]
-        if build_switch is not None:
-            switches.append(build_switch)
+        # build_switch is always a concrete Switch here — the orchestrator runs
+        # it through resolve_build_switch (synthesizing the default isolated
+        # switch when the plan declares none), so there is no None to guard (H2).
+        switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         return PreflightReport(findings=tuple(findings))
 

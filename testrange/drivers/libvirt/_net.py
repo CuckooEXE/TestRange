@@ -26,6 +26,7 @@ fake. Live validation rides the integration suite.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from xml.sax.saxutils import escape
 
 from testrange._log import get_logger
 from testrange.exceptions import DriverError
@@ -49,7 +50,10 @@ def _network_xml(backend_name: str, *, mgmt_host: tuple[str, int] | None) -> str
     # the plan author's concern). <dns enable='no'> stops libvirt spawning a
     # dnsmasq that would shadow the sidecar (with dns off + no dhcp range, libvirt
     # starts no dnsmasq, it just assigns the bridge IP).
-    parts = [f"<network><name>{backend_name}</name>", "<bridge stp='off' delay='0'/>"]
+    # backend_name is composed by _naming (a safe charset), but escape it as
+    # element text anyway — matching the quoteattr/escape discipline the peer
+    # _vm.py XML builders use, so the safety doesn't rely on a remote invariant.
+    parts = [f"<network><name>{escape(backend_name)}</name>", "<bridge stp='off' delay='0'/>"]
     if mgmt_host is not None:
         host_ip, prefix = mgmt_host
         parts.append("<dns enable='no'/>")

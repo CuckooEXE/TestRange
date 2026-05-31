@@ -346,8 +346,12 @@ class TestSerialSink:
 
         client.accept_serial = _boom  # type: ignore[method-assign]
         gen = _serial.read_build_result_sink(client, "x")  # type: ignore[arg-type]
+        # ORCH-15: the connect-wait heartbeats (b"") so the orchestrator can
+        # re-check its build deadline; once the accept budget is exhausted it
+        # raises rather than blocking the whole wait on a single accept.
+        assert next(gen) == b""
         with pytest.raises(DriverError, match="never connected"):
-            next(gen)
+            list(gen)
 
 
 def test_socketpair_roundtrip_real_socket() -> None:

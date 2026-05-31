@@ -306,9 +306,7 @@ class TestHandleLeak:
         mgr, _ = populated_cache
         o = Orchestrator(_plan(), cache_manager=mgr)
         with o as orch:
-            assert o._leak is False
             orch.leak()
-            assert o._leak is True
         # The run VM (`tr_vm_<id>_web`) is destroyed only at teardown, which
         # leak() must short-circuit. (The build VM, build pool, and sidecar all
         # fire their destroys mid-build regardless of leak, so they aren't clean

@@ -110,6 +110,6 @@ class TestFiles:
 
     def test_write_too_large_raises(self) -> None:
         c = _client()
-        big = b"x" * (_guest._MAX_WRITE_CONTENT)  # base64 inflates past the cap
+        big = b"x" * (_guest._MAX_ENCODED_WRITE_LEN)  # base64 inflates past the cap
         with pytest.raises(GuestAgentError, match="single-write cap"):
             _guest.make_write_file(c, "tr-vm-x-web")("/tmp/big", big)

@@ -46,6 +46,14 @@ class _FakeApi:
         self.snapshots: list[dict[str, Any]] = []
         self.lock_remaining = 0  # config reports a 'lock' for this many polls, then clears
         self.resize_fails = 0  # resize task fails transiently this many times, then succeeds
+        # H3: resize.put() raises SYNCHRONOUSLY (no UPID) this many times, with
+        # this exception — models a raw proxmoxer error the old retry missed.
+        self.resize_sync_raises = 0
+        self.resize_sync_exc: BaseException | None = None
+        # PVE-41: qemu.post raises a vmid-collision error this many times, then
+        # succeeds — models a raced cluster/nextid → qemu.post.
+        self.create_collisions = 0
+        self.create_collision_exc: BaseException | None = None
 
     def __getattr__(self, name: str) -> _Endpoint:
         return _Endpoint(self, name)
@@ -57,6 +65,9 @@ class _FakeApi:
         if path.endswith("/qemu") and method == "get":
             return self.vms
         if path.endswith("/qemu") and method == "post":
+            if self.create_collisions > 0 and self.create_collision_exc is not None:
+                self.create_collisions -= 1
+                raise self.create_collision_exc
             self.created = kwargs
             return None
         if path.endswith("/status/current") and method == "get":
@@ -64,6 +75,9 @@ class _FakeApi:
         if "/status/" in path and method == "post":  # start / stop / shutdown
             return None
         if path.endswith("/resize") and method == "put":
+            if self.resize_sync_raises > 0 and self.resize_sync_exc is not None:
+                self.resize_sync_raises -= 1
+                raise self.resize_sync_exc
             if self.resize_fails > 0:
                 self.resize_fails -= 1
                 return "UPID:resize-doomed"  # _FakeClient.wait_task raises on this
@@ -171,6 +185,37 @@ class TestCreateVm:
         _create(c, seed_iso_ref=_SEED)
         assert c.api.resized == {"disk": "scsi0", "size": "8G"}  # eventually applied
         assert c.api.resize_fails == 0
+
+    def test_resize_retries_synchronous_transient(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # H3 (PVE-40): when .resize.put() raises a transient proxmoxer error
+        # SYNCHRONOUSLY (no UPID handed back), the retry must still engage. The
+        # old `except DriverError` missed the raw exception and the resize never
+        # retried.
+        pytest.importorskip("proxmoxer")
+        from proxmoxer.core import ResourceException
+
+        monkeypatch.setattr("time.sleep", lambda _s: None)  # skip backoff
+        c = _client()
+        c.api.resize_sync_exc = ResourceException(595, "got timeout", "")
+        c.api.resize_sync_raises = 2  # two synchronous transient raises, then success
+        _create(c, seed_iso_ref=_SEED)
+        assert c.api.resized == {"disk": "scsi0", "size": "8G"}  # eventually applied
+        assert c.api.resize_sync_raises == 0
+
+    def test_create_retries_on_vmid_collision(self) -> None:
+        # PVE-41: cluster/nextid → qemu.post is racy; a vmid claimed in between
+        # surfaces as an "already exists" rejection. create_vm must re-allocate
+        # and retry rather than abort.
+        pytest.importorskip("proxmoxer")
+        from proxmoxer.core import ResourceException
+
+        c = _client()
+        c.api.create_collisions = 1
+        c.api.create_collision_exc = ResourceException(
+            500, "unable to create VM 100 - config file already exists", ""
+        )
+        _create(c)  # run vm (no seed → no resize)
+        assert c.api.created  # the post eventually succeeded after re-allocation
 
     def test_build_data_disk_is_blank_sized_from_spec(self) -> None:
         c = _client()

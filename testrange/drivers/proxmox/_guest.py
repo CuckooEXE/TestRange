@@ -40,9 +40,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
 
 _POLL_INTERVAL_S = 0.25
-# PVE agent/file-write caps `content` length; base64 inflates by ~4/3, so the
-# raw payload ceiling is ~45 KB. Larger needs chunking (deferred).
-_MAX_WRITE_CONTENT = 60000
+# PVE's agent file-write caps the (base64-encoded) `content` field length; the
+# check below is against the *encoded* length, hence the name. Base64 inflates
+# ~4/3, so 60000 encoded chars ≈ a ~45 KB raw payload. Larger needs chunking
+# (deferred).
+_MAX_ENCODED_WRITE_LEN = 60000
 
 
 def _to_bytes(value: Any) -> bytes:
@@ -104,7 +106,7 @@ def make_write_file(client: ProxmoxClient, backend_name: str) -> GuestWriteFile:
 
     def _write_file(path: str, data: bytes) -> None:
         encoded = base64.b64encode(data).decode("ascii")
-        if len(encoded) > _MAX_WRITE_CONTENT:
+        if len(encoded) > _MAX_ENCODED_WRITE_LEN:
             raise GuestAgentError(
                 f"QGA file-write of {len(data)} bytes to {path!r} exceeds the agent's "
                 "single-write cap; chunked writes are not implemented"

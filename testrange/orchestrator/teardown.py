@@ -61,9 +61,21 @@ def teardown(ctx: RunContext) -> None:
     except Exception:
         remaining = ()
     if not remaining:
-        ctx.store.set_phase(PHASE_DONE)
-        ctx.store.release()
-        ctx.store.remove()
+        # Final bookkeeping is best-effort. teardown() runs from __exit__, so a
+        # failure here (disk full, perms) must not raise out and replace the
+        # original bring-up exception that triggered the teardown. The backend
+        # resources are already destroyed; a leftover state.json is harmless and
+        # reclaimable by `testrange cleanup`.
+        try:
+            ctx.store.set_phase(PHASE_DONE)
+            ctx.store.release()
+            ctx.store.remove()
+        except Exception as e:
+            _log.warning(
+                "teardown: final state bookkeeping failed (run id=%s): %s",
+                ctx.run_id,
+                e,
+            )
     else:
         _log.warning(
             "teardown: %d resource(s) still recorded in state; run id=%s",
