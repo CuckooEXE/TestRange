@@ -57,7 +57,8 @@ def _populate_run(runs_root: Path, run_id: str = "r-test") -> StateStore:
     store.confirm("bn-pool")
     store.record_intent(kind="network", backend_name="bn-netA", plan_name="netA")
     store.confirm("bn-netA")
-    store.pid_path.write_text("0\n")
+    # Caller decides ownership: leave the advisory lock held (owner alive) or
+    # call store.release() to simulate the owner having exited.
     return store
 
 
@@ -68,7 +69,7 @@ class TestCleanupCLI:
         fake_driver: _FakeDriver,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        _populate_run(isolated_state, "r-1")
+        _populate_run(isolated_state, "r-1").release()
         rc = cli.main(["cleanup", "r-1", "--dry-run"])
         assert rc == 0
         out = capsys.readouterr().out
@@ -81,7 +82,7 @@ class TestCleanupCLI:
         fake_driver: _FakeDriver,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        _populate_run(isolated_state, "r-1")
+        _populate_run(isolated_state, "r-1").release()
         rc = cli.main(["cleanup", "r-1"])
         assert rc == 0
         out = capsys.readouterr().out
@@ -94,8 +95,8 @@ class TestCleanupCLI:
         fake_driver: _FakeDriver,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        _populate_run(isolated_state, "r-1")
-        _populate_run(isolated_state, "r-2")
+        _populate_run(isolated_state, "r-1").release()
+        _populate_run(isolated_state, "r-2").release()
         rc = cli.main(["cleanup", "--all"])
         assert rc == 0
         out = capsys.readouterr().out
@@ -111,18 +112,17 @@ class TestCleanupCLI:
         assert rc == 2
         assert "no state" in capsys.readouterr().err
 
-    def test_cleanup_locked_pid(
+    def test_cleanup_locked_live_owner(
         self,
         isolated_state: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        import os
-
-        store = _populate_run(isolated_state, "r-locked")
-        store.pid_path.write_text(f"{os.getpid()}\n")
+        # Owner still alive: _populate_run leaves the advisory lock held, so
+        # cleanup must refuse rather than tear down a live run.
+        _populate_run(isolated_state, "r-locked")
         rc = cli.main(["cleanup", "r-locked"])
         assert rc == 1
-        assert "still owns" in capsys.readouterr().err
+        assert "owned by a live process" in capsys.readouterr().err
 
     def test_cleanup_no_args(
         self,

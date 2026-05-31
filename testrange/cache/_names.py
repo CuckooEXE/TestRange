@@ -22,3 +22,8 @@ def validate_name(name: str) -> None:
         raise CacheError(
             f"cache name {name!r} must match {_NAME_RE.pattern} (no slashes, spaces, or unicode)"
         )
+    # "." and ".." (and any all-dots name) pass the charset but are reserved path
+    # components — as ``/names/.`` / ``/names/..`` they resolve to a directory on
+    # the HTTP tier. Exclude them explicitly.
+    if set(name) <= {"."}:
+        raise CacheError(f"cache name {name!r} cannot be all dots (reserved path component)")

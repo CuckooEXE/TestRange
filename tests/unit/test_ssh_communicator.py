@@ -24,11 +24,16 @@ class _FakeChannel:
 
 
 class _FakeStream:
-    def __init__(self, data: bytes, exit_code: int = 0) -> None:
+    def __init__(
+        self, data: bytes, exit_code: int = 0, read_exc: BaseException | None = None
+    ) -> None:
         self._data = data
+        self._read_exc = read_exc
         self.channel = _FakeChannel(exit_code)
 
     def read(self) -> bytes:
+        if self._read_exc is not None:
+            raise self._read_exc
         return self._data
 
 
@@ -72,6 +77,7 @@ class _FakeClient:
         self.stdout_payload = b""
         self.stderr_payload = b""
         self.exit_code = 0
+        self.read_exc: BaseException | None = None  # stdout.read() raises this when set
         self.closed = False
         self.sftp = _FakeSFTP()
 
@@ -88,7 +94,7 @@ class _FakeClient:
         self.exec_commands.append((cmd, kwargs))
         return (
             object(),
-            _FakeStream(self.stdout_payload, exit_code=self.exit_code),
+            _FakeStream(self.stdout_payload, exit_code=self.exit_code, read_exc=self.read_exc),
             _FakeStream(self.stderr_payload, exit_code=self.exit_code),
         )
 
@@ -161,6 +167,17 @@ class TestExecute:
         assert r.exit_code == 7
         assert r.stderr == b"oops\n"
         assert not r.ok
+
+    def test_read_timeout_is_wrapped(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        # COMM-4: a socket.timeout (TimeoutError) from stdout.read() — the
+        # bound on a chatty-stderr wedge — must surface as CommunicatorError,
+        # not leak paramiko's raw exception past the communicator boundary.
+        _, client = fake_paramiko
+        client.read_exc = TimeoutError("read timed out")
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        with pytest.raises(CommunicatorError, match="timed out"):
+            c.execute(["sleep", "999"])
 
 
 class TestAuthSelection:

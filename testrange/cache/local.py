@@ -4,8 +4,10 @@ Layout:
     <root>/isos/<sha256>.bin   (opaque content)
     <root>/isos/<sha256>.json  (sidecar metadata)
 
-All writes use ``.partial`` + ``os.replace`` so a torn write never leaves
-a plausible-but-corrupt file at the canonical path.
+All writes use ``.partial`` + ``os.replace`` so a crash mid-write never
+leaves a plausible-but-corrupt file at the canonical path. This is crash
+safety for the single owning process (TestRange is single-instance — see
+ADR-0018), not a guard against concurrent writers.
 """
 
 from __future__ import annotations
@@ -58,8 +60,10 @@ def default_root() -> Path:
 class LocalCache:
     """File-backed content-addressed cache.
 
-    Methods are not thread-safe but use atomic-rename writes so a SIGKILL
-    during a write leaves the canonical path either fully-old or fully-new.
+    Single-instance by contract (ADR-0018): methods are not thread- or
+    process-safe. They use atomic-rename writes purely for crash safety, so a
+    SIGKILL during a write leaves the canonical path either fully-old or
+    fully-new — not to serialize concurrent writers (there are none).
     """
 
     def __init__(self, root: Path | None = None) -> None:
@@ -159,10 +163,18 @@ class LocalCache:
         from testrange.cache.entry import CacheEntry
 
         if CacheEntry(identifier).looks_like_sha:
-            # If a short prefix (16 chars) is given, accept any sha that starts with it.
-            for info in self.iter_entries():
-                if info.sha256.startswith(identifier):
-                    return info
+            # A short prefix (e.g. 16 chars) accepts any sha that starts with it,
+            # but an ambiguous prefix matching more than one entry must fail loud
+            # rather than silently return the first sha-sorted match.
+            matches = [info for info in self.iter_entries() if info.sha256.startswith(identifier)]
+            if len(matches) > 1:
+                shas = ", ".join(m.sha256[:16] for m in matches)
+                raise CacheError(
+                    f"sha-prefix {identifier!r} is ambiguous in local cache "
+                    f"(matches {shas}); use a longer prefix"
+                )
+            if matches:
+                return matches[0]
             raise CacheMissError(f"no entry with sha-prefix {identifier!r} in local cache")
 
         for info in self.iter_entries():

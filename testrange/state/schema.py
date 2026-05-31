@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from testrange.exceptions import StateError
+
 SCHEMA_VERSION = 1
 
 # Phase constants. Strings (JSON-writable without a custom encoder).
@@ -119,8 +121,18 @@ class State:
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> State:
+        # Fail loud on an unrecognized version rather than silently degrading
+        # (ADR-0003): an unknown schema means the file was written by a different
+        # testrange and we can't trust our field assumptions for cleanup.
+        version = int(data.get("schema_version", 0))
+        if version != SCHEMA_VERSION:
+            raise StateError(
+                f"state.json schema_version {version} is unsupported "
+                f"(this build reads v{SCHEMA_VERSION}); it was written by a different "
+                "testrange version — clean it up with that version, or remove the run dir"
+            )
         return cls(
-            schema_version=int(data.get("schema_version", 0)),
+            schema_version=version,
             run_id=data.get("run_id", ""),
             plan_name=data.get("plan_name", ""),
             driver_class=data.get("driver_class", ""),

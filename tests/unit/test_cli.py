@@ -39,7 +39,7 @@ class TestDescribe:
         assert "pool1" in out
         assert "web" in out
         assert "debian-13" in out
-        assert "⚠ not in cache" in out  # cache resolution attempted, miss surfaced
+        assert "(!) not in cache" in out  # cache resolution attempted, miss surfaced
         assert "nginx_is_installed" in out
 
     def test_describe_missing_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -57,6 +57,45 @@ class TestDescribe:
         with pytest.raises(SystemExit) as exc:
             cli.main(["describe", str(f)])
         assert exc.value.code == 2
+
+    def test_plan_that_raises_on_import_is_usage_error(
+        self,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # B4: a plan is arbitrary user .py; an exception at import (here a bare
+        # ValueError, as topology validation raises) must surface as a usage
+        # error on stderr, not a raw traceback.
+        f = tmp_path / "boom.py"
+        f.write_text("raise ValueError('bad topology')\n")
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["describe", str(f)])
+        assert exc.value.code == 2
+        assert "boom.py" in capsys.readouterr().err
+
+    def test_describe_binding_error_is_nonzero_and_on_stderr(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # H13: a profile that fails to resolve must exit non-zero with the error
+        # on stderr (not stdout/exit-0), so `describe && run` stops on a broken
+        # binding instead of proceeding.
+        from testrange.exceptions import DriverError
+
+        def _boom(*_a: object, **_k: object) -> object:
+            raise DriverError("incompatible binding")
+
+        monkeypatch.setattr("testrange.cli.resolve_backend", _boom)
+        plan_path = _write_generic_plan(tmp_path)
+        prof = tmp_path / "connect.toml"
+        prof.write_text('[p]\ndriver = "mock"\n')
+        rc = cli.main(["describe", plan_path, "--profile", f"{prof}:p"])
+        assert rc == 2
+        out = capsys.readouterr()
+        assert "incompatible binding" in out.err
+        assert "ERROR" not in out.out
 
 
 class TestRunSubcommand:

@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from testrange.cache import CacheEntry, CacheManager, LocalCache
-from testrange.cache.local import default_root
+from testrange.cache._names import validate_name
+from testrange.cache.local import CacheEntryInfo, default_root
 from testrange.exceptions import CacheError, CacheMissError
 
 
@@ -43,6 +44,36 @@ class TestStaging:
     def test_staging_created_on_access(self, tmp_path: Path) -> None:
         cache = LocalCache(root=tmp_path / "c")
         assert cache.staging.is_dir()
+
+
+class TestResolveAmbiguity:
+    def test_ambiguous_sha_prefix_fails_loud(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A short prefix matching two entries must raise, not silently return the
+        # first sha-sorted match. Two shas sharing a 16-char prefix are injected.
+        cache = LocalCache(root=tmp_path / "c")
+        prefix = "a" * 16
+        infos = [
+            CacheEntryInfo(prefix + "b" * 48, 1, (), None, "2026-05-11T00:00:00Z", None, None),
+            CacheEntryInfo(prefix + "c" * 48, 1, (), None, "2026-05-11T00:00:00Z", None, None),
+        ]
+        monkeypatch.setattr(cache, "iter_entries", lambda: iter(infos))
+        with pytest.raises(CacheError, match="ambiguous"):
+            cache.resolve(prefix)
+
+
+class TestNameValidation:
+    def test_all_dots_names_rejected(self) -> None:
+        # "." / ".." pass the charset but are reserved path components on the
+        # HTTP tier (/names/.. resolves to a parent dir).
+        for bad in (".", "..", "..."):
+            with pytest.raises(CacheError, match="all dots"):
+                validate_name(bad)
+
+    def test_normal_names_accepted(self) -> None:
+        for ok in ("debian-13", "a.b", "v1.2.3", "x_y"):
+            validate_name(ok)  # no raise
 
 
 class TestLocalCacheAdd:
@@ -82,6 +113,29 @@ class TestLocalCacheAdd:
         cache.add(src)
         partials = list(cache.isos.glob("*.partial"))
         assert partials == []
+
+    def test_torn_write_preserves_committed_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Single-instance crash safety (ADR-0018): a failed atomic rename never
+        # corrupts an already-committed entry — the canonical .bin is untouched.
+        cache = LocalCache(root=tmp_path / "c")
+        info = cache.add(_make_blob(tmp_path / "src.bin", payload=b"first\n"))
+        bin_path = cache.isos / f"{info.sha256}.bin"
+        committed = bin_path.read_bytes()
+
+        def _boom(self: Path, target: object) -> None:
+            raise OSError("simulated crash before rename completes")
+
+        monkeypatch.setattr(Path, "replace", _boom)
+        payload2 = b"second-different\n"
+        sha2 = hashlib.sha256(payload2).hexdigest()
+        with pytest.raises(OSError):
+            cache.add(_make_blob(tmp_path / "src2.bin", payload=payload2))
+        # The torn entry never appears at its canonical path (no corrupt hit)…
+        assert not (cache.isos / f"{sha2}.bin").exists()
+        # …and the previously-committed entry is intact.
+        assert bin_path.read_bytes() == committed
 
     def test_sidecar_schema(self, tmp_path: Path) -> None:
         cache = LocalCache(root=tmp_path / "c")

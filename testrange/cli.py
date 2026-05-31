@@ -119,7 +119,20 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
         print(f"error: cannot load plan module: {path}", file=sys.stderr)
         sys.exit(Exit.USAGE)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except TestRangeError as e:
+        # The plan built a topology testrange rejected (e.g. Hypervisor/Switch
+        # validation). A plan-authoring error, not a crash — exit USAGE.
+        print(f"error: invalid plan {path}: {e}", file=sys.stderr)
+        sys.exit(Exit.USAGE)
+    except Exception as e:
+        # A plan is arbitrary user .py executed at import; anything it raises
+        # (incl. the bare ValueError topology validation throws) must surface as
+        # a usage error naming the plan, not a raw testrange traceback. repr
+        # keeps the type+message debuggable.
+        print(f"error: failed to load plan {path}: {e!r}", file=sys.stderr)
+        sys.exit(Exit.USAGE)
     plan = getattr(module, "PLAN", None)
     if not isinstance(plan, Plan):
         print(f"error: {path} does not define a top-level PLAN: Plan(...)", file=sys.stderr)
@@ -176,6 +189,12 @@ def _build(args: argparse.Namespace) -> int:
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return Exit.USAGE
+    except CacheMissError as e:
+        print(f"cache miss: {e}", file=sys.stderr)
+        return Exit.USAGE
+    except CacheError as e:
+        print(f"cache error: {e}", file=sys.stderr)
+        return Exit.FAILURE
     except BuildFailedError as e:
         print(f"build failed: {e}", file=sys.stderr)
         return Exit.FAILURE
@@ -212,6 +231,12 @@ def _run(args: argparse.Namespace) -> int:
     except PreflightError as e:
         print(f"preflight failed:\n{e}", file=sys.stderr)
         return Exit.USAGE
+    except CacheMissError as e:
+        print(f"cache miss: {e}", file=sys.stderr)
+        return Exit.USAGE
+    except CacheError as e:
+        print(f"cache error: {e}", file=sys.stderr)
+        return Exit.FAILURE
     except BuildFailedError as e:
         print(f"build failed: {e}", file=sys.stderr)
         return Exit.FAILURE
@@ -286,18 +311,29 @@ def _cleanup(args: argparse.Namespace) -> int:
     except StateError as e:
         print(f"error: {e}", file=sys.stderr)
         return Exit.USAGE
+    except KeyboardInterrupt:
+        print("interrupted", file=sys.stderr)
+        return Exit.INTERRUPTED
+    except TestRangeError as e:
+        # cleanup is the recovery path; a driver error mid-teardown (e.g. a
+        # failed connect()) must not surface as a raw traceback.
+        print(f"error: {e}", file=sys.stderr)
+        return Exit.CLEANUP_ERRORS
 
 
 def _describe(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     profile = _load_profile_arg(args)
     mgr = _build_manager(args)
-    _print_describe(plan, tests, mgr, profile)
-    return Exit.OK
+    # A profile that fails to resolve is reported (on stderr) by _print_describe;
+    # exit non-zero so `testrange describe … && testrange run …` stops on a
+    # broken binding instead of proceeding (H13).
+    binding_ok = _print_describe(plan, tests, mgr, profile)
+    return Exit.OK if binding_ok else Exit.USAGE
 
 
-def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
-    """Print the resolved backend binding (or UNBOUND when ``--profile`` is missing).
+def _print_binding(plan: Plan, profile: BackendProfile | None) -> bool:
+    """Print the resolved backend binding; return whether it is usable.
 
     Under CORE-19 a concrete ``*Hypervisor`` is a topology-only scheme marker,
     so *every* runnable plan needs ``--profile``; the unbound message names the
@@ -305,6 +341,11 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
     The per-backend field list comes from ``profile.describe_fields()`` (each
     backend renders its own representative bits, with passwords masked). Build
     egress is the plan's ``build_switch`` now (ADR-0016), not a binding knob.
+
+    Returns ``False`` only when a profile was given but the binding failed to
+    resolve — that error goes to **stderr** and the caller exits non-zero, so a
+    ``describe && run`` chain stops instead of proceeding on a broken binding
+    (H13). A missing profile (UNBOUND) is informational, not an error.
     """
     hyp = plan.hypervisor
     if profile is None:
@@ -314,20 +355,20 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
         else:
             print("  backend: UNBOUND (pass --profile <name> to run)")
         print()
-        return
+        return True
     try:
         resolved = resolve_backend(plan, profile)
     except DriverError as e:
-        print(f"  backend: ERROR — {e}")
+        print(f"  backend: ERROR — {e}", file=sys.stderr)
         print()
-        return
+        return False
 
     print("  backend:")
     print(f"    driver: {profile.scheme} ({resolved.driver.DRIVER_NAME})")
     for label, value in profile.describe_fields():
         print(f"    {label}: {value}")
     if profile.uplinks:
-        rendered = ", ".join(f"{k}→{v}" for k, v in sorted(profile.uplinks.items()))
+        rendered = ", ".join(f"{k} -> {v}" for k, v in sorted(profile.uplinks.items()))
         print(f"    uplinks: {rendered}")
     else:
         print("    uplinks: none")
@@ -337,15 +378,19 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> None:
     else:
         print(f"    build egress: switch {bs.name!r} (uplink={bs.uplink or 'none'})")
     print()
+    return True
 
 
 def _print_describe(
     plan: Plan, tests: list[Any], mgr: CacheManager, profile: BackendProfile | None = None
-) -> None:
-    """Pretty-print a Plan + its tests. Shared by `describe` and `repl`."""
+) -> bool:
+    """Pretty-print a Plan + its tests; return whether the binding is usable.
+
+    Shared by `describe` and `repl`.
+    """
     hyp = plan.hypervisor
     print(f"Plan ({type(hyp).__name__})")
-    _print_binding(plan, profile)
+    binding_ok = _print_binding(plan, profile)
 
     if switches := getattr(hyp, "networks", ()):
         print("Switches:")
@@ -416,7 +461,7 @@ def _print_describe(
                     info = mgr.resolve(base, fetch=False)
                     print(f"    base:   {base!r}  -> {info.short_sha} ({_format_size(info.size)})")
                 except CacheMissError:
-                    print(f"    base:   {base!r}  ⚠ not in cache")
+                    print(f"    base:   {base!r}  (!) not in cache")
             if creds := getattr(builder, "credentials", ()):
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
                 print(f"    creds:  {names}")
@@ -435,6 +480,8 @@ def _print_describe(
     if cache_refs:
         unique = {e.identifier for e in cache_refs}
         print(f"CacheEntry references: {len(unique)} unique")
+
+    return binding_ok
 
 
 def _cache_errors(fn: Handler) -> Handler:
@@ -496,14 +543,14 @@ def _cache_forget_name(args: argparse.Namespace) -> int:
 @_cache_errors
 def _cache_push(args: argparse.Namespace) -> int:
     info = _build_manager(args).push(args.identifier)
-    print(f"pushed {info.short_sha} → http cache")
+    print(f"pushed {info.short_sha} -> http cache")
     return Exit.OK
 
 
 @_cache_errors
 def _cache_pull(args: argparse.Namespace) -> int:
     info = _build_manager(args).pull(args.identifier)
-    print(f"pulled {info.short_sha} ← http cache")
+    print(f"pulled {info.short_sha} <- http cache")
     return Exit.OK
 
 
@@ -536,7 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log-level",
         default="INFO",
-        choices=("DEBUG", "INFO", "WARN", "WARNING", "ERROR"),
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="set log level (default INFO)",
     )
     parser.add_argument(

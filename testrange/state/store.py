@@ -1,14 +1,24 @@
-"""StateStore — atomic read/write of state.json + state.pid.
+"""StateStore — crash-safe state.json + state.pid for one run.
 
-The owning process records its PID in ``state.pid``. Callers that need
-exclusive access (the cleanup path) call ``require_dead()`` to refuse
-against a still-running owner with a meaningful error.
+TestRange is single-instance: one ``testrange`` process per user/profile at
+a time (ADR-0018). These writes are *not* a concurrency mechanism. They use
+``.partial`` + ``os.replace`` so a crash (SIGKILL, power loss) mid-write
+leaves state.json fully-old or fully-new, never torn — they do not serialize
+two writers, because by contract there is never more than one.
+
+The owning process holds an exclusive advisory lock on ``state.lock``
+(``fcntl.flock``) for the run's lifetime; ``state.pid`` is a human-readable
+breadcrumb only. The ``cleanup`` recovery tool calls ``require_dead()``, which
+probes that lock — a live owner holds it, a dead/crashed owner's lock was
+released by the kernel — so cleanup never races a live owner and a recycled PID
+can't fool it (ADR-0018, CORE-30: supersedes the old PID-liveness check).
 """
 
 from __future__ import annotations
 
 import contextlib
 import datetime as _dt
+import fcntl
 import json
 import os
 import secrets
@@ -81,6 +91,8 @@ class StateStore:
         self.run_dir = run_dir
         self.state_path = run_dir / "state.json"
         self.pid_path = run_dir / "state.pid"
+        self.lock_path = run_dir / "state.lock"
+        self._lock_fd: int | None = None
 
     def initialize(
         self,
@@ -107,27 +119,62 @@ class StateStore:
             created_at=_now_utc_iso(),
             resources=(),
         )
-        # PID first: it is the ownership guard. Writing it before state.json
-        # closes the window where state.json exists with no recorded owner — a
-        # concurrent `cleanup --all` seeing an owner-less state file could tear
-        # the run down mid-bring-up. The reverse (pid without state.json) is
-        # benign: read() fails loudly and remove() tolerates a missing state.
+        # The advisory lock is the ownership guard — held until release/remove,
+        # and auto-released by the kernel if this process crashes, so a recycled
+        # PID can never masquerade as the owner (ADR-0018). It is acquired before
+        # any state file is written, so the `cleanup` recovery tool (which gates
+        # on the lock, not on state.json existing) can never tear down a run
+        # mid-bring-up. state.pid is written purely as a human-readable breadcrumb.
+        self._acquire_lock()
         self._write_pid_atomic(os.getpid())
         self._write_state_atomic(state)
         _log.info("state initialized for run %s at %s", run_id, self.run_dir)
         return state
 
     def release(self) -> None:
-        """Remove state.pid (the run is done; cleanup may safely act)."""
+        """Drop ownership (the run is done; cleanup may safely act).
+
+        Releases the advisory lock and removes the breadcrumb pid file.
+        """
+        self._release_lock()
         self.pid_path.unlink(missing_ok=True)
 
     def remove(self) -> None:
         """Remove the entire run directory (post-cleanup)."""
+        self._release_lock()
         if self.state_path.exists():
             self.state_path.unlink(missing_ok=True)
         self.pid_path.unlink(missing_ok=True)
+        self.lock_path.unlink(missing_ok=True)
         with contextlib.suppress(OSError):  # non-empty (foreign files) — leave it
             self.run_dir.rmdir()
+
+    def _acquire_lock(self) -> None:
+        """Take the exclusive advisory lock that marks this process as the run's
+        owner, holding it for the run's lifetime.
+
+        Idempotent within an instance. Raises :class:`StateLockedError` if a live
+        process already owns the run (holds the lock).
+        """
+        if self._lock_fd is not None:
+            return
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            os.close(fd)
+            raise StateLockedError(
+                f"run {self.run_dir.name} is owned by a live process "
+                "(state.lock held); kill it or wait for it to exit."
+            ) from e
+        self._lock_fd = fd
+
+    def _release_lock(self) -> None:
+        """Release the advisory lock if this instance holds it."""
+        if self._lock_fd is not None:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = None
 
     def exists(self) -> bool:
         return self.state_path.exists()
@@ -157,13 +204,24 @@ class StateStore:
         return is_pid_alive(pid)
 
     def require_dead(self) -> None:
-        """Raise StateLockedError if the owning PID is still alive."""
-        pid = self.read_pid()
-        if pid is not None and is_pid_alive(pid):
+        """Raise StateLockedError if the run's owner is still alive.
+
+        Probes the advisory lock without holding it: a live owner holds
+        ``state.lock`` (flock), so a non-blocking acquire fails; a dead/crashed
+        owner's lock was released by the kernel, so the acquire succeeds and we
+        immediately drop it. This closes the PID-reuse window the old
+        liveness check had (ADR-0018, CORE-30).
+        """
+        fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
             raise StateLockedError(
-                f"PID {pid} still owns run {self.run_dir.name}; "
-                "kill it first or wait for it to exit, then re-run cleanup."
-            )
+                f"run {self.run_dir.name} is owned by a live process "
+                "(state.lock held); kill it or wait for it to exit, then re-run cleanup."
+            ) from e
+        finally:
+            os.close(fd)
 
     def record_intent(
         self,
