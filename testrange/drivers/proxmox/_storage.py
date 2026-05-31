@@ -150,13 +150,20 @@ def download_from_pool(client: ProxmoxClient, vol_ref: VolumeRef, dest_path: Pat
     Reading ``vol_ref``'s own staging file instead would return the stale
     pre-boot image — the bug this whole dance exists to avoid.
     """
-    vmid, scsi_index = _vm.resolve_disk(client, str(vol_ref))
+    vmid, slot = _vm.resolve_disk(client, str(vol_ref))
     config = client.api.nodes(client.node).qemu(vmid).config.get()
-    key = f"scsi{scsi_index}"
-    entry = config.get(key)
+    # The disk lives at slot ``slot`` on whatever bus create_vm chose
+    # (ProxmoxHardDrive lets a data disk be virtio/sata/ide, not just scsi). The
+    # slot number is unique per disk, so scan the buses for it — capture stays
+    # bus-agnostic without threading the device's bus through the resolution.
+    key = next(
+        (f"{bus}{slot}" for bus in ("scsi", "virtio", "sata", "ide") if f"{bus}{slot}" in config),
+        None,
+    )
+    entry = config.get(key) if key is not None else None
     if not entry:
         raise DriverError(
-            f"download_from_pool: VM {vmid} has no {key} (ref {vol_ref!r}); "
+            f"download_from_pool: VM {vmid} has no disk at slot {slot} (ref {vol_ref!r}); "
             "create_vm did not attach the expected disk"
         )
     live_volid = str(entry).split(",", 1)[0]  # strip ",size=…,…" options

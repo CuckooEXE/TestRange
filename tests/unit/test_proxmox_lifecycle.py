@@ -162,6 +162,42 @@ class TestCreateVm:
         assert c.api.created["ide2"] == f"{_SEED},media=cdrom"
         assert c.api.resized == {"disk": "scsi0", "size": "8G"}  # grown to spec
 
+    def test_data_disk_bus_is_selectable_per_disk(self) -> None:
+        # ProxmoxHardDrive(bus=...) places each data disk on its chosen
+        # controller at slot i+1; a plain disk defaults to scsi. The OS disk is
+        # always scsi0.
+        from testrange.drivers.proxmox import ProxmoxHardDrive
+
+        c = _client()
+        spec = VMSpec(
+            name="web",
+            devices=[
+                CPU(2),
+                Memory(1024),
+                OSDrive("pool1", 8),
+                ProxmoxHardDrive("pool1", 1, bus="scsi"),
+                ProxmoxHardDrive("pool1", 1, bus="virtio"),
+            ],
+        )
+        refs = [
+            VolumeRef("local:import/p__tr-vm-x-web-data0.qcow2"),
+            VolumeRef("local:import/p__tr-vm-x-web-data1.qcow2"),
+        ]
+        _vm.create_vm(
+            c,
+            "tr-vm-x-web",
+            spec,
+            "plan",
+            os_disk_ref=_OS_REF,
+            seed_iso_ref=None,
+            network_refs={},
+            data_disk_refs=refs,
+        )
+        cfg = c.api.created
+        assert cfg["scsi0"] == f"local:0,import-from={_OS_REF}"  # OS: always scsi0
+        assert cfg["scsi1"] == f"local:0,import-from={refs[0]}"  # data0 -> scsi, slot 1
+        assert cfg["virtio2"] == f"local:0,import-from={refs[1]}"  # data1 -> virtio, slot 2
+
     def test_seedless_run_vm_is_not_resized(self) -> None:
         c = _client()
         _create(c, seed_iso_ref=None)
