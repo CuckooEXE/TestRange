@@ -31,7 +31,8 @@ own ``preflight`` and is merged by the orchestrator.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from testrange.drivers import (
@@ -44,6 +45,7 @@ from testrange.preflight import PreflightFinding
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.connect import BackendProfile
+    from testrange.devices.network import StaticAddr
     from testrange.plan import Plan
 
 
@@ -60,6 +62,11 @@ class ResolvedBackend:
 
     driver: HypervisorDriver
     driver_uri: str
+    # Per-uplink static sidecar addressing from the profile (NET-8), keyed by
+    # logical uplink name. The orchestrator injects it into a Switch's sidecar so
+    # a host-NAT'd uplink that won't DHCP the sidecar still egresses. Empty for an
+    # in-plan binding or a profile that declares no table-form uplinks.
+    uplink_addrs: Mapping[str, StaticAddr] = field(default_factory=dict)
 
 
 def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBackend:
@@ -98,6 +105,7 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
     return ResolvedBackend(
         driver=driver,
         driver_uri=_driver_uri(driver),
+        uplink_addrs=profile.uplink_addrs,
     )
 
 

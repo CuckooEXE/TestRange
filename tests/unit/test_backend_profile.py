@@ -112,8 +112,70 @@ class TestUplinksCommon:
             load_profile(_write(tmp_path, '[p]\ndriver = "mock"\nuplinks = "nope"\n'), "p")
 
     def test_non_string_value_rejected(self, tmp_path: Path) -> None:
-        with pytest.raises(ProfileError, match="non-empty host-interface string"):
+        with pytest.raises(ProfileError, match="host-interface string or a table"):
             load_profile(_write(tmp_path, '[p]\ndriver = "mock"\n[p.uplinks]\nlab = 5\n'), "p")
+
+    def test_empty_string_value_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match="non-empty host-interface string"):
+            load_profile(_write(tmp_path, '[p]\ndriver = "mock"\n[p.uplinks]\nlab = ""\n'), "p")
+
+
+class TestUplinkTableForm:
+    """NET-8: an uplink value may be a table carrying static sidecar addressing."""
+
+    def _load(self, tmp_path: Path, uplinks_toml: str) -> BackendProfile:
+        return load_profile(_write(tmp_path, f'[p]\ndriver = "mock"\n{uplinks_toml}'), "p")
+
+    def test_table_form_parses_bridge_and_addr(self, tmp_path: Path) -> None:
+        prof = self._load(
+            tmp_path,
+            "[p.uplinks.egress]\n"
+            'bridge = "vmbr9"\n'
+            'sidecar_addr = "10.10.10.2/24"\n'
+            'gateway = "10.10.10.1"\n'
+            'dns = ["1.1.1.1", "8.8.8.8"]\n',
+        )
+        assert dict(prof.uplinks) == {"egress": "vmbr9"}  # driver still gets the bridge
+        addr = prof.uplink_addrs["egress"]
+        assert addr.addr == "10.10.10.2/24"
+        assert addr.gw == "10.10.10.1"
+        assert addr.dns == ("1.1.1.1", "8.8.8.8")
+
+    def test_string_and_table_forms_coexist(self, tmp_path: Path) -> None:
+        prof = self._load(
+            tmp_path,
+            '[p.uplinks]\nplain = "vmbr3"\n'
+            '[p.uplinks.egress]\nbridge = "vmbr9"\nsidecar_addr = "10.10.10.2/24"\n',
+        )
+        assert dict(prof.uplinks) == {"plain": "vmbr3", "egress": "vmbr9"}
+        assert set(prof.uplink_addrs) == {"egress"}  # only the table form carries an addr
+
+    def test_table_form_bridge_only_has_no_addr(self, tmp_path: Path) -> None:
+        prof = self._load(tmp_path, '[p.uplinks.egress]\nbridge = "vmbr9"\n')
+        assert dict(prof.uplinks) == {"egress": "vmbr9"}
+        assert dict(prof.uplink_addrs) == {}
+
+    def test_table_missing_bridge_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match="requires a non-empty 'bridge'"):
+            self._load(tmp_path, '[p.uplinks.egress]\nsidecar_addr = "10.10.10.2/24"\n')
+
+    def test_table_unknown_key_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match="unknown key"):
+            self._load(tmp_path, '[p.uplinks.egress]\nbridge = "vmbr9"\nnope = 1\n')
+
+    def test_sidecar_addr_without_prefix_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match="explicit prefix"):
+            self._load(
+                tmp_path, '[p.uplinks.egress]\nbridge = "vmbr9"\nsidecar_addr = "10.10.10.2"\n'
+            )
+
+    def test_dns_must_be_list_of_strings(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match="dns must be a list of strings"):
+            self._load(
+                tmp_path,
+                '[p.uplinks.egress]\nbridge = "vmbr9"\n'
+                'sidecar_addr = "10.10.10.2/24"\ndns = "1.1.1.1"\n',
+            )
 
 
 class TestABCConstraints:

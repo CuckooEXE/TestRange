@@ -85,7 +85,28 @@ class _FakeApi:
             self.vnets[kwargs["vnet"]] = {"zone": kwargs.get("zone"), "alias": kwargs.get("alias")}
             return None
         if path.endswith("/subnets") and method == "post":
-            self.subnets.append({"vnet": path.split("/")[3], **kwargs})
+            # PVE derives the subnet id as <zone>-<network>-<mask> and exposes
+            # both the id (``subnet``) and the CIDR (``cidr``) on GET; model that
+            # faithfully so the driver's idempotency (by cidr) and teardown (by
+            # id) paths are exercised against the real shape, not the raw POST.
+            vid = path.split("/")[3]
+            zone = self.vnets.get(vid, {}).get("zone")
+            net, mask = kwargs["subnet"].split("/")
+            self.subnets.append(
+                {
+                    "vnet": vid,
+                    "subnet": f"{zone}-{net}-{mask}",
+                    "cidr": kwargs["subnet"],
+                    "gateway": kwargs.get("gateway"),
+                    "type": kwargs.get("type"),
+                }
+            )
+            return None
+        if path.endswith("/subnets") and method == "get":
+            return [s for s in self.subnets if s["vnet"] == path.split("/")[3]]
+        if "/subnets/" in path and method == "delete":
+            sid = path.rsplit("/", 1)[1]
+            self.subnets = [s for s in self.subnets if s["subnet"] != sid]
             return None
         if path.endswith("/firewall/options") and method == "put":
             self.fw_options.append({"vnet": path.split("/")[3], **kwargs})
@@ -95,7 +116,7 @@ class _FakeApi:
             # fw_rules is kept in evaluation order (index 0 = first evaluated).
             self.fw_rules.insert(0, {"vnet": path.split("/")[3], **kwargs})
             return None
-        if path.startswith("cluster/sdn/vnets/") and method == "delete":
+        if path.startswith("cluster/sdn/vnets/") and "/subnets" not in path and method == "delete":
             self.vnets.pop(path.rsplit("/", 1)[1], None)
             return None
         if path == "cluster/sdn" and method == "put":
@@ -430,6 +451,62 @@ class TestL2:
         assert c.api.vnets == {}
         assert c.api.zones == {}  # zone dropped once its last vnet is gone
 
+    def test_guest_gateway_is_ssh_jump_through_the_host(self) -> None:
+        # ORCH-16: guests live on isolated SDN vnets the off-box orchestrator
+        # can't route to, so SSH transports jump through the PVE host (reusing
+        # the SFTP host creds). QGA transports don't consult this.
+        from testrange.drivers.proxmox._client import ProxmoxConn
+        from testrange.gateways import SSHJumpGateway
+
+        d = ProxmoxDriver(
+            ProxmoxConn(host="pve.example", user="root@pam", password="secret"),
+            client=_FakeClient(),  # type: ignore[arg-type]
+        )
+        gw = d.guest_gateway()
+        assert isinstance(gw, SSHJumpGateway)
+        assert gw.host == "pve.example"
+        assert gw.username == "root"  # ssh_user default
+        assert gw.password == "secret"  # ssh_password falls back to the API password
+
+    def test_mgmt_switch_adds_subnet_with_dot2_gateway(self) -> None:
+        # PVE-44 / ADR-0009(B): a mgmt=True Switch plants the host .2 adapter as
+        # an SDN subnet (gateway=.2) on the vnet — the PVE analog of libvirt's
+        # <ip address=.2>. No SNAT/DHCP keys: it is a pure host adapter.
+        c = _FakeClient()
+        d = _driver(c)
+        d.create_switch(Switch("sw1", Network("a"), cidr="10.30.0.0/24", mgmt=True), "tr-switch-x")
+        assert len(c.api.subnets) == 1
+        sub = c.api.subnets[0]
+        assert sub["cidr"] == "10.30.0.0/24"
+        assert sub["gateway"] == "10.30.0.2"
+        assert sub["type"] == "subnet"
+        assert "snat" not in sub and "dhcp-range" not in sub
+
+    def test_non_mgmt_switch_adds_no_subnet(self) -> None:
+        c = _FakeClient()
+        _driver(c).create_switch(Switch("sw1", Network("a"), cidr="10.0.0.0/24"), "tr-switch-x")
+        assert c.api.subnets == []
+
+    def test_destroy_mgmt_switch_drops_subnet_then_vnet(self) -> None:
+        # PVE refuses to delete a vnet that still holds subnets, so destroy_switch
+        # must drop the subnet first — and do so self-discovering (no mgmt flag).
+        c = _FakeClient()
+        d = _driver(c)
+        d.create_switch(Switch("sw1", Network("a"), cidr="10.30.0.0/24", mgmt=True), "tr-switch-x")
+        d.destroy_switch("tr-switch-x")
+        assert c.api.subnets == []
+        assert c.api.vnets == {}
+        assert c.api.zones == {}
+
+    def test_create_switch_mgmt_is_idempotent(self) -> None:
+        # A re-entrant create_switch (crash-recovery) must not double-post the subnet.
+        c = _FakeClient()
+        d = _driver(c)
+        sw = Switch("sw1", Network("a"), cidr="10.30.0.0/24", mgmt=True)
+        d.create_switch(sw, "tr-switch-x")
+        d.create_switch(sw, "tr-switch-x")
+        assert len(c.api.subnets) == 1
+
     def test_uplink_nat_switch_returns_resolved_bridge(self) -> None:
         # ADR-0016: the sidecar's eth1 attaches to the host bridge the profile's
         # [uplinks] resolves the logical name to (here egress→vmbr0). Egress is
@@ -518,10 +595,13 @@ class TestPreflight:
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")), build_switch=build)
         assert "proxmox-uplink-bridge-missing" in {f.code for f in report.findings}
 
-    def test_mgmt_is_rejected(self) -> None:
+    def test_mgmt_is_accepted(self) -> None:
+        # PVE-44 / ADR-0009(B): Proxmox realizes mgmt (host .2 on the vnet), so it
+        # drops the shared mgmt_unsupported gate — a mgmt=True plan preflights clean.
         sw = Switch("sw1", Network("netA"), cidr="10.0.0.0/24", mgmt=True)
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")))
-        assert "mgmt-unsupported" in {f.code for f in report.findings}
+        assert "mgmt-unsupported" not in {f.code for f in report.findings}
+        assert bool(report), report.render()
 
     def test_native_communicator_ok_with_qga(self) -> None:
         # A NativeCommunicator plan has no extra preflight gate; it passes clean.

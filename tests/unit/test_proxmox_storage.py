@@ -136,12 +136,27 @@ class TestDownload:
         assert remote == "/var/lib/vz/images/107/vm-107-disk-0.qcow2"
         assert dest == "/tmp/out.qcow2"
 
-    def test_download_missing_scsi_entry_raises(self) -> None:
+    def test_download_finds_disk_on_a_non_scsi_bus(self) -> None:
+        # A ProxmoxHardDrive(bus="virtio") data disk lives at slot 1 on virtio,
+        # not scsi; download_from_pool must scan buses for the slot (capture stays
+        # bus-agnostic).
         c = _client()
         c.api.vms = [{"vmid": 107, "name": "tr-vm-x-web"}]
-        c.api.configs[107] = {}  # no scsi0
+        c.api.configs[107] = {
+            "scsi0": "local:107/vm-107-disk-0.qcow2",
+            "virtio1": "local:107/vm-107-disk-1.qcow2,size=1G",
+        }
+        ref = _naming.compose_volume_ref("local", "tr-pool-x-p1", "tr-vm-x-web-data0.qcow2")
+        _storage.download_from_pool(c, ref, Path("/tmp/out.qcow2"))
+        (remote, _dest) = c.got[0]
+        assert remote.endswith("vm-107-disk-1.qcow2")
+
+    def test_download_missing_disk_entry_raises(self) -> None:
+        c = _client()
+        c.api.vms = [{"vmid": 107, "name": "tr-vm-x-web"}]
+        c.api.configs[107] = {}  # no disk on any bus
         ref = _naming.compose_volume_ref("local", "tr-pool-x-p1", "tr-vm-x-web.qcow2")
-        with pytest.raises(DriverError, match="no scsi0"):
+        with pytest.raises(DriverError, match="no disk at slot 0"):
             _storage.download_from_pool(c, ref, Path("/tmp/out.qcow2"))
 
 

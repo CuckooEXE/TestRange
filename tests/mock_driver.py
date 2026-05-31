@@ -37,6 +37,7 @@ from testrange.preflight import (
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
+    from testrange.devices.network import StaticAddr
     from testrange.devices.pool.base import StoragePool
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.networks.base import BuildNic, Network, Switch
@@ -448,16 +449,19 @@ class MockProfile(BackendProfile):
     pool_root: Path | None = None
     backing_capacity_gb: int | None = None
     uplinks: Mapping[str, str] = field(default_factory=dict)
+    uplink_addrs: Mapping[str, StaticAddr] = field(default_factory=dict)
 
     @classmethod
     def _from_table(cls, table: Mapping[str, Any], path: Path) -> Self:
         cls._validate_keys(table, cls._FIELDS, path)
         pool_root = table.get("pool_root")
         capacity = table.get("backing_capacity_gb")
+        uplinks, uplink_addrs = cls._parse_uplinks(table, path)
         return cls(
             pool_root=Path(pool_root) if pool_root is not None else None,
             backing_capacity_gb=int(capacity) if capacity is not None else None,
-            uplinks=cls._parse_uplinks(table, path),
+            uplinks=uplinks,
+            uplink_addrs=uplink_addrs,
         )
 
     def build_driver(self) -> MockDriver:

@@ -61,6 +61,15 @@ class CommunicatorClosedError(CommunicatorError):
     """A communicator was used (or re-bound) after close(); it is one-shot."""
 
 
+class GatewayError(TestRangeError):
+    """A guest-reachability gateway was misconfigured or could not be established.
+
+    Raised for non-retryable conditions (missing credentials, no usable
+    transport). Transient connect/channel failures surface as the underlying
+    transport's exception so a caller's retry loop can act on them.
+    """
+
+
 class BuilderError(TestRangeError):
     """Builder-side failure (render, seed authoring, etc.)."""
 

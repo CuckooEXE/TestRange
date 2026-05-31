@@ -241,6 +241,14 @@ portable plan. Egress is **out-of-band**: a named uplink is a host bridge the
 operator provisions (NAT/DHCP behind it); TestRange never manufactures, SNATs, or
 fences it — it only attaches.
 
+An uplink value may be a **string** (the bridge — the sidecar DHCPs on it) or a
+**table** (NET-8, ADR-0016 addendum): `{bridge, sidecar_addr, gateway, dns}` for
+a bare host-NAT bridge that NATs but runs no DHCP/DNS (a Proxmox `vmbr`). The
+driver still gets only `name → bridge`; the static addressing rides
+`profile.uplink_addrs` → `ResolvedBackend` → the orchestrator injects it into
+`Switch.sidecar.addr` (`provision._effective_switch`, both phases) so a host-NAT
+uplink egresses + resolves without the plan naming any host address.
+
 **NAT topology** (`Sidecar(nat=True)` + `uplink="<named>"`): the driver realizes
 TWO L2 segments — an isolated switch segment (guests + sidecar's eth0 at `.1`,
 plus the host's `.2` if `mgmt`) and a separate uplink segment enslaving the
@@ -1108,6 +1116,26 @@ but empty).
   — there is no manufactured `snat` vnet or VNet-firewall fence. The SDK is
   lazily imported, so the package registers with no `proxmoxer` installed; unit
   tests inject a duck-typed fake client.
+
+- **`PVE-44` — `Switch(mgmt=True)` realized (ADR-0009 ratified, option B).** A
+  `mgmt=True` Switch gets the host's `.2` adapter as an SDN **subnet** on its
+  vnet (`gateway = switch.mgmt_ip`, no SNAT/DHCP), which PVE plumbs onto the
+  vnet bridge on the single, node-pinned host — the analog of libvirt's
+  `<ip address=.2>`. `destroy_switch` drops the subnet before the vnet
+  (self-discovering). `ProxmoxDriver.preflight` therefore **drops** the shared
+  `mgmt_unsupported_findings` gate. Reachability is hypervisor-local (guest ↔
+  host), not promised to a remote test runner; clusters stay out of scope
+  (PVE-31). Live-validated through `_sdn` against the cert host.
+
+- **`ORCH-16` — off-box guest reachability (`GuestGateway`, ADR-0020).** A remote
+  orchestrator can't route to guests on the isolated SDN vnet, so SSH transports
+  ride a backend-agnostic `GuestGateway` (`testrange/gateways/`): the driver
+  returns one from `guest_gateway()` (default `None` = directly routable, e.g.
+  local libvirt), the orchestrator brokers it onto `SSHCommunicator.bind`, and
+  the communicator opens its socket through it without knowing the mechanism.
+  `ProxmoxDriver` returns an `SSHJumpGateway` that ProxyJumps through the PVE
+  host (which carries the mgmt `.2` — PVE-44), reusing the SFTP host creds. QGA
+  transports ignore it (they ride the REST control plane).
 
 - **`PVE-6` — stamped-name → vmid resolution.** `create_vm` stamps the composed
   backend name into the VM's PVE `name`; `_vm.resolve_vmid` recovers the vmid by

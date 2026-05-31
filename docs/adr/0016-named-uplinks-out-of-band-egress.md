@@ -157,3 +157,35 @@ on that table's `driver` key to the registered `BackendProfile` subclass.
   `orchestrator/{backend,build,build_phase,provision,runtime}.py`, `preflight.py`,
   `hypervisor.py` (`build_switch` field), `cli.py` (`--profile`), `PLAN.md §10`,
   `examples/*` + `connect.toml.example`, and the user/dev docs.
+
+## Addendum — 2026-05-31 (NET-8): static sidecar uplink addressing
+
+The uplink contract above assumed the host bridge a logical name resolves to
+either DHCPs the sidecar's MASQUERADE NIC or doesn't need to (a libvirt NAT
+network runs dnsmasq; the sidecar's `eth1` leases an IP + gateway + upstream
+DNS). A bare **host-NAT bridge** (e.g. a Proxmox `vmbr` that MASQUERADEs to the
+host's uplink but runs no DHCP/DNS) breaks that: the sidecar's `eth1` gets no
+address, so the MASQUERADE has no source to fire on and dnsmasq has no upstream.
+
+So an uplink value may now be **either a string** (the bridge — DHCP path,
+unchanged) **or a table** carrying static sidecar addressing:
+
+```toml
+[profile.uplinks.egress]
+bridge       = "vmbr9"
+sidecar_addr = "10.10.10.2/24"   # static IP for the sidecar's eth1
+gateway      = "10.10.10.1"      # the host's IP on that bridge
+dns          = ["1.1.1.1"]       # explicit upstream resolver(s)
+```
+
+The driver still receives only `uplinks` (name → bridge). The addressing is
+parsed into a separate `uplink_addrs` map on the profile and carried on
+`ResolvedBackend`; the orchestrator — the one place that sees both the plan's
+`Sidecar` and the binding — injects it into the Switch's `Sidecar.addr`
+(`provision._effective_switch`) before the sidecar is specced/rendered. The
+NET-7 mechanism it rides (`render_sidecar_interfaces` static `eth1`,
+`render_dnsmasq_conf` `no-resolv`+`server=`) already existed; NET-8 is the
+profile→sidecar plumbing that keeps the *plan* portable. A plan-set
+`Sidecar(addr=...)` still wins. Single static addr per uplink: two NAT sidecars
+sharing one uplink *concurrently* would need distinct addresses — out of scope
+for v1 (sequential build/run phases don't collide).

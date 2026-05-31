@@ -10,7 +10,9 @@ there is no pool->pool copy and no shared base (ADR-0010 §3).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from functools import partial
+from typing import TYPE_CHECKING
 
 from testrange.builders.sidecar_iso import build_sidecar_config_iso
 from testrange.cache.entry import CacheEntry
@@ -27,6 +29,36 @@ from testrange.networks.sidecar import (
 )
 from testrange.orchestrator.build import _sidecar_spec
 from testrange.orchestrator.context import RunContext
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from testrange.devices.network import StaticAddr
+
+
+def _effective_switch(switch: Switch, uplink_addrs: Mapping[str, StaticAddr]) -> Switch:
+    """Inject the profile's static uplink address (NET-8) into a Switch's sidecar.
+
+    The plan stays portable: a host-NAT'd uplink's static MASQUERADE-NIC address
+    (which won't DHCP) lives in the bound profile's ``[uplinks]`` table, not the
+    Switch. The orchestrator is the only thing that sees both, so it brokers the
+    merge here. A no-op unless the Switch has a ``nat`` sidecar with no address of
+    its own (a plan-set ``addr`` wins) and the profile maps its uplink name.
+    """
+    sc = switch.sidecar
+    if sc is None or not sc.nat or sc.addr is not None or switch.uplink is None:
+        return switch
+    addr = uplink_addrs.get(switch.uplink)
+    if addr is None:
+        return switch
+    return Switch(
+        switch.name,
+        *switch.networks,
+        cidr=switch.cidr,
+        uplink=switch.uplink,
+        mgmt=switch.mgmt,
+        sidecar=replace(sc, addr=addr),
+    )
 
 
 def mac_for(ctx: RunContext, vm_name: str, idx: int) -> str:
@@ -102,6 +134,9 @@ def materialize_sidecar_for(
     """
     if not switch.needs_sidecar:
         return
+    # NET-8: merge any profile-supplied static uplink address into the sidecar
+    # before it is specced/rendered, so a host-NAT'd uplink egresses + resolves.
+    switch = _effective_switch(switch, ctx.resolved.uplink_addrs)
     if pool_backend is None:
         if not ctx.plan.hypervisor.pools:
             raise OrchestratorError(

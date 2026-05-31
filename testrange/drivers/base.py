@@ -13,6 +13,7 @@ from testrange.preflight import PreflightReport
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
+    from testrange.gateways.base import GuestGateway
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
@@ -350,6 +351,23 @@ class HypervisorDriver(ABC):
         """A VM-bound callable that writes a file into the guest via the
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")
+
+    # Guest reachability (off-box transports like SSHCommunicator).
+
+    def guest_gateway(self) -> GuestGateway | None:
+        """A gateway the orchestrator routes off-box guest connections through.
+
+        ``None`` (default) means guests are **directly routable** from wherever
+        the orchestrator runs — true for a co-located backend (local libvirt),
+        where an ``SSHCommunicator`` dials the guest's address straight. A remote
+        backend whose guests sit on an isolated segment returns a concrete
+        :class:`~testrange.gateways.base.GuestGateway` (e.g. an
+        :class:`~testrange.gateways.ssh_jump.SSHJumpGateway` through the
+        hypervisor host) so the orchestrator can reach them without the
+        communicator knowing the mechanism. Native-agent transports (QGA, VMware
+        Tools) tunnel through the control plane and never consult this.
+        """
+        return None
 
     # Build-result sink (hypervisor capability, not agent-level).
     # The build phase keys success on a structured ``TESTRANGE-RESULT:``

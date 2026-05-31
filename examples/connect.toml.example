@@ -31,11 +31,24 @@ backing_storage = "local"   # optional
 
 # Named uplinks (ADR-0016): a plan's `Switch(uplink="<name>")` resolves here to a
 # host iface/bridge. `egress` is the out-of-band bridge a NAT sidecar routes out
-# of (it must already have NAT/DHCP behind it — testrange only attaches). Map as
-# many as your plans reference; an unmapped name fails at preflight.
+# of. Map as many as your plans reference; an unmapped name fails at preflight.
+#
+# Two value forms:
+#   - string: just the bridge. The sidecar's MASQUERADE NIC DHCPs on it, so the
+#     bridge must have DHCP+DNS behind it (e.g. a libvirt NAT network).
+#   - table (NET-8): bridge + a static sidecar address, for a host-NAT'd bridge
+#     that does NAT but not DHCP/DNS — gives the sidecar's uplink NIC a source IP
+#     for the MASQUERADE and an explicit upstream resolver.
 [pve.uplinks]
-egress = "vmbr0"            # the host bridge carrying the default gateway
+egress = "vmbr0"            # string form: the bridge has DHCP/DNS behind it
 # lab = "vmbr3"            # another physical bridge a plain Switch(uplink=) can use
+
+# Table form — a host-NAT bridge (NATs to the host's uplink, no DHCP/DNS server):
+# [pve.uplinks.egress]
+# bridge       = "vmbr9"
+# sidecar_addr = "10.10.10.2/24"   # the sidecar's static IP on the uplink subnet
+# gateway      = "10.10.10.1"      # the host's IP on that bridge
+# dns          = ["1.1.1.1"]       # upstream resolver(s) the sidecar forwards to
 
 # A second profile in the same file — a local libvirt host. No host/password:
 # qemu:///system is reachable by any 'libvirt'-group member (no root). Per-run

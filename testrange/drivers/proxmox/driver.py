@@ -36,17 +36,18 @@ from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import _guest, _naming, _sdn, _serial, _storage, _vm
 from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn
 from testrange.exceptions import DriverError
+from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
-    mgmt_unsupported_findings,
     unknown_uplink_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
+    from testrange.gateways.base import GuestGateway
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
@@ -170,16 +171,16 @@ class ProxmoxDriver(HypervisorDriver):
     ) -> PreflightReport:
         """Plan-side checks plus a live uplink-bridge existence check.
 
-        Storage-side checks (pool min-capacity floor; the ``import`` content
-        type the upload path needs) land with PVE-3 alongside ``_storage``.
+        No ``mgmt_unsupported_findings``: Proxmox realizes ``Switch(mgmt=True)``
+        as the host's ``.2`` adapter on the vnet (ADR-0009 B, ``_sdn``), so it is
+        the "drops the gate" path other unrealized backends still keep.
         """
         del cache_manager
         # build_switch is always a concrete Switch here — the orchestrator runs
         # it through resolve_build_switch (synthesizing the default isolated
         # switch when the plan declares none), so there is no None to guard (H2).
         switches = [*plan.hypervisor.all_switches, build_switch]
-        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
-        findings.extend(unknown_uplink_findings(switches, self._uplinks))
+        findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))
@@ -399,6 +400,23 @@ class ProxmoxDriver(HypervisorDriver):
         return _vm.get_vm_power_state(self._client, backend_name)
 
     # -- native guest agent (PVE-4; QGA via _guest) ------------------------
+
+    def guest_gateway(self) -> GuestGateway:
+        """Reach guests by SSH-jumping through the PVE host.
+
+        The orchestrator runs off-box; guests live on isolated SDN vnets it
+        cannot route to, but the PVE host can (it carries the mgmt ``.2`` for a
+        ``mgmt=True`` switch — PVE-44/ADR-0009). So SSH transports tunnel through
+        the host's SSH endpoint, reusing the same host credentials the SFTP
+        byte-egress path already uses (``ssh_user``/``ssh_password``, derived
+        from the API user/password when unset). QGA transports don't consult this
+        — they ride the REST control plane.
+        """
+        return SSHJumpGateway(
+            host=self._conn.host,
+            username=self._conn.ssh_user,
+            password=self._conn.ssh_password or self._conn.password or None,
+        )
 
     def native_guest_execute(self, backend_name: str) -> GuestExec:
         return _guest.make_execute(self._client, backend_name)

@@ -12,6 +12,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.communicators.base import ExecResult
 from testrange.credentials import PosixCred
 from testrange.exceptions import CommunicatorError
+from testrange.gateways import GuestGateway
 from testrange.utils import SSHKey
 
 
@@ -234,6 +235,68 @@ class TestRetry:
         c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
         with pytest.raises(CommunicatorError, match="SSH connect"):
             c.execute(["true"])
+
+
+class _FakeGateway(GuestGateway):
+    """A GuestGateway stand-in: hands back a sentinel sock and records use."""
+
+    def __init__(self) -> None:
+        self.sentinel = object()
+        self.opened: list[tuple[str, int]] = []
+        self.closed = False
+
+    def open_socket(self, host: str, port: int) -> Any:
+        self.opened.append((host, port))
+        return self.sentinel
+
+    def open_local_forward(self, host: str, port: int) -> int:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestGateway:
+    def test_connect_tunnels_through_gateway_sock(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # When a gateway is bound, paramiko is dialled over the gateway's socket,
+        # and host stays the guest's own address (the gateway knows how to reach
+        # it). This is the off-box-reach contract for a remote backend.
+        _, client = fake_paramiko
+        gw = _FakeGateway()
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
+        c.execute(["true"])
+        assert client.connect_args["sock"] is gw.sentinel
+        assert client.connect_args["hostname"] == "10.30.0.41"
+        assert gw.opened == [("10.30.0.41", 22)]
+
+    def test_no_gateway_means_direct_connect(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        _, client = fake_paramiko
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        c.execute(["true"])
+        assert "sock" not in client.connect_args
+
+    def test_gateway_reopened_each_retry(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        # A spent sock can't be reused; the loop asks the gateway for a fresh one
+        # each attempt while the guest's sshd is still coming up.
+        _, client = fake_paramiko
+        client.fail_first_n = 2
+        gw = _FakeGateway()
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
+        c.execute(["true"])
+        assert len(gw.opened) == 3  # 2 failed attempts + 1 success
+
+    def test_close_releases_gateway(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        gw = _FakeGateway()
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
+        c.execute(["true"])
+        c.close()
+        assert gw.closed is True
 
 
 class TestSFTP:

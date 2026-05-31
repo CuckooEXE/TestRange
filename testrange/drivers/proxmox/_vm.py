@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 from testrange._log import get_logger
 from testrange.drivers.proxmox import _naming
+from testrange.drivers.proxmox.devices import ProxmoxHardDrive
 from testrange.exceptions import DriverError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -192,10 +193,15 @@ def create_vm(
     # build may carry no cloud-init seed and this discriminator must be revisited.
     is_build = seed_iso_ref is not None
     for i, ref in enumerate(data_disk_refs):
+        # Slot index ``i+1`` disambiguates each disk; the bus is the device's
+        # choice (ProxmoxHardDrive, default scsi). download_from_pool re-resolves
+        # by scanning buses for the slot, so capture stays bus-agnostic.
+        drive = spec.data_drives[i]
+        bus = drive.bus if isinstance(drive, ProxmoxHardDrive) else "scsi"
         if is_build:
-            config[f"scsi{i + 1}"] = f"{storage}:{spec.data_drives[i].size_gb}"  # blank
+            config[f"{bus}{i + 1}"] = f"{storage}:{drive.size_gb}"  # blank
         else:
-            config[f"scsi{i + 1}"] = f"{storage}:0,import-from={ref}"  # run: cached built disk
+            config[f"{bus}{i + 1}"] = f"{storage}:0,import-from={ref}"  # run: cached built disk
     if seed_iso_ref is not None:
         config["ide2"] = f"{seed_iso_ref},media=cdrom"
     if build_nic is not None:

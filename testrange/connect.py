@@ -16,8 +16,13 @@ One file holds **many** profiles, one per top-level table (ADR-0016)::
     password = "Target123!"
 
     [myProxmox.uplinks]         # optional: logical-name -> host iface
-    lab_net  = "vmbr3"
-    egress   = "vmbr9"          # an out-of-band NAT bridge; just a named uplink
+    lab_net  = "vmbr3"          # string form: just the bridge (sidecar DHCPs on it)
+
+    [myProxmox.uplinks.egress]  # table form (NET-8): bridge + static sidecar
+    bridge       = "vmbr9"      # addressing, for a host-NAT'd uplink that won't
+    sidecar_addr = "10.10.10.2/24"  # DHCP the sidecar — gives its MASQUERADE NIC a
+    gateway      = "10.10.10.1"      # source IP + an explicit upstream resolver.
+    dns          = ["1.1.1.1"]
 
     [myLibvirtServer]           # a second profile; libvirt's localhost default
     driver = "libvirt"
@@ -50,6 +55,7 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+from testrange.devices.network import StaticAddr
 from testrange.exceptions import ProfileError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -85,6 +91,14 @@ class BackendProfile(ABC):
     uplinks: Mapping[str, str]
     """Logical-name → host-iface map (ADR-0016). A plan's ``Switch.uplink`` is a
     key here; the driver resolves it. May be empty (no uplinks declared)."""
+
+    uplink_addrs: Mapping[str, StaticAddr]
+    """Optional per-uplink static addressing for the sidecar's MASQUERADE NIC
+    (``eth1``), keyed by the same logical name (NET-8). Set only for uplinks
+    declared in the *table* form (``bridge`` + ``sidecar_addr``/``gateway``/
+    ``dns``). The orchestrator injects it into the Switch's sidecar so a
+    host-NAT'd uplink that won't DHCP the sidecar still gets a source IP for the
+    MASQUERADE and an explicit upstream resolver. May be empty."""
 
     @classmethod
     @abstractmethod
@@ -125,27 +139,90 @@ class BackendProfile(ABC):
             )
 
     @staticmethod
-    def _parse_uplinks(table: Mapping[str, Any], path: Path) -> dict[str, str]:
+    def _parse_uplinks(
+        table: Mapping[str, Any], path: Path
+    ) -> tuple[dict[str, str], dict[str, StaticAddr]]:
         """Parse the common ``[<profile>.uplinks]`` sub-table, if present.
 
-        Returns ``{}`` when absent. Every value must be a non-empty string (the
-        host iface a logical name maps to); anything else is a typo worth failing
-        loud over.
+        Returns ``({}, {})`` when absent. Each value is one of two forms:
+
+        - **string** — ``egress = "vmbr9"``: the host iface, no sidecar addressing
+          (the sidecar's uplink NIC DHCPs from the upstream LAN).
+        - **table** — ``egress = { bridge = "vmbr9", sidecar_addr = "10.10.10.2/24",
+          gateway = "10.10.10.1", dns = ["1.1.1.1"] }`` (NET-8): the bridge plus a
+          static address for the sidecar's MASQUERADE NIC, for a host-NAT'd uplink
+          that won't DHCP the sidecar. ``sidecar_addr`` must carry a prefix.
+
+        Anything else is a typo worth failing loud over.
         """
         if "uplinks" not in table:
-            return {}
+            return {}, {}
         raw = table["uplinks"]
         if not isinstance(raw, dict):
             raise ProfileError(f"connection profile {path}: [uplinks] must be a table")
         uplinks: dict[str, str] = {}
-        for name, iface in raw.items():
-            if not isinstance(iface, str) or not iface:
+        addrs: dict[str, StaticAddr] = {}
+        for name, val in raw.items():
+            if isinstance(val, str):
+                if not val:
+                    raise ProfileError(
+                        f"connection profile {path}: uplink {name!r} must map to a "
+                        f"non-empty host-interface string; got {val!r}"
+                    )
+                uplinks[name] = val
+            elif isinstance(val, dict):
+                uplinks[name], addr = BackendProfile._parse_uplink_table(name, val, path)
+                if addr is not None:
+                    addrs[name] = addr
+            else:
                 raise ProfileError(
-                    f"connection profile {path}: uplink {name!r} must map to a "
-                    f"non-empty host-interface string; got {iface!r}"
+                    f"connection profile {path}: uplink {name!r} must be a host-interface "
+                    f"string or a table with a 'bridge' key; got {val!r}"
                 )
-            uplinks[name] = iface
-        return uplinks
+        return uplinks, addrs
+
+    @staticmethod
+    def _parse_uplink_table(
+        name: str, val: Mapping[str, Any], path: Path
+    ) -> tuple[str, StaticAddr | None]:
+        """Parse one table-form uplink → ``(bridge, sidecar_addr_or_None)``."""
+        allowed = {"bridge", "sidecar_addr", "gateway", "dns"}
+        unknown = set(val) - allowed
+        if unknown:
+            raise ProfileError(
+                f"connection profile {path}: uplink {name!r} has unknown key(s) "
+                f"{sorted(unknown)}; allowed: {sorted(allowed)}"
+            )
+        bridge = val.get("bridge")
+        if not isinstance(bridge, str) or not bridge:
+            raise ProfileError(
+                f"connection profile {path}: uplink {name!r} (table form) requires a "
+                f"non-empty 'bridge' string; got {bridge!r}"
+            )
+        sidecar_addr = val.get("sidecar_addr")
+        if sidecar_addr is None:
+            return bridge, None
+        if not isinstance(sidecar_addr, str) or "/" not in sidecar_addr:
+            raise ProfileError(
+                f"connection profile {path}: uplink {name!r} sidecar_addr must be a CIDR "
+                f"with an explicit prefix (e.g. '10.10.10.2/24'); got {sidecar_addr!r}"
+            )
+        gateway = val.get("gateway")
+        if gateway is not None and not isinstance(gateway, str):
+            raise ProfileError(
+                f"connection profile {path}: uplink {name!r} gateway must be a string"
+            )
+        dns = val.get("dns", [])
+        if not isinstance(dns, list) or not all(isinstance(d, str) for d in dns):
+            raise ProfileError(
+                f"connection profile {path}: uplink {name!r} dns must be a list of strings"
+            )
+        try:
+            return bridge, StaticAddr(sidecar_addr, gw=gateway, dns=tuple(dns))
+        except ValueError as e:
+            raise ProfileError(
+                f"connection profile {path}: uplink {name!r} addressing is invalid: {e}"
+            ) from e
 
     @staticmethod
     def _mask_password(password: str | None) -> str:
