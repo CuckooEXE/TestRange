@@ -69,7 +69,7 @@ PLAN = Plan(
                 "mgmt-sw",
                 Network("mgmt-net"),
                 cidr="10.51.0.0/24",
-                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
+                # mgmt=True,  # libvirt-only so far; ProxmoxHypervisor preflight rejects mgmt (ADR-0009)
             ),
             Switch(
                 "uplink-sw",
@@ -83,7 +83,7 @@ PLAN = Plan(
                 Network("both-net"),
                 cidr="10.53.0.0/24",
                 uplink="egress",
-                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
+                # mgmt=True,  # libvirt-only so far; ProxmoxHypervisor preflight rejects mgmt (ADR-0009)
                 sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],
@@ -99,7 +99,10 @@ PLAN = Plan(
 
 
 def mgmt_vm_can_reach_host(orch: OrchestratorHandle) -> None:
-    # Gated pending ADR-0009 (mgmt switch semantics): no host adapter at .2.
+    # mgmt is libvirt-only so far; this plan pins ProxmoxHypervisor, which has no
+    # .2 host adapter (mgmt=True above stays gated). Re-enable when proxmox grows
+    # mgmt support (ADR-0009). See examples/capabilities.py for the live libvirt
+    # mgmt check.
     # r = orch.vms["mgmt-vm"].communicator.execute(
     #     ["ping", "-c", "1", "-W", "2", "10.51.0.2"], timeout=10.0
     # )
@@ -116,7 +119,9 @@ def uplink_vm_can_reach_internet(orch: OrchestratorHandle) -> None:
 
 
 def both_vm_reaches_host_and_internet(orch: OrchestratorHandle) -> None:
-    # Gated pending ADR-0009 (mgmt switch semantics): no host adapter at .2.
+    # mgmt is libvirt-only so far; this proxmox-pinned plan has no .2 host
+    # adapter (mgmt=True above stays gated). Re-enable when proxmox grows mgmt
+    # support (ADR-0009).
     # r_host = orch.vms["both-vm"].communicator.execute(
     #     ["ping", "-c", "1", "-W", "2", "10.53.0.2"], timeout=10.0
     # )

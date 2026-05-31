@@ -54,14 +54,14 @@ PLAN = Plan(
                 "priv-sw",
                 Network("private-net"),
                 cidr="10.20.0.0/24",
-                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
+                # mgmt=True,  # libvirt-only so far; ProxmoxHypervisor preflight rejects mgmt (ADR-0009)
             ),
             Switch(
                 "pub-sw",
                 Network("public-net"),
                 cidr="10.30.0.0/24",
                 uplink="egress",
-                # mgmt=True,  # gated pending ADR-0009 (mgmt switch semantics)
+                # mgmt=True,  # libvirt-only so far; ProxmoxHypervisor preflight rejects mgmt (ADR-0009)
                 sidecar=Sidecar(dhcp=True, dns=True, nat=True),
             ),
         ],

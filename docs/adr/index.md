@@ -23,4 +23,5 @@ context, the decision, and the consequences. Listed oldest-first.
 0015-backend-binding
 0016-named-uplinks-out-of-band-egress
 0017-dedicated-build-nic
+0018-single-instance-only
 ```

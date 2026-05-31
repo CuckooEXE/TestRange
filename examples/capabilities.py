@@ -275,9 +275,6 @@ PLAN = Plan(
 )
 
 
-# --- no-net: a guest with no NICs, reachable only over the native agent -------
-
-
 def no_net_agent_executes(orch: OrchestratorHandle) -> None:
     r = orch.vms["no-net"].communicator.execute(["true"])
     assert r.ok, f"native agent unreachable on a NIC-less guest: {r}"
@@ -289,12 +286,7 @@ def no_net_has_no_ethernet(orch: OrchestratorHandle) -> None:
     assert not addrs, f"NIC-less guest has an IPv4 address: {addrs!r}"
 
 
-# --- static-build: apt egresses via the build NIC, static comes up at run -----
-
-
 def static_build_installed_apt_via_build_nic(orch: OrchestratorHandle) -> None:
-    # The declared static (10.30.0.140) has no route on the build switch, so apt
-    # could only have egressed via the dedicated build NIC (ADR-0017).
     r = orch.vms["static-build"].communicator.execute(["dpkg", "-l", "curl"])
     assert r.ok, f"curl missing — apt did not egress via the build NIC: {r}"
 
@@ -302,9 +294,6 @@ def static_build_installed_apt_via_build_nic(orch: OrchestratorHandle) -> None:
 def static_build_static_address_at_run(orch: OrchestratorHandle) -> None:
     out = orch.vms["static-build"].communicator.execute(["ip", "-o", "-4", "addr"]).stdout.decode()
     assert "10.30.0.140" in out, f"declared static NIC did not come up at run: {out!r}"
-
-
-# --- unmanaged: NIC present, no DHCP, no static -> no runtime address ---------
 
 
 def unmanaged_nic_has_link_no_address(orch: OrchestratorHandle) -> None:
@@ -320,9 +309,6 @@ def unmanaged_file_roundtrips_over_agent(orch: OrchestratorHandle) -> None:
     com = orch.vms["unmanaged"].communicator
     com.write_file("/root/marker", b"native-io\n")
     assert com.read_file("/root/marker") == b"native-io\n"
-
-
-# --- multihome: three NIC modes on one VM -------------------------------------
 
 
 def multihome_static_nic_addressed(orch: OrchestratorHandle) -> None:
@@ -342,9 +328,6 @@ def multihome_one_default_route(orch: OrchestratorHandle) -> None:
     out = orch.vms["multihome"].communicator.execute(["ip", "-4", "route", "show", "default"])
     routes = [ln for ln in out.stdout.decode().splitlines() if ln.strip()]
     assert len(routes) == 1, f"expected exactly one default route, got {routes!r}"
-
-
-# --- keybox: SSH key auth on a DHCP-discovered NIC; apt/pip; growpart ---------
 
 
 def keybox_bound_to_dhcp_nic(orch: OrchestratorHandle) -> None:
@@ -380,9 +363,6 @@ def keybox_exec_honors_cwd(orch: OrchestratorHandle) -> None:
     assert r.stdout.strip() == b"/etc", f"cwd ignored: {r.stdout!r}"
 
 
-# --- users: mixed privilege; password auth as the non-admin -------------------
-
-
 def viewer_authed_with_password(orch: OrchestratorHandle) -> None:
     r = orch.vms["users"].communicator.execute(["id", "-un"])
     assert r.stdout.strip() == b"viewer", f"not connected as viewer: {r.stdout!r}"
@@ -404,14 +384,8 @@ def ops_user_is_admin(orch: OrchestratorHandle) -> None:
 
 
 def users_uses_explicit_resolver(orch: OrchestratorHandle) -> None:
-    # /etc/resolv.conf is the systemd-resolved stub (127.0.0.53) on Debian; the
-    # netplan-rendered upstream resolver lands as the link DNS, shown by
-    # `resolvectl status` (readable as the non-root SSH user).
     r = orch.vms["users"].communicator.execute(["resolvectl", "status"])
     assert b"9.9.9.9" in r.stdout, f"explicit DNS not applied: {r.stdout!r}"
-
-
-# --- fileserver: data disks seeded at build, intact at run --------------------
 
 
 def data_disks_mounted(orch: OrchestratorHandle) -> None:
@@ -429,13 +403,9 @@ def data_disks_carry_their_own_content(orch: OrchestratorHandle) -> None:
 def data_disk_bytes_survived_capture(orch: OrchestratorHandle) -> None:
     com = orch.vms["fileserver"].communicator
     for dev, mount in (("/dev/vdb", "/srv/b"), ("/dev/vdc", "/srv/c")):
-        # blkid reads the raw block device → needs root (the SSH user is non-root).
         live = com.execute(["sudo", "blkid", "-s", "UUID", "-o", "value", dev]).stdout.strip()
         seeded = com.execute(["cat", f"{mount}/uuid"]).stdout.strip()
         assert live and live == seeded, f"{dev} fs UUID changed: live={live!r} seeded={seeded!r}"
-
-
-# --- snapshot / memory-snapshot / power-state (host-side driver ops) ----------
 
 
 def disk_snapshot_lifecycle(orch: OrchestratorHandle) -> None:
@@ -478,9 +448,6 @@ def memory_snapshot_restores_running_state(orch: OrchestratorHandle) -> None:
     com.close()
     r = com.execute(["cat", marker])
     assert r.stdout.strip() == b"live", f"tmpfs state not restored from RAM snapshot: {r}"
-
-
-# --- reachability matrix: air-gap, NAT, DNS, multi-Network-per-Switch ---------
 
 
 def client_can_reach_private_web(orch: OrchestratorHandle) -> None:

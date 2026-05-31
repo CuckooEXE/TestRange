@@ -15,13 +15,13 @@ This project predates 1.0; expect breaking changes between minor versions.
   ``Communicator.execute`` / ``read_file`` / ``write_file``; they let a
   builder's readiness hook and a native-agent communicator take loose
   callables without importing a Communicator or driver.
-- ``QGACommunicator`` — a Communicator backed by a hypervisor's native
+- ``NativeCommunicator`` — a Communicator backed by a hypervisor's native
   guest agent (QEMU Guest Agent on libvirt). Takes no Plan-time
   arguments; the orchestrator binds it with three VM-bound callables
   (``execute`` / ``read_file`` / ``write_file``) pulled off the driver.
   No SSH, no credentials, no IP discovery — reaches the guest in-band.
   The guest must have ``qemu-guest-agent`` installed (user-declared in
-  the builder). See ``examples/qga.py``.
+  the builder). See ``examples/native_agent.py``.
 - ``HypervisorDriver.native_guest_execute`` / ``native_guest_read_file``
   / ``native_guest_write_file`` — optional-capability accessors
   returning VM-bound guest-agent callables; the default raises

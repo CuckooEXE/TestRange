@@ -7,10 +7,12 @@ hypervisor backend; declare test functions; run them. Use case: CI/CD
 against specific OS versions and varied network topologies; authorized
 pentest test-ranges.
 
-The driver layer is multi-backend (ADR-0008). `MockDriver` is the in-memory
-**reference backend** the examples and tests run against; the **Proxmox driver
-is green end-to-end** (single-node PVE 9.x — see `examples/px_hello.py`), and a
-libvirt driver is planned (rebuilt against the same ABC).
+The driver layer is multi-backend (ADR-0008). The **libvirt driver is the
+certified reference implementation** — green end-to-end on `qemu:///system` as a
+plain `libvirt`-group user (`examples/capabilities.py` +
+`tests/integration/test_libvirt.py`). `MockDriver` is the in-memory backend the
+unit suite drives through the full lifecycle (it simulates the backend, not a
+real guest). The **Proxmox driver is in progress** (single-node PVE 9.x).
 
 ## Quickstart
 
@@ -23,29 +25,32 @@ testrange cache add \
     https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
     --name debian-13
 
-# Inspect a plan without touching the backend
+# Inspect a plan's topology without touching a backend
 testrange describe examples/hello_world.py
 
-# Warm the cache (build every VM, run no tests)
-testrange build examples/hello_world.py
+# Bind a backend at run time with a connection profile (see
+# examples/connect.toml.example for the shape; --profile reads ./connect.toml).
+# Warm the cache (build every VM, run no tests):
+testrange build examples/hello_world.py --profile libvirt-local
 
-# Bring up the range, run the tests, tear down (auto-builds on a cache miss)
-testrange run examples/hello_world.py
+# Bring up the range, run the tests, tear down (auto-builds on a cache miss):
+testrange run examples/hello_world.py --profile libvirt-local
 ```
 
-The example plans target `MockHypervisor` and are the authoritative shape for
-writing your own. `testrange describe` works against them with no backend; the
-full bring-up lifecycle is exercised against `MockDriver` by the test suite. A
-clean live `run` needs a real backend (Proxmox is green on single-node PVE;
-libvirt later), which carries its own connection prereqs — see
-`docs/user/drivers/`.
+The example plans use the backend-agnostic `Hypervisor` topology type and are
+the authoritative shape for writing your own; a backend is bound at run time via
+`--profile`. `testrange describe` shows a plan's topology with no backend. A live
+`run` needs a real backend — libvirt is certified (see `docs/user/drivers/`),
+Proxmox is in progress. The full bring-up lifecycle is also exercised in-memory
+against `MockDriver` by the unit suite.
 
 ## Plan shape
 
 ```python
 PLAN = Plan(
-    MockHypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24")],
+    "hello-world",
+    Hypervisor(
+        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", mgmt=True)],
         pools=[StoragePool("pool1", 32)],
         vms=[
             VMRecipe(
@@ -70,10 +75,10 @@ TESTS = [my_test]
 testrange cache add <path-or-url> [--name <pretty>] [--description <text>]
 testrange cache list / del / rename / forget-name
 testrange cache push / pull <sha-or-name> --cache <url>
-testrange describe <plan.py>
-testrange build <plan.py>
-testrange run <plan.py> [--fail-fast] [--leak-on-failure] [--require-cache]
-testrange repl <plan.py>
+testrange describe <plan.py> [--profile <name>]
+testrange build <plan.py> --profile <name>
+testrange run <plan.py> --profile <name> [--fail-fast] [--leak-on-failure] [--require-cache]
+testrange repl <plan.py> --profile <name>
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
 ```
@@ -99,4 +104,5 @@ The doc tree:
 ## Status
 
 Pre-1.0. See `docs/dev/architecture.md` (or the built HTML) for the
-component overview and `TODO.md` for in-scope and long-term work.
+component overview; in-flight and long-term work lives on the `ktui` TestRange
+board (the repo tracks code, the board tracks status).

@@ -369,35 +369,40 @@ If a future feature requires a subprocess (`qemu-img` for cross-format
 disk conversion, etc.), it gets its own ADR and a single sanctioned
 module at that time.
 
-### 16. Sync, single-threaded v0
+### 16. Sync, single-threaded, single-instance (ADR-0002, ADR-0018)
 
 Every dependency (libvirt-python, paramiko, requests, pycdlib) is
 blocking. v0 runs single-threaded — install brings up one VM at a
 time, tests run sequentially. No `asyncio`, no `ThreadPoolExecutor`.
 Public API is sync.
 
-State-file safety:
-- Each `state.json` write is `.tmp` + `os.replace` (atomic on every
-  modern filesystem). Protects against torn writes within a process.
-- A sibling `state.pid` file records the owning process PID.
-  `testrange cleanup <run-id>` reads it and refuses to act on a run
-  whose PID is still alive (clear error: "PID <X> still alive; kill
-  it first or wait for it"). Simpler than a FileLock and produces a
-  meaningful error message.
+**TestRange is single-instance (ADR-0018).** One `testrange` process runs
+at a time per user and per driver profile. These are *unsupported* and not
+guarded beyond the ownership check below: two invocations as the same user
+(even different plans/backends — they share the local cache + state root);
+the same plan run twice; two plans against the same profile. Run ranges
+serially, or as separate users with distinct `XDG_STATE_HOME` /
+`XDG_CACHE_HOME` roots and distinct profiles.
 
-**One invocation per plan at a time.** A given plan/run is owned by a
-single `testrange` process for the duration of build + run; concurrent
-invocations against the same run are not supported and not guarded
-beyond the `state.pid` liveness check above. The atomic `state.json`
-write protects against *torn* writes within the owning process, not
-against two processes racing the same run — that scenario is out of
-scope by construction. Consequently cross-process `state.json` locking
-(a `FileLock`, ORCH-5) is **not** built: with a single owner there is no
-legitimate concurrent writer to serialize. To parallelize across
-processes, run separate plans (distinct `run_id`s).
+State-file safety is **crash safety, not concurrency**:
+- Each `state.json` write is `.partial` + `os.replace` (atomic on every
+  modern filesystem). This guarantees a SIGKILL / power loss mid-write
+  leaves the file fully-old or fully-new for the single owning process —
+  it does *not* serialize two writers, because by contract there is never
+  more than one.
+- A sibling `state.pid` file records the owning PID; `testrange cleanup`
+  (the post-crash recovery tool) refuses to act on a run whose owner is
+  still alive — that run's own `__exit__` owns its teardown. The mechanism
+  hardens to an advisory `fcntl.flock` under CORE-30 (closing a PID-reuse
+  window); cross-process `FileLock` for *live* concurrency stays declined,
+  since under this contract there is no legitimate concurrent writer.
 
-Parallel build of independent VMs *within* a single run remains a
-long-term TODO (decision unchanged; see Deferred).
+Multi-instance support is a deliberate future epic, tracked as **ORCH-10**
+(one user, multiple different plans), **ORCH-11** (same plan twice), and
+**ORCH-12** (different plans, same profile) — distinct from **ORCH-1**
+(multiple `Hypervisor` entries in one plan) and **ORCH-4** (parallel build
+*within* a single run), which are intra-process parallelism under a single
+owner.
 
 ### 17. Cleanup-on-failure CLI flag: `--leak-on-failure`
 
@@ -1069,19 +1074,16 @@ but empty).
   `PUT /cluster/sdn` to apply); networks share the switch's vnet.
   `destroy_switch` is self-discovering so a `from_uri`-rebuilt teardown driver
   needs no `run_id`. For an `uplink+nat` Switch, `create_switch` returns the
-  **existing host bridge** named by `switch.uplink` (e.g. `vmbr0`, the one
-  carrying the default gateway) as the segment the sidecar's `eth1` rides — so
-  on Proxmox a Switch/`ManagedBuildSwitch` `uplink` names an existing bridge, not
-  a raw NIC, and `testrange run` **auto-builds** end-to-end. Preflight verifies
-  the bridge exists (`proxmox-uplink-bridge-missing`). A `ManagedBuildSwitch`
-  build switch (ADR-0014, `supports_managed_build_egress=True`) instead
-  *manufactures* a second SDN vnet with a `snat=1` subnet + VNet-firewall fence
-  for `eth1` (`_sdn._create_egress_vnet` / `_fence_egress_vnet`; the VNet-firewall
-  surface + `snat=1` are live-confirmed on PVE 9.2.2 — PVE-37 — and PVE prepends
-  firewall rules at pos 0 ignoring an explicit `pos`, so the fence rules are
-  POSTed in reverse). The SDK is lazily imported, so
-  the package registers with no `proxmoxer` installed; unit tests inject a
-  duck-typed fake client.
+  **existing host bridge** that `switch.uplink` resolves to via the profile's
+  named-uplink map (ADR-0016; e.g. `vmbr0`, the one carrying the default
+  gateway) as the segment the sidecar's `eth1` rides — so on Proxmox an `uplink`
+  names an existing bridge, not a raw NIC, and `testrange run` **auto-builds**
+  end-to-end. Preflight verifies the bridge exists
+  (`proxmox-uplink-bridge-missing`). Egress is **out-of-band** (ADR-0016): the
+  operator owns the uplink bridge's NAT/DHCP and the driver only attaches to it
+  — there is no manufactured `snat` vnet or VNet-firewall fence. The SDK is
+  lazily imported, so the package registers with no `proxmoxer` installed; unit
+  tests inject a duck-typed fake client.
 
 - **`PVE-6` — stamped-name → vmid resolution.** `create_vm` stamps the composed
   backend name into the VM's PVE `name`; `_vm.resolve_vmid` recovers the vmid by
@@ -1174,7 +1176,7 @@ the single-node lab use case; they harden it.
   networks=…, pools=…, vms=…)` is the whole common case: `user` defaults to
   `root@pam` (a bare `"root"` is normalised to `root@pam` — PVE's realm, PVE-21),
   `node` auto-detects the single node at connect, `build_switch` defaults to
-  `None` (isolated build network, no egress — ADR-0014), `backing_storage` to
+  `None` (isolated build network, no egress — ADR-0016), `backing_storage` to
   `local`, SSH reuses the API creds. The
   operational knobs stay optional. (A connection-URI surface was tried and
   dropped — the `@realm` + special-char-password escaping made plain kwargs the
@@ -1250,16 +1252,15 @@ Closed in this cluster (fixed + unit-tested, confirmed by the green run):
 - **`NET-1`** — *done.* `validate.py`'s DHCP-pool hint now derives from
   `USER_STATIC_LO/HI` instead of hardcoded `+100/+254`.
 
-**Build egress (resolved by ADR-0014 / NET-11).** A hosting LAN may refuse the
-sidecar's extra MAC for DHCP egress (confirmed live on a single-public-IP
-OVH-style box: the host's own IP egresses fine, but the sidecar's MAC gets no
-lease). The old workaround was a manual internal bridge + host NAT + a static
-`build_uplink_addr` (a one-time operator step). `ManagedBuildSwitch` now
-automates exactly that: `build_switch=ManagedBuildSwitch(uplink="vmbr0")` has the
-driver manufacture a `snat=1` SDN vnet + fence for the sidecar's static `eth1`,
-so no host-side bridge/NAT/DHCP fiddling is needed. (A plain `Switch` build
-switch with a static `Sidecar.addr` still expresses the manual recipe for
-operators who want to own the bridge themselves.)
+**Build egress (out-of-band — ADR-0016, supersedes ADR-0014 / NET-11).** A
+hosting LAN may refuse the sidecar's extra MAC for DHCP egress (confirmed live on
+a single-public-IP OVH-style box: the host's own IP egresses fine, but the
+sidecar's MAC gets no lease). TestRange does **not** manufacture or fence egress.
+Instead, `Switch.uplink` is a logical name the profile's `[<name>.uplinks]` map
+resolves to an operator-provided bridge/network that already NATs/DHCPs out; the
+driver only attaches the sidecar's `eth1` to that resolved uplink. Standing up
+the NAT bridge is a one-time out-of-band operator step, documented per backend in
+`docs/user/drivers/out-of-band-egress.md`.
 
 ### libvirt backend (full rewrite in progress, BACKEND-1)
 
@@ -1359,7 +1360,7 @@ execute the build/run, all now baked into the driver:
   live.
 
 **Certification status.** `testrange run --profile libvirt-local
-examples/capabilities.py` is **green** (26/26 enabled tests) and
+examples/capabilities.py` is **green** (30/30 enabled tests) and
 `tests/integration/test_libvirt.py` (marked `libvirt`, self-cleaning) passes
 **3/3** live — that integration suite is the authoritative driver cert. The mock
 backend has moved to `tests/mock_driver.py` (registered by `tests/conftest.py`);
@@ -1372,8 +1373,9 @@ The certification surfaced a set of **capabilities-test / orchestrator** issues
 instead of grepping the systemd-resolved `/etc/resolv.conf` stub; `sudo blkid`
 (raw-device read needs root, the SSH user is not); the RAM-restore marker in
 `/dev/shm` (tmpfs + world-writable) rather than root-only `/run`. The one real
-orchestrator gap remains ticketed with `no-net` disabled: **ORCH-9** — a
-zero-NIC VM gets no build-time network, so its `apt`-based builder can't run.
+orchestrator gap it surfaced — a zero-NIC VM getting no build-time network, so
+its `apt`-based builder couldn't run — was **fixed by ADR-0017** (every build VM
+gets a dedicated transient build NIC); `no-net` is re-enabled in `capabilities.py`.
 
 ### 22. Backend binding: topology Plan entry vs. resolved backend
 
@@ -1389,33 +1391,35 @@ ADR-0015 splits them.
 - **Concrete `*Hypervisor`** (CORE-19) — an empty subclass of `Hypervisor` plus
   a registered scheme marker. Topology-only, carries no connection; its only
   job is to assert *this topology MUST run against backend X* so a mismatched
-  `--connect` is caught at preflight (e.g., a PVE-specific CPU type).
-- **Connection profile** (`testrange/connect.py`) — a local TOML file passed
-  with `--connect`. Names the driver by *scheme* (`driver = "proxmox"`), carries
-  the connection (inline plain-string password; lab posture), and carries build
-  egress as a `[build_switch]` table → `ManagedBuildSwitch`. No env-var fallback;
-  `.gitignore` keeps a real `connect.toml` out of git. `BackendProfile` is an
-  ABC (CORE-18); each backend ships a concrete subclass
+  `--profile` is caught at preflight (e.g., a PVE-specific CPU type).
+- **Connection profile** (`testrange/connect.py`) — a local TOML file selected
+  with `--profile [file:]name` (CORE-22, multi-profile). Names the driver by
+  *scheme* (`driver = "proxmox"`), carries the connection (inline plain-string
+  password; lab posture), and carries the named-uplink map (`[<name>.uplinks]`,
+  ADR-0016) that resolves a Switch's logical `uplink` to a host bridge/network.
+  No env-var fallback; `.gitignore` keeps a real profile TOML out of git.
+  `BackendProfile` is an ABC (CORE-18); each backend ships a concrete subclass
   (`ProxmoxProfile` / `LibvirtProfile` / `MockProfile`) that self-registers its
   scheme and builds its own driver via `profile.build_driver()`.
 
 `resolve_backend(plan, profile)` (`testrange/orchestrator/backend.py`) folds the
-entry + required profile into `ResolvedBackend { driver, build_switch,
-driver_uri }`, which the orchestrator reads instead of reaching into
-`plan.hypervisor` for the driver/uri/build-switch. The matrix (CORE-19
-collapse — both "+none" cells are hard errors now):
+entry + required profile into `ResolvedBackend { driver, driver_uri }`, which the
+orchestrator reads instead of reaching into `plan.hypervisor` for the driver/uri.
+The build switch is **not** part of the resolved backend — it is portable
+topology on the Hypervisor (`build_switch: Switch | None`, ADR-0016), read
+directly from `plan.hypervisor`. The matrix (CORE-19 collapse — both "+none"
+cells are hard errors now):
 
 | (entry, profile) | resolution |
 | ---------------- | ---------- |
-| concrete + none  | hard error: pinned scheme, no connection. Names the scheme so the dev knows which profile to point `--connect` at. |
-| concrete + given | profile `scheme` **must** equal the entry's scheme (else hard error); `driver = profile.build_driver()`; build egress from the profile. |
-| generic + none   | hard error: backend-agnostic; pass `--connect`. |
-| generic + given  | `driver = profile.build_driver()`; build egress from the profile. |
+| concrete + none  | hard error: pinned scheme, no connection. Names the scheme so the dev knows which profile to point `--profile` at. |
+| concrete + given | profile `scheme` **must** equal the entry's scheme (else hard error); `driver = profile.build_driver()`. |
+| generic + none   | hard error: backend-agnostic; pass `--profile`. |
+| generic + given  | `driver = profile.build_driver()`. |
 
 Compatibility preflight is three layers: (1) the scheme-pin/profile-match
-above, raised in `resolve_backend`; (2) `compatibility_findings(plan, driver)`
-+ `managed_build_egress_findings(user_build_switch, supports_managed_egress)`,
-both merged by the orchestrator before driver preflight; (3) the resolved
+above, raised in `resolve_backend`; (2) `compatibility_findings(plan, driver)`,
+merged by the orchestrator before driver preflight; (3) the resolved
 driver's own live `preflight`. `RunContext.resolved` holds the binding;
 `ctx.driver` is a property over it. The driver registry carries name dispatch
 (`driver_for_name`, cleanup) + `scheme_for_hypervisor` / `is_pinned` (pin
