@@ -1109,6 +1109,16 @@ but empty).
   lazily imported, so the package registers with no `proxmoxer` installed; unit
   tests inject a duck-typed fake client.
 
+- **`PVE-44` — `Switch(mgmt=True)` realized (ADR-0009 ratified, option B).** A
+  `mgmt=True` Switch gets the host's `.2` adapter as an SDN **subnet** on its
+  vnet (`gateway = switch.mgmt_ip`, no SNAT/DHCP), which PVE plumbs onto the
+  vnet bridge on the single, node-pinned host — the analog of libvirt's
+  `<ip address=.2>`. `destroy_switch` drops the subnet before the vnet
+  (self-discovering). `ProxmoxDriver.preflight` therefore **drops** the shared
+  `mgmt_unsupported_findings` gate. Reachability is hypervisor-local (guest ↔
+  host), not promised to a remote test runner; clusters stay out of scope
+  (PVE-31). Live-validated through `_sdn` against the cert host.
+
 - **`PVE-6` — stamped-name → vmid resolution.** `create_vm` stamps the composed
   backend name into the VM's PVE `name`; `_vm.resolve_vmid` recovers the vmid by
   scanning the node's guest list (no external map; a `from_uri` teardown driver

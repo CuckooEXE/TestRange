@@ -24,6 +24,16 @@ static, operator-owned, out-of-band config — the driver does not create, SNAT,
 fence, or destroy it. It just hands the resolved bridge name back so the
 orchestrator wires the sidecar's ``eth1`` onto it. Preflight verifies both that
 the name is mapped and that the bridge exists.
+
+A ``mgmt=True`` Switch additionally gets the host's ``.2`` mgmt adapter on the
+vnet (ADR-0009 option B): an SDN **subnet** on the vnet carrying
+``gateway = switch.mgmt_ip``, which PVE plumbs onto the vnet bridge on the
+(single, pinned) node — the Proxmox analog of libvirt's ``<ip address=.2>``. The
+subnet sets no SNAT and no DHCP IPAM, so ``.2`` is a pure host adapter that
+coexists with the sidecar at ``.1``; reachability is a hypervisor-local
+guarantee (guests ↔ host), not a remote-test-runner one. The subnet is torn
+down before its vnet in ``destroy_switch`` (self-discovering, so a ``from_uri``
+teardown driver needs no extra state).
 """
 
 from __future__ import annotations
@@ -54,6 +64,24 @@ def _ensure_zone(client: ProxmoxClient, zone: str) -> None:
         _log.info("created per-run SDN simple zone %s", zone)
 
 
+def _ensure_mgmt_subnet(client: ProxmoxClient, vid: str, switch: Switch) -> None:
+    """Realize ``Switch(mgmt=True)`` as the host's ``.2`` adapter on the vnet.
+
+    ADR-0009 (B): a subnet on the vnet with ``gateway = switch.mgmt_ip`` and no
+    SNAT/DHCP makes PVE assign that IP to the vnet bridge on the node — a plain
+    host L2 presence, coexisting with the sidecar's ``.1``. Idempotent: a subnet
+    for this CIDR already present (a re-entrant ``create_switch``) is left alone.
+    """
+    cidr = str(switch.network)
+    present = {s.get("cidr") for s in client.api.cluster.sdn.vnets(vid).subnets.get()}
+    if cidr in present:
+        return
+    client.api.cluster.sdn.vnets(vid).subnets.post(
+        subnet=cidr, type="subnet", gateway=switch.mgmt_ip
+    )
+    _log.info("added mgmt subnet %s (gw %s) on vnet %s", cidr, switch.mgmt_ip, vid)
+
+
 def create_switch(
     client: ProxmoxClient,
     zone: str,
@@ -67,6 +95,9 @@ def create_switch(
     existing = {v["vnet"] for v in client.api.cluster.sdn.vnets.get()}
     if vid not in existing:
         client.api.cluster.sdn.vnets.post(vnet=vid, zone=zone, alias=backend_name)
+
+    if switch.mgmt:
+        _ensure_mgmt_subnet(client, vid, switch)
 
     _apply(client)
     _log.info("created SDN vnet %s (switch %s) in zone %s", vid, backend_name, zone)
@@ -89,6 +120,11 @@ def destroy_switch(client: ProxmoxClient, backend_name: str) -> None:
     if target is None:
         return
     zone = target.get("zone")
+    # Drop any subnets first (a mgmt Switch carries one; PVE refuses to delete a
+    # vnet that still holds subnets). Self-discovering off the live list, so a
+    # from_uri teardown driver cleans them without knowing the Switch was mgmt.
+    for sub in client.api.cluster.sdn.vnets(vid).subnets.get():
+        client.api.cluster.sdn.vnets(vid).subnets(sub["subnet"]).delete()
     client.api.cluster.sdn.vnets(vid).delete()
     # Drop the per-run zone once it holds no more vnets (self-discovering, so a
     # from_uri-rebuilt teardown driver needs no run_id). Decide against a *fresh*

@@ -40,7 +40,6 @@ from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
-    mgmt_unsupported_findings,
     unknown_uplink_findings,
 )
 
@@ -170,16 +169,16 @@ class ProxmoxDriver(HypervisorDriver):
     ) -> PreflightReport:
         """Plan-side checks plus a live uplink-bridge existence check.
 
-        Storage-side checks (pool min-capacity floor; the ``import`` content
-        type the upload path needs) land with PVE-3 alongside ``_storage``.
+        No ``mgmt_unsupported_findings``: Proxmox realizes ``Switch(mgmt=True)``
+        as the host's ``.2`` adapter on the vnet (ADR-0009 B, ``_sdn``), so it is
+        the "drops the gate" path other unrealized backends still keep.
         """
         del cache_manager
         # build_switch is always a concrete Switch here — the orchestrator runs
         # it through resolve_build_switch (synthesizing the default isolated
         # switch when the plan declares none), so there is no None to guard (H2).
         switches = [*plan.hypervisor.all_switches, build_switch]
-        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
-        findings.extend(unknown_uplink_findings(switches, self._uplinks))
+        findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))

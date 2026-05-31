@@ -1,6 +1,6 @@
 # ADR-0009: `Switch(mgmt=True)` semantics across backends
 
-Status: Draft
+Status: Accepted — option (B) (ratified 2026-05-31, see Ratification addendum)
 Date: 2026-05-21
 
 ## Context
@@ -110,3 +110,44 @@ unchanged. Two wording corrections to the paragraph above:
   `PreflightFinding` per offending Switch" now reads simply "one
   `PreflightFinding` per offending Switch," and `bool(report)` is true iff there
   are no findings at all.
+
+## Ratification — 2026-05-31 (PVE-43)
+
+**Decision: option (B).** `Switch(mgmt=True)` means *the hypervisor host has an
+L2 presence at `.2`* on the Switch's subnet — a plain host adapter, no NAT, no
+forwarding, no router semantics (the sidecar still owns `.1`). Guests on the
+switch and the hypervisor host reach each other over `.2`.
+
+**Reachability is a hypervisor-local guarantee, not a test-runner one.** `.2`
+lives on the *hypervisor*; it is promised reachable from guests on the switch
+and from a co-located orchestrator, but **not** from a remote test runner. A
+plan that needs the runner to reach guests must use the guests' own
+static/DHCP addresses (over a routed/uplinked switch), not `mgmt`. This is the
+honest reading of friction #2 above and it does **not** change the preflight
+contract: realizing `mgmt` is now legal on every backend, so no driver rejects
+it — the locality/reachability caveats are documentation, not a gate.
+
+**Locality (friction #1) is resolved by node-pinning, single-node only.** The
+`.2` adapter is realized on the node that runs the workloads. Multi-node
+Proxmox clusters and vCenter+DVS — where "which host owns `.2`?" is genuinely
+ambiguous — remain out of scope (PVE-31); a driver targeting them must pin VM
+placement before claiming `mgmt`.
+
+**Per-backend realization (the "drops the call" path):**
+
+- **libvirt** — host IP on the network's bridge via `<ip address=.2>`
+  (`drivers/libvirt/_net.py`); the gate call was already dropped. *Realized.*
+- **Proxmox VE** — an SDN **subnet** on the per-Switch vnet carrying
+  `gateway = <.2>` (`POST /cluster/sdn/vnets/{vnet}/subnets`,
+  `{subnet=<cidr>, type=subnet, gateway=<.2>}`), which PVE plumbs onto the
+  vnet bridge on the (single, pinned) node. No SNAT and no DHCP IPAM on the
+  subnet, so it is a pure host adapter that coexists with the sidecar at `.1`.
+  `drivers/proxmox/_sdn.py`; the `mgmt_unsupported_findings` call is dropped
+  from `ProxmoxDriver.preflight` (PVE-44). *Realized (single-node).*
+- **ESXi / vCenter / Hyper-V** — unrealized; they keep calling
+  `mgmt_unsupported_findings` until they grow real support.
+
+**The shared gate stays** in `testrange/preflight.py` for backends that have
+*not* realized `mgmt` (today: the test-only `MockDriver`, and future ESXi /
+Hyper-V drivers). It is no longer "the interim gate until ratification" — it is
+the standing per-backend opt-out for unrealized support.
