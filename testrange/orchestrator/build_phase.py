@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
+from testrange._ansi import scrub_terminal_control
 from testrange._log import get_logger
 from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
@@ -564,7 +565,10 @@ class _ConsoleStreamer:
                 continue
             if self._in_log_block or _RESULT_MARKER in line:
                 continue  # framing, not build output
-            text = line.decode("utf-8", "replace").rstrip("\r")
+            # Scrub guest terminal control bytes (colour/cursor escapes, embedded
+            # \r, C0) so raw boot chatter can't hijack the operator's terminal or
+            # garble the log (CORE-6).
+            text = scrub_terminal_control(line.decode("utf-8", "replace"))
             if text:
                 _console.debug("[%s] %s", self._vm_name, text)
 

@@ -15,6 +15,7 @@ from typing import Any
 
 from testrange import __version__
 from testrange._log import configure as configure_logging
+from testrange._tui import live_output
 from testrange.cache.entry import CacheEntry
 from testrange.cache.http import HttpCache
 from testrange.cache.local import CacheEntryInfo
@@ -181,7 +182,8 @@ def _build(args: argparse.Namespace) -> int:
     profile = _load_profile_arg(args)
     mgr = _build_manager(args)
     try:
-        run_id = build_range(plan, cache_manager=mgr, profile=profile)
+        with live_output(verbose=args.verbose):
+            run_id = build_range(plan, cache_manager=mgr, profile=profile)
     except DriverError as e:
         # Binding/pin mismatch or a backend-agnostic plan with no --profile.
         print(f"error: {e}", file=sys.stderr)
@@ -213,15 +215,17 @@ def _run(args: argparse.Namespace) -> int:
     profile = _load_profile_arg(args)
     mgr = _build_manager(args)
     try:
-        results = run_tests(
-            tests,
-            plan,
-            cache_manager=mgr,
-            fail_fast=args.fail_fast,
-            leak_on_failure=args.leak_on_failure,
-            require_cache=args.require_cache,
-            profile=profile,
-        )
+        with live_output(verbose=args.verbose):
+            results = run_tests(
+                tests,
+                plan,
+                cache_manager=mgr,
+                fail_fast=args.fail_fast,
+                leak_on_failure=args.leak_on_failure,
+                require_cache=args.require_cache,
+                profile=profile,
+                verbose=args.verbose,
+            )
     except DriverError as e:
         print(f"error: {e}", file=sys.stderr)
         return Exit.USAGE
@@ -585,6 +589,14 @@ def build_parser() -> argparse.ArgumentParser:
         default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         help="set log level (default INFO)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help=(
+            "render streaming build/test output as a BuildKit-style collapsing "
+            "live tail (TTY only; falls back to plain per-line logging elsewhere)"
+        ),
     )
     parser.add_argument(
         "--cache",

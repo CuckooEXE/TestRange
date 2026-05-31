@@ -5,9 +5,11 @@ from __future__ import annotations
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from testrange._log import get_logger
+from testrange._tui import capture_test_output
 from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile
 from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
@@ -59,6 +61,7 @@ def run_tests(
     leak_on_failure: bool = False,
     require_cache: bool = False,
     profile: BackendProfile | None = None,
+    verbose: bool = False,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
@@ -75,7 +78,7 @@ def run_tests(
         plan, cache_manager=cache_manager, require_cache=require_cache, profile=profile
     )
     with o as orch:
-        _execute_tests(orch, tests, results, fail_fast=fail_fast)
+        _execute_tests(orch, tests, results, fail_fast=fail_fast, verbose=verbose)
         if leak_on_failure and any(not r.passed for r in results):
             _log.warning("--leak-on-failure: skipping teardown; run_id=%s", o.run_id)
             o.leak()
@@ -88,13 +91,19 @@ def _execute_tests(
     results: list[TestResult],
     *,
     fail_fast: bool,
+    verbose: bool = False,
 ) -> None:
-    """Run tests sequentially, capture failures, append to ``results``."""
+    """Run tests sequentially, capture failures, append to ``results``.
+
+    Under ``verbose`` each test's ``stdout``/``stderr`` is teed into the live
+    tail (CORE-6); otherwise prints pass straight through as before.
+    """
     for t in tests:
         name = getattr(t, "__name__", repr(t))
         start = time.monotonic()
         try:
-            t(orch)
+            with capture_test_output(name) if verbose else nullcontext():
+                t(orch)
         except Exception as e:
             tb = traceback.format_exc()
             results.append(

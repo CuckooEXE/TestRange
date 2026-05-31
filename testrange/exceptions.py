@@ -6,6 +6,8 @@ Specific concerns get their own subclass so callers can catch narrowly.
 
 from __future__ import annotations
 
+from testrange._ansi import scrub_terminal_control
+
 
 class TestRangeError(Exception):
     """Base class for every error raised by testrange."""
@@ -106,7 +108,8 @@ class BuildFailedError(BuilderError):
             parts.append(f"exit code {rc}")
         message = "; ".join(parts)
         if log:
-            message += "\n--- build log ---\n" + log.decode("utf-8", "replace")
+            decoded = scrub_terminal_control(log.decode("utf-8", "replace"))
+            message += "\n--- build log ---\n" + decoded
         super().__init__(message)
 
 

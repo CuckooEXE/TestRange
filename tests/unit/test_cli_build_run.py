@@ -172,6 +172,28 @@ class TestBuildVerb:
         assert _run_vm_creates(driver) == 1
 
 
+class TestVerboseFlag:
+    def test_run_verbose_end_to_end(self, env: tuple[MockDriver, str]) -> None:
+        # --verbose is a global flag (before the subcommand). On a non-tty
+        # (pytest capture) live_output takes its plain-logging path; the run
+        # still completes normally (CORE-6).
+        driver, plan_path = env
+        rc = cli.main(["--verbose", "run", plan_path])
+        assert rc == 0
+        assert _build_vm_creates(driver) == 1
+        assert _run_vm_creates(driver) == 1
+
+    def test_build_verbose_end_to_end(self, env: tuple[MockDriver, str]) -> None:
+        driver, plan_path = env
+        assert cli.main(["--verbose", "build", plan_path]) == 0
+        assert _build_vm_creates(driver) == 1
+
+    def test_verbose_in_help(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit):
+            cli.main(["--help"])
+        assert "--verbose" in capsys.readouterr().out
+
+
 class TestRunAutoBuild:
     def test_run_cold_cache_auto_builds(self, env: tuple[MockDriver, str]) -> None:
         driver, plan_path = env

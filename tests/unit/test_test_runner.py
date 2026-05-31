@@ -172,6 +172,60 @@ class TestRunTests:
         assert not results[0].passed
         assert ran_second == []
 
+    def test_verbose_tees_test_stdout_to_testout_logger(
+        self,
+        setup_env: CacheManager,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Under --verbose a test's prints are routed into the live tail via the
+        # TESTOUT_LOGGER, tagged with the test name (CORE-6). Capture with our own
+        # handler on that logger — the testrange tree has propagate=False, so a
+        # root-level caplog would miss these records.
+        import logging
+
+        from testrange._tui import TESTOUT_LOGGER
+
+        _install_fake_driver(monkeypatch, tmp_path)
+
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        sink = _Collect()
+        testout = logging.getLogger(TESTOUT_LOGGER)
+        testout.addHandler(sink)
+        testout.setLevel(logging.INFO)
+
+        def test_chatty(orch):  # type: ignore[no-untyped-def]
+            print("hello from the test")  # noqa: T201 — exercising stdout capture
+
+        try:
+            results = run_tests([test_chatty], _plan(), cache_manager=setup_env, verbose=True)
+        finally:
+            testout.removeHandler(sink)
+        assert all(r.passed for r in results)
+        assert any("hello from the test" in r.getMessage() for r in records)
+        assert all(getattr(r, "tr_step", None) == "test_chatty" for r in records)
+
+    def test_non_verbose_does_not_capture_stdout(
+        self,
+        setup_env: CacheManager,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Without --verbose, test prints pass straight through to real stdout.
+        _install_fake_driver(monkeypatch, tmp_path)
+
+        def test_chatty(orch):  # type: ignore[no-untyped-def]
+            print("straight to stdout")  # noqa: T201 — exercising stdout passthrough
+
+        run_tests([test_chatty], _plan(), cache_manager=setup_env)
+        assert "straight to stdout" in capsys.readouterr().out
+
 
 class TestCommunicatorBindDuringEnter:
     def test_handle_has_communicator(

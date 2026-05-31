@@ -400,6 +400,45 @@ class TestBuildResultSignaling:
         assert not any("TESTRANGE-RESULT" in m for m in streamed)  # framing hidden
         assert not any(log.decode() in m for m in streamed)  # base64 block hidden
 
+    def test_console_output_is_scrubbed_of_control_bytes(
+        self, env: tuple[CacheManager, MockDriver], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Raw guest terminal escapes (colour, clear-screen, embedded \r) must be
+        # stripped before mirroring so they can't hijack the operator's terminal
+        # (CORE-6).
+        cache, driver = env
+        driver.build_result_stream = [
+            b"\x1b[2J\x1b[1;32m[  OK  ]\x1b[0m Started thing.\r\n",
+            b'TESTRANGE-RESULT: fail rc=1 cmd="false"\n',
+        ]
+        with (
+            caplog.at_level(logging.DEBUG, logger="testrange.orchestrator.build_phase.console"),
+            pytest.raises(BuildFailedError),
+        ):
+            build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        streamed = [r.getMessage() for r in caplog.records if r.name.endswith(".console")]
+        assert any("[  OK  ] Started thing." in m for m in streamed)
+        assert not any("\x1b" in m or "\r" in m for m in streamed)
+
+    def test_fail_log_is_scrubbed_in_error_message(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        # The decoded failure log surfaced in BuildFailedError is scrubbed too —
+        # a guest log full of colour codes shouldn't garble the operator's
+        # terminal when the error is printed (CORE-6).
+        cache, driver = env
+        log = b"\x1b[31mE: package broken\x1b[0m\r\n"
+        driver.build_result_stream = [
+            b'TESTRANGE-RESULT: fail rc=100 cmd="apt-get update"\n'
+            b"TESTRANGE-LOG-BEGIN\n" + base64.b64encode(log) + b"\nTESTRANGE-LOG-END\n"
+        ]
+        with pytest.raises(BuildFailedError) as ei:
+            build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        rendered = str(ei.value)
+        assert "E: package broken" in rendered
+        assert "\x1b" not in rendered and "\r" not in rendered
+        assert ei.value.log == log  # raw bytes preserved on the attribute
+
 
 class TestBuildToRunDataDisk:
     """Data-disk content survives build -> cache -> run (ADR-0010 §4)."""
