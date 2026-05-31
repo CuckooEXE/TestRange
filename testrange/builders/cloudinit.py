@@ -374,6 +374,10 @@ class CloudInitBuilder(Builder):
         ).encode("utf-8")
 
         iso = pycdlib.PyCdlib()
+        # NB: the produced ISO bytes are NOT reproducible — pycdlib bakes the
+        # wall-clock into the volume descriptor, so identical inputs yield
+        # byte-different ISOs. Harmless because the build cache keys on the
+        # rendered seed *text* (config_hash, sort_keys=True), never on ISO bytes.
         # interchange_level=3 (relaxed ISO9660 names), joliet=3 (Windows-style
         # long names), rock_ridge="1.09" (the Rock Ridge version Linux mounts
         # cleanly, for POSIX names). vol_ident="cidata" is REQUIRED — cloud-init

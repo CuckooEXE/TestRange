@@ -132,7 +132,11 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
 
     vms_list = list(vms)
     problems: list[str] = []
-    seen_per_net: dict[str, dict[str, str]] = {}
+    # Keyed by Switch name, not Network name: all Networks on one Switch share a
+    # single CIDR/L2 wire (base.py), so a static IP reused across two Networks of
+    # the *same* Switch still collides on the wire (H8). Switch names are unique
+    # per plan.
+    seen_per_switch: dict[str, dict[str, str]] = {}
 
     for vm in vms_list:
         for idx, nic in enumerate(vm.spec.nics):
@@ -191,7 +195,7 @@ def validate_addressing(switches: Iterable[Switch], vms: Iterable[VMRecipe]) -> 
                     )
                     continue
 
-            seen = seen_per_net.setdefault(nic.network, {})
+            seen = seen_per_switch.setdefault(switch.name, {})
             prior = seen.get(static_ip)
             if prior is not None:
                 problems.append(f"{origin}: duplicate — address already used by {prior}")

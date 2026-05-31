@@ -100,6 +100,16 @@ class TestSwitch:
         assert sw.cidr == "10.0.0.0/24"
         assert sw.network.network_address == ipaddress.IPv4Address("10.0.0.0")
 
+    def test_prefix_longer_than_24_rejected(self) -> None:
+        # H7: the .1-.254 reserved/DHCP/static layout needs a full /24 host
+        # space; a /25 would overrun the subnet broadcast.
+        with pytest.raises(ValueError, match=r"/24 or larger|prefix <= 24"):
+            Switch("sw1", Network("a"), cidr="10.0.0.0/25")
+
+    def test_prefix_shorter_than_24_allowed(self) -> None:
+        sw = Switch("sw1", Network("a"), cidr="10.0.0.0/16")
+        assert sw.network.prefixlen == 16
+
     def test_ipv6_rejected(self) -> None:
         with pytest.raises(ValueError, match="IPv4"):
             Switch("sw1", Network("a"), cidr="fd00::/64")
@@ -269,6 +279,18 @@ class TestValidateAddressing:
         vms = [
             _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
             _vm("v2", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
+        ]
+        with pytest.raises(ValueError, match="duplicate"):
+            validate_addressing([sw], vms)
+
+    def test_duplicate_ipv4_across_networks_of_same_switch(self) -> None:
+        # H8: netA and netB share the Switch's one CIDR/L2 wire, so the same
+        # static IP on each still collides on the wire — dedup is keyed by the
+        # Switch, not the Network name.
+        sw = Switch("sw", Network("netA"), Network("netB"), cidr="172.31.0.0/24")
+        vms = [
+            _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
+            _vm("v2", NetworkIface("netB", addr=StaticAddr("172.31.0.100"))),
         ]
         with pytest.raises(ValueError, match="duplicate"):
             validate_addressing([sw], vms)

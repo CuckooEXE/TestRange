@@ -233,6 +233,16 @@ class Switch:
             ) from e
         if not isinstance(parsed, ipaddress.IPv4Network):
             raise ValueError(f"Switch.cidr must be IPv4 (v0 limitation); got {cidr!r}")
+        # The reserved-address layout (_addressing_consts: .1 sidecar, .2 mgmt,
+        # .3-.9 infra, .10-.99 DHCP, .100-.254 user static) assumes a full /24
+        # host space. A longer prefix (/25+) overruns the subnet broadcast — the
+        # DHCP pool and static range would silently land outside the subnet — so
+        # reject it loudly here instead of mis-leasing later (H7).
+        if parsed.prefixlen > 24:
+            raise ValueError(
+                f"Switch.cidr must be /24 or larger (prefix <= 24): a /{parsed.prefixlen} "
+                f"can't hold the .1-.254 reserved/DHCP/static layout; got {cidr!r}"
+            )
 
         # nat-requires-uplink is the one invariant spanning L2 topology
         # (uplink, on the Switch) and services (nat, on the Sidecar); the

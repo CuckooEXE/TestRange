@@ -49,6 +49,12 @@ def build_sidecar_config_iso(
 
     Returns the ISO9660 image so the orchestrator can upload it to a pool
     the same way it uploads a cloud-init seed.
+
+    Note: the returned bytes are **not** reproducible — pycdlib stamps the
+    wall-clock into the volume descriptor, so two calls with identical inputs
+    differ by a few bytes. That is harmless because the cache keys on the
+    rendered *text* (via ``config_hash`` with ``sort_keys=True``), never on the
+    ISO bytes; do not content-address this output.
     """
     pycdlib = _import_pycdlib()
 

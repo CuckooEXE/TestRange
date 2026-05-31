@@ -19,6 +19,3 @@ class Pip(Package):
     """
 
     insecure: bool = False
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
