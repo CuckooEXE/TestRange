@@ -402,10 +402,10 @@ def data_disks_carry_their_own_content(orch: OrchestratorHandle) -> None:
 
 def data_disk_bytes_survived_capture(orch: OrchestratorHandle) -> None:
     com = orch.vms["fileserver"].communicator
-    for dev, mount in (("/dev/vdb", "/srv/b"), ("/dev/vdc", "/srv/c")):
-        live = com.execute(["sudo", "blkid", "-s", "UUID", "-o", "value", dev]).stdout.strip()
+    for mount in ("/srv/b", "/srv/c"):
+        live = com.execute(["findmnt", "-no", "UUID", mount]).stdout.strip()
         seeded = com.execute(["cat", f"{mount}/uuid"]).stdout.strip()
-        assert live and live == seeded, f"{dev} fs UUID changed: live={live!r} seeded={seeded!r}"
+        assert live and live == seeded, f"{mount} fs UUID changed: live={live!r} seeded={seeded!r}"
 
 
 def disk_snapshot_lifecycle(orch: OrchestratorHandle) -> None:
