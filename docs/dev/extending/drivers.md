@@ -1,9 +1,13 @@
 # Adding a hypervisor driver
 
-A driver wraps a backend SDK (proxmoxer, pyvmomi, WMI, ...) and implements
-`testrange.drivers.base.HypervisorDriver`. Reference implementation:
-`testrange/drivers/mock.py` (`MockDriver`) — an in-memory backend that exercises
-the full contract. The deviation analysis behind this shape is
+A driver wraps a backend SDK (proxmoxer, libvirt-python, pyvmomi, WMI, ...) and
+implements `testrange.drivers.base.HypervisorDriver`. The reference
+implementation is the **libvirt** driver (`testrange/drivers/libvirt/`) — a real
+backend, certified against the full capabilities survey
+([ADR-0019](../../adr/0019-libvirt-reference-backend.md)); read it for a worked
+example of every contract below. The in-memory `MockDriver`
+(`tests/mock_driver.py`) is the hermetic test substrate, not a shipped backend.
+The deviation analysis behind the ABC's shape is
 [ADR-0008](../../adr/0008-driver-abc-multi-backend.md).
 
 ## Steps
@@ -130,8 +134,10 @@ For new resource kinds, override `destroy()` and add the kind.
 ## Tests
 
 Unit-test against an in-memory model, no live backend — `MockDriver`
-(`testrange/drivers/mock.py`) is both the reference implementation and the
-substrate the orchestrator/ABC tests run against (see
-`tests/unit/test_mock_driver.py` and `tests/unit/test_orchestrator.py`). A real
-driver adds integration tests under `tests/integration/`, gated by SDK import
-availability.
+(`tests/mock_driver.py`) is the substrate the orchestrator/ABC tests run against
+(see `tests/unit/test_mock_driver.py` and `tests/unit/test_orchestrator.py`). It
+is registered for the suite via `tests/conftest.py`, not by the package, so
+`--profile mock` resolves under test but a production install doesn't list it. A
+real driver adds integration tests under `tests/integration/`, gated by SDK
+import availability — see `tests/integration/test_libvirt.py` (`pytest -m
+libvirt`), the certification suite for the reference backend.

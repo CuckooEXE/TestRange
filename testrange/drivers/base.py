@@ -133,7 +133,7 @@ class HypervisorDriver(ABC):
         The driver owns *all* L2 topology — the orchestrator never names a
         bridge. How the fabric is realized is backend-specific:
 
-        - libvirt: a host bridge (via pyroute2) that networks attach to
+        - libvirt: a host bridge that networks attach to
         - ESXi: a vSwitch; networks become port-groups on it
         - Proxmox: an SDN zone (or vmbr); networks become vnets
         - Hyper-V: a VMSwitch; networks become per-vNIC VLANs

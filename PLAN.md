@@ -60,8 +60,9 @@ is a long-term TODO that does not break the call shape.
 
 ### 3. Top-level Hypervisor is its own class, NOT a VM
 
-A backend-specific Hypervisor dataclass (e.g. `MockHypervisor(...)`, the
-reference backend; `ProxmoxHypervisor`, in progress) is the top-level Plan
+A backend-specific Hypervisor dataclass (e.g. `LibvirtHypervisor(...)`, the
+certified reference backend; `MockHypervisor`, the in-memory test fixture;
+`ProxmoxHypervisor`, in progress) is the top-level Plan
 entry, carrying `networks=`, `pools=`, `vms=` plus per-backend connection
 config. It is the *host*, not a VM. The driver is inferred from the Hypervisor
 type via the driver registry (`testrange/drivers/_registry.py`):
@@ -581,7 +582,7 @@ surfaces here.
 
 `testrange/guest_io.py` (shared Protocols, also §19), `exceptions.py`
 (`GuestAgentError`), `drivers/base.py` (the `native_guest_*` accessors),
-`drivers/mock.py` (reference transport),
+`tests/mock_driver.py` (mock native transport),
 `communicators/native.py` (`NativeCommunicator`), the orchestrator bind branch
 in `run_phase`, plus `examples/native_agent.py` and unit coverage
 (`test_native_communicator.py`, `test_mock_driver.py`, `test_drivers_base.py`).
@@ -693,8 +694,8 @@ flow). It abstracts the per-backend *host read* of the serial console:
   spike" but is **not built** unless the websocket path proves unworkable.
 - **libvirt** (future) — serial pty / unix-socket / file; live-tail.
 - **Mock** — yields a canned stream; unit tests inject `ok` / `fail` records to
-  drive both the success and the (currently untestable) failure path end-to-end
-  on the reference backend.
+  drive both the success and the (live-untestable) failure path end-to-end in
+  the unit suite.
 - **ESXi / Hyper-V** (future) — datastore-file-backed serial / named pipe; the
   abstraction must not preclude these.
 
@@ -726,7 +727,7 @@ stays). CLI maps it to a build failure with the captured log on stderr.
 
 - `testrange/drivers/base.py` — `read_build_result_sink` accessor returning a
   `Generator[bytes, None, None]` (no bespoke sink type).
-- `testrange/drivers/mock.py` — canned result-sink generator + test hooks.
+- `tests/mock_driver.py` — canned result-sink generator + test hooks.
 - `testrange/drivers/proxmox/_client.py` + `_serial.py` — `serial0` reader over
   `termproxy`→`vncwebsocket` (new dep `websocket-client`; transport-policy
   amendment above), wired into `driver.py`.
@@ -765,7 +766,7 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
   orchestrator owns the watchdog); the orchestrator tails it under
   `contextlib.closing` so the driver's transport is released via the
   generator's `finally` even on an early break — no bespoke sink type. Default
-  raises `DriverError("no build-result sink")`. `MockDriver` is the reference
+  raises `DriverError("no build-result sink")`. `MockDriver` provides the test
   sink: canned `ok` by default; `build_result_stream` injects a `fail` /
   chatter stream and `build_result_wedge` emits heartbeats forever to exercise
   the watchdog.
@@ -1006,7 +1007,7 @@ testrange/
         cpu/  memory/  disk/  network/  pool/   # each: base.py + __init__.py
     drivers/
         base.py                 # HypervisorDriver ABC
-        mock.py                 # MockDriver + MockHypervisor (reference backend)
+        libvirt/                # LibvirtDriver — certified reference backend
         _registry.py            # Hypervisor-type → driver dispatch
         proxmox/                # _client.py, _naming.py, _sdn.py (in progress)
     networks/
@@ -1048,13 +1049,15 @@ the install->build split) have been executed and are dropped; their decisions
 live in the ADRs and the design sections above. Current state:
 
 - **Suite green:** 434 unit tests pass; `ruff` + `mypy --strict` clean.
-- **Reference backend (in transition):** `MockDriver` / `MockHypervisor`
-  currently implement the full `HypervisorDriver` ABC (ADR-0008) and drive the
-  unit suite. Per the **libvirt rebuild** (BACKEND-1, see *libvirt backend*
-  below), libvirt becomes the **reference implementation** and the mock moves to
-  `tests/` as a unit-only fixture — the mock simulates a backend but cannot run a
-  real guest, so a live-certified driver is the better reference. The Proxmox
-  driver is in progress on `feature/proxmox` (see *Proxmox backend* below).
+- **Reference backend:** the **libvirt** driver is the certified reference
+  implementation (BACKEND-1 complete, ADR-0019) — green across
+  `examples/capabilities.py` and `pytest -m libvirt` as a plain `libvirt`-group
+  user. `MockDriver` / `MockHypervisor` implement the full `HypervisorDriver`
+  ABC (ADR-0008) and drive the unit suite, but as a unit-only fixture at
+  `tests/mock_driver.py` (registered via `tests/conftest.py`) — the mock
+  simulates a backend, not a real guest, so the live-certified driver is the
+  reference. The Proxmox driver is in progress on `feature/proxmox` (see
+  *Proxmox backend* below).
 - **Build/run split (ADR-0010) complete:** `build_phase` warms the cache and
   nothing else; `run_phase` creates the user's pools, gates sidecar readiness,
   pushes every built disk (OS + each data disk) per VM, and runs tests.
@@ -1283,12 +1286,13 @@ driver only attaches the sidecar's `eth1` to that resolved uplink. Standing up
 the NAT bridge is a one-time out-of-band operator step, documented per backend in
 `docs/user/drivers/out-of-band-egress.md`.
 
-### libvirt backend (full rewrite in progress, BACKEND-1)
+### libvirt backend (certified reference, BACKEND-1 complete)
 
 The pre-existing libvirt skeleton (connection/naming/profile/preflight + the
-`_todo()`-gated surface) is being **rewritten from zero** against the current
-ABC — libvirt becomes the **reference implementation** and the mock retires to
-`tests/`. Sequenced on the board as `BACKEND-1.0`…`1.E`. The earlier BACKEND-1.1
+`_todo()`-gated surface) was **rewritten from zero** against the current
+ABC — libvirt is now the **reference implementation** (ADR-0019) and the mock
+retired to `tests/`. Sequenced on the board as `BACKEND-1.0`…`1.E`. The earlier
+BACKEND-1.1
 slice and its managed-egress framing (pyroute2 bridges + `nwfilter` fence +
 `supports_managed_build_egress`) are **superseded** — by ADR-0016 (egress is
 out-of-band) and by the decisions below.
@@ -1346,9 +1350,11 @@ out-of-band) and by the decisions below.
   `tests/conftest.py`, drop its side-effect import from `drivers/__init__.py`;
   ADR + docs (install/connecting/extending, the `tr-egress` recipe).
 
-**Status (2026-05-30): 1.0–1.D driver code complete and live-certified.**
+**Status (2026-05-31): BACKEND-1 complete (1.0–1.E), libvirt live-certified.**
 `testrange run --profile libvirt-local examples/{hello_world,capabilities}.py`
-are **green** on real `qemu:///system` as a plain `libvirt`-group user (no root).
+are **green** on real `qemu:///system` as a plain `libvirt`-group user (no root);
+1.E landed the reference-impl ADR ([ADR-0019](docs/adr/0019-libvirt-reference-backend.md))
+and the dev/user doc sweep.
 Three non-obvious realities surfaced by being the first backend to *really*
 execute the build/run, all now baked into the driver:
 
@@ -1385,8 +1391,11 @@ examples/capabilities.py` is **green** (30/30 enabled tests) and
 `tests/integration/test_libvirt.py` (marked `libvirt`, self-cleaning) passes
 **3/3** live — that integration suite is the authoritative driver cert. The mock
 backend has moved to `tests/mock_driver.py` (registered by `tests/conftest.py`);
-libvirt is the reference implementation. **Remaining (1.E):** the reference-impl
-ADR + docs (install/connecting/extending, the `tr-egress` recipe).
+libvirt is the reference implementation, ratified by
+[ADR-0019](docs/adr/0019-libvirt-reference-backend.md). **BACKEND-1 complete
+(1.0–1.E, 2026-05-31):** 1.E landed the reference-impl ADR and the dev/user doc
+sweep (extending/connecting/bugfixing + the `tr-egress` recipe in
+`out-of-band-egress.md`).
 
 The certification surfaced a set of **capabilities-test / orchestrator** issues
 (none a libvirt-driver defect). The test-authoring ones were fixed in

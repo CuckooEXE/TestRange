@@ -11,8 +11,9 @@ communicators faked so no real network or guest is needed:
 
 That is the fast reproduction loop. It catches orchestration, render, and
 state-machine bugs but not real-hypervisor quirks (qcow2 chain semantics,
-permission boundaries, paramiko version issues) — those surface when a real
-backend driver lands and gets its own integration suite.
+permission boundaries, paramiko version issues) — those surface in the live
+backend integration suites (`pytest -m libvirt`, against a local
+`qemu:///system`; see `tests/integration/test_libvirt.py`).
 
 The CLI passive check works on any plan with no backend:
 

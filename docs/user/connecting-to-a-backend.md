@@ -76,7 +76,8 @@ egress = "vmbr0"            # the out-of-band bridge a NAT sidecar routes out of
 ```
 
 Each backend ships its own concrete `BackendProfile` subclass (CORE-18) — the
-`ProxmoxProfile` shown above; `LibvirtProfile(uri, backing_pool)`;
+`ProxmoxProfile` shown above; `LibvirtProfile(uri, uplinks)` (no `backing_pool`
+— libvirt creates per-run dir pools itself);
 `MockProfile(pool_root, backing_capacity_gb)` for the in-memory backend. The
 `driver = "..."` scheme picks which one TestRange loads, and each subclass
 rejects keys it doesn't know (typo protection).
