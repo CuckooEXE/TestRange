@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from testrange.exceptions import StateError, StateLockedError
-from testrange.state.cleanup import cleanup_run, find_run_dirs
+from testrange.exceptions import DriverError, StateError, StateLockedError
+from testrange.state.cleanup import cleanup_all, cleanup_run, find_run_dirs
 from testrange.state.schema import PHASE_RUN
 from testrange.state.store import StateStore
 
@@ -22,8 +22,11 @@ class _FakeDriver:
         self.connected = False
         self.destroyed: list[tuple[str, str]] = []
         self.fail_on: set[str] = set()
+        self.fail_connect = False  # simulate a vanished/unreachable backend
 
     def connect(self) -> None:
+        if self.fail_connect:
+            raise DriverError(f"cannot reach backend at {self.uri}")
         self.connected = True
 
     def disconnect(self) -> None:
@@ -142,6 +145,55 @@ class TestCleanupRun:
         assert "bn-netA" in remaining
         assert "bn-netB" not in remaining
         assert "bn-pool" not in remaining
+
+
+class TestCleanupAll:
+    def test_dead_backend_does_not_abort_the_sweep(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A run whose backend is gone (connect() raises) must not stop the
+        others — cleanup_all attempts every state file independently (CORE-59)."""
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+
+        def _make_run(run_id: str, uri: str) -> None:
+            store = StateStore(tmp_path / "testrange" / "runs" / run_id)
+            store.initialize(
+                run_id=run_id, plan_name="p", driver_class="FakeDriver", driver_uri=uri
+            )
+            store.record_intent(kind="pool", backend_name=f"{run_id}-pool", plan_name="pool1")
+            store.confirm(f"{run_id}-pool")
+            store.set_phase(PHASE_RUN)
+            store.release()  # owner exited — eligible for cleanup
+
+        # find_run_dirs sorts, so "r-1-dead" is walked before "r-2-live": if the
+        # dead backend aborted the sweep, the live run would never be reached.
+        _make_run("r-1-dead", "fake:///dead")
+        _make_run("r-2-live", "fake:///live")
+
+        live = _FakeDriver(uri="fake:///live")
+
+        def _instantiate(cls: str, uri: str) -> _FakeDriver:
+            if uri == "fake:///dead":
+                dead = _FakeDriver(uri=uri)
+                dead.fail_connect = True
+                return dead
+            return live
+
+        monkeypatch.setattr("testrange.state.cleanup._instantiate_driver", _instantiate)
+
+        results = {r.run_id: r for r in cleanup_all()}
+
+        # Both runs were attempted — the dead one did not abort the sweep.
+        assert set(results) == {"r-1-dead", "r-2-live"}
+        # Dead run: nothing destroyed, the failure recorded, ledger preserved.
+        assert results["r-1-dead"].destroyed == ()
+        assert results["r-1-dead"].errors
+        assert StateStore(tmp_path / "testrange" / "runs" / "r-1-dead").exists()
+        # Live run: cleaned through to completion despite the earlier failure.
+        assert results["r-2-live"].destroyed == ("r-2-live-pool",)
+        assert live.destroyed == [("pool", "r-2-live-pool")]
 
 
 class TestFindRunDirs:

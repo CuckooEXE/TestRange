@@ -149,6 +149,22 @@ def cleanup_all(
                 skipped=(),
                 errors=(("(state)", str(e)),),
             )
+        except Exception as e:
+            # Cleanup is the recovery path and must attempt every state file
+            # independently: a single run whose backend is gone (connect() raises
+            # DriverError) or otherwise fails to instantiate must NOT abort the
+            # whole sweep — the CLI consumes this generator with list(), so a
+            # propagating error would also discard every result already yielded.
+            # Record it and move on; the ledger stays on disk for a later retry
+            # once the backend is reachable. Mirrors the per-resource broad catch
+            # in cleanup_run.
+            _log.warning("skipping run %s: cleanup failed: %s", run_id, e)
+            yield CleanupResult(
+                run_id=run_id,
+                destroyed=(),
+                skipped=(),
+                errors=(("(driver)", str(e)),),
+            )
 
 
 def format_cleanup_results(results: Iterable[CleanupResult]) -> str:
