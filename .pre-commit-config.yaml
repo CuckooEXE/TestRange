@@ -77,8 +77,12 @@ repos:
         args: ["testrange", "tests"]
 
       - id: pytest
-        name: pytest (not proxmox)
-        entry: .venv/bin/pytest -m "not proxmox"
+        name: pytest (unit only; excludes live-backend integration)
+        # Pre-commit must be self-contained: unit/MockDriver tests only, never a
+        # live backend. Both integration suites are marked and excluded here — the
+        # libvirt suite (incl. the live nested run) and the proxmox suite need a
+        # real host and are run out-of-band, not on every commit.
+        entry: .venv/bin/pytest -m "not proxmox and not libvirt"
         language: system
         types: [python]
         pass_filenames: false
