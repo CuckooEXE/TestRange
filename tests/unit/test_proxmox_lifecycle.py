@@ -265,7 +265,7 @@ class TestCreateVm:
             network_refs={"netA": "vneta"},
             data_disk_refs=[VolumeRef("local:import/p1__tr-vm-x-web-data0.qcow2")],
         )
-        assert c.api.created["scsi1"] == "local:32"  # blank, sized from HardDrive
+        assert c.api.created["scsi1"] == "local:32,format=qcow2"  # blank, sized from HardDrive
 
     def test_run_data_disk_imports_from_staging(self) -> None:
         c = _client()
@@ -300,7 +300,7 @@ class TestCreateVm:
             network_refs={"netA": "vneta"},
             data_disk_refs=[data_ref],
         )
-        assert c.api.created["scsi1"] == "local:32"  # blank, stale staging ignored
+        assert c.api.created["scsi1"] == "local:32,format=qcow2"  # blank, stale staging ignored
 
     def test_nics_get_stable_macs_on_their_bridges(self) -> None:
         c = _client()

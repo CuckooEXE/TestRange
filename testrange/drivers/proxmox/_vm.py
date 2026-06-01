@@ -199,7 +199,11 @@ def create_vm(
         drive = spec.data_drives[i]
         bus = drive.bus if isinstance(drive, ProxmoxHardDrive) else "scsi"
         if is_build:
-            config[f"{bus}{i + 1}"] = f"{storage}:{drive.size_gb}"  # blank
+            # format=qcow2 to match the OS disk (import-from preserves qcow2) and
+            # the .qcow2 cache naming: a dir store allocates a bare `<storage>:N`
+            # as RAW, which the build then captures into a .qcow2-named file that
+            # fails to re-import as qcow2 at run.
+            config[f"{bus}{i + 1}"] = f"{storage}:{drive.size_gb},format=qcow2"  # blank
         else:
             config[f"{bus}{i + 1}"] = f"{storage}:0,import-from={ref}"  # run: cached built disk
     if seed_iso_ref is not None:
