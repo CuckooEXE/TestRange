@@ -408,18 +408,18 @@ class CloudInitBuilder(Builder):
         return buf.getvalue()
 
 
-# Apt config drop-in that disables signature verification. Written into
+# Apt config drop-in that disables TLS certificate verification, for an
+# internal HTTPS mirror fronted by an untrusted CA. Written into
 # /etc/apt/apt.conf.d/ as the last-loaded file so it wins against distro
 # defaults.
-_INSECURE_APT_CONFIG = (
-    'Acquire::AllowInsecureRepositories "true";\n'
-    'Acquire::AllowDowngradeToInsecureRepositories "true";\n'
-    'APT::Get::AllowUnauthenticated "true";\n'
-)
+_INSECURE_APT_CONFIG = """\
+Acquire::https::Verify-Peer "false";
+Acquire::https::Verify-Host "false";
+"""
 
 
 def _render_insecure_write_files(*, insecure: bool) -> list[dict[str, Any]]:
-    """Cloud-init ``write_files`` entry disabling apt signature verification.
+    """Cloud-init ``write_files`` entry disabling apt TLS verification.
 
     Apt is the only package manager the builder's typed ``packages`` cover, so
     the insecure drop-in is apt-only; a guest provisioned via ``dnf`` in

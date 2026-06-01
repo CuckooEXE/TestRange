@@ -276,8 +276,8 @@ class TestInsecureFlags:
         wf = {entry["path"]: entry for entry in body["write_files"]}
         assert "/etc/apt/apt.conf.d/99-testrange-insecure" in wf
         content = wf["/etc/apt/apt.conf.d/99-testrange-insecure"]["content"]
-        assert "Acquire::AllowInsecureRepositories" in content
-        assert "APT::Get::AllowUnauthenticated" in content
+        assert 'Acquire::https::Verify-Peer "false";' in content
+        assert 'Acquire::https::Verify-Host "false";' in content
 
     def test_insecure_pkg_manager_is_apt_only(self) -> None:
         # The single flag emits the apt drop-in only — no dnf config. (The
