@@ -16,10 +16,11 @@ from typing import Any
 import pytest
 
 from testrange.devices import CPU, HardDrive, Memory, OSDrive
-from testrange.devices.network import NetworkIface
+from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.libvirt import _serial, _vm
 from testrange.exceptions import DriverError
+from testrange.networks.base import BuildNic, NetworkAddressing
 from testrange.vms.spec import VMSpec
 
 
@@ -208,8 +209,21 @@ class TestDomainXML:
         assert "<interface" not in xml
 
 
+_BUILD_NIC = BuildNic(
+    mac="02:aa:bb:cc:dd:fe",
+    network="build-net",
+    addr=StaticAddr("10.97.0.3"),
+    addressing=NetworkAddressing(
+        cidr="10.97.0.0/24", prefix_len=24, dhcp=True, gateway="10.97.0.1", dns_server="10.97.0.1"
+    ),
+)
+
+
 class TestCreateVM:
     def test_build_vm_defines_and_opens_serial(self) -> None:
+        # ADR-0017/0021: the build VM (the one with a build_nic) is the only VM
+        # that gets the unix-socket serial sink — the orchestrator reads its
+        # TESTRANGE-RESULT off it.
         client = FakeClient()
         client.vols["bp/tr-vm-x-web.qcow2"] = FakeVol("/img/os.qcow2")
         client.vols["bp/seed.iso"] = FakeVol("/img/seed.iso")
@@ -220,10 +234,31 @@ class TestCreateVM:
             "plan",
             os_disk_ref=VolumeRef("bp/tr-vm-x-web.qcow2"),
             seed_iso_ref=VolumeRef("bp/seed.iso"),
+            network_refs={"build-net": "tr-build-net"},
+            build_nic=_BUILD_NIC,
+        )
+        assert client.serial_opened == ["tr-vm-x-web"]  # build VM => serial listener
+        assert "mode='connect' path=\"/run/tr/tr-vm-x-web.sock\"" in client.conn.defined_xml[0]
+
+    def test_sidecar_seed_vm_gets_pty_not_serial_sink(self) -> None:
+        # A seed-carrying VM that is NOT a build VM (no build_nic) — e.g. a sidecar
+        # — must NOT open the unix-socket serial sink: it's monitored via QGA, and
+        # the socket would be unreachable on a remote daemon (ADR-0021).
+        client = FakeClient()
+        client.vols["bp/tr-sidecar.qcow2"] = FakeVol("/img/os.qcow2")
+        client.vols["bp/cfg.iso"] = FakeVol("/img/cfg.iso")
+        _vm.create_vm(
+            client,  # type: ignore[arg-type]
+            "tr-sidecar",
+            _spec(),
+            "plan",
+            os_disk_ref=VolumeRef("bp/tr-sidecar.qcow2"),
+            seed_iso_ref=VolumeRef("bp/cfg.iso"),
             network_refs={},
         )
-        assert client.serial_opened == ["tr-vm-x-web"]  # seed VM => serial listener
-        assert "mode='connect' path=\"/run/tr/tr-vm-x-web.sock\"" in client.conn.defined_xml[0]
+        assert client.serial_opened == []  # seed but no build_nic => pty, no sink
+        assert "<serial type='pty'>" in client.conn.defined_xml[0]
+        assert "device='cdrom'" in client.conn.defined_xml[0]  # seed still attached
 
     def test_run_vm_no_serial_listener(self) -> None:
         client = FakeClient()

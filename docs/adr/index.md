@@ -26,4 +26,5 @@ context, the decision, and the consequences. Listed oldest-first.
 0018-single-instance-only
 0019-libvirt-reference-backend
 0020-guest-gateway-abstraction
+0021-nested-virtualization
 ```

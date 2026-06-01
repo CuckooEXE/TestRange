@@ -23,11 +23,13 @@ and ``testrange describe`` works against a libvirt Plan today.
 
 from __future__ import annotations
 
+import urllib.parse
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from testrange._log import get_logger
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.libvirt import _guest, _naming, _net, _serial, _storage, _vm
@@ -38,6 +40,26 @@ from testrange.preflight import (
     PreflightReport,
     unknown_uplink_findings,
 )
+
+_log = get_logger(__name__)
+
+
+def _host_nested_kvm_enabled() -> bool:
+    """True if the local host has KVM nesting on (``kvm_intel``/``kvm_amd``).
+
+    Exactly one of the two modules is loaded per host; a value beginning ``Y``
+    or ``1`` means nesting is enabled. A missing file (module not loaded) or an
+    ``N`` reads as disabled. Module-level so a preflight test can monkeypatch it.
+    """
+    for module in ("kvm_intel", "kvm_amd"):
+        try:
+            value = Path(f"/sys/module/{module}/parameters/nested").read_text().strip()
+        except OSError:
+            continue
+        if value[:1] in ("Y", "1"):
+            return True
+    return False
+
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
@@ -123,7 +145,47 @@ class LibvirtDriver(HypervisorDriver):
         # switch when the plan declares none), so there is no None to guard (H2).
         switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
+        findings.extend(self._nested_kvm_findings(plan))
         return PreflightReport(findings=tuple(findings))
+
+    def _nested_kvm_findings(self, plan: Plan) -> tuple[PreflightFinding, ...]:
+        """Reject ``CPU(nested=True)`` when the L0 host can't run nested guests (ADR-0021).
+
+        A nested hypervisor only boots its inner VMs with KVM if the host exposes
+        the virtualization extensions (``vmx``/``svm``) — which libvirt's
+        ``host-passthrough`` forwards only when KVM nesting is on. We verify the
+        host module parameter and fail loud here rather than let an inner VM crawl
+        under TCG emulation. Only checkable when libvirtd is **local** (the URI
+        names no host): reading ``/sys/module/kvm_*/parameters/nested`` is a
+        host-filesystem read, and a remote daemon's sysfs isn't reachable over the
+        libvirt API (deferred with the rest of the remote surface, BACKEND-5).
+        """
+        if not any(vm.spec.cpu.nested for vm in plan.hypervisor.vms):
+            return ()
+        host = urllib.parse.urlparse(self._conn.libvirt_uri).hostname
+        if host not in (None, "", "localhost"):
+            _log.debug(
+                "nested CPU requested but libvirt is remote (%s); skipping host nested-KVM probe",
+                self._conn.libvirt_uri,
+            )
+            return ()
+        if _host_nested_kvm_enabled():
+            return ()
+        return (
+            PreflightFinding(
+                code="nested-kvm-disabled",
+                message=(
+                    "a VM declares CPU(nested=True) but the host has KVM nesting disabled "
+                    "(/sys/module/kvm_{intel,amd}/parameters/nested is not Y); inner guests "
+                    "would fall back to slow TCG emulation or fail to boot"
+                ),
+                fix_hint=(
+                    "enable nesting: `echo Y | sudo tee /sys/module/kvm_intel/parameters/nested` "
+                    "(or kvm_amd), or set `options kvm_intel nested=1` in /etc/modprobe.d and "
+                    "reload the module"
+                ),
+            ),
+        )
 
     def _resolve_uplink(self, switch: Switch) -> str | None:
         """The host bridge ``switch.uplink`` maps to, or ``None`` if it declares none.

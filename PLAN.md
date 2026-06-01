@@ -66,9 +66,10 @@ certified reference backend; `MockHypervisor`, the in-memory test fixture;
 entry, carrying `networks=`, `pools=`, `vms=` plus per-backend connection
 config. It is the *host*, not a VM. The driver is inferred from the Hypervisor
 type via the driver registry (`testrange/drivers/_registry.py`):
-`MockHypervisor` → `MockDriver`. Nested hypervisors are explicitly **out of
-scope for v0**. When nesting lands, it lands as a separate class shape —
-designed fresh.
+`MockHypervisor` → `MockDriver`. A *nested* hypervisor — a guest that is itself
+a host running an inner plan — is the one VM-shaped exception: it is a
+`VMRecipe` subclass (`GuestHypervisor`), not a top-level entry. See §23 and
+ADR-0021.
 
 ### 4. State schema future-proofs for resume + nested; feature deferred
 
@@ -1483,6 +1484,49 @@ driver's own live `preflight`. `RunContext.resolved` holds the binding;
 (`driver_for_name`, cleanup) + `scheme_for_hypervisor` / `is_pinned` (pin
 introspection); the type-driven `driver_for` path is gone (CORE-19 — the
 concrete+none cell that needed it now errors).
+
+### 23. Nested virtualization via recursive orchestration (ADR-0021)
+
+A guest that is itself a hypervisor — an L1 libvirt host running its own inner
+plan of L2 guests — brought up automatically as part of the outer run. It is
+**the existing pipeline, recursed**, not a new execution model.
+
+- **Shape:** `GuestHypervisor(VMRecipe)` adds one field `inner: Hypervisor` (the
+  L1 plan). It lives in `Hypervisor.vms` alongside ordinary recipes; build / run
+  / bind treat it as a VM via its shared `.spec`/`.builder`/`.communicator`, and
+  only `nested_phase` selects it with `isinstance(vm, GuestHypervisor)`. A
+  `GuestHypervisor.libvirt(...)` classmethod fills the qemu/libvirt-stack
+  `CloudInitBuilder` + `SSHCommunicator` + an inner `LibvirtHypervisor` (reused
+  as the inner-scheme marker — installing libvirtd into the guest pins the inner
+  backend to libvirt).
+- **Recursion:** after L0 run-phase brings the guest-hypervisor VM up,
+  `nested_phase` waits for libvirtd, then **synthesizes the inner binding from
+  the running guest** — its discovered IP + the SSH key the builder baked →
+  an in-process `LibvirtProfile`/driver for `qemu+ssh://<admin>@<L1-ip>/system`.
+  It enters a full inner `Orchestrator(Plan("<outer>.<host>", vm.inner),
+  require_cache=True, <shared cache>)`. To the inner run this is an ordinary
+  remote-libvirt run. No `--profile` for the inner plan — it is derived, which
+  is what makes nesting automatic. The inner handle is exposed as
+  `OrchestratorHandle.nested["<host>"]` (`.vms`/`.driver`/`.run_id` + `.host`).
+- **Build on L0:** inner VM disks always build during the **outer** build phase
+  on the **L0** backend into the shared cache (real egress for apt). The inner
+  run (`require_cache=True`) only uploads the cached disk to the L1 pool and
+  boots — no nested build boot, no L1 build infra.
+- **Egress is the wrapping L0 sidecar:** the inner plan declares a normal
+  `Sidecar(nat)` + `uplink`; the uplink resolves to a bridge the guest builder
+  provisions, and runtime egress chains inner-sidecar → host-a → wrapping L0
+  `Switch`+`Sidecar(nat)` → real world. No synthesized egress. Only exercised for
+  inner-VM *runtime* internet, since build is on L0.
+- **`CPU(count, nested=True)`** is the portable "must run hardware-accelerated
+  VMs" knob; libvirt already passes the host CPU through, and the L0 preflight
+  verifies host nested KVM is enabled.
+- **Depth:** uncapped by construction (an inner `Orchestrator` runs its own
+  `nested_phase`). Depth-2 was run (CI-8): the build path recurses fine (all
+  disks build on L0), but bring-up dies on **L2 guest reachability** — host-b
+  sits on host-a's internal network, and the inner driver's `guest_gateway()` is
+  `None`, so the orchestrator can't SSH to it. The fix (a `GuestGateway` that
+  jumps through host-a, ADR-0020) is real driver work and is **not** done here;
+  full findings in ADR-0021.
 
 ### Deferred (named, not built)
 

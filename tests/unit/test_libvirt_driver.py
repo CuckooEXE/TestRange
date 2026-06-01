@@ -60,6 +60,36 @@ def _plan(comm: object | None = None) -> Plan:
     )
 
 
+def _nested_plan() -> Plan:
+    """A plan whose one VM requests CPU(nested=True) (for the nested-KVM probe)."""
+    return Plan(
+        "t",
+        LibvirtHypervisor(
+            networks=[
+                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
+            pools=[StoragePool("pool1", 16)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(
+                        name="host-a",
+                        devices=[
+                            CPU(2, nested=True),
+                            Memory(2048),
+                            OSDrive("pool1", 20),
+                            NetworkIface("netA", addr=StaticAddr("10.0.0.150")),
+                        ],
+                    ),
+                    builder=CloudInitBuilder(
+                        base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+                    ),
+                    communicator=SSHCommunicator("u"),
+                )
+            ],
+        ),
+    )
+
+
 class TestConstruction:
     def test_satisfies_abc(self) -> None:
         assert isinstance(LibvirtDriver(LibvirtConn()), HypervisorDriver)
@@ -156,3 +186,45 @@ class TestPreflight:
             build_switch=_BUILD_SW,
         )
         assert any(f.code == "unknown-uplink" for f in report.findings)
+
+    def test_nested_cpu_rejected_when_host_nesting_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-0021: CPU(nested=True) on a local host with KVM nesting off fails loud.
+        monkeypatch.setattr(
+            "testrange.drivers.libvirt.driver._host_nested_kvm_enabled", lambda: False
+        )
+        report = LibvirtDriver(LibvirtConn()).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert any(f.code == "nested-kvm-disabled" for f in report.findings)
+
+    def test_nested_cpu_passes_when_host_nesting_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "testrange.drivers.libvirt.driver._host_nested_kvm_enabled", lambda: True
+        )
+        report = LibvirtDriver(LibvirtConn()).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert not any(f.code == "nested-kvm-disabled" for f in report.findings)
+
+    def test_nested_cpu_probe_skipped_for_remote_host(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A remote daemon's sysfs isn't reachable over the libvirt API; skip the
+        # probe rather than read the orchestrator host's (irrelevant) sysfs.
+        monkeypatch.setattr(
+            "testrange.drivers.libvirt.driver._host_nested_kvm_enabled", lambda: False
+        )
+        report = LibvirtDriver(LibvirtConn("qemu+ssh://elsewhere/system")).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert not any(f.code == "nested-kvm-disabled" for f in report.findings)

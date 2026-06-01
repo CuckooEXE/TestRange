@@ -48,7 +48,9 @@ from testrange.orchestrator.artifacts import (
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
+from testrange.plan import Plan
 from testrange.state.schema import PHASE_BUILD
+from testrange.vms.nested import GuestHypervisor
 from testrange.vms.recipe import VMRecipe
 
 _log = get_logger(__name__)
@@ -101,13 +103,20 @@ def _build_nic_for(ctx: RunContext, build_switch: Switch, vm_name: str) -> Build
 
 
 def build_phase(ctx: RunContext) -> None:
-    """Warm the cache for every VM; build only the misses."""
+    """Warm the cache for every VM; build only the misses.
+
+    Nested hypervisors (``GuestHypervisor``) build like any VM here for their own
+    L0 disk; their *inner* VM disks are warmed afterward on the same L0 backend
+    (:func:`build_nested_inner_vms`, ADR-0021 — "build on L0"), so the later inner
+    run is a pure cache hit and needs no nested build boot.
+    """
     ctx.store.set_phase(PHASE_BUILD)
 
     misses, hits = _probe_all(ctx)
     ctx.built_disk_paths.update(hits)
     if not misses:
         _log.info("build: full cache hit; no backend resources needed")
+        build_nested_inner_vms(ctx)
         return
 
     # At least one miss: stand up the ephemeral build infra (ADR-0010 §2/§9).
@@ -129,6 +138,57 @@ def build_phase(ctx: RunContext) -> None:
         build_one_vm(ctx, bp, build_pool_backend, build_net_backend)
 
     teardown_build_phase(ctx, build_switch, build_pool_backend)
+
+    build_nested_inner_vms(ctx)
+
+
+def build_nested_inner_vms(ctx: RunContext) -> None:
+    """Warm each nested host's inner VM disks on the **L0** backend (ADR-0021 §3).
+
+    For every ``GuestHypervisor`` in the plan, run the ordinary build phase over
+    its inner plan against the *same* (outer/L0) driver and shared cache: the
+    inner VMs build with real egress through the L0 build switch, and their disks
+    land in the shared cache keyed under the inner plan namespace
+    (``"<outer>.<host>"``). The inner run (``nested_phase``, ``require_cache=True``)
+    then only uploads those cached disks into the guest's pool and boots.
+
+    Recursion is depth-agnostic: an inner plan that itself contains a
+    ``GuestHypervisor`` warms *its* inner VMs here too. (Whether a depth-2 inner
+    run can consume them is a separate question — see ADR-0021 / CI-8.)
+    """
+    guests = [vm for vm in ctx.plan.hypervisor.vms if isinstance(vm, GuestHypervisor)]
+    for guest in guests:
+        inner_plan = Plan(f"{ctx.plan_name}.{guest.name}", guest.inner)
+        _log.info(
+            "build: warming inner plan %r on L0 for nested host %r", inner_plan.name, guest.name
+        )
+        build_phase(_inner_build_ctx(ctx, inner_plan))
+
+
+def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
+    """A RunContext for building ``inner_plan`` on the outer driver + shared cache.
+
+    Shares the outer driver binding, state store, cache, and run id (the inner
+    build's transient backend resources live on L0 under the outer run); only the
+    plan, plan name, and run-network addressing are inner-specific.
+    """
+    return RunContext(
+        plan=inner_plan,
+        resolved=ctx.resolved,
+        store=ctx.store,
+        cache=ctx.cache,
+        run_id=ctx.run_id,
+        plan_name=inner_plan.name,
+        build_timeout_s=ctx.build_timeout_s,
+        lease_timeout_s=ctx.lease_timeout_s,
+        sidecar_ready_timeout_s=ctx.sidecar_ready_timeout_s,
+        agent_ready_timeout_s=ctx.agent_ready_timeout_s,
+        addressing={
+            n.name: NetworkAddressing.from_switch(s)
+            for s in inner_plan.hypervisor.all_switches
+            for n in s.networks
+        },
+    )
 
 
 def probe_misses(ctx: RunContext) -> list[str]:

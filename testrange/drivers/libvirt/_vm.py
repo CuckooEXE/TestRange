@@ -17,11 +17,13 @@ map, crash-safe teardown.
   ``compose_mac(plan, vm, i)`` so DHCP hands out a predictable lease (ADR-0006).
   At build (``build_nic`` set, ADR-0017) the declared NICs are replaced by a
   single build-NIC interface on the build network.
-- **serial build-result sink** — a seed-carrying VM (build / sidecar) gets a
-  ``<serial type='unix' mode='connect'>`` pointing at a socket the driver already
-  listens on (see ``_conn``); a run VM gets a throwaway ``pty`` console (no
-  back-pressure, nothing to drain). The build VM's serial is tailed by
-  ``read_build_result_sink``.
+- **serial build-result sink** — a **build VM** (the one with a ``build_nic``,
+  ADR-0017) gets a ``<serial type='unix' mode='connect'>`` pointing at a socket
+  the driver already listens on (see ``_conn``); its serial is tailed by
+  ``read_build_result_sink``. Sidecars and run VMs get a throwaway ``pty`` console
+  (no back-pressure, nothing to drain) — a sidecar carries a seed but is monitored
+  via QGA, and binding it a unix socket breaks against a remote daemon (the socket
+  is on the orchestrator host, not the daemon's — ADR-0021's nested inner run).
 - **QGA channel** — an unconditional ``org.qemu.guest_agent.0`` virtio channel
   (``mode='bind'``, the daemon owns that socket) so ``_guest`` can drive the QEMU
   Guest Agent.
@@ -196,9 +198,10 @@ def create_vm(
 
     The OS disk is already full-size (the orchestrator ``resize_volume``\\ d it
     before this call), so create_vm only attaches; cloud-init's ``growpart``
-    expands the rootfs on first boot. A seed-carrying VM (``seed_iso_ref`` set —
-    build VM or sidecar) gets the unix-socket serial sink, its listener opened
-    here so the socket exists when ``start_vm`` boots QEMU.
+    expands the rootfs on first boot. Only a **build VM** (``build_nic`` set) gets
+    the unix-socket serial sink, its listener opened here so the socket exists when
+    ``start_vm`` boots QEMU; sidecars and run VMs get a throwaway pty (see the
+    module docstring for why a sidecar must not get the unix socket).
 
     When ``build_nic`` is set (build phase, ADR-0017) the domain gets a *single*
     ``<interface>`` for the build NIC and the declared ``spec.nics`` are not
@@ -215,7 +218,16 @@ def create_vm(
             (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
             for idx, nic in enumerate(spec.nics)
         ]
-    serial_sock = client.open_serial_listener(backend_name) if seed_iso_ref is not None else None
+    # The unix-socket serial sink is opened ONLY for build VMs — the orchestrator
+    # reads a build VM's TESTRANGE-RESULT off it (build_one_vm). A build VM is the
+    # one with the dedicated build NIC (ADR-0017), so build_nic is the signal.
+    # Sidecars carry a seed too but are monitored via QGA, never the serial sink;
+    # giving them one is dead weight locally and, on a *remote* daemon (the inner
+    # qemu+ssh connection of a nested run, ADR-0021), outright broken — the socket
+    # we bind lives on the orchestrator host, not the remote daemon's, so its
+    # security driver can't stat it. Seed-carrying non-build VMs get a throwaway
+    # pty like run VMs.
+    serial_sock = client.open_serial_listener(backend_name) if build_nic is not None else None
     xml = _domain_xml(
         backend_name,
         spec,
