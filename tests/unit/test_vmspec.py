@@ -67,3 +67,15 @@ class TestVMSpec:
         # Backend-agnostic: VMSpec only checks non-empty. Libvirt's charset
         # rule is enforced at the MockHypervisor boundary (test_plan.py).
         assert VMSpec(name="v,1", devices=_basic_devices()).name == "v,1"
+
+    def test_firmware_defaults_to_bios(self) -> None:
+        # BUILD-1b: firmware is a whole-VM property; the cross-backend default is
+        # BIOS (what cloud images expect).
+        assert VMSpec(name="x", devices=_basic_devices()).firmware == "bios"
+
+    def test_firmware_uefi_accepted(self) -> None:
+        assert VMSpec(name="x", devices=_basic_devices(), firmware="uefi").firmware == "uefi"
+
+    def test_firmware_rejects_unknown(self) -> None:
+        with pytest.raises(ValueError, match="firmware must be one of"):
+            VMSpec(name="x", devices=_basic_devices(), firmware="seabios")

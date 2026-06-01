@@ -201,9 +201,9 @@ class HypervisorDriver(ABC):
 
         ``kind`` is one of the orchestrator's logical volume kinds
         (``build_disk``, ``run_disk``, ``data_disk``, ``base_image``,
-        ``build_seed``). Drivers return the right extension for their
-        on-disk format (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for
-        cloud-init seeds).
+        ``build_seed``, ``boot_iso``). Drivers return the right extension for
+        their on-disk format (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for
+        cloud-init seeds and installer boot media).
         """
 
     @abstractmethod
@@ -276,6 +276,7 @@ class HypervisorDriver(ABC):
         network_refs: dict[str, str],
         data_disk_refs: Sequence[VolumeRef] = (),
         build_nic: BuildNic | None = None,
+        boot_media_ref: VolumeRef | None = None,
     ) -> Any:
         """Define a VM on the backend.
 
@@ -283,13 +284,20 @@ class HypervisorDriver(ABC):
           backend_name:  Deterministic name for the VM on the backend
             (composed via ``compose_resource_name``).
           spec:          ``VMSpec`` from the Plan (CPU/memory/devices/NICs).
+            ``spec.firmware`` (``bios``/``uefi``) selects the platform firmware;
+            a ``uefi`` VM is defined under OVMF with per-VM EFI vars. The driver
+            MUST reproduce the same firmware at run-phase create that the build
+            used, or a UEFI-installed disk panics under SeaBIOS (BUILD-1b).
           plan_name:     User-facing Plan name (drivers that derive stable
             MACs from ``(plan_name, vm_name, nic_idx)`` use this).
-          os_disk_ref:   Locator for the writable OS disk (pushed onto this
-            VM's own ref via ``upload_to_pool``).
-          seed_iso_ref:  Locator for the cloud-init seed ISO produced by an
-            earlier ``write_to_pool`` call, or ``None`` for VMs that don't
-            need a seed (run-phase VMs).
+          os_disk_ref:   Locator for the writable OS disk. Image-origin: the
+            base bytes were pushed onto this ref (``upload_to_pool``). Installer-
+            origin (``boot_media_ref`` set): a **blank** sized disk the installer
+            partitions — the driver realizes it blank and does not import/grow it.
+          seed_iso_ref:  Locator for a seed ISO produced by an earlier
+            ``write_to_pool``/``upload_to_pool`` call (cloud-init ``cidata``, or
+            the PVE answer-file volume), attached as a **data** CDROM. ``None``
+            for VMs that need no seed (run-phase VMs).
           network_refs:  ``{plan_network_name: backend_network_name}`` map
             so the driver can wire NICs to the right backend network. At run
             it keys every declared ``spec.nics`` entry; at build (``build_nic``
@@ -306,6 +314,14 @@ class HypervisorDriver(ABC):
             absent during build; their MAC-matched netplan stanzas stay inert).
             ``None`` at run/sidecar time → the driver wires ``spec.nics`` as
             usual.
+          boot_media_ref: Locator for a **bootable** install medium (the
+            installer ISO), or ``None`` (the image-origin default). When set,
+            this is an installer-origin build: the driver attaches it as a
+            bootable CDROM and realizes ``os_disk_ref`` blank, so the empty OS
+            disk falls through to the installer and is partitioned unattended
+            (BUILD-1c/1d, ADR-0010 §6). Distinct from ``seed_iso_ref``, which is
+            always *data* media; an installer build carries both (bootable ISO +
+            answer-file seed).
         """
 
     @abstractmethod
@@ -451,9 +467,9 @@ class HypervisorDriver(ABC):
     def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
         """Destroy a resource by kind (default dispatch).
 
-        Volume kinds (``build_disk``, ``build_seed``, ``data_disk``,
-        ``run_disk``) require a ``pool_backend`` in ``metadata`` so the
-        driver knows which pool to remove the volume from.
+        Volume kinds (``build_disk``, ``build_seed``, ``boot_iso``,
+        ``data_disk``, ``run_disk``) require a ``pool_backend`` in ``metadata``
+        so the driver knows which pool to remove the volume from.
         """
         if kind in ("network", "build_network"):
             self.destroy_network(backend_name)
@@ -464,6 +480,7 @@ class HypervisorDriver(ABC):
         elif kind in (
             "build_disk",
             "build_seed",
+            "boot_iso",
             "run_disk",
             "data_disk",
             "base_image",

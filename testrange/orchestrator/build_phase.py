@@ -74,10 +74,32 @@ class _VMBuildPlan:
     config_hash: str
     macs: tuple[str, ...]
     build_nic: BuildNic
-    base_path: Path
+    # Image-origin: the local path of the OS base to upload+grow. Installer-
+    # origin: None (the OS disk is materialized blank; the install medium is
+    # ``boot_media_path`` instead).
+    base_path: Path | None
+    boot_media_path: Path | None
     roles: tuple[str, ...]
     # role -> cached path on a full hit; None when any role misses (whole-VM miss).
     cached_paths: dict[str, Path] | None
+
+    def __post_init__(self) -> None:
+        # Exactly one OS-disk origin: an image base (upload+grow) XOR an installer
+        # boot medium (blank disk the installer partitions). installer_origin reads
+        # base_path alone, so a plan with *both* set would silently drop the boot
+        # medium and one with *neither* would yield a blank, unbootable disk.
+        # _probe_vm constructs these mutually exclusive; this backstops a future
+        # edit (or a test) that doesn't.
+        if (self.base_path is None) == (self.boot_media_path is None):
+            raise OrchestratorError(
+                f"vm {self.vm.name!r}: _VMBuildPlan needs exactly one OS-disk origin "
+                f"(base_path xor boot_media_path); got base_path={self.base_path!r}, "
+                f"boot_media_path={self.boot_media_path!r}"
+            )
+
+    @property
+    def installer_origin(self) -> bool:
+        return self.base_path is None
 
 
 def _build_nic_for(ctx: RunContext, build_switch: Switch, vm_name: str) -> BuildNic:
@@ -176,17 +198,30 @@ def _probe_vm(
 ) -> _VMBuildPlan:
     builder = vm.builder
     base = builder.os_disk_base()
-    if base is None:
-        # Installer-based OS-disk origin (blank disk + boot media): the deferred
-        # BUILD-1 materialize_os_disk seam (ADR-0010 §6). The image-based path
-        # below is the only one built today.
-        raise OrchestratorError(
-            f"vm {vm.name!r}: builder {type(builder).__name__} provides no OS-disk base "
-            "image; installer-based OS-disk origin is not supported yet (BUILD-1)"
-        )
-
-    base_info = ctx.cache.resolve(base)
-    assert base_info.path is not None  # cache.resolve(fetch=True) materializes locally
+    # OS-disk origin: image-based (a base CacheEntry to upload+grow) or
+    # installer-based (no base; the builder supplies the boot medium and the
+    # orchestrator materializes a blank OS disk — BUILD-1, ADR-0010 §6). Exactly
+    # one origin sha feeds the cache key via ``base_sha``: the base image's, or
+    # the install medium's (a different installer ISO must invalidate the cache
+    # just as a different base would).
+    base_path: Path | None = None
+    boot_media_path: Path | None = None
+    if base is not None:
+        base_info = ctx.cache.resolve(base)
+        assert base_info.path is not None  # cache.resolve(fetch=True) materializes locally
+        base_path = base_info.path
+        origin_sha = base_info.sha256
+    else:
+        boot_media = builder.boot_media()
+        if boot_media is None:
+            raise OrchestratorError(
+                f"vm {vm.name!r}: builder {type(builder).__name__} provides neither an "
+                "OS-disk base image (os_disk_base) nor a boot medium (boot_media)"
+            )
+        media_info = ctx.cache.resolve(boot_media)
+        assert media_info.path is not None
+        boot_media_path = media_info.path
+        origin_sha = media_info.sha256
     macs = tuple(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
     )
@@ -195,7 +230,7 @@ def _probe_vm(
         vm.spec,
         vm,
         addressing=ctx.addressing,
-        base_sha=base_info.sha256,
+        base_sha=origin_sha,
         sidecar_sha=sidecar_sha,
         macs=macs,
         build_nic=build_nic,
@@ -208,7 +243,8 @@ def _probe_vm(
         config_hash=config_hash,
         macs=macs,
         build_nic=build_nic,
-        base_path=base_info.path,
+        base_path=base_path,
+        boot_media_path=boot_media_path,
         roles=roles,
         cached_paths=cached,
     )
@@ -270,7 +306,10 @@ def build_one_vm(
     spec = vm.spec
     build_vm_backend = ctx.driver.compose_resource_name(ctx.run_id, "build_vm", vm.name)
 
-    # --- OS disk: push base bytes straight onto this VM's own ref, then grow.
+    # --- OS disk. Image-origin: push base bytes onto this VM's own ref, then
+    # grow. Installer-origin (BUILD-1): materialize a blank disk of the declared
+    # size — the installer partitions it, booting the install medium staged
+    # below.
     os_disk_name = f"{build_vm_backend}{ctx.driver.volume_suffix('build_disk')}"
     os_disk_ref = ctx.driver.compose_volume_ref(build_pool_backend, os_disk_name)
     ctx.store.record_intent(
@@ -279,9 +318,34 @@ def build_one_vm(
         plan_name=vm.name,
         pool_backend=build_pool_backend,
     )
-    ctx.driver.upload_to_pool(os_disk_ref, bp.base_path)
-    ctx.driver.resize_volume(os_disk_ref, spec.os_drive.size_gb)
+    if bp.installer_origin:
+        ctx.driver.create_blank_volume(os_disk_ref, spec.os_drive.size_gb)
+    else:
+        assert bp.base_path is not None  # image-origin always resolves a base path
+        ctx.driver.upload_to_pool(os_disk_ref, bp.base_path)
+        ctx.driver.resize_volume(os_disk_ref, spec.os_drive.size_gb)
     ctx.store.confirm(os_disk_name, pool_backend=build_pool_backend)
+
+    # --- Boot medium (installer-origin only): stage the install ISO onto the
+    # build pool and attach it as a bootable CDROM. Ephemeral like the seed —
+    # deleted post-capture.
+    boot_media_ref: VolumeRef | None = None
+    boot_media_name: str | None = None
+    if bp.boot_media_path is not None:
+        # The builder may transform the resolved medium (e.g. bake the PVE
+        # auto-installer activation file + first-boot script into the ISO).
+        # Default identity; runs only here, on a build miss.
+        prepared_media = bp.builder.prepare_boot_media(bp.boot_media_path)
+        boot_media_name = f"{build_vm_backend}-bootmedia{ctx.driver.volume_suffix('boot_iso')}"
+        boot_media_ref = ctx.driver.compose_volume_ref(build_pool_backend, boot_media_name)
+        ctx.store.record_intent(
+            kind="boot_iso",
+            backend_name=boot_media_name,
+            plan_name=vm.name,
+            pool_backend=build_pool_backend,
+        )
+        ctx.driver.upload_to_pool(boot_media_ref, prepared_media)
+        ctx.store.confirm(boot_media_name, pool_backend=build_pool_backend)
 
     # --- Data disks: blank, sized; the guest formats/populates them on the build boot.
     data_disk_refs: list[tuple[str, VolumeRef]] = []
@@ -332,6 +396,7 @@ def build_one_vm(
         network_refs=network_refs,
         data_disk_refs=[ref for _, ref in data_disk_refs],
         build_nic=bp.build_nic,
+        boot_media_ref=boot_media_ref,
     )
     ctx.store.confirm(build_vm_backend)
     ctx.driver.start_vm(build_vm_backend)
@@ -364,6 +429,10 @@ def build_one_vm(
     )
     if seed_ref is not None and seed_name is not None:
         _best_effort_delete(ctx, "volume", seed_name, partial(ctx.driver.delete_volume, seed_ref))
+    if boot_media_ref is not None and boot_media_name is not None:
+        _best_effort_delete(
+            ctx, "volume", boot_media_name, partial(ctx.driver.delete_volume, boot_media_ref)
+        )
     for name, ref in data_disk_refs:
         _best_effort_delete(ctx, "volume", name, partial(ctx.driver.delete_volume, ref))
     _best_effort_delete(ctx, "volume", os_disk_name, partial(ctx.driver.delete_volume, os_disk_ref))

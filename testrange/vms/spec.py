@@ -19,6 +19,17 @@ from testrange.devices.disk.base import HardDrive, OSDrive
 from testrange.devices.memory.base import Memory
 from testrange.devices.network.base import NetworkIface
 
+# Platform firmware the VM boots under. ``bios`` is SeaBIOS (the cross-backend
+# default cloud images expect); ``uefi`` is OVMF — the firmware the installer
+# media was validated under (e.g. booting the PVE installer via its x86_64-efi
+# GRUB path rather than the BIOS El-Torito one). Modeled as a validated str —
+# matching the project's other hardware knobs (e.g. ``ProxmoxHardDrive.bus``)
+# rather than an enum. Firmware is a whole-VM property, NOT a builder one: a UEFI
+# install produces a disk that panics under SeaBIOS, so the *same* firmware must
+# be reproduced at run-phase create — hence it lives on the spec, which both
+# phases read (BUILD-1b).
+FIRMWARES = frozenset({"bios", "uefi"})
+
 
 @dataclass(frozen=True)
 class VMSpec:
@@ -26,12 +37,17 @@ class VMSpec:
 
     name: str
     devices: tuple[Device, ...] = field(default_factory=tuple)
+    firmware: str = "bios"
 
-    def __init__(self, *, name: str, devices: Sequence[Device]) -> None:
+    def __init__(self, *, name: str, devices: Sequence[Device], firmware: str = "bios") -> None:
         # Backend-agnostic check only; name-charset rules are enforced at the
         # Hypervisor boundary (validate_hypervisor_plan) and per-driver.
         if not name:
             raise ValueError("VMSpec.name must be a non-empty string")
+        if firmware not in FIRMWARES:
+            raise ValueError(
+                f"VMSpec({name!r}).firmware must be one of {sorted(FIRMWARES)}, got {firmware!r}"
+            )
         devs = tuple(devices)
 
         cpus = sum(1 for d in devs if isinstance(d, CPU))
@@ -47,6 +63,7 @@ class VMSpec:
 
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "devices", devs)
+        object.__setattr__(self, "firmware", firmware)
 
     @property
     def cpu(self) -> CPU:

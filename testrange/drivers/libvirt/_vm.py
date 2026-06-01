@@ -73,22 +73,37 @@ def _vol_path(client: LibvirtClient, ref: VolumeRef) -> str:
     return str(vol.path())
 
 
-def _disk_xml(path: str, dev: str) -> str:
+def _boot_order_xml(boot_order: int | None) -> str:
+    """A per-device ``<boot order='N'/>`` element, or empty.
+
+    Used only on installer-origin domains: the OS disk and the bootable
+    installer CDROM carry explicit per-device order so the empty OS disk is
+    tried first and falls through to the installer (see :func:`_os_xml`).
+    Per-device ``<boot order>`` and the ``<os><boot dev>`` form are mutually
+    exclusive in libvirt, so image-origin domains pass ``None`` here and keep
+    the ``<os>`` form.
+    """
+    return f"<boot order='{boot_order}'/>" if boot_order is not None else ""
+
+
+def _disk_xml(path: str, dev: str, *, boot_order: int | None = None) -> str:
     return (
         "<disk type='file' device='disk'>"
         "<driver name='qemu' type='qcow2'/>"
         f"<source file={quoteattr(path)}/>"
         f"<target dev='{dev}' bus='virtio'/>"
+        f"{_boot_order_xml(boot_order)}"
         "</disk>"
     )
 
 
-def _cdrom_xml(path: str) -> str:
+def _cdrom_xml(path: str, dev: str, *, boot_order: int | None = None) -> str:
     return (
         "<disk type='file' device='cdrom'>"
         "<driver name='qemu' type='raw'/>"
         f"<source file={quoteattr(path)}/>"
-        "<target dev='sda' bus='sata'/>"
+        f"<target dev='{dev}' bus='sata'/>"
+        f"{_boot_order_xml(boot_order)}"
         "<readonly/>"
         "</disk>"
     )
@@ -129,6 +144,24 @@ _QGA_CHANNEL = (
 )
 
 
+def _os_xml(firmware: str, *, installer: bool) -> str:
+    """The ``<os>`` element for the requested firmware + boot model.
+
+    ``uefi`` selects OVMF via libvirt's ``firmware='efi'`` auto-descriptor
+    (no hard-coded ``OVMF_CODE``/``VARS`` paths — libvirt picks a loader matching
+    the machine type and manages the per-domain EFI vars) on a ``q35`` machine,
+    which is what the PVE installer's x86_64-efi GRUB needs; ``bios`` keeps the
+    ``pc`` machine cloud images expect. On an installer-origin domain the boot
+    order lives per-device (the empty OS disk is order 1 and falls through to the
+    installer CDROM at order 2), so ``<os>`` carries no ``<boot dev>``; an
+    image-origin domain pins ``<boot dev='hd'/>`` here.
+    """
+    machine = "q35" if firmware == "uefi" else "pc"
+    fw = " firmware='efi'" if firmware == "uefi" else ""
+    boot = "" if installer else "<boot dev='hd'/>"
+    return f"<os{fw}><type arch='x86_64' machine='{machine}'>hvm</type>{boot}</os>"
+
+
 def _domain_xml(
     backend_name: str,
     spec: VMSpec,
@@ -136,10 +169,16 @@ def _domain_xml(
     os_path: str,
     data_paths: Sequence[str],
     seed_path: str | None,
+    boot_media_path: str | None = None,
     nics: Sequence[tuple[str, str]],
     serial_sock: str | None,
 ) -> str:
-    devices = [_disk_xml(os_path, "vda")]
+    installer = boot_media_path is not None
+    # Installer-origin: the empty OS disk is boot order 1; firmware skips it
+    # (no boot sector / EFI loader) and falls through to the installer CDROM at
+    # order 2. Post-install the disk is bootable and wins. Image-origin: no
+    # per-device order (the <os> form pins hd).
+    devices = [_disk_xml(os_path, "vda", boot_order=1 if installer else None)]
     if len(data_paths) > 25:
         # vdb..vdz is 25 slots; past 'z' the chr() arithmetic silently produces
         # "vd{" and beyond. Fail loud rather than emit a bogus target dev.
@@ -148,8 +187,12 @@ def _domain_xml(
         )
     for i, path in enumerate(data_paths):
         devices.append(_disk_xml(path, f"vd{chr(ord('b') + i)}"))
+    # Seed is always *data* (cidata / PVE answer-file), CD at sda. The installer
+    # medium (when present) is the *bootable* CD at sdb, boot order 2.
     if seed_path is not None:
-        devices.append(_cdrom_xml(seed_path))
+        devices.append(_cdrom_xml(seed_path, "sda"))
+    if boot_media_path is not None:
+        devices.append(_cdrom_xml(boot_media_path, "sdb", boot_order=2))
     devices.extend(_interface_xml(mac, net) for mac, net in nics)
     devices.append(_serial_xml(serial_sock))
     devices.append(_QGA_CHANNEL)
@@ -167,7 +210,7 @@ def _domain_xml(
         f"<memory unit='MiB'>{spec.memory.size_mb}</memory>"
         f"<currentMemory unit='MiB'>{spec.memory.size_mb}</currentMemory>"
         f"<vcpu>{spec.cpu.count}</vcpu>"
-        "<os><type arch='x86_64' machine='pc'>hvm</type><boot dev='hd'/></os>"
+        f"{_os_xml(spec.firmware, installer=installer)}"
         # ACPI is required for the daemon's graceful shutdown() to reach the guest.
         "<features><acpi/><apic/></features>"
         "<cpu mode='host-passthrough'/>"
@@ -191,14 +234,20 @@ def create_vm(
     network_refs: dict[str, str],
     data_disk_refs: Sequence[VolumeRef] = (),
     build_nic: BuildNic | None = None,
+    boot_media_ref: VolumeRef | None = None,
 ) -> str:
     """Define a libvirt domain from the orchestrator's staged disks.
 
-    The OS disk is already full-size (the orchestrator ``resize_volume``\\ d it
-    before this call), so create_vm only attaches; cloud-init's ``growpart``
-    expands the rootfs on first boot. A seed-carrying VM (``seed_iso_ref`` set —
-    build VM or sidecar) gets the unix-socket serial sink, its listener opened
-    here so the socket exists when ``start_vm`` boots QEMU.
+    Image-origin: the OS disk is already full-size (the orchestrator
+    ``resize_volume``\\ d it before this call), so create_vm only attaches;
+    cloud-init's ``growpart`` expands the rootfs on first boot. Installer-origin
+    (``boot_media_ref`` set): the OS disk is a blank the installer partitions,
+    and the installer ISO is attached as a bootable CDROM (see :func:`_os_xml`
+    for the fall-through boot order). ``spec.firmware`` picks BIOS vs OVMF.
+
+    A seed-carrying VM (``seed_iso_ref`` set — build VM or sidecar) gets the
+    unix-socket serial sink, its listener opened here so the socket exists when
+    ``start_vm`` boots QEMU.
 
     When ``build_nic`` is set (build phase, ADR-0017) the domain gets a *single*
     ``<interface>`` for the build NIC and the declared ``spec.nics`` are not
@@ -208,6 +257,7 @@ def create_vm(
     os_path = _vol_path(client, os_disk_ref)
     data_paths = [_vol_path(client, ref) for ref in data_disk_refs]
     seed_path = _vol_path(client, seed_iso_ref) if seed_iso_ref is not None else None
+    boot_media_path = _vol_path(client, boot_media_ref) if boot_media_ref is not None else None
     if build_nic is not None:
         nics = [(build_nic.mac, network_refs[build_nic.network])]
     else:
@@ -215,13 +265,20 @@ def create_vm(
             (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
             for idx, nic in enumerate(spec.nics)
         ]
-    serial_sock = client.open_serial_listener(backend_name) if seed_iso_ref is not None else None
+    # The unix-socket serial sink is opened for any provisioning boot that
+    # reports a build result — one carrying a seed (cloud-init/PVE answer, build
+    # VM or sidecar) OR an installer-origin boot with no separate seed (ESXi
+    # single-CDROM: ks.cfg lives in the boot media and %firstboot writes the
+    # result to the same serial). A plain run boot gets a throwaway pty.
+    is_provisioning_boot = seed_iso_ref is not None or boot_media_ref is not None
+    serial_sock = client.open_serial_listener(backend_name) if is_provisioning_boot else None
     xml = _domain_xml(
         backend_name,
         spec,
         os_path=os_path,
         data_paths=data_paths,
         seed_path=seed_path,
+        boot_media_path=boot_media_path,
         nics=nics,
         serial_sock=serial_sock,
     )

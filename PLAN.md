@@ -1251,8 +1251,10 @@ unit-tested** (2026-05-24); the rest are in *Ready*:
   forgets+leaks on a genuine failure).
 - **`PVE-27`** *(bug/design, done)* — `create_vm` decides build-vs-run data disks
   from the orchestrator's intent (seed presence) instead of a backend probe, so a
-  stale staging volume from a crashed build can't be mis-imported. (Revisit when
-  installer-based OS origins land — BUILD-1 — which may carry no seed.)
+  stale staging volume from a crashed build can't be mis-imported. (BUILD-1
+  resolved the revisit: the installer-origin build still carries a seed — the PVE
+  answer-file volume — so the discriminator holds; only the OS-disk realization
+  differs, keyed on `boot_media_ref`/`installer_origin`.)
 - **`PVE-28`** *(re-verified: not a bug)* — the claimed `_resize_os_disk`
   double-resize doesn't occur (the `wait_task` poll-timeout message contains no
   `timeout`/`lock` substring, so it's never classified transient). Residual LOW
@@ -1484,12 +1486,57 @@ driver's own live `preflight`. `RunContext.resolved` holds the binding;
 introspection); the type-driven `driver_for` path is gone (CORE-19 — the
 concrete+none cell that needed it now errors).
 
+### Installer-based OS-disk origin (BUILD-1, built)
+
+The second OS-disk origin (ADR-0010 §6), now built. An *installer-based* builder
+returns `None` from `Builder.os_disk_base()` and the install medium from
+`Builder.boot_media() -> CacheEntry | None`; the orchestrator materializes a
+**blank** OS disk of the declared size and boots the medium (attached as a
+bootable CDROM — the empty disk falls through to it, then wins once installed).
+The seam:
+
+- `Builder.boot_media()` (default `None`) and `Builder.prepare_boot_media(path)
+  -> path` (default identity) — the latter lets a builder transform the medium
+  during staging (the PVE builder bakes the auto-installer activation file +
+  first-boot script into the ISO via xorriso, ADR-0022). The vanilla medium's
+  content sha keys the cache via `config_hash`'s `base_sha`; anything the prep
+  varies (the first-boot script) is folded into `config_hash` by the builder.
+- **Firmware is on `VMSpec`** (`firmware: "bios" | "uefi"`, default `bios`), not
+  the builder: a UEFI install produces a disk that panics under SeaBIOS, so the
+  *same* firmware must be reproduced at run-phase create — a whole-VM property
+  both phases read. `create_vm` gains `boot_media_ref`; the driver realizes the
+  OS disk blank + the installer as a bootable CDROM + OVMF when `uefi` (libvirt
+  via `firmware='efi'` on q35; Proxmox via `bios=ovmf`+`efidisk0`, the latter
+  pending live-PVE certification — libvirt is the certified installer-origin
+  path).
+- Preflight (`builder_origin_findings`) rejects a builder that declares neither
+  origin, and each driver's preflight runs `unsupported_firmware_findings`
+  against its own `SUPPORTED_FIRMWARES` so a VM requesting a firmware the bound
+  backend can't realize fails loud — both before any backend resource stands up.
+
+Two concretes ship on this seam:
+
+- **`ProxmoxAnswerBuilder`** (BUILD-2): a PVE 9.x node via the auto-installer
+  (`answer.toml` seed + prepared installer ISO). Provisioning + the build-result
+  contract live in `/proxmox-first-boot` (PVE has no `answer.toml` runcmd
+  equivalent): network-flip → repo-swap → threaded packages/commands → framed
+  `TESTRANGE-RESULT:` to serial → poweroff.
+- **`ESXiKickstartBuilder`** (BUILD-8): an ESXi node (validated on 8) via
+  weasel's kickstart. **Single-CDROM** — `render_seed()` returns `None`; the
+  ks.cfg is patched *into* the boot ISO (`ks=cdrom:/ks.cfg`, two-pass xorriso:
+  patch each `BOOT.CFG` kernelopt + inject ks.cfg, `-rockridge off` +
+  `-boot_image any patch` + `-compliance lowercase` so the case-sensitive
+  `ks.cfg` lookup resolves). The build-result contract lives in the kickstart
+  `%firstboot` block.
+
+That no-separate-seed shape forced a contract refinement: the **serial sink and
+the build-vs-run discriminator key on `seed OR boot_media`**, not seed presence
+alone — an installer build reports a result and attaches blank disks whether or
+not it ships a seed. Firmware default `bios` (ESXi's proven BIOS+i440fx+IDE
+combo); `uefi` is accepted but unvalidated for ESXi.
+
 ### Deferred (named, not built)
 
-- **Installer-based OS-disk origin** (ESXi Kickstart, Windows autounattend):
-  blank OS disk + boot media, OS-disk origin behind a builder-owned method.
-  Named in ADR-0010 §6; lands with the second builder and supersedes §6's
-  image-based hard-coding. No abstraction built now.
 - **Parallel build** of independent VMs (still sequential per ADR /
   decision 16).
 - **Backend-side dedup / COW overlays** — explicitly rejected for v0 (§3);

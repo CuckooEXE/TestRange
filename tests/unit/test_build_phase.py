@@ -23,18 +23,19 @@ from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
-from testrange.devices.network import NetworkIface
+from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.base import VolumeRef
 from testrange.exceptions import BuildFailedError, DriverError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
+from testrange.networks.base import BuildNic
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.backend import ResolvedBackend
-from testrange.orchestrator.build_phase import build_phase
+from testrange.orchestrator.build_phase import _VMBuildPlan, build_phase
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms import VMRecipe, VMSpec
-from tests.mock_driver import MockDriver, MockHypervisor
+from tests.mock_driver import MockDriver, MockHypervisor, OriginlessBuilder
 
 
 def _plan(*, data_disks: int = 1) -> Plan:
@@ -269,28 +270,13 @@ class TestBuildPhase:
         assert len(create) == 1
         assert any(n.endswith("__os") for n in _built_names(cache))
 
-    def test_no_os_disk_base_is_rejected(self, env: tuple[CacheManager, MockDriver]) -> None:
-        # ORCH-5: the build phase reads OS-disk origin via the Builder ABC seam
-        # (not isinstance). A builder with no base image (installer-based origin)
-        # is the deferred BUILD-1 path and fails loud at probe.
-        from testrange.builders.base import Builder
-        from testrange.credentials.base import Credential
-
-        class _InstallerBuilder(Builder):
-            @property
-            def credentials(self) -> tuple[Credential, ...]:
-                return ()
-
-            def os_disk_base(self) -> None:
-                return None
-
-            def config_hash(  # type: ignore[no-untyped-def]
-                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
-            ):
-                return "0" * 16
-
-            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
-                return b""
+    def test_no_origin_at_all_is_rejected(self, env: tuple[CacheManager, MockDriver]) -> None:
+        # BUILD-1: the build phase reads OS-disk origin via the Builder ABC seam
+        # (not isinstance). A builder that provides NEITHER an image base
+        # (os_disk_base) NOR a boot medium (boot_media) has no way to populate an
+        # OS disk and fails loud at probe. (The installer-origin happy path —
+        # os_disk_base None + boot_media set — is covered separately.)
+        from tests.mock_driver import OriginlessBuilder
 
         cache, driver = env
         plan = Plan(
@@ -311,14 +297,159 @@ class TestBuildPhase:
                                 NetworkIface("netA"),
                             ],
                         ),
-                        builder=_InstallerBuilder(),
+                        builder=OriginlessBuilder(),
                         communicator=SSHCommunicator("u"),
                     ),
                 ],
             ),
         )
-        with pytest.raises(OrchestratorError, match="installer-based OS-disk origin"):
+        with pytest.raises(OrchestratorError, match="neither an OS-disk base image"):
             build_phase(_ctx(plan, driver, cache))
+
+    def test_installer_origin_materializes_blank_disk_and_boots_media(
+        self, env: tuple[CacheManager, MockDriver], tmp_path: Path
+    ) -> None:
+        # BUILD-1 happy path: a builder with os_disk_base() None but a boot_media()
+        # builds via the materialize seam — the orchestrator creates a BLANK OS
+        # disk (never upload_to_pool's a base onto it), stages the install medium,
+        # and create_vm gets boot_media_ref + the VM's uefi firmware.
+        from testrange.builders.base import Builder
+        from testrange.credentials.base import Credential
+
+        iso = tmp_path / "pve.iso"
+        iso.write_bytes(b"FAKE-PVE-INSTALLER-ISO" * 100)
+        cache, driver = env
+        cache.local.add(iso, name="pve-iso")
+
+        class _PVEBuilder(Builder):
+            @property
+            def credentials(self) -> tuple[Credential, ...]:
+                return ()
+
+            def os_disk_base(self) -> None:
+                return None
+
+            def boot_media(self) -> CacheEntry:
+                return CacheEntry("pve-iso")
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+            ):
+                # Fold base_sha (the orchestrator passes the boot-media sha here)
+                # so a different installer ISO keys a different build.
+                return ("pve" + base_sha)[:16].ljust(16, "0")
+
+            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+                return b"answer.toml-seed"
+
+        plan = Plan(
+            "hello",
+            MockHypervisor(
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[
+                    VMRecipe(
+                        spec=VMSpec(
+                            name="pve",
+                            firmware="uefi",
+                            devices=[CPU(2), Memory(2048), OSDrive("pool1", 16)],
+                        ),
+                        builder=_PVEBuilder(),
+                        communicator=SSHCommunicator("root"),
+                    ),
+                ],
+            ),
+        )
+        build_phase(_ctx(plan, driver, cache))
+
+        # create_vm saw the bootable medium + UEFI firmware (the sidecar VM is
+        # also recorded; select the PVE build VM by name).
+        created = next(v for v in driver.created_vms.values() if v.vm_name == "pve")
+        assert created.firmware == "uefi"
+        assert created.boot_media is not None
+        # The sidecar stays BIOS image-origin — installer firmware/media are
+        # scoped to the VM that declared them.
+        sidecar = next(v for v in driver.created_vms.values() if v.vm_name != "pve")
+        assert sidecar.firmware == "bios"
+        assert sidecar.boot_media is None
+
+        # Behavioral, not string-sniffing: the recorded OS-disk ref was created
+        # BLANK and never base-uploaded, and the recorded boot-media ref was
+        # uploaded to the pool.
+        blank_targets = [c[1][0] for c in driver.calls if c[0] == "create_blank_volume"]
+        upload_targets = [c[1][0] for c in driver.calls if c[0] == "upload_to_pool"]
+        assert created.os_disk in blank_targets
+        assert created.os_disk not in upload_targets
+        assert created.boot_media in upload_targets
+
+        # And the build produced a cached OS disk (full lifecycle reached capture).
+        assert _built_names(cache)
+
+    def test_installer_origin_with_no_seed_still_builds(
+        self, env: tuple[CacheManager, MockDriver], tmp_path: Path
+    ) -> None:
+        # ESXi single-CDROM shape (BUILD-8): an installer-origin builder whose
+        # render_seed() returns None — the ks.cfg rides the boot media, so no
+        # seed volume is staged. The build still runs: blank OS disk + boot
+        # media, create_vm with seed_iso_ref=None, full lifecycle to capture.
+        from testrange.builders.base import Builder
+        from testrange.credentials.base import Credential
+
+        iso = tmp_path / "esxi.iso"
+        iso.write_bytes(b"FAKE-ESXI-ISO" * 100)
+        cache, driver = env
+        cache.local.add(iso, name="esxi-iso")
+
+        class _ESXiShapedBuilder(Builder):
+            @property
+            def credentials(self) -> tuple[Credential, ...]:
+                return ()
+
+            def os_disk_base(self) -> None:
+                return None
+
+            def boot_media(self) -> CacheEntry:
+                return CacheEntry("esxi-iso")
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+            ):
+                return ("esxi" + base_sha)[:16].ljust(16, "0")
+
+            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+                return None
+
+        plan = Plan(
+            "hello",
+            MockHypervisor(
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
+                pools=[StoragePool("pool1", 64)],
+                vms=[
+                    VMRecipe(
+                        spec=VMSpec(
+                            name="esxi",
+                            firmware="bios",
+                            devices=[CPU(2), Memory(4096), OSDrive("pool1", 40)],
+                        ),
+                        builder=_ESXiShapedBuilder(),
+                        communicator=SSHCommunicator("root"),
+                    ),
+                ],
+            ),
+        )
+        build_phase(_ctx(plan, driver, cache))
+
+        created = next(v for v in driver.created_vms.values() if v.vm_name == "esxi")
+        assert created.boot_media is not None  # booted the installer media
+        # No seed volume was written (render_seed -> None).
+        assert not any(c[0] == "write_to_pool" and "seed" in c[1][0] for c in driver.calls)
+        # The OS disk was materialized blank, and the build reached capture.
+        assert "create_blank_volume" in [name for name, _, _ in driver.calls]
+        assert _built_names(cache)
 
 
 class TestBuildResultSignaling:
@@ -517,3 +648,48 @@ class TestSidecarReadinessGate:
             run_phase(ctx)
         # The user VM never started — the gate blocked first.
         assert not any(c[0] == "create_vm" and c[1][0].startswith("tr_vm_") for c in driver.calls)
+
+
+class TestVMBuildPlanOriginInvariant:
+    """_VMBuildPlan must carry exactly one OS-disk origin (ORCH-21): base_path
+    XOR boot_media_path. installer_origin reads base_path alone, so 'both' would
+    silently drop the boot medium and 'neither' would yield a blank, unbootable
+    disk — the dataclass backstops a future edit that violates this."""
+
+    def _make(self, *, base_path: Path | None, boot_media_path: Path | None) -> _VMBuildPlan:
+        sw = Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+        vm = VMRecipe(
+            spec=VMSpec(name="vm", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)]),
+            builder=OriginlessBuilder(),
+            communicator=SSHCommunicator("u"),
+        )
+        return _VMBuildPlan(
+            vm=vm,
+            builder=OriginlessBuilder(),
+            config_hash="0" * 16,
+            macs=(),
+            build_nic=BuildNic(
+                mac="02:00:00:aa:bb:cc",
+                network="n",
+                addr=StaticAddr("10.0.0.3"),
+                addressing=NetworkAddressing.from_switch(sw),
+            ),
+            base_path=base_path,
+            boot_media_path=boot_media_path,
+            roles=("os",),
+            cached_paths=None,
+        )
+
+    def test_image_origin_ok(self) -> None:
+        self._make(base_path=Path("/base.qcow2"), boot_media_path=None)
+
+    def test_installer_origin_ok(self) -> None:
+        self._make(base_path=None, boot_media_path=Path("/inst.iso"))
+
+    def test_both_origins_rejected(self) -> None:
+        with pytest.raises(OrchestratorError, match="exactly one OS-disk origin"):
+            self._make(base_path=Path("/base.qcow2"), boot_media_path=Path("/inst.iso"))
+
+    def test_no_origin_rejected(self) -> None:
+        with pytest.raises(OrchestratorError, match="exactly one OS-disk origin"):
+            self._make(base_path=None, boot_media_path=None)

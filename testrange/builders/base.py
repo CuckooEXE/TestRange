@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -66,15 +67,56 @@ class Builder(ABC):
         resolves the returned :class:`CacheEntry`, uploads its bytes onto the
         VM's own disk ref, and grows it. An image-based builder (cloud-init)
         returns its base image. ``None`` means the builder materializes its own
-        OS disk — an installer-based origin (ESXi Kickstart, Windows
-        autounattend) that boots blank media; that path is the deferred BUILD-1
-        ``materialize_os_disk`` seam (ADR-0010 §6) and is not built yet, so the
-        orchestrator rejects a ``None`` origin at preflight for now.
+        OS disk — an installer-based origin (PVE auto-install, ESXi Kickstart,
+        Windows autounattend) that boots blank media. In that case the builder
+        returns the install medium from :meth:`boot_media`, and the orchestrator
+        creates a blank OS disk of the declared size and boots the medium
+        (BUILD-1, ADR-0010 §6). A builder that returns ``None`` here MUST return
+        a non-``None`` :meth:`boot_media`; the orchestrator rejects a builder
+        that provides neither at preflight.
 
         Abstract because OS-disk origin is a fundamental build property every
         builder must declare — the orchestrator reads it through this seam
         rather than knowing any concrete builder type.
         """
+
+    def boot_media(self) -> CacheEntry | None:
+        """The bootable install medium, or ``None`` (BUILD-1a, ADR-0010 §6).
+
+        Default ``None`` — an image-based builder (cloud-init) seeds its OS disk
+        from :meth:`os_disk_base` and needs no boot medium. An *installer-based*
+        builder returns ``None`` from :meth:`os_disk_base` and the install ISO
+        here: the orchestrator then materializes a **blank** OS disk of the
+        declared size and boots this medium (attached as a bootable CDROM, the
+        OS disk falling through to it while empty) so the installer partitions
+        the disk unattended.
+
+        The returned :class:`CacheEntry`'s content sha is folded into the build
+        cache key (the orchestrator passes it as ``config_hash``'s ``base_sha``),
+        so a different installer ISO invalidates the cache like a different base
+        image would. Non-abstract: only installer-origin builders override it.
+        """
+        return None
+
+    def prepare_boot_media(self, media_path: Path) -> Path:
+        """Transform the resolved boot medium before it is staged, if needed.
+
+        The orchestrator resolves :meth:`boot_media` to a local file and passes
+        its path here; the returned path is what gets uploaded and booted.
+        Default identity — most installer media boots as-is. An installer-origin
+        builder whose installer needs an activation payload baked into the booted
+        ISO overrides this to return a transformed copy.
+
+        Called once per build miss (never on a cache hit), with the same resolved
+        ``media_path`` each time — the orchestrator does **not** memoize across
+        misses, so a builder whose transform is expensive (an ISO rewrite) owns
+        its own caching, keyed however it likes. The vanilla medium's content sha
+        already keys the build cache via ``config_hash``'s ``base_sha``; a
+        transform that varies the installed system must fold its inputs into
+        ``config_hash`` itself, so the orchestrator need not content-address the
+        returned path.
+        """
+        return media_path
 
     @abstractmethod
     def config_hash(
