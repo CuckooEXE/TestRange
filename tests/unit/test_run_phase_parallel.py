@@ -8,6 +8,7 @@ state ledger is asserted complete + uncorrupted under the thread pool.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import ResolvedBackend
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
+from testrange.orchestrator.teardown import teardown
 from testrange.state.store import StateStore, run_dir_for
 from testrange.vms import VMRecipe, VMSpec
 from tests.mock_driver import MockDriver, MockHypervisor
@@ -35,11 +37,28 @@ _UPLOAD_DELAY_S = 0.05
 
 
 class _SlowUploadDriver(MockDriver):
-    """MockDriver whose disk upload blocks, so overlap is measurable."""
+    """MockDriver whose disk upload blocks and records peak concurrency.
+
+    ``max_in_flight`` lets a test assert genuine overlap (>= 2 uploads running
+    at once) instead of a flaky wall-clock threshold.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.max_in_flight = 0
 
     def upload_to_pool(self, target_ref: VolumeRef, source_path: Path) -> VolumeRef:
-        time.sleep(_UPLOAD_DELAY_S)
-        return super().upload_to_pool(target_ref, source_path)
+        with self._lock:
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            time.sleep(_UPLOAD_DELAY_S)
+            return super().upload_to_pool(target_ref, source_path)
+        finally:
+            with self._lock:
+                self._in_flight -= 1
 
 
 class _FailingUploadDriver(MockDriver):
@@ -117,13 +136,13 @@ class TestRunPhaseParallel:
         plan = _bare_plan(4)
         ctx = _ctx(plan, driver, tmp_path)
 
-        start = time.monotonic()
         run_phase(ctx)
-        elapsed = time.monotonic() - start
-        # 4 VMs x one 50ms upload each = 200ms serial; overlapped on 4 workers it
-        # is ~50ms. Generous bound to avoid CI flakiness while still failing if
-        # the loop runs serially.
-        assert elapsed < 0.15, f"expected overlapped uploads, took {elapsed:.3f}s"
+        # Structural overlap assertion (not wall-clock): at least two per-VM
+        # uploads were in flight simultaneously, proving the phase parallelized
+        # rather than ran serially. Robust on a loaded/throttled CI box.
+        assert driver.max_in_flight >= 2, (
+            f"expected overlapped uploads, peak in-flight was {driver.max_in_flight}"
+        )
 
     def test_ledger_complete_under_concurrency(self, tmp_path: Path) -> None:
         driver = _SlowUploadDriver(pool_root=tmp_path / "pools")
@@ -152,3 +171,30 @@ class TestRunPhaseParallel:
             run_phase(ctx)
         # State is still readable (not torn) after the aborted phase.
         assert ctx.store.read().resources is not None
+
+    def test_partial_failure_leaves_no_leak_after_teardown(self, tmp_path: Path) -> None:
+        # The real risk of a *parallel* partial failure: a sibling VM that
+        # succeeded (or was mid-flight) before vm2 raised must still be recorded
+        # in state so teardown reaches it — no orphaned backend resource. Drive
+        # the failure, then run the ledger-driven teardown and assert the mock
+        # backend holds nothing live.
+        driver = _FailingUploadDriver(pool_root=tmp_path / "pools")
+        ctx = _ctx(_bare_plan(4), driver, tmp_path)
+
+        with pytest.raises(DriverError, match="vm2"):
+            run_phase(ctx)
+
+        # Every resource the surviving siblings created is recorded (record-
+        # before-create), so it is reachable for teardown — nothing leaks
+        # silently outside the ledger.
+        recorded = {r.backend_name for r in ctx.store.read().resources}
+        assert driver._pools <= recorded
+        assert set(driver._vms) <= recorded
+
+        teardown(ctx)
+
+        # Backend is empty: every created pool / switch / network / VM destroyed.
+        assert driver._pools == set(), f"leaked pools: {driver._pools}"
+        assert driver._vms == {}, f"leaked VMs: {driver._vms}"
+        assert driver._switches == {}, f"leaked switches: {driver._switches}"
+        assert driver._networks == {}, f"leaked networks: {driver._networks}"

@@ -37,6 +37,7 @@ from testrange.exceptions import (
     TestRangeError,
 )
 from testrange.networks.base import Network, Switch
+from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
 from testrange.orchestrator.backend import resolve_backend
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
@@ -751,19 +752,38 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _jobs_arg(value: str) -> int:
+    """Parse ``--jobs N``: a non-negative int. ``0`` and ``1`` both mean serial.
+
+    Negatives are rejected loud at the boundary rather than silently coerced to
+    serial (``resolve_workers`` would clamp them) — a negative ``--jobs`` is a
+    user error, not a request for serial. ``0`` is accepted and means serial,
+    mirroring the familiar ``make -j``-style "no extra workers" spelling.
+    """
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--jobs expects an integer, got {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"--jobs must be >= 0 (0 or 1 = serial), got {n}")
+    return n
+
+
 def _add_jobs_arg(parser: argparse.ArgumentParser) -> None:
     """Attach ``--jobs N`` to a plan-taking verb (run/build).
 
     Caps the I/O phases' bounded thread pool (ADR-0020): per-VM bring-up
     uploads, build-disk downloads, and readiness waits. Omit for the default
-    cap; ``--jobs 1`` forces the phases serial (handy for debugging).
+    cap; ``--jobs 0`` or ``--jobs 1`` forces the phases serial (handy for
+    debugging).
     """
     parser.add_argument(
         "--jobs",
-        type=int,
+        type=_jobs_arg,
         default=None,
         metavar="N",
-        help="max concurrent workers for the I/O phases (default: bounded; 1 = serial)",
+        help=f"max concurrent workers for the I/O phases "
+        f"(default: {DEFAULT_MAX_WORKERS}; 0 or 1 = serial)",
     )
 
 

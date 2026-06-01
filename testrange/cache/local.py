@@ -4,10 +4,13 @@ Layout:
     <root>/isos/<sha256>.bin   (opaque content)
     <root>/isos/<sha256>.json  (sidecar metadata)
 
-All writes use ``.partial`` + ``os.replace`` so a crash mid-write never
-leaves a plausible-but-corrupt file at the canonical path. This is crash
-safety for the single owning process (TestRange is single-instance — see
-ADR-0018), not a guard against concurrent writers.
+All writes go through a unique ``tempfile.mkstemp`` temp + ``os.replace`` so a
+crash mid-write never leaves a plausible-but-corrupt file at the canonical path.
+Within one process the mutating methods are safe to call from several threads:
+concurrent adds of the *same* content sha merge their name aliases under a write
+lock instead of clobbering (ADR-0020), and the slow byte copy stays outside it
+so distinct-content adds parallelize. Cross-*process* concurrency is still out
+of scope — TestRange runs one instance per profile (ADR-0018).
 """
 
 from __future__ import annotations
@@ -62,10 +65,13 @@ def default_root() -> Path:
 class LocalCache:
     """File-backed content-addressed cache.
 
-    Single-instance by contract (ADR-0018): methods are not thread- or
-    process-safe. They use atomic-rename writes purely for crash safety, so a
-    SIGKILL during a write leaves the canonical path either fully-old or
-    fully-new — not to serialize concurrent writers (there are none).
+    Safe to drive from multiple threads in one process: same-sha concurrent
+    adds merge aliases under :attr:`_write_lock` (ADR-0020), and the mutating
+    methods (``add``/``delete``/``purge``/``*_name``) take that lock around the
+    sidecar read-modify-write. Atomic-rename writes additionally give crash
+    safety — a SIGKILL mid-write leaves the canonical path either fully-old or
+    fully-new. Cross-*process* concurrency is out of scope (single instance per
+    profile, ADR-0018); ``_write_lock`` is an in-process guard, not a file lock.
     """
 
     def __init__(self, root: Path | None = None) -> None:
@@ -166,6 +172,7 @@ class LocalCache:
         """
         _log.info("fetching %s", url)
         fd, tmp_name = tempfile.mkstemp(dir=self.isos, suffix=".download.partial")
+        os.fchmod(fd, 0o644)  # mkstemp is 0600; a content-addressed cache is world-readable
         tmp = Path(tmp_name)
         # ``mkstemp`` already owns ``fd``; wrap it first so it's always closed,
         # then stream the body in. On any failure the partial is removed rather
@@ -226,8 +233,14 @@ class LocalCache:
         info = self.resolve(identifier)
         sidecar = self.isos / f"{info.sha256}.json"
         bin_path = self.isos / f"{info.sha256}.bin"
-        bin_path.unlink(missing_ok=True)
-        sidecar.unlink(missing_ok=True)
+        # Unlink the sidecar *first*, under the same lock the adders hold: an
+        # unlocked reader (``iter_entries`` globs ``*.json``) then either sees
+        # the whole entry or none of it — never a sidecar whose ``.bin`` has
+        # already vanished. The lock also serializes against a concurrent
+        # same-sha ``add`` racing this delete (ADR-0020).
+        with self._write_lock:
+            sidecar.unlink(missing_ok=True)
+            bin_path.unlink(missing_ok=True)
         _log.info("deleted cache entry %s", info.short_sha)
         return info
 
@@ -239,9 +252,12 @@ class LocalCache:
         deleting so iteration is not invalidated mid-walk.
         """
         removed = self.list_entries()
-        for info in removed:
-            (self.isos / f"{info.sha256}.bin").unlink(missing_ok=True)
-            (self.isos / f"{info.sha256}.json").unlink(missing_ok=True)
+        with self._write_lock:
+            for info in removed:
+                # Sidecar first (see :meth:`delete`): a concurrent reader never
+                # observes an entry whose ``.bin`` is already gone.
+                (self.isos / f"{info.sha256}.json").unlink(missing_ok=True)
+                (self.isos / f"{info.sha256}.bin").unlink(missing_ok=True)
         if removed:
             _log.info("purged %d cache entr%s", len(removed), "y" if len(removed) == 1 else "ies")
         return removed
@@ -350,6 +366,7 @@ def _atomic_copy(src: Path, dst: Path) -> None:
     collide on one staging path (ADR-0020).
     """
     fd, tmp_name = tempfile.mkstemp(dir=dst.parent, suffix=".partial")
+    os.fchmod(fd, 0o644)  # mkstemp is 0600; restore the umask-typical cache perms
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as w, src.open("rb") as r:
@@ -367,6 +384,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     content-addressed sidecar don't race a fixed staging name (ADR-0020).
     """
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".partial")
+    os.fchmod(fd, 0o644)  # mkstemp is 0600; restore the umask-typical cache perms
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:

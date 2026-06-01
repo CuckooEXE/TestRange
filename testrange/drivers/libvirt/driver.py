@@ -23,6 +23,7 @@ and ``testrange describe`` works against a libvirt Plan today.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +90,14 @@ class LibvirtDriver(HypervisorDriver):
         # the map and passes through unchanged. In-process only: teardown never
         # wires NICs.
         self._libvirt_net_by_network: dict[str, str] = {}
+        # Guards the map above. The run phase provisions independent switches
+        # concurrently (ADR-0020), so create_network writes it from several
+        # worker threads and create_vm reads it; the lock makes the write
+        # visible and the read consistent rather than leaning on dict-op GIL
+        # atomicity (which the ADR itself flags as fragile). Held only for the
+        # dict access — the libvirt network API calls run unlocked on the
+        # internally-thread-safe virConnect.
+        self._state_lock = threading.Lock()
 
     @classmethod
     def from_uri(cls, uri: str) -> LibvirtDriver:
@@ -163,7 +172,8 @@ class LibvirtDriver(HypervisorDriver):
         )
         # Remember composed name → switch's libvirt network so create_vm wires
         # NICs onto the real (shared) network, not the composed alias.
-        self._libvirt_net_by_network[backend_name] = libvirt_net
+        with self._state_lock:
+            self._libvirt_net_by_network[backend_name] = libvirt_net
         return libvirt_net
 
     def destroy_network(self, backend_name: str) -> None:
@@ -207,10 +217,11 @@ class LibvirtDriver(HypervisorDriver):
     ) -> Any:
         # Translate composed network names → the switch's shared libvirt network;
         # the uplink network (e.g. tr-egress) isn't in the map and passes through.
-        resolved_refs = {
-            name: self._libvirt_net_by_network.get(backend, backend)
-            for name, backend in network_refs.items()
-        }
+        with self._state_lock:
+            resolved_refs = {
+                name: self._libvirt_net_by_network.get(backend, backend)
+                for name, backend in network_refs.items()
+            }
         return _vm.create_vm(
             self._client,
             backend_name,

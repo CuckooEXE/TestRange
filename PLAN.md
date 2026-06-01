@@ -1476,7 +1476,5 @@ concrete+none cell that needed it now errors).
   blank OS disk + boot media, OS-disk origin behind a builder-owned method.
   Named in ADR-0010 §6; lands with the second builder and supersedes §6's
   image-based hard-coding. No abstraction built now.
-- **Parallel build** of independent VMs (still sequential per ADR /
-  decision 16).
 - **Backend-side dedup / COW overlays** — explicitly rejected for v0 (§3);
   revisit only if redundant pushes become a measured bottleneck.

@@ -7,6 +7,7 @@ single VM whose agent never answers still fails loud, naming that VM.
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -35,11 +36,28 @@ _PROBE_DELAY_S = 0.05
 
 
 class _SleepyNativeDriver(MockDriver):
-    """Native exec sleeps before answering, so per-VM readiness waits overlap."""
+    """Native exec sleeps before answering and records peak concurrency.
+
+    ``max_in_flight`` lets a test assert the per-VM readiness waits genuinely
+    overlap (>= 2 at once) rather than relying on a flaky wall-clock bound.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.max_in_flight = 0
 
     def native_guest_execute(self, backend_name: str) -> GuestExec:
         def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
-            time.sleep(_PROBE_DELAY_S)
+            with self._lock:
+                self._in_flight += 1
+                self.max_in_flight = max(self.max_in_flight, self._in_flight)
+            try:
+                time.sleep(_PROBE_DELAY_S)
+            finally:
+                with self._lock:
+                    self._in_flight -= 1
             return ExecResult(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
 
         return _execute
@@ -113,11 +131,12 @@ class TestReadinessOverlap:
         ctx = _ctx(_native_plan(4), driver, tmp_path)
         bind_communicators(ctx)
 
-        start = time.monotonic()
         wait_communicators_ready(ctx)
-        elapsed = time.monotonic() - start
-        # 4 VMs x one 50ms probe = 200ms serial; overlapped on the pool ~50ms.
-        assert elapsed < 0.15, f"expected overlapped readiness waits, took {elapsed:.3f}s"
+        # Structural overlap (not wall-clock): at least two readiness probes ran
+        # at once on the pool, proving the per-VM waits overlapped.
+        assert driver.max_in_flight >= 2, (
+            f"expected overlapped readiness waits, peak in-flight was {driver.max_in_flight}"
+        )
 
     def test_one_unreachable_agent_fails_loud(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

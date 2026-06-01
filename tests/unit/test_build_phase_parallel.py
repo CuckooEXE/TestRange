@@ -8,6 +8,7 @@ failure aborts the run.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
@@ -55,11 +56,24 @@ class TestBuildIpOffset:
 
 
 class _SlowDownloadDriver(MockDriver):
-    """Capture download blocks, so cross-VM capture overlap is measurable."""
+    """Capture download blocks and records peak concurrency across VMs."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self.max_in_flight = 0
 
     def download_from_pool(self, vol_ref: VolumeRef, dest_path: Path) -> Path:
-        time.sleep(_DOWNLOAD_DELAY_S)
-        return super().download_from_pool(vol_ref, dest_path)
+        with self._lock:
+            self._in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self._in_flight)
+        try:
+            time.sleep(_DOWNLOAD_DELAY_S)
+            return super().download_from_pool(vol_ref, dest_path)
+        finally:
+            with self._lock:
+                self._in_flight -= 1
 
 
 class _FailOneBuildDriver(MockDriver):
@@ -167,11 +181,12 @@ class TestParallelBuild:
         cache = _env(tmp_path, monkeypatch, driver)
         ctx = _ctx(_multi_plan(4), driver, cache)
 
-        start = time.monotonic()
         build_phase(ctx)
-        elapsed = time.monotonic() - start
-        # 4 VMs x one 50ms capture download = 200ms serial; overlapped ~50ms.
-        assert elapsed < 0.15, f"expected overlapped capture, took {elapsed:.3f}s"
+        # Structural overlap (not wall-clock): at least two capture downloads ran
+        # at once, proving the parallel build pass overlapped them.
+        assert driver.max_in_flight >= 2, (
+            f"expected overlapped capture, peak in-flight was {driver.max_in_flight}"
+        )
 
     def test_one_build_failure_aborts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

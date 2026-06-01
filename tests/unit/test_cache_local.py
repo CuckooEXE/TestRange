@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -341,3 +342,69 @@ class TestCacheManager:
         mgr = CacheManager(local=cache)
         assert mgr.resolve(CacheEntry("debian-13")).sha256 == info.sha256
         assert mgr.resolve_path(CacheEntry("debian-13")) == info.path
+
+
+class TestConcurrentDeleteAndPerms:
+    def test_delete_removes_both_files(self, tmp_path: Path) -> None:
+        cache = LocalCache(root=tmp_path / "c")
+        info = cache.add(_make_blob(tmp_path / "src.bin"), name="x")
+        cache.delete("x")
+        assert not (cache.isos / f"{info.sha256}.bin").exists()
+        assert not (cache.isos / f"{info.sha256}.json").exists()
+
+    def test_added_entry_is_world_readable(self, tmp_path: Path) -> None:
+        # mkstemp creates 0600; a content-addressed cache must stay readable to
+        # group/other (a shared cache, or a different uid reading the disk). The
+        # canonical .bin/.json inherit the temp's mode through os.replace.
+        cache = LocalCache(root=tmp_path / "c")
+        info = cache.add(_make_blob(tmp_path / "src.bin"), name="x")
+        assert info.path is not None
+        for p in (info.path, cache.isos / f"{info.sha256}.json"):
+            mode = p.stat().st_mode & 0o777
+            assert mode == 0o644, f"{p.name} is {oct(mode)}, expected 0o644"
+
+    def test_readers_run_clean_against_concurrent_delete(self, tmp_path: Path) -> None:
+        # The CACHE-6 invariant: an unlocked reader (iter_entries / resolve) must
+        # never *raise* while a deleter runs concurrently, and the cache must
+        # never persist a dangling sidecar (a .json whose .bin is gone) — that is
+        # what delete()'s ".json first, under the write lock" ordering buys. The
+        # per-entry "bin exists right now" check is deliberately *not* asserted:
+        # no unlocked read-then-use of a separate file can be race-free, and
+        # that's the consumer's window to manage, not LocalCache's to promise.
+        cache = LocalCache(root=tmp_path / "c")
+        shas = [
+            cache.add(
+                _make_blob(tmp_path / f"src{i}.bin", payload=f"content-{i}\n".encode())
+            ).sha256
+            for i in range(30)
+        ]
+        barrier = threading.Barrier(5)
+        errors: list[Exception] = []
+
+        def deleter() -> None:
+            barrier.wait()
+            for sha in shas:
+                with contextlib.suppress(CacheMissError):
+                    cache.delete(sha)
+
+        def reader() -> None:
+            barrier.wait()
+            try:
+                for _ in range(60):
+                    list(cache.iter_entries())  # unlocked; must tolerate a vanishing sidecar
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=deleter)] + [
+            threading.Thread(target=reader) for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"reader raised during concurrent delete: {errors}"
+        # No dangling sidecar persisted: every surviving .json has its .bin.
+        bins = {p.stem for p in cache.isos.glob("*.bin")}
+        jsons = {p.stem for p in cache.isos.glob("*.json")}
+        assert jsons <= bins, f"dangling sidecar(s) with no .bin: {jsons - bins}"

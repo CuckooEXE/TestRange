@@ -26,6 +26,7 @@ testrange describe <plan.py>            # passive structure summary, no backend 
 testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
   --leak-on-failure                     #   skip teardown if any test fails
+  --jobs N                              #   cap I/O-phase workers (default 8; 0 or 1 = serial)
 testrange repl <plan.py>                # bring-up, drop into a Python REPL, no TESTS
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
@@ -53,6 +54,14 @@ Tests are plain functions that take one argument (the handle) and raise to
 fail. The runner captures the traceback into `TestResult.error`. By default,
 all tests run sequentially and the runner continues on failure; pass
 `--fail-fast` to stop on the first failed assertion.
+
+Test *execution* is always sequential — your tests share one range. What
+parallelizes is the bring-up plumbing underneath: per-VM disk uploads,
+build-disk captures, and readiness waits run on a bounded thread pool so a
+multi-VM range comes up in roughly the time of its slowest VM instead of the
+sum. `--jobs N` caps that pool (default 8); `--jobs 0` or `--jobs 1` forces it
+serial, which is handy when a backend misbehaves under concurrency or you want
+deterministic single-threaded logs while debugging.
 
 ## What `OrchestratorHandle` exposes
 

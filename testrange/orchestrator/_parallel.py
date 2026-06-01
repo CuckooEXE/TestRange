@@ -63,11 +63,19 @@ def parallel_map(
     """Apply ``fn`` to every item, concurrently, returning results in input order.
 
     Bounded by :func:`resolve_workers`. A single item (or ``jobs<=1``) runs
-    inline with no thread overhead, so the serial path is unchanged. The first
-    worker to raise — taken in *submission* order for determinism — propagates
-    its exception (with traceback) after the still-pending workers are
-    cancelled; in-flight workers are joined by the executor on exit. This is the
-    one place the worker cap and the fail-fast error policy live.
+    inline with no thread overhead, so the serial path is unchanged.
+
+    Fail-fast policy: as soon as a worker raises, this returns by propagating an
+    exception (with its traceback) rather than the result list. Workers that had
+    not yet *started* are cancelled; workers already *in flight* are awaited —
+    the executor joins them on context exit — so no worker is abandoned
+    mid-operation (the orchestrator relies on this: a sibling that already
+    created a backend resource finishes recording it before teardown runs). The
+    propagated exception is the first one found scanning futures in submission
+    order; when several workers are in flight this is the earliest *submitted*
+    failure among those that have *completed*, not a global earliest — exact
+    which-worker-won determinism is not guaranteed. This is the one place the
+    worker cap and the fail-fast error policy live.
     """
     work = list(items)
     if not work:
@@ -79,10 +87,10 @@ def parallel_map(
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tr-worker") as ex:
         futures: list[Future[_R]] = [ex.submit(fn, item) for item in work]
         _done, not_done = wait(futures, return_when=FIRST_EXCEPTION)
-        for fut in futures:  # submission order → deterministic first failure
+        for fut in futures:  # submission order: report the earliest completed failure
             if fut.done() and fut.exception() is not None:
                 for pending in not_done:
-                    pending.cancel()
+                    pending.cancel()  # only cancels not-yet-started work; in-flight drains
                 fut.result()  # re-raise the worker's exception with its traceback
         return [fut.result() for fut in futures]
 

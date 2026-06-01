@@ -72,6 +72,24 @@ class TestParallelMap:
         with pytest.raises(ValueError, match="boom 2"):
             parallel_map(work, range(5), jobs=5)
 
+    def test_inflight_workers_drain_before_failure_escapes(self) -> None:
+        # The fail-fast contract: an in-flight worker is awaited (not abandoned)
+        # before the exception leaves parallel_map, so a sibling that already
+        # started mutating shared state finishes — the orchestrator's no-leak
+        # guarantee. Worker 0 is slow and records completion; worker 1 raises at
+        # once. After parallel_map raises, worker 0 must have finished.
+        finished: list[int] = []
+
+        def work(i: int) -> None:
+            if i == 1:
+                raise ValueError("boom 1")
+            time.sleep(0.05)
+            finished.append(i)
+
+        with pytest.raises(ValueError, match="boom 1"):
+            parallel_map(work, range(2), jobs=2)
+        assert finished == [0], "in-flight worker was abandoned instead of joined"
+
     def test_concurrent_mutation_under_caller_lock_is_consistent(self) -> None:
         # The helper itself does not lock shared state — callers do. With a lock,
         # concurrent appends from every worker land without loss.
