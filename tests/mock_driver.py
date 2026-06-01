@@ -31,6 +31,7 @@ from testrange.networks.sidecar import LEASEFILE
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
+    builder_origin_findings,
     mgmt_unsupported_findings,
     unknown_uplink_findings,
 )
@@ -74,6 +75,15 @@ class _Switch:
     uplink_network: str | None
 
 
+@dataclass(frozen=True)
+class _CreatedVM:
+    """What ``create_vm`` was asked to define — for installer-origin assertions."""
+
+    vm_name: str
+    firmware: str
+    boot_media: str | None
+
+
 # Default serial output of a clean build: the positive token the orchestrator
 # treats as the only success signal.
 _DEFAULT_BUILD_RESULT = (b"TESTRANGE-RESULT: ok\n",)
@@ -104,6 +114,7 @@ class MockDriver(HypervisorDriver):
         self._networks: dict[str, str] = {}  # network backend -> switch backend
         self._pools: set[str] = set()
         self._vms: dict[str, str] = {}  # vm backend -> power state
+        self.created_vms: dict[str, _CreatedVM] = {}  # vm backend -> create_vm inputs
         self._snapshots: dict[str, list[str]] = {}
         self._volume_sizes: dict[str, int] = {}  # ref -> last size_gb seen
 
@@ -157,6 +168,7 @@ class MockDriver(HypervisorDriver):
         # no None to guard (H2).
         switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
+        findings.extend(builder_origin_findings(plan))
         findings.extend(self._pool_capacity_findings(plan))
         findings.extend(unknown_uplink_findings(switches, self.uplinks))
         return PreflightReport(findings=tuple(findings))
@@ -322,6 +334,7 @@ class MockDriver(HypervisorDriver):
         network_refs: dict[str, str],
         data_disk_refs: Sequence[VolumeRef] = (),
         build_nic: BuildNic | None = None,
+        boot_media_ref: VolumeRef | None = None,
     ) -> Any:
         del plan_name, os_disk_ref, seed_iso_ref
         if self.fail_create_vm:
@@ -333,6 +346,13 @@ class MockDriver(HypervisorDriver):
             nics: tuple[str, ...] = (build_nic.mac,)
         else:
             nics = tuple(network_refs[nic.network] for nic in spec.nics)
+        # boot_media presence + firmware are recorded so installer-origin tests
+        # can assert the orchestrator passed the bootable medium and UEFI through.
+        self.created_vms[backend_name] = _CreatedVM(
+            vm_name=spec.name,
+            firmware=spec.firmware,
+            boot_media=str(boot_media_ref) if boot_media_ref is not None else None,
+        )
         self._record(
             "create_vm", backend_name, spec.name, tuple(str(r) for r in data_disk_refs), nics
         )

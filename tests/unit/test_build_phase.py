@@ -269,14 +269,16 @@ class TestBuildPhase:
         assert len(create) == 1
         assert any(n.endswith("__os") for n in _built_names(cache))
 
-    def test_no_os_disk_base_is_rejected(self, env: tuple[CacheManager, MockDriver]) -> None:
-        # ORCH-5: the build phase reads OS-disk origin via the Builder ABC seam
-        # (not isinstance). A builder with no base image (installer-based origin)
-        # is the deferred BUILD-1 path and fails loud at probe.
+    def test_no_origin_at_all_is_rejected(self, env: tuple[CacheManager, MockDriver]) -> None:
+        # BUILD-1: the build phase reads OS-disk origin via the Builder ABC seam
+        # (not isinstance). A builder that provides NEITHER an image base
+        # (os_disk_base) NOR a boot medium (boot_media) has no way to populate an
+        # OS disk and fails loud at probe. (The installer-origin happy path —
+        # os_disk_base None + boot_media set — is covered separately.)
         from testrange.builders.base import Builder
         from testrange.credentials.base import Credential
 
-        class _InstallerBuilder(Builder):
+        class _OriginlessBuilder(Builder):
             @property
             def credentials(self) -> tuple[Credential, ...]:
                 return ()
@@ -311,14 +313,98 @@ class TestBuildPhase:
                                 NetworkIface("netA"),
                             ],
                         ),
-                        builder=_InstallerBuilder(),
+                        builder=_OriginlessBuilder(),
                         communicator=SSHCommunicator("u"),
                     ),
                 ],
             ),
         )
-        with pytest.raises(OrchestratorError, match="installer-based OS-disk origin"):
+        with pytest.raises(OrchestratorError, match="neither an OS-disk base image"):
             build_phase(_ctx(plan, driver, cache))
+
+    def test_installer_origin_materializes_blank_disk_and_boots_media(
+        self, env: tuple[CacheManager, MockDriver], tmp_path: Path
+    ) -> None:
+        # BUILD-1 happy path: a builder with os_disk_base() None but a boot_media()
+        # builds via the materialize seam — the orchestrator creates a BLANK OS
+        # disk (never upload_to_pool's a base onto it), stages the install medium,
+        # and create_vm gets boot_media_ref + the VM's uefi firmware.
+        from testrange.builders.base import Builder
+        from testrange.credentials.base import Credential
+
+        iso = tmp_path / "pve.iso"
+        iso.write_bytes(b"FAKE-PVE-INSTALLER-ISO" * 100)
+        cache, driver = env
+        cache.local.add(iso, name="pve-iso")
+
+        class _PVEBuilder(Builder):
+            @property
+            def credentials(self) -> tuple[Credential, ...]:
+                return ()
+
+            def os_disk_base(self) -> None:
+                return None
+
+            def boot_media(self) -> CacheEntry:
+                return CacheEntry("pve-iso")
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+            ):
+                # Fold base_sha (the orchestrator passes the boot-media sha here)
+                # so a different installer ISO keys a different build.
+                return ("pve" + base_sha)[:16].ljust(16, "0")
+
+            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+                return b"answer.toml-seed"
+
+        plan = Plan(
+            "hello",
+            MockHypervisor(
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
+                pools=[StoragePool("pool1", 32)],
+                vms=[
+                    VMRecipe(
+                        spec=VMSpec(
+                            name="pve",
+                            firmware="uefi",
+                            devices=[CPU(2), Memory(2048), OSDrive("pool1", 16)],
+                        ),
+                        builder=_PVEBuilder(),
+                        communicator=SSHCommunicator("root"),
+                    ),
+                ],
+            ),
+        )
+        build_phase(_ctx(plan, driver, cache))
+
+        # create_vm saw the bootable medium + UEFI firmware (the sidecar VM is
+        # also recorded; select the PVE build VM by name).
+        created = next(v for v in driver.created_vms.values() if v.vm_name == "pve")
+        assert created.firmware == "uefi"
+        assert created.boot_media is not None
+        # The sidecar stays BIOS image-origin — installer firmware/media are
+        # scoped to the VM that declared them.
+        sidecar = next(v for v in driver.created_vms.values() if v.vm_name != "pve")
+        assert sidecar.firmware == "bios"
+        assert sidecar.boot_media is None
+
+        # The OS disk was materialized BLANK (create_blank_volume), and the
+        # install medium was uploaded to the pool (the sidecar uploads its own
+        # base too, so we assert the boot medium is among the uploads — not that
+        # it is the only one).
+        ops = [name for name, _, _ in driver.calls]
+        assert "create_blank_volume" in ops
+        upload_targets = [c[1][0] for c in driver.calls if c[0] == "upload_to_pool"]
+        assert any("bootmedia" in t for t in upload_targets)
+        # The build VM's OS disk was never base-uploaded (it's blank): no upload
+        # targets a ``build_vm`` qcow2 (the boot medium is a ``-bootmedia.iso``).
+        assert not any(t.endswith(".qcow2") and "build_vm" in t for t in upload_targets)
+
+        # And the build produced a cached OS disk (full lifecycle reached capture).
+        assert _built_names(cache)
 
 
 class TestBuildResultSignaling:

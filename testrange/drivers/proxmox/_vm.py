@@ -143,6 +143,7 @@ def create_vm(
     network_refs: dict[str, str],
     data_disk_refs: Sequence[VolumeRef] = (),
     build_nic: BuildNic | None = None,
+    boot_media_ref: VolumeRef | None = None,
 ) -> str:
     """Define a VM on PVE from the orchestrator's staged disks.
 
@@ -169,6 +170,14 @@ def create_vm(
       network carrying the build NIC's MAC.
     """
     storage = client.storage
+    # Installer-origin (boot_media_ref set, BUILD-1d): the OS disk is a BLANK the
+    # installer partitions — allocate it sized rather than import-from a base —
+    # and the install ISO is attached as a bootable CDROM. boot=order=scsi0 still
+    # holds: an empty scsi0 has no bootloader, so OVMF falls through to the
+    # attached CDROM and runs the installer; post-install scsi0 is bootable and
+    # wins, so the CD never loops (validated mechanism, carried from the prior
+    # impl). Run firmware MUST match install or the installed disk panics.
+    installer_origin = boot_media_ref is not None
     config: dict[str, Any] = {
         # vmid is allocated + filled in by _post_new_vm (cluster/nextid is racy).
         "name": backend_name,
@@ -179,8 +188,21 @@ def create_vm(
         "agent": 1,  # QEMU Guest Agent (the PVE-4 native transport rides this)
         "serial0": "socket",  # cloud images expect a serial console
         "boot": "order=scsi0",  # the seed ISO is data, not bootable
-        "scsi0": f"{storage}:0,import-from={os_disk_ref}",
+        "scsi0": (
+            f"{storage}:{spec.os_drive.size_gb}"  # installer-origin: blank, sized
+            if installer_origin
+            else f"{storage}:0,import-from={os_disk_ref}"  # image-origin: import base
+        ),
     }
+    if spec.firmware == "uefi":
+        # OVMF + a per-VM EFI vars disk on q35, required by the PVE installer's
+        # x86_64-efi GRUB (SeaBIOS triple-faults on the hybrid media). NOTE: the
+        # exact efidisk0 allocation string is the documented PVE REST form;
+        # needs live-PVE certification (the libvirt reference backend is the
+        # certified installer-origin path today — see BUILD-13).
+        config["bios"] = "ovmf"
+        config["machine"] = "q35"
+        config["efidisk0"] = f"{storage}:1,efitype=4m,pre-enrolled-keys=0"
     # Build-vs-run for data disks follows the orchestrator's *intent*, not a
     # backend probe (PVE-27). A build/sidecar create carries a cloud-init/config
     # seed and attaches every writable disk as a BLANK for the guest to populate
@@ -189,8 +211,9 @@ def create_vm(
     # seed-presence signal the OS-disk grow below keys on, so the two never
     # disagree — and it can't be fooled by a stale staging file left behind by a
     # crashed prior build (which the old "does the volume exist?" probe would have
-    # mis-imported). NB: when installer-based OS-disk origins land (BUILD-1), a
-    # build may carry no cloud-init seed and this discriminator must be revisited.
+    # mis-imported). The installer-origin build (BUILD-1) still carries a seed —
+    # the PVE answer-file volume — so the seed-presence discriminator holds; only
+    # the OS-disk realization differs (blank vs import), keyed on installer_origin.
     is_build = seed_iso_ref is not None
     for i, ref in enumerate(data_disk_refs):
         # Slot index ``i+1`` disambiguates each disk; the bus is the device's
@@ -204,6 +227,10 @@ def create_vm(
             config[f"{bus}{i + 1}"] = f"{storage}:0,import-from={ref}"  # run: cached built disk
     if seed_iso_ref is not None:
         config["ide2"] = f"{seed_iso_ref},media=cdrom"
+    if boot_media_ref is not None:
+        # Bootable installer medium on ide0 (ide2 is the data seed). Not named in
+        # boot=order=scsi0 on purpose: the blank scsi0 falls through to it.
+        config["ide0"] = f"{boot_media_ref},media=cdrom"
     if build_nic is not None:
         # Build phase (ADR-0017): one build NIC, declared NICs not attached.
         config["net0"] = f"virtio={build_nic.mac},bridge={network_refs[build_nic.network]}"
@@ -214,7 +241,11 @@ def create_vm(
 
     vmid = _post_new_vm(client, config)
     _wait_unlocked(client, vmid)
-    if seed_iso_ref is not None:
+    # Grow scsi0 only on an image-origin build/sidecar (a small base was imported
+    # and needs to expand to the spec size). An installer-origin scsi0 was
+    # allocated blank at full size above, and a run-phase scsi0 imported an
+    # already-full-size cached disk — neither is resized (PVE rejects a no-op).
+    if seed_iso_ref is not None and not installer_origin:
         _resize_os_disk(client, vmid, spec.os_drive.size_gb)
         _wait_unlocked(client, vmid)
     _log.info("created PVE vm %s (vmid %d)", backend_name, vmid)

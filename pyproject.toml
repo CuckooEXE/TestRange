@@ -32,6 +32,9 @@ proxmox = [
     "requests-toolbelt>=1",
     "paramiko>=3",
     "websocket-client>=1.7",
+    # ProxmoxAnswerBuilder authors the answer-file seed ISO with pycdlib (the
+    # installer-ISO prep itself uses the system `xorriso`, ADR-0022, not a wheel).
+    "pycdlib>=1.14",
 ]
 # libvirt-python is the only libvirt dependency; it imports lazily (on connect),
 # so the package registers without it installed.
@@ -108,6 +111,10 @@ ignore = [
 "examples/**" = ["S106", "S108"]
 # The CLI's job is to print to stdout; T201 guards library code, not the CLI.
 "testrange/cli.py" = ["T201"]
+# ADR-0022: the single sanctioned subprocess module (PVE installer-ISO prep via
+# xorriso, to preserve the hybrid GPT a pure-pycdlib rebuild strips). Scoped here
+# so the project-wide ban still holds everywhere else.
+"testrange/builders/_proxmox_prepare.py" = ["TID251", "S404", "S603"]
 
 [tool.mypy]
 python_version = "3.11"

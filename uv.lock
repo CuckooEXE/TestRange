@@ -1311,6 +1311,7 @@ libvirt = [
 proxmox = [
     { name = "paramiko" },
     { name = "proxmoxer" },
+    { name = "pycdlib" },
     { name = "requests" },
     { name = "requests-toolbelt" },
     { name = "websocket-client" },
@@ -1333,6 +1334,7 @@ requires-dist = [
     { name = "proxmoxer", marker = "extra == 'proxmox'", specifier = ">=2" },
     { name = "pycdlib", marker = "extra == 'cloudinit'", specifier = ">=1.14" },
     { name = "pycdlib", marker = "extra == 'dev'", specifier = ">=1.14" },
+    { name = "pycdlib", marker = "extra == 'proxmox'", specifier = ">=1.14" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5" },
     { name = "pyyaml", marker = "extra == 'cloudinit'", specifier = ">=6" },

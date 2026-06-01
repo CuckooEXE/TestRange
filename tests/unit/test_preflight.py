@@ -2,12 +2,76 @@
 
 from __future__ import annotations
 
+from testrange import Plan
+from testrange.builders import CloudInitBuilder
+from testrange.builders.base import Builder
+from testrange.cache import CacheEntry
+from testrange.communicators import SSHCommunicator
+from testrange.credentials.base import Credential
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.networks import Network, Sidecar, Switch
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
+    builder_origin_findings,
     unknown_uplink_findings,
 )
+from testrange.vms import VMRecipe, VMSpec
+from tests.mock_driver import MockHypervisor
+
+
+class _OriginlessBuilder(Builder):
+    """A builder that declares no OS-disk origin at all — the misconfiguration."""
+
+    @property
+    def credentials(self) -> tuple[Credential, ...]:
+        return ()
+
+    def os_disk_base(self) -> None:
+        return None
+
+    def config_hash(  # type: ignore[no-untyped-def]
+        self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+    ):
+        return "0" * 16
+
+    def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+        return None
+
+
+def _plan_with(builder: Builder) -> Plan:
+    return Plan(
+        "p",
+        MockHypervisor(
+            networks=[Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
+            pools=[StoragePool("pool1", 16)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(name="vm", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)]),
+                    builder=builder,
+                    communicator=SSHCommunicator("u"),
+                )
+            ],
+        ),
+    )
+
+
+class TestBuilderOriginFindings:
+    def test_image_origin_is_clean(self) -> None:
+        plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")))
+        assert builder_origin_findings(plan) == ()
+
+    def test_no_origin_is_flagged(self) -> None:
+        findings = builder_origin_findings(_plan_with(_OriginlessBuilder()))
+        assert len(findings) == 1
+        assert findings[0].code == "no-os-disk-origin"
+
+    def test_installer_origin_is_clean(self) -> None:
+        class _InstallerBuilder(_OriginlessBuilder):
+            def boot_media(self) -> CacheEntry:
+                return CacheEntry("installer-iso")
+
+        assert builder_origin_findings(_plan_with(_InstallerBuilder())) == ()
 
 
 class TestReport:

@@ -83,6 +83,39 @@ def unknown_uplink_findings(
     return tuple(out)
 
 
+def builder_origin_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
+    """Reject a VM whose builder declares no OS-disk origin (BUILD-1).
+
+    Every builder must populate the OS disk one of two ways: an image base
+    (:meth:`Builder.os_disk_base`) the orchestrator uploads + grows, or a boot
+    medium (:meth:`Builder.boot_media`) it boots against a freshly-materialized
+    blank disk (installer-origin, ADR-0010 §6). A builder that returns ``None``
+    from *both* has no way to produce a disk; that is a plan misconfiguration,
+    so it fails loud here — before any backend resource stands up — rather than
+    at the build probe. Backend-agnostic: every driver calls it from
+    ``preflight``. Both seams are pure (no I/O), so this stays read-only.
+    """
+    out: list[PreflightFinding] = []
+    for vm in plan.hypervisor.vms:
+        builder = vm.builder
+        if builder.os_disk_base() is None and builder.boot_media() is None:
+            out.append(
+                PreflightFinding(
+                    code="no-os-disk-origin",
+                    message=(
+                        f"vm {vm.spec.name!r}: builder {type(builder).__name__} declares "
+                        "neither an OS-disk base image (os_disk_base) nor a boot medium "
+                        "(boot_media) — it cannot populate an OS disk"
+                    ),
+                    fix_hint=(
+                        "use an image-based builder (e.g. CloudInitBuilder with base=...) "
+                        "or an installer-based builder that returns a boot_media()"
+                    ),
+                )
+            )
+    return tuple(out)
+
+
 def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
     """Gate ``Switch(mgmt=True)`` until its cross-backend semantics are settled.
 

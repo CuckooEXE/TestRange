@@ -456,16 +456,27 @@ def _print_describe(
                 extra_str = f" ({', '.join(extra)})" if extra else ""
                 print(f"    nic:    {nic.network}{extra_str}")
             builder = vm.builder
-            if isinstance(base := getattr(builder, "base", None), CacheEntry):
-                cache_refs.append(base)
+            # OS-disk origin via the Builder ABC seams (not a concrete attr):
+            # image-based builders return os_disk_base(), installer-based ones
+            # return boot_media() (the install ISO). Both are CacheEntry refs the
+            # user must have cached, so surface either.
+            for label, entry in (
+                ("base", builder.os_disk_base()),
+                ("media", builder.boot_media()),
+            ):
+                if entry is None:
+                    continue
+                cache_refs.append(entry)
                 try:
                     # Passive describe — don't pull a multi-GB base over HTTP
                     # just to print one line. fetch=False is the rule for
                     # any non-install-phase resolve.
-                    info = mgr.resolve(base, fetch=False)
-                    print(f"    base:   {base!r}  -> {info.short_sha} ({_format_size(info.size)})")
+                    info = mgr.resolve(entry, fetch=False)
+                    print(
+                        f"    {label}:   {entry!r}  -> {info.short_sha} ({_format_size(info.size)})"
+                    )
                 except CacheMissError:
-                    print(f"    base:   {base!r}  (!) not in cache")
+                    print(f"    {label}:   {entry!r}  (!) not in cache")
             if creds := getattr(builder, "credentials", ()):
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
                 print(f"    creds:  {names}")

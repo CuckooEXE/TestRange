@@ -36,6 +36,7 @@ from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
+    builder_origin_findings,
     unknown_uplink_findings,
 )
 
@@ -123,6 +124,7 @@ class LibvirtDriver(HypervisorDriver):
         # switch when the plan declares none), so there is no None to guard (H2).
         switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
+        findings.extend(builder_origin_findings(plan))
         return PreflightReport(findings=tuple(findings))
 
     def _resolve_uplink(self, switch: Switch) -> str | None:
@@ -204,6 +206,7 @@ class LibvirtDriver(HypervisorDriver):
         network_refs: dict[str, str],
         data_disk_refs: Sequence[VolumeRef] = (),
         build_nic: BuildNic | None = None,
+        boot_media_ref: VolumeRef | None = None,
     ) -> Any:
         # Translate composed network names → the switch's shared libvirt network;
         # the uplink network (e.g. tr-egress) isn't in the map and passes through.
@@ -221,6 +224,7 @@ class LibvirtDriver(HypervisorDriver):
             network_refs=resolved_refs,
             data_disk_refs=data_disk_refs,
             build_nic=build_nic,
+            boot_media_ref=boot_media_ref,
         )
 
     def start_vm(self, backend_name: str) -> None:

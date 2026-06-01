@@ -231,6 +231,13 @@ class TestRenderUserData:
         body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec)))
         assert "chpasswd" not in body
 
+    def test_image_origin_has_no_boot_media(self) -> None:
+        # BUILD-1a: an image-based builder seeds the OS disk from os_disk_base and
+        # needs no boot medium — the ABC default None stands.
+        b = CloudInitBuilder(base=CacheEntry("x"), credentials=())
+        assert b.boot_media() is None
+        assert b.os_disk_base() == CacheEntry("x")
+
 
 class TestDisableNetworkGuard:
     def test_default_write_files_pins_netplan(self) -> None:
