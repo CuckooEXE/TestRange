@@ -14,6 +14,7 @@ capability (NET-17) and is not exercised here.
 Prerequisites:
     testrange cache add https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2 \
         --name debian-13
+    sudo tools/build-sidecar-image/build.sh
     testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 --name testrange-sidecar
 
 Usage:

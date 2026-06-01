@@ -23,7 +23,7 @@ import pytest
 from testrange.cache import CacheEntry, CacheManager
 from testrange.drivers.libvirt import LibvirtProfile
 from testrange.drivers.libvirt._conn import LibvirtConn
-from testrange.drivers.libvirt.driver import LibvirtDriver, _host_nested_kvm_enabled
+from testrange.drivers.libvirt.driver import LibvirtDriver, _probe_host_nested_kvm
 from testrange.exceptions import DriverError
 from testrange.orchestrator.runner import run_tests
 
@@ -34,7 +34,7 @@ _UPLINK_BRIDGE = "tr-egress"
 
 
 def _require_preconditions() -> None:
-    if not _host_nested_kvm_enabled():
+    if _probe_host_nested_kvm() is not True:
         pytest.skip("host KVM nesting is disabled (/sys/module/kvm_*/parameters/nested != Y)")
     d = LibvirtDriver(LibvirtConn())
     try:

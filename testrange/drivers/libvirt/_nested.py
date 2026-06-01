@@ -72,7 +72,7 @@ def wait_libvirtd_ready(execute: GuestExec, *, timeout: float, poll: float = 2.0
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
-        r = execute(("virsh", "-c", "qemu:///system", "list", "--all"), timeout=15.0)
+        r = execute(("virsh", "-c", "qemu:///system", "list", "--all"))
         if r.ok:
             _log.info("guest libvirtd ready")
             return

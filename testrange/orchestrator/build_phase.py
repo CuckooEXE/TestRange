@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import re
 import tempfile
 import time
@@ -50,7 +51,7 @@ from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.plan import Plan
 from testrange.state.schema import PHASE_BUILD
-from testrange.vms.nested import GuestHypervisor
+from testrange.vms.nested import GuestHypervisor, reject_unsupported_nesting
 from testrange.vms.recipe import VMRecipe
 
 _log = get_logger(__name__)
@@ -110,6 +111,10 @@ def build_phase(ctx: RunContext) -> None:
     (:func:`build_nested_inner_vms`, ADR-0021 — "build on L0"), so the later inner
     run is a pure cache hit and needs no nested build boot.
     """
+    # Refuse depth-2+ nesting before any backend work (ADR-0021): build recursion
+    # is depth-agnostic, but a depth-2 inner run can't be reached, so fail loud
+    # rather than build three disk sets and time out opaquely later.
+    reject_unsupported_nesting(ctx.plan.hypervisor)
     ctx.store.set_phase(PHASE_BUILD)
 
     misses, hits = _probe_all(ctx)
@@ -152,9 +157,9 @@ def build_nested_inner_vms(ctx: RunContext) -> None:
     (``"<outer>.<host>"``). The inner run (``nested_phase``, ``require_cache=True``)
     then only uploads those cached disks into the guest's pool and boots.
 
-    Recursion is depth-agnostic: an inner plan that itself contains a
-    ``GuestHypervisor`` warms *its* inner VMs here too. (Whether a depth-2 inner
-    run can consume them is a separate question — see ADR-0021 / CI-8.)
+    Single level only: a guest whose inner plan itself contains a
+    ``GuestHypervisor`` is rejected up front by :func:`build_phase`
+    (``reject_unsupported_nesting``), so this never recurses past depth 1.
     """
     guests = [vm for vm in ctx.plan.hypervisor.vms if isinstance(vm, GuestHypervisor)]
     for guest in guests:
@@ -168,16 +173,23 @@ def build_nested_inner_vms(ctx: RunContext) -> None:
 def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
     """A RunContext for building ``inner_plan`` on the outer driver + shared cache.
 
-    Shares the outer driver binding, state store, cache, and run id (the inner
-    build's transient backend resources live on L0 under the outer run); only the
-    plan, plan name, and run-network addressing are inner-specific.
+    Shares the outer driver binding, state store, and cache (the inner build's
+    transient backend resources live on L0 under the outer run). It gets a
+    *distinct* run id derived from the outer run id + inner plan name: backend
+    resource names are composed from ``run_id`` (e.g. the build pool is
+    ``tr-build_pool-<run_id[:8]>-build``), so sharing the outer run id would
+    collide the inner build pool with the outer's — safe only by serial accident
+    today, and a failed best-effort delete leaving a same-named outer resource in
+    the ledger would corrupt cleanup. The derivation is deterministic so the
+    cleanup walker rebuilds the same names without live state.
     """
+    inner_run_id = hashlib.sha256(f"{ctx.run_id}/{inner_plan.name}".encode()).hexdigest()
     return RunContext(
         plan=inner_plan,
         resolved=ctx.resolved,
         store=ctx.store,
         cache=ctx.cache,
-        run_id=ctx.run_id,
+        run_id=inner_run_id,
         plan_name=inner_plan.name,
         build_timeout_s=ctx.build_timeout_s,
         lease_timeout_s=ctx.lease_timeout_s,

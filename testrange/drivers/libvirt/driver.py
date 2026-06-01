@@ -34,6 +34,7 @@ from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.libvirt import _guest, _naming, _net, _serial, _storage, _vm
 from testrange.drivers.libvirt._conn import LibvirtClient, LibvirtConn
+from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
     PreflightFinding,
@@ -44,26 +45,33 @@ from testrange.preflight import (
 _log = get_logger(__name__)
 
 
-def _host_nested_kvm_enabled() -> bool:
-    """True if the local host has KVM nesting on (``kvm_intel``/``kvm_amd``).
+def _probe_host_nested_kvm() -> bool | None:
+    """Tri-state probe of the local host's KVM-nesting toggle.
 
-    Exactly one of the two modules is loaded per host; a value beginning ``Y``
-    or ``1`` means nesting is enabled. A missing file (module not loaded) or an
-    ``N`` reads as disabled. Module-level so a preflight test can monkeypatch it.
+    Returns ``True`` when a ``kvm_intel``/``kvm_amd`` ``nested`` parameter reads
+    as on (``Y``/``1``), ``False`` when one reads as explicitly off (``N``/``0``),
+    and ``None`` when neither file is readable or carries a recognized value
+    (module not loaded yet, empty transient read, exotic kernel). ``None`` is
+    *indeterminate* — the caller must not turn it into a hard preflight reject,
+    only an explicit ``False`` is a real "nesting is off" signal. Module-level so
+    a preflight test can monkeypatch it.
     """
     for module in ("kvm_intel", "kvm_amd"):
         try:
-            value = Path(f"/sys/module/{module}/parameters/nested").read_text().strip()
+            head = Path(f"/sys/module/{module}/parameters/nested").read_text().strip()[:1]
         except OSError:
             continue
-        if value[:1] in ("Y", "1"):
+        if head in ("Y", "1"):
             return True
-    return False
+        if head in ("N", "0"):
+            return False
+    return None
 
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
     from testrange.devices.pool.base import StoragePool
+    from testrange.gateways.base import GuestGateway
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
     from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
@@ -126,6 +134,30 @@ class LibvirtDriver(HypervisorDriver):
     def disconnect(self) -> None:
         self._client.close()
 
+    def guest_gateway(self) -> GuestGateway | None:
+        """SSH-jump through the ``qemu+ssh`` host for a remote libvirt (ADR-0021).
+
+        Local libvirt (``qemu:///system``) — guests are directly routable from the
+        co-located orchestrator, so ``None`` (unchanged). A **remote** ``qemu+ssh``
+        connection — the binding a nested guest hypervisor is reached over — puts
+        its guests on the remote host's *internal* networks the orchestrator
+        cannot route to. An ``SSHCommunicator`` reaches them by tunnelling through
+        the same host + key the connect URI already carries (the depth-2 nested
+        wall; also any SSH-communicator inner VM). QGA transports ride the libvirt
+        control plane and ignore this.
+        """
+        parsed = urllib.parse.urlparse(self._conn.libvirt_uri)
+        if not parsed.scheme.startswith("qemu+ssh") or not parsed.hostname:
+            return None
+        keyfile = urllib.parse.parse_qs(parsed.query).get("keyfile", [None])[0]
+        pkey_text = Path(keyfile).read_text(encoding="utf-8") if keyfile else None
+        return SSHJumpGateway(
+            host=parsed.hostname,
+            username=parsed.username or "root",
+            pkey_text=pkey_text,
+            port=parsed.port or 22,
+        )
+
     def preflight(
         self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
     ) -> PreflightReport:
@@ -158,18 +190,32 @@ class LibvirtDriver(HypervisorDriver):
         under TCG emulation. Only checkable when libvirtd is **local** (the URI
         names no host): reading ``/sys/module/kvm_*/parameters/nested`` is a
         host-filesystem read, and a remote daemon's sysfs isn't reachable over the
-        libvirt API (deferred with the rest of the remote surface, BACKEND-5).
+        libvirt API (a real remote probe via the capabilities API is deferred with
+        the rest of the remote surface, BACKEND-5). For a remote L0 we therefore
+        cannot verify nesting — we ``warning``-log the gap rather than skip it
+        silently, because that is precisely the case an inner VM degrades to TCG.
         """
         if not any(vm.spec.cpu.nested for vm in plan.hypervisor.vms):
             return ()
         host = urllib.parse.urlparse(self._conn.libvirt_uri).hostname
         if host not in (None, "", "localhost"):
-            _log.debug(
-                "nested CPU requested but libvirt is remote (%s); skipping host nested-KVM probe",
+            _log.warning(
+                "nested CPU requested but libvirt is remote (%s); cannot verify host "
+                "nested-KVM over the API yet (BACKEND-5) — inner guests will fall back "
+                "to slow TCG emulation if that host has KVM nesting disabled",
                 self._conn.libvirt_uri,
             )
             return ()
-        if _host_nested_kvm_enabled():
+        state = _probe_host_nested_kvm()
+        if state is None:
+            _log.warning(
+                "nested CPU requested but the host's KVM-nesting state is indeterminate "
+                "(no readable /sys/module/kvm_{intel,amd}/parameters/nested); proceeding "
+                "without the preflight check — inner guests will fall back to slow TCG "
+                "emulation if nesting is in fact off"
+            )
+            return ()
+        if state:
             return ()
         return (
             PreflightFinding(

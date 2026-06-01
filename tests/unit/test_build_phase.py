@@ -25,6 +25,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers.base import VolumeRef
+from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import BuildFailedError, DriverError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
@@ -33,7 +34,7 @@ from testrange.orchestrator.build_phase import build_phase
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
 from testrange.state.store import StateStore, new_run_id, run_dir_for
-from testrange.vms import VMRecipe, VMSpec
+from testrange.vms import GuestHypervisor, VMRecipe, VMSpec
 from tests.mock_driver import MockDriver, MockHypervisor
 
 
@@ -438,6 +439,86 @@ class TestBuildResultSignaling:
         assert "E: package broken" in rendered
         assert "\x1b" not in rendered and "\r" not in rendered
         assert ei.value.log == log  # raw bytes preserved on the attribute
+
+
+def _nested_plan() -> Plan:
+    inner = LibvirtHypervisor(
+        networks=[
+            Switch(
+                "inner", Network("inner-net"), cidr="192.168.50.0/24", sidecar=Sidecar(dhcp=True)
+            )
+        ],
+        pools=[StoragePool("inner-pool", 32)],
+        vms=[
+            VMRecipe(
+                spec=VMSpec(
+                    name="webapp",
+                    devices=[
+                        CPU(1),
+                        Memory(512),
+                        OSDrive("inner-pool", 8),
+                        NetworkIface("inner-net", addr=DHCPAddr()),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+                ),
+                communicator=SSHCommunicator("u"),
+            )
+        ],
+    )
+    guest = GuestHypervisor(
+        spec=VMSpec(
+            name="host-a",
+            devices=[
+                CPU(2, nested=True),
+                Memory(2048),
+                OSDrive("pool1", 20),
+                NetworkIface("lab-net", addr=DHCPAddr()),
+            ],
+        ),
+        builder=CloudInitBuilder(
+            base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+        ),
+        communicator=SSHCommunicator("u"),
+        inner=inner,
+    )
+    return Plan(
+        "nested",
+        MockHypervisor(
+            networks=[
+                Switch("lab", Network("lab-net"), cidr="10.50.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
+            pools=[StoragePool("pool1", 128)],
+            vms=[guest],
+        ),
+    )
+
+
+class TestNestedBuild:
+    """ADR-0021: a GuestHypervisor's inner VM disks warm on the L0 backend."""
+
+    def test_inner_vms_build_on_l0_with_isolated_run_ids(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        cache, driver = env
+        build_phase(_ctx(_nested_plan(), driver, cache))
+
+        # Two OS disks captured on L0: the outer guest's and the inner webapp's.
+        assert len(_built_names(cache)) == 2
+
+        # Two ephemeral build pools — outer + inner — with DISTINCT backend names.
+        # The inner build derives its own run id; sharing the outer's would
+        # collide the build pool names and corrupt the shared cleanup ledger.
+        pools = [
+            arg
+            for c in driver.calls
+            if c[0] == "create_pool"
+            for arg in c[1]
+            if isinstance(arg, str) and "build_pool" in arg
+        ]
+        assert len(pools) == 2
+        assert len(set(pools)) == 2
 
 
 class TestBuildToRunDataDisk:

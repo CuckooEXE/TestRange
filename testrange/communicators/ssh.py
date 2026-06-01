@@ -111,6 +111,15 @@ class SSHCommunicator(Communicator):
     def host(self) -> str | None:
         return self._host
 
+    @property
+    def gateway(self) -> GuestGateway | None:
+        """The jump gateway this VM was bound through, or ``None`` if direct.
+
+        Set when the backend's guests are not directly routable from the
+        orchestrator (a remote hypervisor); ``None`` for a co-located backend.
+        """
+        return self._gateway
+
     def bind(
         self,
         *,

@@ -16,6 +16,7 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
 from testrange.vms import GuestHypervisor, VMRecipe, VMSpec
+from testrange.vms.nested import reject_unsupported_nesting
 from tests.mock_driver import MockHypervisor
 
 _KEY = SSHKey.generate(comment="nested-test")
@@ -82,6 +83,48 @@ class TestGuestHypervisorShape:
         with pytest.raises(AttributeError):
             g.inner = _inner_libvirt()  # type: ignore[misc]
 
+    def test_non_libvirt_inner_rejected_at_construction(self) -> None:
+        # The inner backend is libvirt-only in v1 (ADR-0021); __post_init__
+        # rejects any other Hypervisor at the trust boundary, not mid-run.
+        with pytest.raises(TypeError, match="LibvirtHypervisor"):
+            GuestHypervisor(
+                spec=_outer_spec(),
+                builder=CloudInitBuilder(base=CacheEntry("debian-13"), credentials=[_ADMIN]),
+                communicator=SSHCommunicator("admin"),
+                inner=MockHypervisor(),
+            )
+
+
+def _nested_host(name: str, pool: str, inner: LibvirtHypervisor) -> GuestHypervisor:
+    return GuestHypervisor(
+        spec=VMSpec(name=name, devices=[CPU(2, nested=True), Memory(2048), OSDrive(pool, 20)]),
+        builder=CloudInitBuilder(base=CacheEntry("debian-13"), credentials=[_ADMIN]),
+        communicator=SSHCommunicator("admin"),
+        inner=inner,
+    )
+
+
+class TestNestingDepth:
+    def test_single_level_nesting_allowed(self) -> None:
+        hyp = MockHypervisor(
+            networks=[
+                Switch("lab", Network("lab-net"), cidr="10.50.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
+            pools=[StoragePool("pool1", 128)],
+            vms=[_guest()],
+        )
+        reject_unsupported_nesting(hyp)  # must not raise
+
+    def test_depth2_nesting_rejected(self) -> None:
+        # host-a hosts host-b, which is itself a nested host => depth 2.
+        host_b = _nested_host("host-b", "p-b", _inner_libvirt())
+        host_a = _nested_host(
+            "host-a", "pool1", LibvirtHypervisor(pools=[StoragePool("p-b", 32)], vms=[host_b])
+        )
+        hyp = MockHypervisor(pools=[StoragePool("pool1", 128)], vms=[host_a])
+        with pytest.raises(ValueError, match="single-level nesting"):
+            reject_unsupported_nesting(hyp)
+
 
 class TestLibvirtSugar:
     def test_fills_stack_builder_and_ssh(self) -> None:
@@ -101,10 +144,10 @@ class TestLibvirtSugar:
         # admin credential carried onto the builder so the inner qemu+ssh binding
         # and outer SSH login share the baked key.
         assert g.builder.find_credential("admin") is not None
-        # libvirtd brought up and the admin joined to the libvirt group.
-        joined = "\n".join(g.builder.post_install_commands)
-        assert "libvirtd" in joined
-        assert "admin" in joined and "libvirt" in joined
+        # libvirtd brought up and the admin joined to the libvirt/kvm groups.
+        post = g.builder.post_install_commands
+        assert "systemctl enable --now libvirtd" in post
+        assert "usermod -aG libvirt,kvm admin" in post
 
     def test_extra_packages_appended(self) -> None:
         g = GuestHypervisor.libvirt(spec=_outer_spec(), admin=_ADMIN, extra_packages=[Apt("ovmf")])

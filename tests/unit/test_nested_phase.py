@@ -20,6 +20,7 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import OrchestratorError
+from testrange.gateways import SSHJumpGateway
 from testrange.orchestrator.nested_phase import (
     NestedHandle,
     NestedRun,
@@ -71,14 +72,28 @@ class TestRunNestedPhaseGuards:
         with pytest.raises(OrchestratorError, match="SSHCommunicator"):
             run_nested_phase(_ctx(_guest(comm=NativeCommunicator())))
 
-    def test_non_libvirt_inner_rejected(self) -> None:
-        with pytest.raises(OrchestratorError, match="inner LibvirtHypervisor"):
-            run_nested_phase(_ctx(_guest(comm=SSHCommunicator("admin"), inner=MockHypervisor())))
+    def test_non_libvirt_inner_rejected_at_construction(self) -> None:
+        # GuestHypervisor.__post_init__ enforces the libvirt-only inner at the
+        # trust boundary, so a bad plan never reaches run_nested_phase.
+        with pytest.raises(TypeError, match="LibvirtHypervisor"):
+            _guest(comm=SSHCommunicator("admin"), inner=MockHypervisor())
 
     def test_unbound_communicator_has_no_host(self) -> None:
         # SSH + libvirt inner, but the communicator was never bound (no address).
         with pytest.raises(OrchestratorError, match="no resolved address"):
             run_nested_phase(_ctx(_guest(comm=SSHCommunicator("admin"))))
+
+    def test_gateway_bound_communicator_rejected(self) -> None:
+        # A guest reached only through a jump gateway (remote L0) can't be the
+        # target of a direct inner qemu+ssh dial — fail loud, don't hang.
+        comm = SSHCommunicator("admin")
+        comm.bind(
+            host="10.50.0.9",
+            credential=PosixCred("admin", ssh_key=_KEY, admin=True),
+            gateway=SSHJumpGateway(host="jump", username="root", pkey_text=None, port=22),
+        )
+        with pytest.raises(OrchestratorError, match="bound via a gateway"):
+            run_nested_phase(_ctx(_guest(comm=comm)))
 
     def test_admin_credential_without_key_rejected(self) -> None:
         comm = SSHCommunicator("admin")
@@ -109,8 +124,8 @@ class TestNestedHandle:
         host = VMHandle(name="host-a", backend_name="tr-vm-x", communicator=NativeCommunicator())
         h = NestedHandle(host=host, inner=inner)
         assert h.host is host
-        assert h.vms == {"webapp": "vh"}
-        assert h.driver == "drv"
+        assert h.vms is inner.vms
+        assert h.driver is inner.driver
         assert h.run_id == "rid"
 
 

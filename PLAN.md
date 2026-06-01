@@ -1518,15 +1518,19 @@ plan of L2 guests — brought up automatically as part of the outer run. It is
   `Switch`+`Sidecar(nat)` → real world. No synthesized egress. Only exercised for
   inner-VM *runtime* internet, since build is on L0.
 - **`CPU(count, nested=True)`** is the portable "must run hardware-accelerated
-  VMs" knob; libvirt already passes the host CPU through, and the L0 preflight
-  verifies host nested KVM is enabled.
-- **Depth:** uncapped by construction (an inner `Orchestrator` runs its own
-  `nested_phase`). Depth-2 was run (CI-8): the build path recurses fine (all
-  disks build on L0), but bring-up dies on **L2 guest reachability** — host-b
-  sits on host-a's internal network, and the inner driver's `guest_gateway()` is
-  `None`, so the orchestrator can't SSH to it. The fix (a `GuestGateway` that
-  jumps through host-a, ADR-0020) is real driver work and is **not** done here;
-  full findings in ADR-0021.
+  VMs" knob; libvirt already passes the host CPU through. The L0 preflight
+  verifies host nested KVM is enabled for a **local** L0; for a remote L0 the
+  host sysfs isn't reachable over the libvirt API yet (BACKEND-5), so preflight
+  `warning`-logs that it can't verify rather than asserting it.
+- **Depth:** single-level only, **enforced**. The build/run recursion is
+  depth-agnostic by construction, but depth-2 dies on **L2 guest reachability**
+  (host-b sits on host-a's internal network and the inner driver's
+  `guest_gateway()` is `None`, so the orchestrator can't SSH to it — CI-8). So
+  `build_phase`/`run_nested_phase` reject a plan whose nested host itself hosts a
+  nested host (`reject_unsupported_nesting`) up front, rather than building three
+  disk sets and timing out at L2. A directly-gateway-bound L0 guest is likewise
+  rejected. The real fix (a `GuestGateway` jumping through host-a, ADR-0020) is
+  deferred; full findings in ADR-0021.
 
 ### Deferred (named, not built)
 

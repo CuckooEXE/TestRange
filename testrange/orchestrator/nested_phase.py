@@ -33,14 +33,16 @@ from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
-from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.drivers.libvirt._nested import inner_libvirt_profile, wait_libvirtd_ready
 from testrange.exceptions import OrchestratorError
 from testrange.plan import Plan
 from testrange.vms.handle import VMHandle
-from testrange.vms.nested import GuestHypervisor
+from testrange.vms.nested import GuestHypervisor, reject_unsupported_nesting
 
 if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Mapping
+
+    from testrange.drivers.base import HypervisorDriver
     from testrange.orchestrator.context import RunContext
     from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
     from testrange.utils.sshkey import SSHKey
@@ -63,11 +65,11 @@ class NestedHandle:
     inner: OrchestratorHandle
 
     @property
-    def vms(self) -> object:
+    def vms(self) -> Mapping[str, VMHandle]:
         return self.inner.vms
 
     @property
-    def driver(self) -> object:
+    def driver(self) -> HypervisorDriver:
         return self.inner.driver
 
     @property
@@ -91,6 +93,7 @@ def run_nested_phase(ctx: RunContext) -> tuple[list[NestedRun], dict[str, Nested
     inner orchestrators are torn down (LIFO) and the error propagates, so the
     outer ``__enter__`` never returns with half-built nested state.
     """
+    reject_unsupported_nesting(ctx.plan.hypervisor)
     guests = [vm for vm in ctx.plan.hypervisor.vms if isinstance(vm, GuestHypervisor)]
     runs: list[NestedRun] = []
     handles: dict[str, NestedHandle] = {}
@@ -117,16 +120,26 @@ def _bring_up_one(ctx: RunContext, guest: GuestHypervisor) -> NestedRun:
             f"nested host {guest.name!r} needs an SSHCommunicator for the inner "
             f"qemu+ssh binding; got {type(comm).__name__}"
         )
-    if not isinstance(guest.inner, LibvirtHypervisor):
-        raise OrchestratorError(
-            f"nested host {guest.name!r}: only an inner LibvirtHypervisor is supported "
-            f"(got {type(guest.inner).__name__})"
-        )
+    # (The inner LibvirtHypervisor requirement is enforced at GuestHypervisor
+    # construction; see GuestHypervisor.__post_init__.)
     host = comm.host
     if not host:
         raise OrchestratorError(
             f"nested host {guest.name!r}: communicator has no resolved address "
             f"(run phase should have bound it)"
+        )
+    if comm.gateway is not None:
+        # The inner qemu+ssh binding dials comm.host directly from the
+        # orchestrator host (no jump). If the L0 guest itself was bound *via* a
+        # gateway — a remote L0 whose guests aren't directly routable — that dial
+        # can't reach it and would hang opaquely. Fail loud here: nested virt
+        # currently requires a directly SSH-reachable L1 guest (local libvirt L0;
+        # remote-L0 nesting is deferred, BACKEND-5/BACKEND-11).
+        raise OrchestratorError(
+            f"nested host {guest.name!r}: the L0 guest is bound via a gateway "
+            f"({type(comm.gateway).__name__}), so the inner qemu+ssh binding cannot "
+            f"route to it directly; nested virtualization requires a directly "
+            f"SSH-reachable L1 guest (local libvirt L0)"
         )
     key = _admin_ssh_key(guest, comm.username)
 
@@ -181,6 +194,11 @@ def _admin_ssh_key(guest: GuestHypervisor, username: str) -> SSHKey:
             f"(got {type(builder).__name__})"
         )
     cred = builder.find_credential(username)
+    if cred is None:
+        raise OrchestratorError(
+            f"nested host {guest.name!r}: builder bakes no credential for admin user "
+            f"{username!r} (the inner qemu+ssh binding authenticates as this user)"
+        )
     if not isinstance(cred, PosixCred) or cred.ssh_key is None:
         raise OrchestratorError(
             f"nested host {guest.name!r}: admin credential {username!r} must be a "

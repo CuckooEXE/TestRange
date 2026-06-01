@@ -13,7 +13,7 @@ from __future__ import annotations
 import contextlib
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import FrameType, TracebackType
 from typing import Any
@@ -23,7 +23,7 @@ from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile
 from testrange.drivers.base import HypervisorDriver
 from testrange.exceptions import BuildRequiredError, PreflightError
-from testrange.networks.base import NetworkAddressing, Switch
+from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import (
     ResolvedBackend,
     compatibility_findings,
@@ -72,8 +72,8 @@ class OrchestratorHandle:
     driver: HypervisorDriver
     vms: Mapping[str, VMHandle]
     leak: Callable[[], None]
-    # Brought-up nested hypervisors, keyed by their plan name (ADR-0021). Empty
-    # unless the plan declares a GuestHypervisor. Reach an inner VM via
+    # Brought-up nested hypervisors, keyed by the host (guest) name (ADR-0021).
+    # Empty unless the plan declares a GuestHypervisor. Reach an inner VM via
     # ``orch.nested["host-a"].vms["webapp"]``.
     nested: Mapping[str, NestedHandle] = field(default_factory=dict)
 
@@ -117,7 +117,7 @@ class Orchestrator:
             sidecar_ready_timeout_s=sidecar_ready_timeout_s,
             addressing={
                 n.name: NetworkAddressing.from_switch(s)
-                for s in self._all_switches()
+                for s in plan.hypervisor.all_switches
                 for n in s.networks
             },
         )
@@ -146,12 +146,6 @@ class Orchestrator:
     @property
     def lease_timeout_s(self) -> float:
         return self.ctx.lease_timeout_s
-
-    def _all_switches(self) -> Sequence[Switch]:
-        switches = getattr(self.plan.hypervisor, "networks", None)
-        if switches is None:
-            return ()
-        return tuple(switches)
 
     def _preflight_and_initialize(self) -> None:
         """Run read-only preflight (abort on error) and open the state file."""

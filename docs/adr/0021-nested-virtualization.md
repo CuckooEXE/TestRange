@@ -115,14 +115,22 @@ ordinary L0 `Switch`+`Sidecar(nat)` the guest hypervisor sits on.
   reclaims it — inner teardown is a fast-path/forget for clean state and
   `--leak-on-failure` semantics, not a correctness requirement.
 - `CPU(count, nested=True)` is a portable "must run hardware-accelerated VMs"
-  knob; libvirt already passes the host CPU through, and the L0 driver's
-  preflight verifies the host has nested KVM enabled and fails loud early.
-- The inner `qemu+ssh` binding requires the L1 guest be SSH-reachable from the
-  orchestrator host (true for local libvirt: guests are directly routable,
-  `guest_gateway()` is `None`) and the admin user in the `libvirt`/`kvm` groups.
-- **Depth-2 breaks, and we do not patch it in this work** (CI-8). The recursion
+  knob; libvirt already passes the host CPU through. For a **local** L0 the
+  driver's preflight verifies the host has nested KVM enabled and fails loud
+  early; for a **remote** L0 the host's sysfs isn't reachable over the libvirt
+  API yet (BACKEND-5), so preflight `warning`-logs that it cannot verify nesting
+  rather than asserting it — the check is local-L0-only for now.
+- The inner `qemu+ssh` binding requires the L1 guest be SSH-reachable *directly*
+  from the orchestrator host (true for local libvirt: guests are directly
+  routable, `guest_gateway()` is `None`) and the admin user in the
+  `libvirt`/`kvm` groups. A guest bound through a gateway (remote L0) is rejected
+  loudly — the direct inner dial can't route through the jump.
+- **Depth-2 is unsupported, and we reject it loudly** (CI-8). The recursion
   structure permits arbitrary depth and — to my initial surprise — the *build*
-  path does too; the wall is **L2 guest reachability** (see findings below).
+  path does too; the wall is **L2 guest reachability** (see findings below). Both
+  `build_phase` and `run_nested_phase` now refuse a plan whose nested host itself
+  contains a nested host (`reject_unsupported_nesting`), before any backend work,
+  rather than building three disk sets and timing out opaquely at L2.
 
 ## Depth-2 findings (CI-8, run 2026-05-31)
 
@@ -163,3 +171,35 @@ A doubly-nested plan was run on real libvirt:
   gateway layer; deferred. The single-instance/`run_id[:8]`-by-date naming
   (ADR-0018) is also a latent collision for rapid same-day reruns, surfaced
   incidentally during this work — orthogonal, noted, not addressed here.
+
+### Gateway experiment (BACKEND-11, run 2026-05-31)
+
+We wired the first ingredient — `LibvirtDriver.guest_gateway()` returns an
+`SSHJumpGateway` through the `qemu+ssh` host for a remote connection (ADR-0020) —
+and re-ran depth-2 to see how far it gets. It is **necessary but not sufficient**;
+it advances one hop and reveals a chain:
+
+1. **Jump establishes, final hop fails.** With the gateway, host-b's
+   `SSHCommunicator` binds "via gateway" and the SSH jump to host-a is
+   established — but the `direct-tcpip` channel to `192.168.50.28:22` fails with
+   `ChannelException(2, 'Connect failed')`. host-a's *host OS* has no route to the
+   inner network: the inner switch had no `mgmt`, so host-a carries no host
+   adapter on it (the ADR-0009/0020 ".2 reach depends on mgmt(B)" caveat,
+   recursed).
+2. **Adding `mgmt=True` to the inner switch trips a nested-host libvirt gap.** The
+   inner sidecar then fails to start on host-a:
+   `Failed to create file '/var/lib/libvirt/dnsmasq/virbr1.macs.new': No such
+   file or directory` — host-a's libvirt has no dnsmasq state dir for a
+   host-IP'd network. A nested host built by `CloudInitBuilder` isn't provisioned
+   for managed (host-routed) libvirt networks.
+3. **Even past that, the recursive `qemu+ssh` binding wouldn't route.** The
+   inner-inner run would `libvirt.open("qemu+ssh://admin@192.168.50.28/…")`, which
+   shells out to the system `ssh` from the orchestrator host — the `GuestGateway`
+   tunnels paramiko `SSHCommunicator` sockets, **not** libvirt's `qemu+ssh`
+   transport, so the L2 control-plane connect has no jump and no route.
+
+Conclusion: a gateway is the right first ingredient (and a real improvement for
+any *depth-1* `SSHCommunicator` inner VM — kept as BACKEND-11), but depth-2 needs
+all three of (host route into the inner net) + (nested-host libvirt provisioned
+for it) + (`qemu+ssh` jump support). Not pursued here — this confirms the
+original "don't patch depth-2" call empirically.
