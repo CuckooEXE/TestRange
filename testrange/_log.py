@@ -35,12 +35,37 @@ def configure(level: str = "INFO") -> None:
     """
     root = logging.getLogger("testrange")
     root.setLevel(level.upper())
+    _quiesce_firehose()
     if any(isinstance(h, logging.StreamHandler) for h in root.handlers):
         return
     handler = logging.StreamHandler()
     handler.setFormatter(_RunIdFormatter(_DEFAULT_FORMAT))
     root.addHandler(handler)
     root.propagate = False
+
+
+def _quiesce_firehose() -> None:
+    """Pin the streaming-firehose loggers above the operator's log level (CORE-50).
+
+    The build serial mirror (``…build_phase.console``, emits DEBUG) and the
+    per-test stdout tee (``…runner.testout``, emits INFO) are a high-volume
+    firehose of *raw guest output*, meant to be watched only through the
+    ``--verbose`` live tail — which lowers them to DEBUG for its own duration
+    (see :func:`testrange._tui.live_output`). Left inheriting the ``testrange``
+    root level, a plain ``--log-level debug`` run would enable their DEBUG/INFO
+    records and dump the whole firehose through the stderr handler, drowning the
+    operator (and hijacking the terminal with embedded escapes). Pinning them to
+    ``WARNING`` decouples the firehose from ``--log-level`` without touching the
+    live-tail path, which overrides this level explicitly while it owns the
+    terminal.
+
+    Imported lazily so this low-level module stays free of a static dependency
+    on the UI layer that owns the firehose logger names.
+    """
+    from testrange._tui import CONSOLE_LOGGER, TESTOUT_LOGGER
+
+    for name in (CONSOLE_LOGGER, TESTOUT_LOGGER):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 class _RunIdFormatter(logging.Formatter):

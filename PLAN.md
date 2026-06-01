@@ -805,8 +805,11 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
   surfaced by the CLI on stderr; `BuildTimeoutError` stays as the wedge
   watchdog. The orchestrator no longer polls `get_vm_power_state` during build.
   Console output is mirrored line-by-line to a dedicated `…build_phase.console`
-  logger at DEBUG as it streams (framing suppressed), so a build is watchable
-  live with `--log-level debug`.
+  logger at DEBUG as it streams (framing suppressed), watchable live via
+  `--verbose` (the live tail). That firehose logger is pinned above the operator
+  log level (CORE-50), so a plain `--log-level debug` run does **not** dump the
+  raw-guest-output firehose through the stderr handler — only `--verbose` lowers
+  it.
 - **CORE-6 (prerequisite, done)** — guest serial output is raw terminal output
   (ANSI/CSI colour + cursor escapes, OSC titles, embedded `\r`, C0 control
   bytes). `testrange/_ansi.py::scrub_terminal_control` strips it (keeping only
@@ -826,8 +829,10 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
   TTY/non-TTY split: on a TTY it makes `LiveTail` the sole `testrange` handler
   for the run (so it and the plain stderr handler can't fight); off a TTY it
   bumps the console/testout loggers to DEBUG for plain per-line logging. The
-  `--verbose` global flag composes with `--log-level` (verbose owns the TTY
-  region; debug is the full firehose to the logger).
+  `--verbose` global flag is the *only* path that surfaces the firehose:
+  `--log-level` governs the orchestrator's own progress lines, while the
+  console/testout firehose loggers are pinned above it (CORE-50) and lowered to
+  DEBUG only for the duration of `live_output`.
 
 ## v0 example (target shape)
 

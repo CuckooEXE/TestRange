@@ -64,9 +64,11 @@ from testrange.vms.recipe import VMRecipe
 _log = get_logger(__name__)
 
 # Build VMs' serial console output is streamed here, one line per record, as it
-# arrives — run with ``--log-level debug`` to watch a build provision live. A
-# dedicated child logger so it can be silenced/routed independently of the
-# phase's own INFO progress lines.
+# arrives — run with ``--verbose`` to watch a build provision live in the tail.
+# A dedicated child logger so it routes independently of the phase's own INFO
+# progress lines: it is pinned above the operator log level (CORE-50) so a plain
+# ``--log-level debug`` run does not dump this raw-guest-output firehose through
+# the stderr handler; only the ``--verbose`` live tail lowers it to DEBUG.
 _console = get_logger(f"{__name__}.console")
 
 # The single ephemeral build pool's plan-level name (ADR-0010 §9). Cosmetic —
