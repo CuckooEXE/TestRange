@@ -9,6 +9,9 @@ These pin the fixes from the post-merge review:
   apply or double-create the shared per-run zone (PVE-53);
 - the Proxmox vnet resource map survives concurrent ``create_network`` writes
   with no lost entries (BACKEND-13).
+- the Proxmox driver serializes its per-storage create_vm import critical
+  section so concurrent ``--jobs>1`` run-phase workers never pile concurrent
+  ``qmcreate`` import-froms onto the one storage's flock (PVE-56).
 """
 
 from __future__ import annotations
@@ -21,9 +24,12 @@ from typing import Any
 import pytest
 
 from testrange.cli import _jobs_arg, build_parser
+from testrange.devices import CPU, Memory, OSDrive
+from testrange.drivers.base import VolumeRef
 from testrange.drivers.proxmox.driver import ProxmoxDriver
 from testrange.networks import Network, Switch
 from testrange.orchestrator._parallel import parallel_map
+from testrange.vms import VMSpec
 
 # Reuse the proxmoxer-free fakes the driver suite already maintains.
 from tests.unit.test_proxmox_driver import _conn, _FakeApi, _FakeClient
@@ -109,6 +115,77 @@ class TestProxmoxSdnSerialization:
         # The shared per-run zone is created exactly once (no check-then-act race).
         assert api.zone_posts == 1
         assert len(api.vnets) == 6
+
+
+class _InstrumentedCreateApi(_FakeApi):
+    """``_FakeApi`` extended with the qemu-create path, recording its concurrency.
+
+    The create POST sleeps briefly so that, *without* the driver's per-storage
+    import lock, concurrent ``create_vm`` workers would visibly overlap on the
+    storage critical section here — the test asserts they never do (PVE-56).
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._clock = threading.Lock()
+        self._create_in_flight = 0
+        self.max_create_in_flight = 0
+        self._nextid = 100
+
+    def _call(self, method: str, path: str, kwargs: dict[str, Any]) -> Any:
+        if path == "cluster/nextid" and method == "get":
+            with self._clock:
+                self._nextid += 1
+                return str(self._nextid)
+        if path.endswith("/qemu") and method == "post":
+            with self._clock:
+                self._create_in_flight += 1
+                self.max_create_in_flight = max(self.max_create_in_flight, self._create_in_flight)
+            try:
+                time.sleep(0.02)  # widen the storage critical-section window
+                return None  # not a UPID → create_vm does not wait on a task
+            finally:
+                with self._clock:
+                    self._create_in_flight -= 1
+        if path.endswith("/config") and method == "get":
+            return {}  # never config-locked → _wait_unlocked returns immediately
+        return super()._call(method, path, kwargs)
+
+
+def _run_spec() -> VMSpec:
+    # No NICs: keeps network_refs empty so the create path exercises only the
+    # storage critical section under test.
+    return VMSpec(name="web", devices=[CPU(2), Memory(1024), OSDrive("pool1", 8)])
+
+
+class TestProxmoxStorageImportSerialization:
+    def test_concurrent_create_vm_never_overlaps_storage_import(self) -> None:
+        client = _FakeClient()
+        api = _InstrumentedCreateApi()
+        client.api = api
+        drv = ProxmoxDriver(_conn(), client=client, uplinks={})  # type: ignore[arg-type]
+        spec = _run_spec()
+
+        parallel_map(
+            lambda i: drv.create_vm(
+                f"tr-vm-x-{i}",
+                spec,
+                "plan",
+                os_disk_ref=VolumeRef(f"local:import/p__tr-vm-x-{i}.qcow2"),
+                seed_iso_ref=None,  # run phase: import-from the cached disk
+                network_refs={},
+            ),
+            range(6),
+            jobs=6,
+        )
+
+        # PVE guards every storage-alloc op behind a single per-storage flock;
+        # the driver's import lock keeps our own concurrent imports from racing
+        # it — never two qmcreate import-froms in flight at once.
+        assert api.max_create_in_flight == 1, (
+            f"create_vm imports overlapped (peak {api.max_create_in_flight}); "
+            "the per-driver storage import lock did not serialize the create path"
+        )
 
 
 class TestProxmoxVnetMapConcurrency:

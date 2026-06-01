@@ -51,7 +51,14 @@ make it safe:
    Proxmox that lock also serializes the whole SDN control path, which is
    cluster-global (every `create_switch` shares one zone and ends in a
    cluster-wide `PUT /cluster/sdn`). The slow transfers still overlap because
-   the underlying clients serve concurrent streams/requests outside any lock.
+   the underlying clients serve concurrent streams/requests outside any lock —
+   with one PVE-specific exception: `create_vm`'s storage-allocation section
+   (import-from / blank / efidisk alloc / disk resize) is serialized by a
+   per-driver `_storage_import_lock`. PVE guards every storage op behind a
+   single per-storage flock with a bounded timeout, so concurrent `qmcreate`
+   import-froms against the one storage pile up and one times out (PVE-56);
+   serializing them in-process trades that hard failure for an orderly wait and
+   loses no real parallelism, since PVE would never have run them concurrently.
 
 2. **Agent commands serialize on a per-driver `call_lock`.** The native guest
    channel (QGA over libvirt / the PVE agent REST) issues commands on the shared

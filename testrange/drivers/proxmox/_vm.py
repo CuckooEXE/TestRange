@@ -341,12 +341,26 @@ def shutdown_vm(client: ProxmoxClient, backend_name: str, *, timeout: float = 12
 
 
 def destroy_vm(client: ProxmoxClient, backend_name: str) -> None:
-    """Stop (if needed) then purge the VM and its disks.
+    """Stop (if needed) then purge the VM and its disks. Tolerant of absence.
+
+    Idempotent like the rest of the teardown surface (``destroy_network`` /
+    ``destroy_pool`` / ``delete_volume``): a VM the orchestrator never finished
+    creating — e.g. a ``create_vm`` that failed mid-flight (PVE-56) leaving a
+    state record but no guest — or one already destroyed leaves nothing to
+    purge, so a missing stamped name is success, not drift. Resolved by stamped
+    name directly rather than via :func:`resolve_vmid`, which stays strict for
+    the lifecycle ops (start/shutdown/snapshot/...) that legitimately require
+    the VM to exist.
 
     ``purge=1`` + ``destroy-unreferenced-disks=1`` removes the vm-scoped disks
     (so a separate ``delete_volume`` on a disk ref is a tolerant no-op).
     """
-    vmid = resolve_vmid(client, backend_name)
+    vmid = list_vms(client).get(backend_name)
+    if vmid is None:
+        _log.debug(
+            "destroy_vm(%s): no stamped PVE VM (already gone); nothing to purge", backend_name
+        )
+        return
     try:
         _await(client, client.api.nodes(client.node).qemu(vmid).status.stop.post())
     except Exception as e:

@@ -164,6 +164,22 @@ class ProxmoxDriver(HypervisorDriver):
         # here nests an acquire, and a plain Lock surfaces an accidental nest as a
         # deadlock in test rather than hiding it.
         self._state_lock = threading.Lock()
+        # Serializes the storage-allocation critical section of create_vm across
+        # concurrent run-phase workers (PVE-56). PVE guards every storage op
+        # (import-from, blank/efidisk alloc, disk resize) behind a single
+        # per-storage flock (/var/lock/pve-manager/pve-storage-<storage>) with a
+        # bounded timeout, so N concurrent qmcreate import-froms against the one
+        # 'local' store pile up on it and one fails ("cant lock file ... got
+        # timeout"). This driver targets exactly one storage (client.storage), so
+        # one Lock IS the per-storage lock. We hold it across the whole create
+        # (POST → import-task wait → resize) because PVE serializes those imports
+        # regardless: we lose no real parallelism — the imports could never run
+        # concurrently — and trade a hard timeout for an orderly wait. Non-storage
+        # parallelism is untouched: switches, snapshots, guest exec, and
+        # start_vm/readiness take no storage lock. Distinct from _state_lock (the
+        # SDN control path) and acquired without nesting it, so the two never
+        # contend or deadlock.
+        self._storage_import_lock = threading.Lock()
 
     @classmethod
     def from_uri(cls, uri: str) -> ProxmoxDriver:
@@ -393,18 +409,22 @@ class ProxmoxDriver(HypervisorDriver):
                 name: self._vnet_by_network.get(backend, backend)
                 for name, backend in network_refs.items()
             }
-        return _vm.create_vm(
-            self._client,
-            backend_name,
-            spec,
-            plan_name,
-            os_disk_ref=os_disk_ref,
-            seed_iso_ref=seed_iso_ref,
-            network_refs=resolved_refs,
-            data_disk_refs=data_disk_refs,
-            build_nic=build_nic,
-            boot_media_ref=boot_media_ref,
-        )
+        # Serialize the per-storage import critical section (PVE-56) — see
+        # _storage_import_lock. The _state_lock above is released first, so the
+        # two never nest.
+        with self._storage_import_lock:
+            return _vm.create_vm(
+                self._client,
+                backend_name,
+                spec,
+                plan_name,
+                os_disk_ref=os_disk_ref,
+                seed_iso_ref=seed_iso_ref,
+                network_refs=resolved_refs,
+                data_disk_refs=data_disk_refs,
+                build_nic=build_nic,
+                boot_media_ref=boot_media_ref,
+            )
 
     @_translates
     def start_vm(self, backend_name: str) -> None:

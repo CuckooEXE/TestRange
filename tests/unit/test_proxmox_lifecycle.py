@@ -345,6 +345,16 @@ class TestLifecycle:
         delete = next(kw for m, p, kw in c.api.calls if m == "delete")
         assert delete == {"purge": 1, "destroy-unreferenced-disks": 1}
 
+    def test_destroy_missing_vm_is_noop(self) -> None:
+        # PVE-56: destroy_vm of a VM that was never created (or already gone) is
+        # idempotent like the rest of teardown (destroy_network / destroy_pool /
+        # delete_volume). cleanup runs destroy over the recorded set even when
+        # create_vm failed mid-flight (a state record but no guest), so a missing
+        # stamped name must not raise — and must issue no delete.
+        c = _client()  # no VMs on the node
+        _vm.destroy_vm(c, "tr-vm-x-web")
+        assert not any(m == "delete" for m, _p, _kw in c.api.calls)
+
     def test_power_state_maps_stopped_to_shutoff(self) -> None:
         c = self._running_vm()
         c.api.status = "stopped"
