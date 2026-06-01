@@ -41,7 +41,7 @@ The gates (`.pre-commit-config.yaml` + the project standard):
 ruff check .
 ruff format --check .
 mypy --strict testrange tests
-pytest -m "not <integration-mark>"
+pytest -m "not proxmox and not libvirt"   # unit/MockDriver only; live-backend suites run out-of-band
 ```
 
 No cheap dev hacks to make a gate pass. Fix the underlying issue.

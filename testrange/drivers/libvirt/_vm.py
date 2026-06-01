@@ -17,11 +17,13 @@ map, crash-safe teardown.
   ``compose_mac(plan, vm, i)`` so DHCP hands out a predictable lease (ADR-0006).
   At build (``build_nic`` set, ADR-0017) the declared NICs are replaced by a
   single build-NIC interface on the build network.
-- **serial build-result sink** — a seed-carrying VM (build / sidecar) gets a
-  ``<serial type='unix' mode='connect'>`` pointing at a socket the driver already
-  listens on (see ``_conn``); a run VM gets a throwaway ``pty`` console (no
-  back-pressure, nothing to drain). The build VM's serial is tailed by
-  ``read_build_result_sink``.
+- **serial build-result sink** — a **build VM** (the one with a ``build_nic``,
+  ADR-0017) gets a ``<serial type='unix' mode='connect'>`` pointing at a socket
+  the driver already listens on (see ``_conn``); its serial is tailed by
+  ``read_build_result_sink``. Sidecars and run VMs get a throwaway ``pty`` console
+  (no back-pressure, nothing to drain) — a sidecar carries a seed but is monitored
+  via QGA, and binding it a unix socket breaks against a remote daemon (the socket
+  is on the orchestrator host, not the daemon's — ADR-0021's nested inner run).
 - **QGA channel** — an unconditional ``org.qemu.guest_agent.0`` virtio channel
   (``mode='bind'``, the daemon owns that socket) so ``_guest`` can drive the QEMU
   Guest Agent.
@@ -245,9 +247,14 @@ def create_vm(
     and the installer ISO is attached as a bootable CDROM (see :func:`_os_xml`
     for the fall-through boot order). ``spec.firmware`` picks BIOS vs OVMF.
 
-    A seed-carrying VM (``seed_iso_ref`` set — build VM or sidecar) gets the
-    unix-socket serial sink, its listener opened here so the socket exists when
-    ``start_vm`` boots QEMU.
+    The unix-socket serial sink is opened for a boot whose TESTRANGE-RESULT the
+    orchestrator reads off serial: a **build VM** (``build_nic`` set, ADR-0017)
+    or an installer-origin boot (``boot_media_ref`` set). Its listener is opened
+    here so the socket exists when ``start_vm`` boots QEMU. Sidecars carry a seed
+    too but are monitored via QGA, never the serial sink: the socket we bind
+    lives on the orchestrator host, so on a *remote* daemon (the inner qemu+ssh
+    connection of a nested run, ADR-0021) the remote security driver can't stat
+    it. Sidecars and run VMs get a throwaway pty.
 
     When ``build_nic`` is set (build phase, ADR-0017) the domain gets a *single*
     ``<interface>`` for the build NIC and the declared ``spec.nics`` are not
@@ -265,12 +272,16 @@ def create_vm(
             (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
             for idx, nic in enumerate(spec.nics)
         ]
-    # The unix-socket serial sink is opened for any provisioning boot that
-    # reports a build result — one carrying a seed (cloud-init/PVE answer, build
-    # VM or sidecar) OR an installer-origin boot with no separate seed (ESXi
-    # single-CDROM: ks.cfg lives in the boot media and %firstboot writes the
-    # result to the same serial). A plain run boot gets a throwaway pty.
-    is_provisioning_boot = seed_iso_ref is not None or boot_media_ref is not None
+    # The unix-socket serial sink is opened for a boot whose TESTRANGE-RESULT the
+    # orchestrator reads off serial: a build VM (build_nic set, ADR-0017) or an
+    # installer-origin boot with no separate seed (ESXi single-CDROM: ks.cfg lives
+    # in the boot media and %firstboot writes the result to the same serial).
+    # Sidecars carry a seed too but are monitored via QGA, never the serial sink:
+    # giving one a socket is dead weight locally and, on a *remote* daemon (the
+    # inner qemu+ssh connection of a nested run, ADR-0021), outright broken — the
+    # socket we bind lives on the orchestrator host, not the remote daemon's, so
+    # its security driver can't stat it. Seed-only (sidecar) and run boots get a pty.
+    is_provisioning_boot = build_nic is not None or boot_media_ref is not None
     serial_sock = client.open_serial_listener(backend_name) if is_provisioning_boot else None
     xml = _domain_xml(
         backend_name,

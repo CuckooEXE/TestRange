@@ -8,6 +8,8 @@ means the package registers and these tests run with libvirt untouched.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from testrange import Plan
@@ -22,6 +24,7 @@ from testrange.drivers.base import HypervisorDriver
 from testrange.drivers.libvirt import LibvirtDriver, LibvirtHypervisor, LibvirtProfile
 from testrange.drivers.libvirt._conn import LibvirtConn
 from testrange.exceptions import DriverError
+from testrange.gateways import SSHJumpGateway
 from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.vms import VMRecipe, VMSpec
@@ -56,6 +59,36 @@ def _plan(comm: object | None = None) -> Plan:
             ],
             pools=[StoragePool("pool1", 16)],
             vms=[_vm(comm=comm)],
+        ),
+    )
+
+
+def _nested_plan() -> Plan:
+    """A plan whose one VM requests CPU(nested=True) (for the nested-KVM probe)."""
+    return Plan(
+        "t",
+        LibvirtHypervisor(
+            networks=[
+                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+            ],
+            pools=[StoragePool("pool1", 16)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(
+                        name="host-a",
+                        devices=[
+                            CPU(2, nested=True),
+                            Memory(2048),
+                            OSDrive("pool1", 20),
+                            NetworkIface("netA", addr=StaticAddr("10.0.0.150")),
+                        ],
+                    ),
+                    builder=CloudInitBuilder(
+                        base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+                    ),
+                    communicator=SSHCommunicator("u"),
+                )
+            ],
         ),
     )
 
@@ -156,3 +189,77 @@ class TestPreflight:
             build_switch=_BUILD_SW,
         )
         assert any(f.code == "unknown-uplink" for f in report.findings)
+
+    def test_nested_cpu_rejected_when_host_nesting_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ADR-0021: CPU(nested=True) on a local host with KVM nesting explicitly
+        # off (probe returns False) fails loud.
+        monkeypatch.setattr(
+            "testrange.drivers.libvirt.driver._probe_host_nested_kvm", lambda: False
+        )
+        report = LibvirtDriver(LibvirtConn()).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert any(f.code == "nested-kvm-disabled" for f in report.findings)
+
+    def test_nested_cpu_passes_when_host_nesting_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("testrange.drivers.libvirt.driver._probe_host_nested_kvm", lambda: True)
+        report = LibvirtDriver(LibvirtConn()).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert not any(f.code == "nested-kvm-disabled" for f in report.findings)
+
+    def test_nested_cpu_not_rejected_when_host_state_indeterminate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An unreadable/empty sysfs param (probe returns None) is indeterminate,
+        # not "disabled": it must NOT spuriously fail a legitimate nested plan.
+        monkeypatch.setattr("testrange.drivers.libvirt.driver._probe_host_nested_kvm", lambda: None)
+        report = LibvirtDriver(LibvirtConn()).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert not any(f.code == "nested-kvm-disabled" for f in report.findings)
+
+    def test_nested_cpu_probe_skipped_for_remote_host(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A remote daemon's sysfs isn't reachable over the libvirt API; skip the
+        # probe rather than read the orchestrator host's (irrelevant) sysfs. Even
+        # an explicit local "disabled" must not leak into the remote verdict.
+        monkeypatch.setattr(
+            "testrange.drivers.libvirt.driver._probe_host_nested_kvm", lambda: False
+        )
+        report = LibvirtDriver(LibvirtConn("qemu+ssh://elsewhere/system")).preflight(
+            _nested_plan(),
+            cache_manager=None,  # type: ignore[arg-type]
+            build_switch=_BUILD_SW,
+        )
+        assert not any(f.code == "nested-kvm-disabled" for f in report.findings)
+
+
+class TestGuestGateway:
+    def test_local_libvirt_is_directly_routable(self) -> None:
+        # qemu:///system: co-located orchestrator reaches guests directly.
+        assert LibvirtDriver(LibvirtConn()).guest_gateway() is None
+
+    def test_remote_qemu_ssh_jumps_through_the_host(self, tmp_path: Path) -> None:
+        # ADR-0021: a remote (nested) guest hypervisor's guests are reached by
+        # SSH-jumping through the qemu+ssh host with the URI's key.
+        key = tmp_path / "k"
+        key.write_text("PRIVKEY-TEXT")
+        uri = f"qemu+ssh://admin@10.50.0.98/system?keyfile={key}&no_verify=1&sshauth=privkey"
+        gw = LibvirtDriver(LibvirtConn(libvirt_uri=uri)).guest_gateway()
+        assert isinstance(gw, SSHJumpGateway)
+        assert gw.host == "10.50.0.98"
+        assert gw.username == "admin"
+        assert gw.pkey_text == "PRIVKEY-TEXT"
+        assert gw.port == 22

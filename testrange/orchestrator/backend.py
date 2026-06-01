@@ -67,6 +67,12 @@ class ResolvedBackend:
     # a host-NAT'd uplink that won't DHCP the sidecar still egresses. Empty for an
     # in-plan binding or a profile that declares no table-form uplinks.
     uplink_addrs: Mapping[str, StaticAddr] = field(default_factory=dict)
+    # Logical-uplink-name → host bridge from the profile (ADR-0016). The driver
+    # already holds this for L2 realization; exposed here so the nested phase can
+    # inherit it for a synthesized inner binding (ADR-0021) — an inner plan built
+    # on L0 references the same logical uplink names, and its (cache-only) inner
+    # run must accept them at preflight. Empty for a profile with no uplinks.
+    uplinks: Mapping[str, str] = field(default_factory=dict)
 
 
 def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBackend:
@@ -106,6 +112,7 @@ def resolve_backend(plan: Plan, profile: BackendProfile | None) -> ResolvedBacke
         driver=driver,
         driver_uri=_driver_uri(driver),
         uplink_addrs=profile.uplink_addrs,
+        uplinks=profile.uplinks,
     )
 
 

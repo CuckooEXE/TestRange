@@ -13,8 +13,8 @@ from __future__ import annotations
 import contextlib
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from types import FrameType, TracebackType
 from typing import Any
 
@@ -23,7 +23,7 @@ from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile
 from testrange.drivers.base import HypervisorDriver
 from testrange.exceptions import BuildRequiredError, PreflightError
-from testrange.networks.base import NetworkAddressing, Switch
+from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import (
     ResolvedBackend,
     compatibility_findings,
@@ -32,6 +32,12 @@ from testrange.orchestrator.backend import (
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.nested_phase import (
+    NestedHandle,
+    NestedRun,
+    run_nested_phase,
+    teardown_nested,
+)
 from testrange.orchestrator.run_phase import (
     await_guest_readiness,
     bind_communicators,
@@ -66,6 +72,10 @@ class OrchestratorHandle:
     driver: HypervisorDriver
     vms: Mapping[str, VMHandle]
     leak: Callable[[], None]
+    # Brought-up nested hypervisors, keyed by the host (guest) name (ADR-0021).
+    # Empty unless the plan declares a GuestHypervisor. Reach an inner VM via
+    # ``orch.nested["host-a"].vms["webapp"]``.
+    nested: Mapping[str, NestedHandle] = field(default_factory=dict)
 
 
 class Orchestrator:
@@ -107,12 +117,15 @@ class Orchestrator:
             sidecar_ready_timeout_s=sidecar_ready_timeout_s,
             addressing={
                 n.name: NetworkAddressing.from_switch(s)
-                for s in self._all_switches()
+                for s in plan.hypervisor.all_switches
                 for n in s.networks
             },
         )
         self._handle: OrchestratorHandle | None = None
         self._leak = False
+        # Entered inner orchestrators (one per GuestHypervisor), torn down LIFO
+        # before the outer teardown destroys their guest VMs (ADR-0021).
+        self._nested_runs: list[NestedRun] = []
 
     @property
     def run_id(self) -> str:
@@ -133,12 +146,6 @@ class Orchestrator:
     @property
     def lease_timeout_s(self) -> float:
         return self.ctx.lease_timeout_s
-
-    def _all_switches(self) -> Sequence[Switch]:
-        switches = getattr(self.plan.hypervisor, "networks", None)
-        if switches is None:
-            return ()
-        return tuple(switches)
 
     def _preflight_and_initialize(self) -> None:
         """Run read-only preflight (abort on error) and open the state file."""
@@ -206,12 +213,17 @@ class Orchestrator:
                 else:
                     build_phase(self.ctx)  # auto-build any cache miss
                 run_phase(self.ctx)
-                self._handle = self._build_handle()
                 bind_communicators(self.ctx)
                 wait_communicators_ready(self.ctx)
                 await_guest_readiness(self.ctx)
+                # Recurse into each GuestHypervisor (ADR-0021); built last so the
+                # returned handle carries the nested map. run_nested_phase tears
+                # down any inner it entered if a later one fails.
+                self._nested_runs, nested = run_nested_phase(self.ctx)
+                self._handle = self._build_handle(nested)
             except Exception:
                 _log.exception("bring-up failed; tearing down")
+                teardown_nested(self._nested_runs)
                 teardown(self.ctx)
                 raise
             return self._handle
@@ -228,12 +240,15 @@ class Orchestrator:
         del exc_val, exc_tb
         try:
             if self._leak:
-                _log.warning("leak: skipping teardown; run state retained")
+                _log.warning("leak: skipping teardown; run state retained (incl. nested)")
                 self.ctx.store.set_phase(PHASE_LEAKED)
                 self.ctx.store.release()
             else:
                 if exc_type is not None:
                     _log.info("tearing down after %s", exc_type.__name__)
+                # Inner orchestrators first (LIFO): tear each nested plan down
+                # before the outer teardown destroys its guest VM (ADR-0021).
+                teardown_nested(self._nested_runs)
                 teardown(self.ctx)
         finally:
             self._restore_signal_handlers()
@@ -277,7 +292,7 @@ class Orchestrator:
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, prior)
 
-    def _build_handle(self) -> OrchestratorHandle:
+    def _build_handle(self, nested: Mapping[str, NestedHandle]) -> OrchestratorHandle:
         vms_map: dict[str, VMHandle] = {
             vm.name: VMHandle(
                 name=vm.name,
@@ -291,6 +306,7 @@ class Orchestrator:
             driver=self.ctx.driver,
             vms=vms_map,
             leak=self.leak,
+            nested=nested,
         )
 
 
