@@ -111,10 +111,11 @@ ignore = [
 "examples/**" = ["S106", "S108"]
 # The CLI's job is to print to stdout; T201 guards library code, not the CLI.
 "testrange/cli.py" = ["T201"]
-# ADR-0022: the single sanctioned subprocess module (PVE installer-ISO prep via
-# xorriso, to preserve the hybrid GPT a pure-pycdlib rebuild strips). Scoped here
-# so the project-wide ban still holds everywhere else.
+# ADR-0022: the sanctioned subprocess modules (installer-ISO prep via xorriso, to
+# preserve hybrid-boot layouts a pure-pycdlib rebuild strips). Scoped here so the
+# project-wide ban still holds everywhere else.
 "testrange/builders/_proxmox_prepare.py" = ["TID251", "S404", "S603"]
+"testrange/builders/_esxi_prepare.py" = ["TID251", "S404", "S603"]
 
 [tool.mypy]
 python_version = "3.11"

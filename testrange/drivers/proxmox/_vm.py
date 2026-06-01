@@ -211,10 +211,11 @@ def create_vm(
     # seed-presence signal the OS-disk grow below keys on, so the two never
     # disagree — and it can't be fooled by a stale staging file left behind by a
     # crashed prior build (which the old "does the volume exist?" probe would have
-    # mis-imported). The installer-origin build (BUILD-1) still carries a seed —
-    # the PVE answer-file volume — so the seed-presence discriminator holds; only
-    # the OS-disk realization differs (blank vs import), keyed on installer_origin.
-    is_build = seed_iso_ref is not None
+    # mis-imported). An installer-origin build is a build whether or not it ships a
+    # separate seed: the PVE answer build carries one, an ESXi single-CDROM build
+    # does not (ks.cfg rides the boot media), so OR in boot_media — otherwise the
+    # ESXi build would be misread as a run create and import a blank as full-size.
+    is_build = seed_iso_ref is not None or boot_media_ref is not None
     for i, ref in enumerate(data_disk_refs):
         # Slot index ``i+1`` disambiguates each disk; the bus is the device's
         # choice (ProxmoxHardDrive, default scsi). download_from_pool re-resolves

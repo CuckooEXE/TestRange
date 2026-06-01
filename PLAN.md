@@ -1512,11 +1512,24 @@ The seam:
 - Preflight (`builder_origin_findings`) rejects a builder that declares neither
   origin, before any backend resource stands up.
 
-The first concrete is **`ProxmoxAnswerBuilder`** (BUILD-2): a PVE 9.x node built
-via the auto-installer (`answer.toml` seed + prepared installer ISO). All
-provisioning + the build-result contract live in the `/proxmox-first-boot`
-script (PVE has no `answer.toml` runcmd equivalent): network-flip → repo-swap →
-threaded packages/commands → framed `TESTRANGE-RESULT:` to serial → poweroff.
+Two concretes ship on this seam:
+
+- **`ProxmoxAnswerBuilder`** (BUILD-2): a PVE 9.x node via the auto-installer
+  (`answer.toml` seed + prepared installer ISO). Provisioning + the build-result
+  contract live in `/proxmox-first-boot` (PVE has no `answer.toml` runcmd
+  equivalent): network-flip → repo-swap → threaded packages/commands → framed
+  `TESTRANGE-RESULT:` to serial → poweroff.
+- **`ESXiKickstartBuilder`** (BUILD-8): an ESXi 8 node via weasel's kickstart.
+  **Single-CDROM** — `render_seed()` returns `None`; the ks.cfg is patched *into*
+  the boot ISO (`ks=cdrom:/ks.cfg`, two-pass xorriso: patch each `BOOT.CFG`
+  kernelopt + inject ks.cfg, `-rockridge off` + `-boot_image any patch`). The
+  build-result contract lives in the kickstart `%firstboot` block.
+
+That no-separate-seed shape forced a contract refinement: the **serial sink and
+the build-vs-run discriminator key on `seed OR boot_media`**, not seed presence
+alone — an installer build reports a result and attaches blank disks whether or
+not it ships a seed. Firmware default `bios` (ESXi's proven BIOS+i440fx+IDE
+combo); `uefi` is accepted but unvalidated for ESXi.
 
 ### Deferred (named, not built)
 

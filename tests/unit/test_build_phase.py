@@ -406,6 +406,70 @@ class TestBuildPhase:
         # And the build produced a cached OS disk (full lifecycle reached capture).
         assert _built_names(cache)
 
+    def test_installer_origin_with_no_seed_still_builds(
+        self, env: tuple[CacheManager, MockDriver], tmp_path: Path
+    ) -> None:
+        # ESXi single-CDROM shape (BUILD-8): an installer-origin builder whose
+        # render_seed() returns None — the ks.cfg rides the boot media, so no
+        # seed volume is staged. The build still runs: blank OS disk + boot
+        # media, create_vm with seed_iso_ref=None, full lifecycle to capture.
+        from testrange.builders.base import Builder
+        from testrange.credentials.base import Credential
+
+        iso = tmp_path / "esxi.iso"
+        iso.write_bytes(b"FAKE-ESXI-ISO" * 100)
+        cache, driver = env
+        cache.local.add(iso, name="esxi-iso")
+
+        class _ESXiShapedBuilder(Builder):
+            @property
+            def credentials(self) -> tuple[Credential, ...]:
+                return ()
+
+            def os_disk_base(self) -> None:
+                return None
+
+            def boot_media(self) -> CacheEntry:
+                return CacheEntry("esxi-iso")
+
+            def config_hash(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+            ):
+                return ("esxi" + base_sha)[:16].ljust(16, "0")
+
+            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+                return None
+
+        plan = Plan(
+            "hello",
+            MockHypervisor(
+                networks=[
+                    Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
+                ],
+                pools=[StoragePool("pool1", 64)],
+                vms=[
+                    VMRecipe(
+                        spec=VMSpec(
+                            name="esxi",
+                            firmware="bios",
+                            devices=[CPU(2), Memory(4096), OSDrive("pool1", 40)],
+                        ),
+                        builder=_ESXiShapedBuilder(),
+                        communicator=SSHCommunicator("root"),
+                    ),
+                ],
+            ),
+        )
+        build_phase(_ctx(plan, driver, cache))
+
+        created = next(v for v in driver.created_vms.values() if v.vm_name == "esxi")
+        assert created.boot_media is not None  # booted the installer media
+        # No seed volume was written (render_seed -> None).
+        assert not any(c[0] == "write_to_pool" and "seed" in c[1][0] for c in driver.calls)
+        # The OS disk was materialized blank, and the build reached capture.
+        assert "create_blank_volume" in [name for name, _, _ in driver.calls]
+        assert _built_names(cache)
+
 
 class TestBuildResultSignaling:
     """ADR §21: success keys on the serial ``ok`` token, not power-off.

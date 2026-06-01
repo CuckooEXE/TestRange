@@ -265,7 +265,13 @@ def create_vm(
             (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
             for idx, nic in enumerate(spec.nics)
         ]
-    serial_sock = client.open_serial_listener(backend_name) if seed_iso_ref is not None else None
+    # The unix-socket serial sink is opened for any provisioning boot that
+    # reports a build result — one carrying a seed (cloud-init/PVE answer, build
+    # VM or sidecar) OR an installer-origin boot with no separate seed (ESXi
+    # single-CDROM: ks.cfg lives in the boot media and %firstboot writes the
+    # result to the same serial). A plain run boot gets a throwaway pty.
+    is_provisioning_boot = seed_iso_ref is not None or boot_media_ref is not None
+    serial_sock = client.open_serial_listener(backend_name) if is_provisioning_boot else None
     xml = _domain_xml(
         backend_name,
         spec,

@@ -11,10 +11,13 @@ from pathlib import Path
 
 _SUBPROCESS_PAT = re.compile(r"^\s*(import subprocess|from subprocess\b)", re.MULTILINE)
 
-# The single sanctioned subprocess module: PVE installer-ISO prep via xorriso
-# (ADR-0022). Preserving the hybrid GPT a pure-pycdlib rebuild strips needs
-# xorriso; ADR-0001's escape hatch permits one sanctioned module.
-_SANCTIONED = {"testrange/builders/_proxmox_prepare.py"}
+# The sanctioned subprocess modules: installer-ISO prep via xorriso (ADR-0022).
+# Preserving the hybrid-boot layouts a pure-pycdlib rebuild strips needs xorriso;
+# ADR-0001's escape hatch permits these sanctioned modules.
+_SANCTIONED = {
+    "testrange/builders/_proxmox_prepare.py",
+    "testrange/builders/_esxi_prepare.py",
+}
 
 
 def test_no_subprocess_imports() -> None:
