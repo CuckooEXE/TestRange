@@ -40,14 +40,16 @@ def build_range(
     *,
     cache_manager: CacheManager | None = None,
     profile: BackendProfile | None = None,
+    jobs: int | None = None,
 ) -> str:
     """Warm the cache for ``plan`` (``testrange build``); run no tests.
 
     Runs preflight + the build phase only, tearing down all build infra. The
     backend holds nothing afterward. Returns the run id (for logging).
     ``profile`` binds a backend-agnostic plan to a backend (CORE-10/-11).
+    ``jobs`` caps the build phase's worker pool (ADR-0023).
     """
-    o = Orchestrator(plan, cache_manager=cache_manager, profile=profile)
+    o = Orchestrator(plan, cache_manager=cache_manager, profile=profile, jobs=jobs)
     o.build()
     return o.run_id
 
@@ -62,6 +64,7 @@ def run_tests(
     require_cache: bool = False,
     profile: BackendProfile | None = None,
     verbose: bool = False,
+    jobs: int | None = None,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
@@ -75,7 +78,7 @@ def run_tests(
     """
     results: list[TestResult] = []
     o = Orchestrator(
-        plan, cache_manager=cache_manager, require_cache=require_cache, profile=profile
+        plan, cache_manager=cache_manager, require_cache=require_cache, profile=profile, jobs=jobs
     )
     with o as orch:
         _execute_tests(orch, tests, results, fail_fast=fail_fast, verbose=verbose)

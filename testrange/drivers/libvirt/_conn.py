@@ -26,6 +26,7 @@ import contextlib
 import hashlib
 import socket
 import tempfile
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +117,16 @@ class LibvirtClient:
         # listener is opened in create_vm and accept()ed later by the sink.
         self._serial_dir: Path | None = None
         self._serial_listeners: dict[str, tuple[Any, str]] = {}
+        # Serializes mutation of this one shared connection's in-memory state
+        # when the I/O phases drive it from several worker threads (ADR-0023):
+        # QGA agent commands (so concurrent readiness polls don't interleave on
+        # the channel) and the lazy serial-listener plumbing below (the
+        # ``_serial_dir`` create + the ``_serial_listeners`` map, which a
+        # parallel build mutates per build VM). Held only for the quick op — a
+        # command, or a dict/dir mutation — never across a readiness-loop sleep,
+        # so the waits still overlap. Re-entrant because a guest op
+        # (exec/read/write) issues several agent commands in sequence.
+        self.call_lock = threading.RLock()
 
     def connect(self) -> None:
         libvirt = _import_libvirt()
@@ -204,11 +215,15 @@ class LibvirtClient:
         share this ``/tmp``; that is a remote/hardened-host concern tracked under
         BACKEND-5, not the local-cert path.)
         """
-        if self._serial_dir is None:
-            d = Path(tempfile.mkdtemp(prefix="tr-lv-serial-", dir="/tmp"))
-            d.chmod(0o755)
-            self._serial_dir = d
-        return self._serial_dir
+        # Double-checked under call_lock: a parallel build (ADR-0023) calls
+        # open_serial_listener for several build VMs at once, and an unguarded
+        # check-then-set would mkdtemp twice and leak the loser's dir.
+        with self.call_lock:
+            if self._serial_dir is None:
+                d = Path(tempfile.mkdtemp(prefix="tr-lv-serial-", dir="/tmp"))
+                d.chmod(0o755)
+                self._serial_dir = d
+            return self._serial_dir
 
     def open_serial_listener(self, backend_name: str) -> str:
         """Bind+listen a unix socket for ``backend_name``'s serial console.
@@ -226,7 +241,8 @@ class LibvirtClient:
         srv.bind(path)
         Path(path).chmod(0o777)  # qemu (libvirt-qemu) must be able to connect
         srv.listen(1)
-        self._serial_listeners[backend_name] = (srv, path)
+        with self.call_lock:  # concurrent build VMs each register their listener
+            self._serial_listeners[backend_name] = (srv, path)
         return path
 
     def accept_serial(self, backend_name: str, *, timeout: float) -> Any:
@@ -244,7 +260,8 @@ class LibvirtClient:
 
     def close_serial_listener(self, backend_name: str) -> None:
         """Close + unlink ``backend_name``'s serial listener. Tolerant of absence."""
-        entry = self._serial_listeners.pop(backend_name, None)
+        with self.call_lock:
+            entry = self._serial_listeners.pop(backend_name, None)
         if entry is None:
             return
         srv, path = entry

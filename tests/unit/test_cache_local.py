@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import re
+import threading
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -18,6 +23,97 @@ from testrange.exceptions import CacheError, CacheMissError
 def _make_blob(p: Path, payload: bytes = b"hello world\n") -> Path:
     p.write_bytes(payload)
     return p
+
+
+class _SlowResponse:
+    """A urlopen() stand-in that dribbles bytes out, forcing concurrent
+    downloads to interleave so a shared temp path would corrupt."""
+
+    def __init__(self, data: bytes) -> None:
+        self._buf = io.BytesIO(data)
+
+    def __enter__(self) -> _SlowResponse:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._buf.close()
+
+    def read(self, size: int = -1) -> bytes:
+        time.sleep(0.01)  # widen the interleave window
+        return self._buf.read(size)
+
+
+class TestConcurrentDownload:
+    """Two concurrent URL adds must not collide on a shared ``.partial`` path.
+
+    Before CACHE-4 both fetches streamed into a fixed ``.download.partial``;
+    under the I/O phases' thread pool that interleaves into one file and
+    promotes a disk whose bytes don't hash to its content-addressed name. With
+    per-fetch ``mkstemp`` each download is isolated.
+    """
+
+    def test_two_url_adds_in_parallel_land_correctly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bodies = {
+            "http://x/a": b"A" * 4096,
+            "http://x/b": b"B" * 8192,
+        }
+
+        def fake_urlopen(url: str, *_a: object, **_k: object) -> _SlowResponse:
+            return _SlowResponse(bodies[url])
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        cache = LocalCache(root=tmp_path / "c")
+
+        results: dict[str, CacheEntryInfo] = {}
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(len(bodies))
+
+        def add(url: str) -> None:
+            barrier.wait()
+            info = cache.add(url)
+            with results_lock:
+                results[url] = info
+
+        threads = [threading.Thread(target=add, args=(u,)) for u in bodies]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        for url, body in bodies.items():
+            assert results[url].sha256 == hashlib.sha256(body).hexdigest()
+            path = results[url].path
+            assert path is not None
+            assert path.read_bytes() == body
+        # No stray temp files left behind under isos/.
+        assert not list((cache.isos).glob("*.download.partial"))
+
+    def test_same_content_different_names_merge(self, tmp_path: Path) -> None:
+        # Two concurrent adds of byte-identical content under different names
+        # (a parallel build capturing identical disks) must land one entry that
+        # carries *both* aliases — no clobbered name, no crash on the shared
+        # ``<sha>.json`` staging path.
+        cache = LocalCache(root=tmp_path / "c")
+        payload = b"IDENTICAL" * 500
+        names = [f"_built_{i:02d}__os" for i in range(8)]
+        srcs = [_make_blob(tmp_path / f"src{i}.bin", payload=payload) for i in range(8)]
+        barrier = threading.Barrier(len(names))
+
+        def add(i: int) -> None:
+            barrier.wait()
+            cache.add(srcs[i], name=names[i])
+
+        threads = [threading.Thread(target=add, args=(i,)) for i in range(len(names))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        entries = cache.list_entries()
+        assert len(entries) == 1  # one content sha
+        assert set(entries[0].names) == set(names)  # every alias survived the RMW
 
 
 class TestDefaultRoot:
@@ -246,3 +342,69 @@ class TestCacheManager:
         mgr = CacheManager(local=cache)
         assert mgr.resolve(CacheEntry("debian-13")).sha256 == info.sha256
         assert mgr.resolve_path(CacheEntry("debian-13")) == info.path
+
+
+class TestConcurrentDeleteAndPerms:
+    def test_delete_removes_both_files(self, tmp_path: Path) -> None:
+        cache = LocalCache(root=tmp_path / "c")
+        info = cache.add(_make_blob(tmp_path / "src.bin"), name="x")
+        cache.delete("x")
+        assert not (cache.isos / f"{info.sha256}.bin").exists()
+        assert not (cache.isos / f"{info.sha256}.json").exists()
+
+    def test_added_entry_is_world_readable(self, tmp_path: Path) -> None:
+        # mkstemp creates 0600; a content-addressed cache must stay readable to
+        # group/other (a shared cache, or a different uid reading the disk). The
+        # canonical .bin/.json inherit the temp's mode through os.replace.
+        cache = LocalCache(root=tmp_path / "c")
+        info = cache.add(_make_blob(tmp_path / "src.bin"), name="x")
+        assert info.path is not None
+        for p in (info.path, cache.isos / f"{info.sha256}.json"):
+            mode = p.stat().st_mode & 0o777
+            assert mode == 0o644, f"{p.name} is {oct(mode)}, expected 0o644"
+
+    def test_readers_run_clean_against_concurrent_delete(self, tmp_path: Path) -> None:
+        # The CACHE-6 invariant: an unlocked reader (iter_entries / resolve) must
+        # never *raise* while a deleter runs concurrently, and the cache must
+        # never persist a dangling sidecar (a .json whose .bin is gone) — that is
+        # what delete()'s ".json first, under the write lock" ordering buys. The
+        # per-entry "bin exists right now" check is deliberately *not* asserted:
+        # no unlocked read-then-use of a separate file can be race-free, and
+        # that's the consumer's window to manage, not LocalCache's to promise.
+        cache = LocalCache(root=tmp_path / "c")
+        shas = [
+            cache.add(
+                _make_blob(tmp_path / f"src{i}.bin", payload=f"content-{i}\n".encode())
+            ).sha256
+            for i in range(30)
+        ]
+        barrier = threading.Barrier(5)
+        errors: list[Exception] = []
+
+        def deleter() -> None:
+            barrier.wait()
+            for sha in shas:
+                with contextlib.suppress(CacheMissError):
+                    cache.delete(sha)
+
+        def reader() -> None:
+            barrier.wait()
+            try:
+                for _ in range(60):
+                    list(cache.iter_entries())  # unlocked; must tolerate a vanishing sidecar
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=deleter)] + [
+            threading.Thread(target=reader) for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors, f"reader raised during concurrent delete: {errors}"
+        # No dangling sidecar persisted: every surviving .json has its .bin.
+        bins = {p.stem for p in cache.isos.glob("*.bin")}
+        jsons = {p.stem for p in cache.isos.glob("*.json")}
+        assert jsons <= bins, f"dangling sidecar(s) with no .bin: {jsons - bins}"

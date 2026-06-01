@@ -9,6 +9,7 @@ base64 write, byte decoding, and error mapping.
 from __future__ import annotations
 
 import base64
+import threading
 from typing import Any
 
 import pytest
@@ -62,6 +63,7 @@ class _FakeClient:
     def __init__(self) -> None:
         self.api = _FakeApi()
         self.node = "ns1001849"
+        self.call_lock = threading.RLock()  # mirrors ProxmoxClient.call_lock (ADR-0023)
 
 
 def _client() -> Any:

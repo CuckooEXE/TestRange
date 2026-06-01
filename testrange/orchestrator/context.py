@@ -9,6 +9,7 @@ writes are visible at its call site rather than hidden behind ``self``.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,10 @@ class RunContext:
     # probe — the agent starts a few seconds after power-on and must not be
     # raced. Same budget shape as the sidecar wait.
     agent_ready_timeout_s: float = 120.0
+    # Worker cap for the I/O phases' bounded thread pool (ADR-0023). ``None``
+    # uses the default cap (``parallel_map``'s :data:`DEFAULT_MAX_WORKERS`);
+    # ``1`` forces the phases serial (the ``--jobs`` CLI knob).
+    jobs: int | None = None
 
     # Resource ledger — written during bring-up, read at teardown.
     pool_backends: dict[str, str] = field(default_factory=dict)  # plan_name -> backend
@@ -63,6 +68,13 @@ class RunContext:
     # vm name -> {role -> cached disk path}, e.g. {"web": {"os": ..., "data0": ...}}.
     # Populated by the build phase (capture or cache-hit); read by the run phase.
     built_disk_paths: dict[str, dict[str, Path]] = field(default_factory=dict)
+
+    # Guards the in-memory ledger dicts above when the I/O phases mutate them
+    # from multiple worker threads (ADR-0023). Held only for the quick dict
+    # update; the slow backend call around it runs unlocked on the shared,
+    # thread-safe driver connection. The cross-process state.json is serialized
+    # separately inside StateStore.
+    ledger_lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
 
     @property
     def driver(self) -> HypervisorDriver:

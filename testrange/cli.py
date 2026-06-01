@@ -37,6 +37,7 @@ from testrange.exceptions import (
     TestRangeError,
 )
 from testrange.networks.base import Network, Switch
+from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
 from testrange.orchestrator.backend import resolve_backend
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
@@ -183,7 +184,7 @@ def _build(args: argparse.Namespace) -> int:
     mgr = _build_manager(args)
     try:
         with live_output(verbose=args.verbose):
-            run_id = build_range(plan, cache_manager=mgr, profile=profile)
+            run_id = build_range(plan, cache_manager=mgr, profile=profile, jobs=args.jobs)
     except DriverError as e:
         # Binding/pin mismatch or a backend-agnostic plan with no --profile.
         print(f"error: {e}", file=sys.stderr)
@@ -225,6 +226,7 @@ def _run(args: argparse.Namespace) -> int:
                 require_cache=args.require_cache,
                 profile=profile,
                 verbose=args.verbose,
+                jobs=args.jobs,
             )
     except DriverError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -719,6 +721,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_build.add_argument("plan", help="path to the plan file (.py)")
+    _add_jobs_arg(p_build)
     _add_connect_arg(p_build)
     p_build.set_defaults(func=_build)
 
@@ -739,6 +742,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail fast if any artifact is missing instead of auto-building it first",
     )
+    _add_jobs_arg(p_run)
     _add_connect_arg(p_run)
     p_run.set_defaults(func=_run)
 
@@ -757,6 +761,41 @@ def build_parser() -> argparse.ArgumentParser:
     p_repl.set_defaults(func=_repl)
 
     return parser
+
+
+def _jobs_arg(value: str) -> int:
+    """Parse ``--jobs N``: a non-negative int. ``0`` and ``1`` both mean serial.
+
+    Negatives are rejected loud at the boundary rather than silently coerced to
+    serial (``resolve_workers`` would clamp them) — a negative ``--jobs`` is a
+    user error, not a request for serial. ``0`` is accepted and means serial,
+    mirroring the familiar ``make -j``-style "no extra workers" spelling.
+    """
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--jobs expects an integer, got {value!r}") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"--jobs must be >= 0 (0 or 1 = serial), got {n}")
+    return n
+
+
+def _add_jobs_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach ``--jobs N`` to a plan-taking verb (run/build).
+
+    Caps the I/O phases' bounded thread pool (ADR-0023): per-VM bring-up
+    uploads, build-disk downloads, and readiness waits. Omit for the default
+    cap; ``--jobs 0`` or ``--jobs 1`` forces the phases serial (handy for
+    debugging).
+    """
+    parser.add_argument(
+        "--jobs",
+        type=_jobs_arg,
+        default=None,
+        metavar="N",
+        help=f"max concurrent workers for the I/O phases "
+        f"(default: {DEFAULT_MAX_WORKERS}; 0 or 1 = serial)",
+    )
 
 
 def _add_connect_arg(parser: argparse.ArgumentParser) -> None:

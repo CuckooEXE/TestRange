@@ -379,12 +379,26 @@ If a future feature requires a subprocess (`qemu-img` for cross-format
 disk conversion, etc.), it gets its own ADR and a single sanctioned
 module at that time.
 
-### 16. Sync, single-threaded, single-instance (ADR-0002, ADR-0018)
+### 16. Sync API + sequential tests; bounded I/O-phase threading (ADR-0002, ADR-0023, ADR-0018)
 
 Every dependency (libvirt-python, paramiko, requests, pycdlib) is
-blocking. v0 runs single-threaded — install brings up one VM at a
-time, tests run sequentially. No `asyncio`, no `ThreadPoolExecutor`.
-Public API is sync.
+blocking. The **public API is synchronous** (no `async def` anywhere) and
+**test execution is sequential** (§14). Those two guarantees from ADR-0002
+hold.
+
+What ADR-0023 narrows: the orchestration **I/O phases** (bring-up uploads,
+build-disk downloads, readiness waits) may run on a **bounded thread pool**
+internally — they are independent, I/O-bound work that the old blanket "no
+`ThreadPoolExecutor`" needlessly serialized. The workers drive the **one shared,
+thread-safe driver connection** concurrently (libvirt's `virConnect` serves
+concurrent streams; the proxmoxer session / paramiko transport multiplex) —
+per-worker connections were rejected because a driver's per-instance
+resource-name maps aren't visible to a second connection. Three rules keep it
+safe: agent commands serialize on a per-driver `call_lock` (held per command, so
+the readiness polls' sleeps still overlap); shared bookkeeping (`StateStore`
+RMW, the `RunContext` ledger) is mutated only under a lock held for the quick
+update; and the cache's content-addressed staging is `mkstemp` + alias-merge
+safe. The worker cap is `--jobs` (default 8); `--jobs 1` forces serial.
 
 **TestRange is single-instance (ADR-0018).** One `testrange` process runs
 at a time per user and per driver profile. These are *unsupported* and not
@@ -1585,7 +1599,5 @@ plan of L2 guests — brought up automatically as part of the outer run. It is
 
 ### Deferred (named, not built)
 
-- **Parallel build** of independent VMs (still sequential per ADR /
-  decision 16).
 - **Backend-side dedup / COW overlays** — explicitly rejected for v0 (§3);
   revisit only if redundant pushes become a measured bottleneck.

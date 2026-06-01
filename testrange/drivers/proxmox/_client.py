@@ -22,6 +22,7 @@ modules (`_sdn`, `_storage`, `_vm`, `_guest`) take it as their first argument.
 from __future__ import annotations
 
 import ssl
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -41,6 +42,14 @@ _TASK_TIMEOUT_S = 600.0
 # proxmoxer's 5s default per-request timeout aborts large image uploads; the
 # control plane is unaffected by a higher ceiling (calls return in ms).
 _HTTP_TIMEOUT_S = 600.0
+
+# urllib3's HTTPAdapter pools 10 connections by default; the I/O phases issue
+# concurrent control-plane calls on the one shared session (ADR-0023), so a high
+# ``--jobs`` would overflow that pool ("Connection pool is full") and churn
+# connections. Size the pool with headroom over the default worker cap so the
+# session is not the bottleneck; an extreme ``--jobs`` against a single PVE host
+# is out of scope (you're hammering one node at that point).
+_REST_POOL_MAXSIZE = 32
 
 
 def _import_proxmoxer() -> Any:
@@ -220,6 +229,15 @@ class ProxmoxClient:
         # Resolved at connect(): the configured node, or the sole node on the
         # host when conn.node is "" (auto-detect).
         self._node: str | None = conn.node or None
+        # Serializes mutation of this connection's shared in-memory state when the
+        # I/O phases drive it from several worker threads (ADR-0023): QGA agent
+        # REST calls (so concurrent readiness polls don't race the session's
+        # cookie/CSRF state during a ticket refresh) and the lazy SSH-client
+        # connect (``_ensure_ssh``). Held per-op (a call, or the one-time SSH
+        # connect) — never across the exec poll loop's sleep, so the polls
+        # overlap. Re-entrant for symmetry with the libvirt client; current
+        # callers acquire per-op without nesting.
+        self.call_lock = threading.RLock()
 
     @property
     def node(self) -> str:
@@ -255,10 +273,32 @@ class ProxmoxClient:
             timeout=_HTTP_TIMEOUT_S,
         )
         self._node = self._resolve_node()
+        self._widen_session_pool()
         # Cheap authenticated read so bad creds / unreachable host fail loud here
         # rather than on the first real operation.
         self._api.nodes(self._node).status.get()
         _log.info("connected to PVE %s node %s", self._conn.host, self._node)
+
+    def _widen_session_pool(self) -> None:
+        """Resize the proxmoxer session's connection pool for ADR-0023 concurrency.
+
+        proxmoxer stores its live ``requests.Session`` at ``_api._store["session"]``
+        (verified against proxmoxer 2.3.0); mount an ``HTTPAdapter`` sized to
+        :data:`_REST_POOL_MAXSIZE` so concurrent control-plane calls reuse pooled
+        connections instead of overflowing urllib3's 10-slot default. Defensive:
+        a proxmoxer internal-layout change must not break ``connect`` — the pool
+        size is an optimization, not a correctness requirement.
+        """
+        import requests.adapters
+
+        try:
+            session = self.api._store["session"]
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=_REST_POOL_MAXSIZE, pool_maxsize=_REST_POOL_MAXSIZE
+            )
+            session.mount("https://", adapter)
+        except (AttributeError, KeyError, TypeError) as e:  # pragma: no cover - defensive
+            _log.debug("could not widen proxmoxer session pool (continuing): %s", e)
 
     def _resolve_node(self) -> str:
         """The configured node, or the host's sole node when unspecified.
@@ -301,25 +341,33 @@ class ProxmoxClient:
     # -- SSH/SFTP (download_from_pool only) --------------------------------
 
     def _ensure_ssh(self) -> Any:
+        # Double-checked under call_lock: a parallel build (ADR-0023) runs
+        # download_from_pool concurrently across build VMs, so two workers could
+        # both see ``_ssh is None`` and open two connections, leaking one (close()
+        # only closes a single handle). The lock makes the lazy connect once-only;
+        # the per-transfer ``open_sftp()`` opens its own channel and needs no lock.
         if self._ssh is not None:
             return self._ssh
-        paramiko = _import_paramiko()
-        client = paramiko.SSHClient()
-        # The PVE host is a fixed, operator-owned box (not an ephemeral guest),
-        # but we still can't assume a known_hosts entry on the runner; trust on
-        # first use. Acceptable for the lab posture; document and move on.
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(
-            hostname=self._conn.host,
-            port=self._conn.ssh_port,
-            username=self._conn.ssh_user,
-            password=self._conn.ssh_password or None,
-            look_for_keys=False,
-            allow_agent=False,
-            timeout=15.0,
-        )
-        self._ssh = client
-        return client
+        with self.call_lock:
+            if self._ssh is not None:
+                return self._ssh
+            paramiko = _import_paramiko()
+            client = paramiko.SSHClient()
+            # The PVE host is a fixed, operator-owned box (not an ephemeral guest),
+            # but we still can't assume a known_hosts entry on the runner; trust on
+            # first use. Acceptable for the lab posture; document and move on.
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            client.connect(
+                hostname=self._conn.host,
+                port=self._conn.ssh_port,
+                username=self._conn.ssh_user,
+                password=self._conn.ssh_password or None,
+                look_for_keys=False,
+                allow_agent=False,
+                timeout=15.0,
+            )
+            self._ssh = client
+            return client
 
     def sftp_get(self, remote_path: str, dest_path: Path) -> None:
         """SFTP a file off the PVE host into a local path (overwrites).

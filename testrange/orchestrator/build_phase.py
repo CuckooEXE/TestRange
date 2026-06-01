@@ -30,7 +30,7 @@ from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.devices.network import StaticAddr
 from testrange.devices.pool.base import StoragePool
-from testrange.drivers.base import BUILD_NIC_NIC_IDX, VolumeRef
+from testrange.drivers.base import BUILD_NIC_NIC_IDX, HypervisorDriver, VolumeRef
 from testrange.exceptions import (
     BuildFailedError,
     BuildTimeoutError,
@@ -38,9 +38,16 @@ from testrange.exceptions import (
     CacheMissError,
     OrchestratorError,
 )
-from testrange.networks._addressing_consts import BUILD_NIC_OFFSET, SIDECAR_CACHE_NAME
+from testrange.networks._addressing_consts import (
+    BUILD_NIC_OFFSET,
+    DHCP_RANGE_LO,
+    SIDECAR_CACHE_NAME,
+    USER_STATIC_HI,
+    USER_STATIC_LO,
+)
 from testrange.networks.base import BuildNic, NetworkAddressing, Switch
 from testrange.networks.sidecar import _uplink_network_name
+from testrange.orchestrator._parallel import parallel_map
 from testrange.orchestrator.artifacts import (
     built_artifact_name,
     built_artifact_roles,
@@ -105,18 +112,46 @@ class _VMBuildPlan:
         return self.base_path is None
 
 
-def _build_nic_for(ctx: RunContext, build_switch: Switch, vm_name: str) -> BuildNic:
+# Host offsets a build NIC may take on the build switch, in allocation order:
+# the ``.3``-``.9`` infra range first, then ``.100`` upward — skipping the
+# sidecar's DHCP pool ``.10``-``.99`` so a static build IP never collides with a
+# lease. The build switch carries no user-declared statics (build VMs attach
+# only the build NIC), so ``.100``+ is free there.
+_BUILD_IP_SLOTS: tuple[int, ...] = (
+    *range(BUILD_NIC_OFFSET, DHCP_RANGE_LO),
+    *range(USER_STATIC_LO, USER_STATIC_HI + 1),
+)
+
+
+def _build_ip_offset(vm_index: int) -> int:
+    """Deterministic per-VM build-switch host offset (ADR-0017 / ADR-0023).
+
+    Serial build reused the single ``.3`` slot; parallel build (ORCH-4) needs a
+    **distinct** build IP per in-flight VM. Keyed on the VM's *plan position*,
+    not scheduling order — the build IP feeds ``config_hash``, so a
+    scheduling-dependent address would churn the cache key. A VM's offset is thus
+    stable across runs and independent of how many peers hit or miss.
+    """
+    if vm_index >= len(_BUILD_IP_SLOTS):
+        raise OrchestratorError(
+            f"build needs a distinct build-switch address per VM, but VM #{vm_index} "
+            f"exceeds the {len(_BUILD_IP_SLOTS)} available on the build switch"
+        )
+    return _BUILD_IP_SLOTS[vm_index]
+
+
+def _build_nic_for(ctx: RunContext, build_switch: Switch, vm_name: str, vm_index: int) -> BuildNic:
     """Synthesize the dedicated build NIC for one VM (ADR-0017).
 
-    One transient NIC on the build switch, statically addressed from the build
-    switch's ``.3`` infra slot (:data:`BUILD_NIC_OFFSET`) with a reserved-slot
-    MAC (:data:`BUILD_NIC_NIC_IDX`) disjoint from the VM's declared NICs. When
+    One transient NIC on the build switch, statically addressed with a
+    reserved-slot MAC (:data:`BUILD_NIC_NIC_IDX`) disjoint from the VM's declared
+    NICs. The host offset is :func:`_build_ip_offset` of the VM's plan position,
+    so concurrent build VMs (ORCH-4) get distinct, deterministic addresses. When
     the build switch is ``nat`` the address derives its gateway/DNS from the
-    sidecar at ``.1``, so the build boot egresses for ``apt``/``pip``. Serial
-    build uses this one fixed slot per VM (ORCH-4 widens to a per-in-flight slot).
+    sidecar at ``.1``, so the build boot egresses for ``apt``/``pip``.
     """
     network = build_switch.networks[0]
-    build_ip = str(build_switch.network.network_address + BUILD_NIC_OFFSET)
+    build_ip = str(build_switch.network.network_address + _build_ip_offset(vm_index))
     return BuildNic(
         mac=ctx.driver.compose_mac(ctx.plan_name, vm_name, BUILD_NIC_NIC_IDX),
         network=network.name,
@@ -161,8 +196,16 @@ def build_phase(ctx: RunContext) -> None:
         pool_name=BUILD_POOL_NAME,
     )
 
-    for bp in misses:
-        build_one_vm(ctx, bp, build_pool_backend, build_net_backend)
+    # Build the misses concurrently, driving the one shared, thread-safe driver
+    # connection (ADR-0023): the base upload and the multi-GB capture download
+    # are blocking I/O that overlaps across VMs. Each build VM has a distinct,
+    # deterministic build IP (_build_ip_offset) so they coexist on the one build
+    # switch stood up above.
+    parallel_map(
+        lambda bp: build_one_vm(ctx, bp, build_pool_backend, build_net_backend),
+        misses,
+        jobs=ctx.jobs,
+    )
 
     teardown_build_phase(ctx, build_switch, build_pool_backend)
 
@@ -254,8 +297,11 @@ def _probe_all(
     build_switch = resolve_build_switch(ctx.plan.hypervisor.build_switch)
     misses: list[_VMBuildPlan] = []
     hits: dict[str, dict[str, Path]] = {}
-    for vm in ctx.plan.hypervisor.vms:
-        bp = _probe_vm(ctx, vm, sidecar_sha, build_switch)
+    # Probe stays serial: VMs commonly share one base, so a serial walk fetches
+    # it once into the local cache and the rest hit it — parallel probes would
+    # redundantly fetch the same base and race its content-addressed staging.
+    for vm_index, vm in enumerate(ctx.plan.hypervisor.vms):
+        bp = _probe_vm(ctx, vm, vm_index, sidecar_sha, build_switch)
         if bp.cached_paths is None:
             _log.info("vm %s: cache miss on %s; will build", vm.name, bp.config_hash)
             misses.append(bp)
@@ -266,7 +312,7 @@ def _probe_all(
 
 
 def _probe_vm(
-    ctx: RunContext, vm: VMRecipe, sidecar_sha: str, build_switch: Switch
+    ctx: RunContext, vm: VMRecipe, vm_index: int, sidecar_sha: str, build_switch: Switch
 ) -> _VMBuildPlan:
     builder = vm.builder
     base = builder.os_disk_base()
@@ -297,7 +343,7 @@ def _probe_vm(
     macs = tuple(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
     )
-    build_nic = _build_nic_for(ctx, build_switch, vm.name)
+    build_nic = _build_nic_for(ctx, build_switch, vm.name, vm_index)
     config_hash = builder.config_hash(
         vm.spec,
         vm,
@@ -373,17 +419,22 @@ def build_one_vm(
     and the install payload populates them; on power-off each disk is
     downloaded and added to the cache under its ``_built_…__{role}`` name.
     The build VM and all its volumes are deleted immediately afterward.
+
+    Concurrent VM builds (ORCH-4) drive the one shared, thread-safe driver
+    connection, so their base uploads and capture downloads overlap.
+    ``ctx.store`` and ``ctx.built_disk_paths`` are guarded; the transfers are not.
     """
+    drv = ctx.driver
     vm = bp.vm
     spec = vm.spec
-    build_vm_backend = ctx.driver.compose_resource_name(ctx.run_id, "build_vm", vm.name)
+    build_vm_backend = drv.compose_resource_name(ctx.run_id, "build_vm", vm.name)
 
     # --- OS disk. Image-origin: push base bytes onto this VM's own ref, then
     # grow. Installer-origin (BUILD-1): materialize a blank disk of the declared
     # size — the installer partitions it, booting the install medium staged
     # below.
-    os_disk_name = f"{build_vm_backend}{ctx.driver.volume_suffix('build_disk')}"
-    os_disk_ref = ctx.driver.compose_volume_ref(build_pool_backend, os_disk_name)
+    os_disk_name = f"{build_vm_backend}{drv.volume_suffix('build_disk')}"
+    os_disk_ref = drv.compose_volume_ref(build_pool_backend, os_disk_name)
     ctx.store.record_intent(
         kind="build_disk",
         backend_name=os_disk_name,
@@ -391,11 +442,11 @@ def build_one_vm(
         pool_backend=build_pool_backend,
     )
     if bp.installer_origin:
-        ctx.driver.create_blank_volume(os_disk_ref, spec.os_drive.size_gb)
+        drv.create_blank_volume(os_disk_ref, spec.os_drive.size_gb)
     else:
         assert bp.base_path is not None  # image-origin always resolves a base path
-        ctx.driver.upload_to_pool(os_disk_ref, bp.base_path)
-        ctx.driver.resize_volume(os_disk_ref, spec.os_drive.size_gb)
+        drv.upload_to_pool(os_disk_ref, bp.base_path)
+        drv.resize_volume(os_disk_ref, spec.os_drive.size_gb)
     ctx.store.confirm(os_disk_name, pool_backend=build_pool_backend)
 
     # --- Boot medium (installer-origin only): stage the install ISO onto the
@@ -408,29 +459,29 @@ def build_one_vm(
         # auto-installer activation file + first-boot script into the ISO).
         # Default identity; runs only here, on a build miss.
         prepared_media = bp.builder.prepare_boot_media(bp.boot_media_path)
-        boot_media_name = f"{build_vm_backend}-bootmedia{ctx.driver.volume_suffix('boot_iso')}"
-        boot_media_ref = ctx.driver.compose_volume_ref(build_pool_backend, boot_media_name)
+        boot_media_name = f"{build_vm_backend}-bootmedia{drv.volume_suffix('boot_iso')}"
+        boot_media_ref = drv.compose_volume_ref(build_pool_backend, boot_media_name)
         ctx.store.record_intent(
             kind="boot_iso",
             backend_name=boot_media_name,
             plan_name=vm.name,
             pool_backend=build_pool_backend,
         )
-        ctx.driver.upload_to_pool(boot_media_ref, prepared_media)
+        drv.upload_to_pool(boot_media_ref, prepared_media)
         ctx.store.confirm(boot_media_name, pool_backend=build_pool_backend)
 
     # --- Data disks: blank, sized; the guest formats/populates them on the build boot.
     data_disk_refs: list[tuple[str, VolumeRef]] = []
     for i, hd in enumerate(spec.data_drives):
-        name = f"{build_vm_backend}-{data_disk_role(i)}{ctx.driver.volume_suffix('data_disk')}"
-        ref = ctx.driver.compose_volume_ref(build_pool_backend, name)
+        name = f"{build_vm_backend}-{data_disk_role(i)}{drv.volume_suffix('data_disk')}"
+        ref = drv.compose_volume_ref(build_pool_backend, name)
         ctx.store.record_intent(
             kind="data_disk",
             backend_name=name,
             plan_name=vm.name,
             pool_backend=build_pool_backend,
         )
-        ctx.driver.create_blank_volume(ref, hd.size_gb)
+        drv.create_blank_volume(ref, hd.size_gb)
         ctx.store.confirm(name, pool_backend=build_pool_backend)
         data_disk_refs.append((name, ref))
 
@@ -441,15 +492,15 @@ def build_one_vm(
         spec, vm, addressing=ctx.addressing, macs=bp.macs, build_nic=bp.build_nic
     )
     if seed_bytes is not None:
-        seed_name = f"{build_vm_backend}-seed{ctx.driver.volume_suffix('build_seed')}"
-        seed_ref = ctx.driver.compose_volume_ref(build_pool_backend, seed_name)
+        seed_name = f"{build_vm_backend}-seed{drv.volume_suffix('build_seed')}"
+        seed_ref = drv.compose_volume_ref(build_pool_backend, seed_name)
         ctx.store.record_intent(
             kind="build_seed",
             backend_name=seed_name,
             plan_name=vm.name,
             pool_backend=build_pool_backend,
         )
-        ctx.driver.write_to_pool(seed_ref, seed_bytes)
+        drv.write_to_pool(seed_ref, seed_bytes)
         ctx.store.confirm(seed_name, pool_backend=build_pool_backend)
 
     # --- Define + start the build VM with every writable disk attached.
@@ -459,7 +510,7 @@ def build_one_vm(
     # therefore carries only the build network.
     network_refs = {bp.build_nic.network: build_net_backend}
     ctx.store.record_intent(kind="build_vm", backend_name=build_vm_backend, plan_name=vm.name)
-    ctx.driver.create_vm(
+    drv.create_vm(
         build_vm_backend,
         spec,
         ctx.plan_name,
@@ -471,24 +522,26 @@ def build_one_vm(
         boot_media_ref=boot_media_ref,
     )
     ctx.store.confirm(build_vm_backend)
-    ctx.driver.start_vm(build_vm_backend)
+    drv.start_vm(build_vm_backend)
     # The guest reports an explicit result over the serial console; ``ok`` is
     # the *only* success signal. A ``fail`` record or a power-off without ``ok``
     # raises before capture, so a corrupt disk is never silently cached (ADR §21).
-    wait_for_build_result(ctx, build_vm_backend, vm.name)
+    wait_for_build_result(ctx, build_vm_backend, vm.name, driver=drv)
     # ``ok`` says it succeeded; the guest then runs ``poweroff``. Wait for the VM
     # to actually reach shutoff before reading its disk — otherwise capture races
     # qemu's final writes / file release on a live backend (torn read).
-    wait_for_poweroff(ctx, build_vm_backend, vm.name)
+    wait_for_poweroff(ctx, build_vm_backend, vm.name, driver=drv)
 
-    # --- Capture every writable disk into the cache (ADR-0010 §4/§5).
+    # --- Capture every writable disk into the cache (ADR-0010 §4/§5). Serial
+    # within this VM (one worker connection); capture overlaps across VMs.
     refs_by_role: dict[str, VolumeRef] = {"os": os_disk_ref}
     for i, (_, ref) in enumerate(data_disk_refs):
         refs_by_role[data_disk_role(i)] = ref
     captured: dict[str, Path] = {}
     for role in bp.roles:
-        captured[role] = _capture_disk(ctx, refs_by_role[role], bp.config_hash, role, vm.name)
-    ctx.built_disk_paths[vm.name] = captured
+        captured[role] = _capture_disk(ctx, drv, refs_by_role[role], bp.config_hash, role, vm.name)
+    with ctx.ledger_lock:
+        ctx.built_disk_paths[vm.name] = captured
 
     # --- Delete everything on the backend (ADR-0010 §3). Best-effort: the disks
     # are already captured into the cache, so a single flaky backend delete must
@@ -497,17 +550,17 @@ def build_one_vm(
     # its resource recorded in state.json, so the record-before-create ledger
     # (ADR-0003) still drives teardown/cleanup to retry it.
     _best_effort_delete(
-        ctx, "build_vm", build_vm_backend, partial(ctx.driver.destroy_vm, build_vm_backend)
+        ctx, "build_vm", build_vm_backend, partial(drv.destroy_vm, build_vm_backend)
     )
     if seed_ref is not None and seed_name is not None:
-        _best_effort_delete(ctx, "volume", seed_name, partial(ctx.driver.delete_volume, seed_ref))
+        _best_effort_delete(ctx, "volume", seed_name, partial(drv.delete_volume, seed_ref))
     if boot_media_ref is not None and boot_media_name is not None:
         _best_effort_delete(
-            ctx, "volume", boot_media_name, partial(ctx.driver.delete_volume, boot_media_ref)
+            ctx, "volume", boot_media_name, partial(drv.delete_volume, boot_media_ref)
         )
     for name, ref in data_disk_refs:
-        _best_effort_delete(ctx, "volume", name, partial(ctx.driver.delete_volume, ref))
-    _best_effort_delete(ctx, "volume", os_disk_name, partial(ctx.driver.delete_volume, os_disk_ref))
+        _best_effort_delete(ctx, "volume", name, partial(drv.delete_volume, ref))
+    _best_effort_delete(ctx, "volume", os_disk_name, partial(drv.delete_volume, os_disk_ref))
 
 
 def _best_effort_delete(
@@ -539,6 +592,7 @@ def _best_effort_delete(
 
 def _capture_disk(
     ctx: RunContext,
+    drv: HypervisorDriver,
     vol_ref: VolumeRef,
     config_hash: str,
     role: str,
@@ -547,9 +601,11 @@ def _capture_disk(
     """Download one built disk and add it to the cache (+ HTTP tier when configured).
 
     The pool volume may not be readable by the orchestrator process (different
-    uid, remote host), so it is streamed back via the driver into a local temp
-    file, then ingested. ``CacheManager.add`` mirrors to the HTTP tier
-    best-effort when one is configured (ADR-0010 §5).
+    uid, remote host), so it is streamed back via the worker's driver connection
+    into a local temp file, then ingested. ``CacheManager.add`` mirrors to the
+    HTTP tier best-effort when one is configured (ADR-0010 §5). Distinct VMs'
+    captures carry distinct ``config_hash`` content shas, so concurrent
+    ``cache.add`` calls never collide on a staging path.
     """
     cache_name = built_artifact_name(config_hash, role)
     # CORE-4: stage the download on the cache filesystem, not the system
@@ -557,13 +613,13 @@ def _capture_disk(
     # same-fs temp keeps the subsequent cache ingest a cheap intra-fs copy.
     with tempfile.NamedTemporaryFile(
         prefix=f"tr_built_{vm_name}_{role}_",
-        suffix=ctx.driver.volume_suffix("build_disk"),
+        suffix=drv.volume_suffix("build_disk"),
         dir=ctx.cache.staging,
         delete=False,
     ) as tmp:
         tmp_path = Path(tmp.name)
     try:
-        ctx.driver.download_from_pool(vol_ref, tmp_path)
+        drv.download_from_pool(vol_ref, tmp_path)
         info = ctx.cache.add(tmp_path, name=cache_name)
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -714,7 +770,9 @@ class _ConsoleStreamer:
                 _console.debug("[%s] %s", self._vm_name, text)
 
 
-def wait_for_build_result(ctx: RunContext, backend_name: str, vm_name: str) -> None:
+def wait_for_build_result(
+    ctx: RunContext, backend_name: str, vm_name: str, *, driver: HypervisorDriver | None = None
+) -> None:
     """Live-tail the build VM's serial console until it reports a result.
 
     Replaces the old power-off-as-success poll. Opens the driver's
@@ -742,12 +800,13 @@ def wait_for_build_result(ctx: RunContext, backend_name: str, vm_name: str) -> N
     guard (a true wall-clock interrupt would need a thread/signal, which ADR-0002
     rules out). The shipped libvirt and proxmox sinks both heartbeat.
     """
+    drv = driver or ctx.driver
     deadline = time.monotonic() + ctx.build_timeout_s
     buffer = bytearray()
     streamer = _ConsoleStreamer(vm_name)
     # ``closing`` runs the generator's ``finally`` (releasing the driver's
     # transport) even when we break out early on a record.
-    with closing(ctx.driver.read_build_result_sink(backend_name)) as stream:
+    with closing(drv.read_build_result_sink(backend_name)) as stream:
         for chunk in stream:
             # Process the chunk *before* the deadline check: a chunk carrying the
             # result must never be discarded just because it landed at the timeout
@@ -777,7 +836,9 @@ def wait_for_build_result(ctx: RunContext, backend_name: str, vm_name: str) -> N
     )
 
 
-def wait_for_poweroff(ctx: RunContext, backend_name: str, vm_name: str) -> None:
+def wait_for_poweroff(
+    ctx: RunContext, backend_name: str, vm_name: str, *, driver: HypervisorDriver | None = None
+) -> None:
     """Block until the build VM is actually ``shutoff`` (safe to capture).
 
     The serial ``ok`` token means provisioning *succeeded*; it is emitted just
@@ -789,9 +850,10 @@ def wait_for_poweroff(ctx: RunContext, backend_name: str, vm_name: str) -> None:
     A guest that reports ``ok`` but never powers off is a wedge; the build
     timeout catches it.
     """
+    drv = driver or ctx.driver
     deadline = time.monotonic() + ctx.build_timeout_s
     while time.monotonic() < deadline:
-        if ctx.driver.get_vm_power_state(backend_name) == "shutoff":
+        if drv.get_vm_power_state(backend_name) == "shutoff":
             return
         time.sleep(2.0)
     raise BuildTimeoutError(

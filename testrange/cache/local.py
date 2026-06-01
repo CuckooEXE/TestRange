@@ -4,10 +4,13 @@ Layout:
     <root>/isos/<sha256>.bin   (opaque content)
     <root>/isos/<sha256>.json  (sidecar metadata)
 
-All writes use ``.partial`` + ``os.replace`` so a crash mid-write never
-leaves a plausible-but-corrupt file at the canonical path. This is crash
-safety for the single owning process (TestRange is single-instance — see
-ADR-0018), not a guard against concurrent writers.
+All writes go through a unique ``tempfile.mkstemp`` temp + ``os.replace`` so a
+crash mid-write never leaves a plausible-but-corrupt file at the canonical path.
+Within one process the mutating methods are safe to call from several threads:
+concurrent adds of the *same* content sha merge their name aliases under a write
+lock instead of clobbering (ADR-0023), and the slow byte copy stays outside it
+so distinct-content adds parallelize. Cross-*process* concurrency is still out
+of scope — TestRange runs one instance per profile (ADR-0018).
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
+import threading
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -60,16 +65,26 @@ def default_root() -> Path:
 class LocalCache:
     """File-backed content-addressed cache.
 
-    Single-instance by contract (ADR-0018): methods are not thread- or
-    process-safe. They use atomic-rename writes purely for crash safety, so a
-    SIGKILL during a write leaves the canonical path either fully-old or
-    fully-new — not to serialize concurrent writers (there are none).
+    Safe to drive from multiple threads in one process: same-sha concurrent
+    adds merge aliases under :attr:`_write_lock` (ADR-0023), and the mutating
+    methods (``add``/``delete``/``purge``/``*_name``) take that lock around the
+    sidecar read-modify-write. Atomic-rename writes additionally give crash
+    safety — a SIGKILL mid-write leaves the canonical path either fully-old or
+    fully-new. Cross-*process* concurrency is out of scope (single instance per
+    profile, ADR-0018); ``_write_lock`` is an in-process guard, not a file lock.
     """
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or default_root()).resolve()
         self.isos = self.root / "isos"
         self.isos.mkdir(parents=True, exist_ok=True)
+        # Serializes the sidecar read-modify-write inside the mutating methods so
+        # concurrent in-process adds of the *same* content (parallel build-disk
+        # captures, ADR-0023) merge their name aliases instead of clobbering, and
+        # never race a fixed-name temp. The slow byte copy/hash stays outside it,
+        # so distinct-content adds still parallelize fully. Not a cross-process
+        # guard (ADR-0018) — single-instance still holds.
+        self._write_lock = threading.Lock()
 
     @property
     def staging(self) -> Path:
@@ -114,45 +129,62 @@ class LocalCache:
         bin_path = self.isos / f"{sha}.bin"
         sidecar = self.isos / f"{sha}.json"
 
-        if bin_path.exists() and sidecar.exists():
-            info = self._read_sidecar(sidecar)
-            if origin != info.origin and tmp != bin_path:
-                _log.info("entry already in cache: %s (origin differs from existing)", sha[:16])
-            if name and name not in info.names:
-                info = self._append_alias(sidecar, info, name, description=description)
-            if src.startswith(("http://", "https://")) and tmp.parent != self.isos:
-                tmp.unlink(missing_ok=True)
-            return info
-
-        # First write the .bin atomically
-        if tmp != bin_path:
+        # Materialize the content-addressed ``.bin`` first, *unlocked*: the copy
+        # is the slow part and is idempotent (same sha → same bytes), so parallel
+        # adds of distinct content overlap fully and two adds of the same new sha
+        # just both land identical bytes via unique temps.
+        if not bin_path.exists() and tmp != bin_path:
             _atomic_copy(tmp, bin_path)
-            if src.startswith(("http://", "https://")):
-                tmp.unlink(missing_ok=True)
+        if src.startswith(("http://", "https://")):
+            tmp.unlink(missing_ok=True)  # the download tmp is scratch once .bin lands
 
-        names: tuple[str, ...] = (name,) if name else ()
-        info = CacheEntryInfo(
-            sha256=sha,
-            size=bin_path.stat().st_size,
-            names=names,
-            origin=origin,
-            added_at=_now_utc_iso(),
-            description=description,
-            path=bin_path,
-        )
-        self._write_sidecar(sidecar, info)
+        # Serialize only the sidecar read-modify-write: re-read under the lock so
+        # a concurrent same-sha add's alias is merged rather than clobbered.
+        with self._write_lock:
+            if sidecar.exists():
+                info = self._read_sidecar(sidecar)
+                if origin != info.origin and tmp != bin_path:
+                    _log.info("entry already in cache: %s (origin differs)", sha[:16])
+                if name and name not in info.names:
+                    info = self._append_alias(sidecar, info, name, description=description)
+                return info
+            names: tuple[str, ...] = (name,) if name else ()
+            info = CacheEntryInfo(
+                sha256=sha,
+                size=bin_path.stat().st_size,
+                names=names,
+                origin=origin,
+                added_at=_now_utc_iso(),
+                description=description,
+                path=bin_path,
+            )
+            self._write_sidecar(sidecar, info)
         _log.info("added cache entry %s (%d bytes)", sha[:16], info.size)
         return info
 
     def _download_url(self, url: str) -> tuple[Path, str]:
-        """Stream ``url`` into a ``.partial`` file under ``isos/``. Returns (tmp_path, url)."""
-        tmp = self.isos / ".download.partial"
+        """Stream ``url`` into a unique temp file under ``isos/``. Returns (tmp_path, url).
+
+        The temp name comes from :func:`tempfile.mkstemp`, not a fixed
+        ``.download.partial`` — two concurrent fetches (a parallel build-disk
+        capture, the I/O phases on a thread pool) must not interleave into one
+        file and promote a disk whose bytes don't hash to its name (CACHE-4).
+        """
         _log.info("fetching %s", url)
-        # urlopen verifies TLS via the system CA store by default in Python 3.6+.
+        fd, tmp_name = tempfile.mkstemp(dir=self.isos, suffix=".download.partial")
+        os.fchmod(fd, 0o644)  # mkstemp is 0600; a content-addressed cache is world-readable
+        tmp = Path(tmp_name)
+        # ``mkstemp`` already owns ``fd``; wrap it first so it's always closed,
+        # then stream the body in. On any failure the partial is removed rather
+        # than left as cache litter.
         # S310: the scheme is pre-validated by add() (http/https only) before we
         # ever reach here, so file:/custom schemes cannot slip through.
-        with urllib.request.urlopen(url) as resp, tmp.open("wb") as out:  # noqa: S310
-            shutil.copyfileobj(resp, out)
+        try:
+            with os.fdopen(fd, "wb") as out, urllib.request.urlopen(url) as resp:  # noqa: S310
+                shutil.copyfileobj(resp, out)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         return tmp, url
 
     def resolve(self, identifier: str) -> CacheEntryInfo:
@@ -201,8 +233,14 @@ class LocalCache:
         info = self.resolve(identifier)
         sidecar = self.isos / f"{info.sha256}.json"
         bin_path = self.isos / f"{info.sha256}.bin"
-        bin_path.unlink(missing_ok=True)
-        sidecar.unlink(missing_ok=True)
+        # Unlink the sidecar *first*, under the same lock the adders hold: an
+        # unlocked reader (``iter_entries`` globs ``*.json``) then either sees
+        # the whole entry or none of it — never a sidecar whose ``.bin`` has
+        # already vanished. The lock also serializes against a concurrent
+        # same-sha ``add`` racing this delete (ADR-0023).
+        with self._write_lock:
+            sidecar.unlink(missing_ok=True)
+            bin_path.unlink(missing_ok=True)
         _log.info("deleted cache entry %s", info.short_sha)
         return info
 
@@ -214,9 +252,12 @@ class LocalCache:
         deleting so iteration is not invalidated mid-walk.
         """
         removed = self.list_entries()
-        for info in removed:
-            (self.isos / f"{info.sha256}.bin").unlink(missing_ok=True)
-            (self.isos / f"{info.sha256}.json").unlink(missing_ok=True)
+        with self._write_lock:
+            for info in removed:
+                # Sidecar first (see :meth:`delete`): a concurrent reader never
+                # observes an entry whose ``.bin`` is already gone.
+                (self.isos / f"{info.sha256}.json").unlink(missing_ok=True)
+                (self.isos / f"{info.sha256}.bin").unlink(missing_ok=True)
         if removed:
             _log.info("purged %d cache entr%s", len(removed), "y" if len(removed) == 1 else "ies")
         return removed
@@ -288,9 +329,7 @@ class LocalCache:
             "description": info.description,
         }
         text = json.dumps(body, indent=2, sort_keys=True) + "\n"
-        tmp = path.with_suffix(path.suffix + ".partial")
-        tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        _atomic_write_text(path, text)
 
     def _append_alias(
         self,
@@ -320,11 +359,40 @@ def _sha256_of(path: Path) -> str:
 
 
 def _atomic_copy(src: Path, dst: Path) -> None:
-    """Copy ``src`` to ``dst`` via ``<dst>.partial`` + ``os.replace``."""
-    tmp = dst.with_suffix(dst.suffix + ".partial")
-    with src.open("rb") as r, tmp.open("wb") as w:
-        shutil.copyfileobj(r, w)
-    tmp.replace(dst)
+    """Copy ``src`` to ``dst`` via a unique temp + ``os.replace``.
+
+    The temp name comes from :func:`tempfile.mkstemp` (not a fixed
+    ``<dst>.partial``) so two concurrent copies of the same content sha don't
+    collide on one staging path (ADR-0023).
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=dst.parent, suffix=".partial")
+    os.fchmod(fd, 0o644)  # mkstemp is 0600; restore the umask-typical cache perms
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as w, src.open("rb") as r:
+            shutil.copyfileobj(r, w)
+        tmp.replace(dst)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a unique temp + ``os.replace``.
+
+    Unique temp (not ``<path>.partial``) so concurrent writers of the same
+    content-addressed sidecar don't race a fixed staging name (ADR-0023).
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".partial")
+    os.fchmod(fd, 0o644)  # mkstemp is 0600; restore the umask-typical cache perms
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _now_utc_iso() -> str:

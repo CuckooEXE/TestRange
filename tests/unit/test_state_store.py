@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -252,3 +253,64 @@ class TestRunDirFor:
         monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
         d = run_dir_for("r-abc")
         assert d == tmp_path / "testrange" / "runs" / "r-abc"
+
+
+class TestConcurrentRMW:
+    """In-process concurrency (the I/O phases run on a thread pool).
+
+    Unlike the cross-process case (still unsupported, ADR-0018), one owning
+    process may now drive its bring-up/build on a bounded thread pool. The
+    read-modify-write pairs must be atomic against each other or concurrent
+    ``record_intent`` calls would clobber one another's additions.
+    """
+
+    def _store(self, tmp_path: Path) -> StateStore:
+        store = StateStore(tmp_path / "runs" / "r1")
+        store.initialize(
+            run_id="r1",
+            plan_name="hello",
+            driver_class="MockDriver",
+            driver_uri="qemu:///session",
+        )
+        return store
+
+    def test_concurrent_record_intent_loses_no_writes(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        n = 64
+        barrier = threading.Barrier(n)
+
+        def record(i: int) -> None:
+            barrier.wait()  # maximize contention on the RMW pair
+            store.record_intent(kind="vm", backend_name=f"vm-{i:03d}", plan_name=f"p{i}")
+
+        threads = [threading.Thread(target=record, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        names = {r.backend_name for r in store.read().resources}
+        assert names == {f"vm-{i:03d}" for i in range(n)}
+
+    def test_concurrent_confirm_and_forget(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        n = 32
+        for i in range(n):
+            store.record_intent(kind="vm", backend_name=f"vm-{i:03d}", plan_name=f"p{i}")
+
+        # Confirm the even ids, forget the odd ones, all concurrently.
+        def mutate(i: int) -> None:
+            if i % 2 == 0:
+                store.confirm(f"vm-{i:03d}")
+            else:
+                store.forget(f"vm-{i:03d}")
+
+        threads = [threading.Thread(target=mutate, args=(i,)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        resources = {r.backend_name: r for r in store.read().resources}
+        assert set(resources) == {f"vm-{i:03d}" for i in range(0, n, 2)}
+        assert all(r.outcome_at is not None for r in resources.values())

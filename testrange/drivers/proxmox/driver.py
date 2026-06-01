@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import functools
 import secrets
+import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,6 +152,18 @@ class ProxmoxDriver(HypervisorDriver):
         # uplink segment (an existing bridge like vmbr0) is not in the map and
         # passes through unchanged. In-process only: teardown never wires NICs.
         self._vnet_by_network: dict[str, str] = {}
+        # Serializes the SDN mutation path and the vnet map. The run phase
+        # provisions independent switches concurrently (ADR-0023), but PVE SDN is
+        # cluster-global: every create_switch shares one ``_sdn_zone`` and ends in
+        # ``PUT /cluster/sdn``, which commits the *entire* staged config and
+        # spawns a reload. Without this lock concurrent workers double-create the
+        # zone (check-then-act) and stomp each other's applies. The same lock
+        # guards the ``_vnet_by_network`` write (create_network) / read
+        # (create_vm). The slow disk/volume transfers take no lock, so they still
+        # overlap — only the SDN control path serializes. Not re-entrant: nothing
+        # here nests an acquire, and a plain Lock surfaces an accidental nest as a
+        # deadlock in test rather than hiding it.
+        self._state_lock = threading.Lock()
 
     # -- construction paths ------------------------------------------------
 
@@ -299,13 +312,19 @@ class ProxmoxDriver(HypervisorDriver):
                     f"profile's [uplinks] map does not resolve (have: {sorted(self._uplinks)})"
                 )
             resolved_uplink = self._uplinks[switch.uplink]
-        return _sdn.create_switch(
-            self._client, self._sdn_zone, switch, backend_name, resolved_uplink=resolved_uplink
-        )
+        # Serialize the whole SDN critical section (zone-ensure → vnet post →
+        # cluster-wide apply) across concurrent switch workers — see _state_lock.
+        with self._state_lock:
+            return _sdn.create_switch(
+                self._client, self._sdn_zone, switch, backend_name, resolved_uplink=resolved_uplink
+            )
 
     @_translates
     def destroy_switch(self, backend_name: str) -> None:
-        _sdn.destroy_switch(self._client, backend_name)
+        # destroy_switch has the same check-then-act + cluster apply as create;
+        # hold the same lock so it is safe even if teardown ever parallelizes.
+        with self._state_lock:
+            _sdn.destroy_switch(self._client, backend_name)
 
     @_translates
     def create_network(
@@ -321,7 +340,8 @@ class ProxmoxDriver(HypervisorDriver):
         )
         # Remember the composed name → vnet id so create_vm can wire NICs to the
         # real bridge (the orchestrator only keeps the composed name).
-        self._vnet_by_network[backend_name] = vnet
+        with self._state_lock:
+            self._vnet_by_network[backend_name] = vnet
         return vnet
 
     def destroy_network(self, backend_name: str) -> None:
@@ -380,10 +400,11 @@ class ProxmoxDriver(HypervisorDriver):
     ) -> Any:
         # Translate composed network names → SDN vnet ids for the NIC bridges;
         # the uplink segment (vmbr0) isn't in the map and passes through.
-        resolved_refs = {
-            name: self._vnet_by_network.get(backend, backend)
-            for name, backend in network_refs.items()
-        }
+        with self._state_lock:
+            resolved_refs = {
+                name: self._vnet_by_network.get(backend, backend)
+                for name, backend in network_refs.items()
+            }
         return _vm.create_vm(
             self._client,
             backend_name,

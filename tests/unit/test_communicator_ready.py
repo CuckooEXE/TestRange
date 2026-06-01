@@ -47,6 +47,7 @@ def _ctx(comm: _Comm, *, timeout: float = 6.0) -> Any:
     return SimpleNamespace(
         plan=SimpleNamespace(hypervisor=SimpleNamespace(vms=[vm])),
         agent_ready_timeout_s=timeout,
+        jobs=1,  # single fake VM; keep the readiness poll on the calling thread
     )
 
 

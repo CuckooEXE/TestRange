@@ -57,9 +57,15 @@ def _resolve_domain(client: LibvirtClient, backend_name: str) -> Any:
 
 
 def _agent_command(client: LibvirtClient, dom: Any, command: dict[str, Any]) -> Any:
-    """Run one QGA command, returning its ``return`` payload (or ``None``)."""
+    """Run one QGA command, returning its ``return`` payload (or ``None``).
+
+    Serialized on ``client.call_lock`` so concurrent readiness polls across
+    guests (ADR-0023) don't issue overlapping commands on the one shared
+    connection; the hold is brief (one command), so the polls' sleeps overlap.
+    """
     libvirt_qemu = _import_libvirt_qemu()
-    raw = libvirt_qemu.qemuAgentCommand(dom, json.dumps(command), _AGENT_TIMEOUT_S, 0)
+    with client.call_lock:
+        raw = libvirt_qemu.qemuAgentCommand(dom, json.dumps(command), _AGENT_TIMEOUT_S, 0)
     reply = json.loads(raw)
     return reply.get("return")
 
