@@ -65,11 +65,13 @@ def make_execute(client: ProxmoxClient, backend_name: str) -> GuestExec:
         del cwd  # QGA exec has no working-directory concept
         start = time.monotonic()
         try:
-            pid = agent("exec").post(command=list(argv))["pid"]
+            with client.call_lock:
+                pid = agent("exec").post(command=list(argv))["pid"]
         except Exception as e:
             raise GuestAgentError(f"QGA exec failed on {backend_name!r}: {e}") from e
         while True:
-            status = agent("exec-status").get(pid=pid)
+            with client.call_lock:
+                status = agent("exec-status").get(pid=pid)
             if status.get("exited"):
                 return ExecResult(
                     exit_code=int(status.get("exitcode", -1)),
@@ -92,7 +94,8 @@ def make_read_file(client: ProxmoxClient, backend_name: str) -> GuestReadFile:
 
     def _read_file(path: str) -> bytes:
         try:
-            result = agent("file-read").get(file=path)
+            with client.call_lock:
+                result = agent("file-read").get(file=path)
         except Exception as e:
             raise GuestAgentError(f"QGA file-read {path!r} failed on {backend_name!r}: {e}") from e
         return _to_bytes(result.get("content"))
@@ -112,7 +115,8 @@ def make_write_file(client: ProxmoxClient, backend_name: str) -> GuestWriteFile:
                 "single-write cap; chunked writes are not implemented"
             )
         try:
-            agent("file-write").post(file=path, content=encoded, encode=0)
+            with client.call_lock:
+                agent("file-write").post(file=path, content=encoded, encode=0)
         except Exception as e:
             raise GuestAgentError(f"QGA file-write {path!r} failed on {backend_name!r}: {e}") from e
 

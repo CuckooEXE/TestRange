@@ -16,6 +16,7 @@ from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.posix import PosixCred
 from testrange.devices.network import StaticAddr
+from testrange.devices.pool.base import StoragePool
 from testrange.exceptions import (
     BuildNotReadyError,
     CommunicatorError,
@@ -24,6 +25,7 @@ from testrange.exceptions import (
 )
 from testrange.networks.base import Switch
 from testrange.networks.sidecar import LEASEFILE, SIDECAR_DNSMASQ_CONF, parse_dnsmasq_leases
+from testrange.orchestrator._parallel import parallel_map
 from testrange.orchestrator.artifacts import data_disk_role
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
@@ -37,72 +39,90 @@ def run_phase(ctx: RunContext) -> None:
     ctx.store.set_phase(PHASE_RUN)
     hyp = ctx.plan.hypervisor
 
+    # The independent units of each step run on a bounded thread pool, driving
+    # the one shared, thread-safe driver connection concurrently (ADR-0020): the
+    # disk uploads are blocking I/O that overlaps for real. Each step is a
+    # barrier — pools exist before switches read pool_backends, switches+sidecars
+    # exist before VMs wire to network_backends, and every sidecar is serving
+    # before any user VM boots (ADR-0010 §8). ``ctx.store`` and the ledger dicts
+    # are guarded; the slow backend calls run unlocked.
+    #
     # The build phase tears down its own ephemeral pool and no longer leaves the
     # user's declared pools behind (ADR-0010 §9), so the run phase owns creating
     # them before any disk is pushed or sidecar materialized.
-    for pool in hyp.pools:
-        backend = ctx.driver.compose_resource_name(ctx.run_id, "pool", pool.name)
-        ctx.store.record_intent(kind="pool", backend_name=backend, plan_name=pool.name)
-        ctx.driver.create_pool(pool, backend)
-        ctx.store.confirm(backend)
+    parallel_map(lambda pool: _create_pool(ctx, pool), hyp.pools, jobs=ctx.jobs)
+    parallel_map(
+        lambda switch: _provision_switch_with_sidecar(ctx, switch), hyp.networks, jobs=ctx.jobs
+    )
+    wait_sidecars_ready(ctx)
+    parallel_map(lambda vm: _bring_up_vm(ctx, vm), hyp.vms, jobs=ctx.jobs)
+
+
+def _create_pool(ctx: RunContext, pool: StoragePool) -> None:
+    backend = ctx.driver.compose_resource_name(ctx.run_id, "pool", pool.name)
+    ctx.store.record_intent(kind="pool", backend_name=backend, plan_name=pool.name)
+    ctx.driver.create_pool(pool, backend)
+    ctx.store.confirm(backend)
+    with ctx.ledger_lock:
         ctx.pool_backends[pool.name] = backend
 
-    for switch in hyp.networks:
-        provision_switch(ctx, switch)
-        materialize_sidecar_for(ctx, switch)
 
-    # Block until every sidecar is serving before any user VM boots, so a guest
-    # can never ask for a DHCP lease the sidecar isn't ready to hand out yet
-    # (ADR-0010 §8).
-    wait_sidecars_ready(ctx)
+def _provision_switch_with_sidecar(ctx: RunContext, switch: Switch) -> None:
+    # One switch's fabric + its sidecar are a single unit: the sidecar reads this
+    # switch's own network_backends, so they must be ordered within the switch.
+    # Different switches are independent.
+    provision_switch(ctx, switch)
+    materialize_sidecar_for(ctx, switch)
 
-    for vm in hyp.vms:
-        pool_backend = ctx.pool_backends[vm.spec.os_drive.pool]
-        built = ctx.built_disk_paths[vm.name]  # {role: cached path}
-        vm_backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
 
-        # OS disk: push the cached built OS bytes straight onto this VM's own
-        # ref — no shared base, no clone (ADR-0010 §3). The captured disk is
-        # already full-size, so run VMs need neither a seed nor a resize (§6).
-        os_disk_name = f"{vm_backend}{ctx.driver.volume_suffix('run_disk')}"
-        os_disk_ref = ctx.driver.compose_volume_ref(pool_backend, os_disk_name)
+def _bring_up_vm(ctx: RunContext, vm: VMRecipe) -> None:
+    drv = ctx.driver
+    pool_backend = ctx.pool_backends[vm.spec.os_drive.pool]
+    built = ctx.built_disk_paths[vm.name]  # {role: cached path}
+    vm_backend = drv.compose_resource_name(ctx.run_id, "vm", vm.name)
+
+    # OS disk: push the cached built OS bytes straight onto this VM's own
+    # ref — no shared base, no clone (ADR-0010 §3). The captured disk is
+    # already full-size, so run VMs need neither a seed nor a resize (§6).
+    os_disk_name = f"{vm_backend}{drv.volume_suffix('run_disk')}"
+    os_disk_ref = drv.compose_volume_ref(pool_backend, os_disk_name)
+    ctx.store.record_intent(
+        kind="run_disk",
+        backend_name=os_disk_name,
+        plan_name=vm.name,
+        pool_backend=pool_backend,
+    )
+    drv.upload_to_pool(os_disk_ref, built["os"])
+    ctx.store.confirm(os_disk_name, pool_backend=pool_backend)
+
+    # Data disks: push each cached built data disk onto its own ref.
+    data_disk_refs = []
+    for i, _hd in enumerate(vm.spec.data_drives):
+        role = data_disk_role(i)
+        name = f"{vm_backend}-{role}{drv.volume_suffix('data_disk')}"
+        ref = drv.compose_volume_ref(pool_backend, name)
         ctx.store.record_intent(
-            kind="run_disk",
-            backend_name=os_disk_name,
+            kind="data_disk",
+            backend_name=name,
             plan_name=vm.name,
             pool_backend=pool_backend,
         )
-        ctx.driver.upload_to_pool(os_disk_ref, built["os"])
-        ctx.store.confirm(os_disk_name, pool_backend=pool_backend)
+        drv.upload_to_pool(ref, built[role])
+        ctx.store.confirm(name, pool_backend=pool_backend)
+        data_disk_refs.append(ref)
 
-        # Data disks: push each cached built data disk onto its own ref.
-        data_disk_refs = []
-        for i, _hd in enumerate(vm.spec.data_drives):
-            role = data_disk_role(i)
-            name = f"{vm_backend}-{role}{ctx.driver.volume_suffix('data_disk')}"
-            ref = ctx.driver.compose_volume_ref(pool_backend, name)
-            ctx.store.record_intent(
-                kind="data_disk",
-                backend_name=name,
-                plan_name=vm.name,
-                pool_backend=pool_backend,
-            )
-            ctx.driver.upload_to_pool(ref, built[role])
-            ctx.store.confirm(name, pool_backend=pool_backend)
-            data_disk_refs.append(ref)
-
-        ctx.store.record_intent(kind="vm", backend_name=vm_backend, plan_name=vm.name)
-        ctx.driver.create_vm(
-            vm_backend,
-            vm.spec,
-            ctx.plan_name,
-            os_disk_ref=os_disk_ref,
-            seed_iso_ref=None,
-            network_refs=ctx.network_backends,
-            data_disk_refs=data_disk_refs,
-        )
-        ctx.store.confirm(vm_backend)
-        ctx.driver.start_vm(vm_backend)
+    ctx.store.record_intent(kind="vm", backend_name=vm_backend, plan_name=vm.name)
+    drv.create_vm(
+        vm_backend,
+        vm.spec,
+        ctx.plan_name,
+        os_disk_ref=os_disk_ref,
+        seed_iso_ref=None,
+        network_refs=ctx.network_backends,
+        data_disk_refs=data_disk_refs,
+    )
+    ctx.store.confirm(vm_backend)
+    drv.start_vm(vm_backend)
 
 
 def bind_communicators(ctx: RunContext) -> None:
@@ -114,27 +134,34 @@ def bind_communicators(ctx: RunContext) -> None:
     communicator, not on VMHandle. The ``isinstance`` ladder is the
     sanctioned trust boundary between the user's Plan and dispatch.
     """
-    for vm in ctx.plan.hypervisor.vms:
-        comm = vm.communicator
-        if isinstance(comm, SSHCommunicator):
-            ip = discover_ip(ctx, vm, comm.nic_idx)
-            cred = lookup_credential(vm)
-            comm.bind(host=ip, credential=cred)
-            _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
-        elif isinstance(comm, NativeCommunicator):
-            backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
-            comm.bind(
-                execute=ctx.driver.native_guest_execute(backend),
-                read_file=ctx.driver.native_guest_read_file(backend),
-                write_file=ctx.driver.native_guest_write_file(backend),
-            )
-            _log.info("vm %s: bound NativeCommunicator via %s", vm.name, backend)
-        else:
-            _log.debug(
-                "vm %s: communicator %s not bindable; skipping",
-                vm.name,
-                type(comm).__name__,
-            )
+    # Independent per VM; the slow part is the SSH path's DHCP-lease poll in
+    # discover_ip, overlapped across VMs (ADR-0020). Each VM binds its own
+    # communicator object — no shared mutable state — and native lease reads are
+    # serialized at the driver's call lock.
+    parallel_map(lambda vm: _bind_one_communicator(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs)
+
+
+def _bind_one_communicator(ctx: RunContext, vm: VMRecipe) -> None:
+    comm = vm.communicator
+    if isinstance(comm, SSHCommunicator):
+        ip = discover_ip(ctx, vm, comm.nic_idx)
+        cred = lookup_credential(vm)
+        comm.bind(host=ip, credential=cred)
+        _log.info("vm %s: bound SSHCommunicator at %s", vm.name, ip)
+    elif isinstance(comm, NativeCommunicator):
+        backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
+        comm.bind(
+            execute=ctx.driver.native_guest_execute(backend),
+            read_file=ctx.driver.native_guest_read_file(backend),
+            write_file=ctx.driver.native_guest_write_file(backend),
+        )
+        _log.info("vm %s: bound NativeCommunicator via %s", vm.name, backend)
+    else:
+        _log.debug(
+            "vm %s: communicator %s not bindable; skipping",
+            vm.name,
+            type(comm).__name__,
+        )
 
 
 def wait_sidecars_ready(ctx: RunContext) -> None:
@@ -147,8 +174,11 @@ def wait_sidecars_ready(ctx: RunContext) -> None:
     only through the driver's native guest channel; the orchestrator never
     routes IP traffic to one. A sidecar whose agent never answers fails loud.
     """
-    for switch_name, sidecar_backend in ctx.sidecar_backends.items():
-        _wait_one_sidecar_ready(ctx, switch_name, sidecar_backend)
+    parallel_map(
+        lambda item: _wait_one_sidecar_ready(ctx, item[0], item[1]),
+        list(ctx.sidecar_backends.items()),
+        jobs=ctx.jobs,
+    )
 
 
 def _wait_one_sidecar_ready(ctx: RunContext, switch_name: str, sidecar_backend: str) -> None:
@@ -183,8 +213,9 @@ def wait_communicators_ready(ctx: RunContext) -> None:
     :func:`wait_sidecars_ready`: poll a trivial exec until the communicator
     answers, then hand off. A VM whose communicator never answers fails loud.
     """
-    for vm in ctx.plan.hypervisor.vms:
-        _wait_one_communicator_ready(ctx, vm)
+    parallel_map(
+        lambda vm: _wait_one_communicator_ready(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs
+    )
 
 
 def _wait_one_communicator_ready(ctx: RunContext, vm: VMRecipe) -> None:
@@ -218,11 +249,17 @@ def await_guest_readiness(ctx: RunContext) -> None:
     Builders never see a Communicator type; the orchestrator only
     brokers the callable and tags failures with the VM name.
     """
-    for vm in ctx.plan.hypervisor.vms:
-        try:
-            vm.builder.wait_ready(vm.spec, vm, vm.communicator.execute)
-        except BuildNotReadyError as e:
-            raise BuildNotReadyError(f"vm {vm.name!r}: {e}") from e
+    parallel_map(
+        lambda vm: _await_one_guest_readiness(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs
+    )
+
+
+def _await_one_guest_readiness(ctx: RunContext, vm: VMRecipe) -> None:
+    del ctx  # symmetry with the other per-VM helpers
+    try:
+        vm.builder.wait_ready(vm.spec, vm, vm.communicator.execute)
+    except BuildNotReadyError as e:
+        raise BuildNotReadyError(f"vm {vm.name!r}: {e}") from e
 
 
 def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> str:

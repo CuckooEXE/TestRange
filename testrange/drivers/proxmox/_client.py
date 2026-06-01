@@ -22,6 +22,7 @@ modules (`_sdn`, `_storage`, `_vm`, `_guest`) take it as their first argument.
 from __future__ import annotations
 
 import ssl
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -220,6 +221,11 @@ class ProxmoxClient:
         # Resolved at connect(): the configured node, or the sole node on the
         # host when conn.node is "" (auto-detect).
         self._node: str | None = conn.node or None
+        # Serializes QGA agent REST calls on the shared proxmoxer session so the
+        # run phase can poll guests' readiness concurrently (ADR-0020) without
+        # racing the session's cookie/CSRF state during a ticket refresh. Held
+        # per-call (not across the exec poll loop), so the polls' sleeps overlap.
+        self.call_lock = threading.RLock()
 
     @property
     def node(self) -> str:

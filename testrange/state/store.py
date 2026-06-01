@@ -22,6 +22,7 @@ import fcntl
 import json
 import os
 import secrets
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -93,6 +94,14 @@ class StateStore:
         self.pid_path = run_dir / "state.pid"
         self.lock_path = run_dir / "state.lock"
         self._lock_fd: int | None = None
+        # Serializes the read-modify-write pairs below. Each ``_write_state_atomic``
+        # is already crash-safe per write (``.partial`` + ``os.replace``), but the
+        # read→mutate→write *pair* is not atomic on its own: when the run drives
+        # its I/O phases on a bounded thread pool (the concurrency ADR), two
+        # workers recording resources concurrently would each read, then clobber
+        # the other's addition. This in-process lock makes each pair atomic. It is
+        # not a cross-process guard — that is ``state.lock`` (ADR-0018).
+        self._rmw_lock = threading.Lock()
 
     def initialize(
         self,
@@ -250,27 +259,31 @@ class StateStore:
             intent_at=_now_utc_iso(),
             metadata=metadata,
         )
-        self._write_state_atomic(self.read().with_resource(r))
+        with self._rmw_lock:
+            self._write_state_atomic(self.read().with_resource(r))
         return r
 
     def confirm(self, backend_name: str, **metadata: object) -> None:
         """Set outcome_at on the matching resource and merge metadata."""
         outcome = _now_utc_iso()
-        state = self.read()
-        for r in state.resources:
-            if r.backend_name == backend_name:
-                self._write_state_atomic(
-                    state.replace_resource(backend_name, r.with_outcome(outcome, **metadata))
-                )
-                return
+        with self._rmw_lock:
+            state = self.read()
+            for r in state.resources:
+                if r.backend_name == backend_name:
+                    self._write_state_atomic(
+                        state.replace_resource(backend_name, r.with_outcome(outcome, **metadata))
+                    )
+                    return
         raise StateError(f"confirm: no resource named {backend_name!r} in state")
 
     def forget(self, backend_name: str) -> None:
         """Remove a resource from state.json (post-successful-destroy)."""
-        self._write_state_atomic(self.read().remove_resource(backend_name))
+        with self._rmw_lock:
+            self._write_state_atomic(self.read().remove_resource(backend_name))
 
     def set_phase(self, phase: str) -> None:
-        self._write_state_atomic(replace(self.read(), phase=phase))
+        with self._rmw_lock:
+            self._write_state_atomic(replace(self.read(), phase=phase))
 
     def _write_state_atomic(self, state: State) -> None:
         text = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"

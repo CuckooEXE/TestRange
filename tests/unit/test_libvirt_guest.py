@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,6 +20,9 @@ from testrange.exceptions import GuestAgentError
 
 
 class FakeClient:
+    # Mirrors LibvirtClient.call_lock (serializes agent commands; ADR-0020).
+    call_lock = threading.RLock()
+
     def lookup_domain(self, name: str) -> object:
         return SimpleNamespace(name=name)
 

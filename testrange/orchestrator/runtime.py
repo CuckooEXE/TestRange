@@ -87,6 +87,7 @@ class Orchestrator:
         sidecar_ready_timeout_s: float = 120.0,
         require_cache: bool = False,
         profile: BackendProfile | None = None,
+        jobs: int | None = None,
     ) -> None:
         self.plan = plan
         self._require_cache = require_cache
@@ -110,6 +111,7 @@ class Orchestrator:
                 for s in self._all_switches()
                 for n in s.networks
             },
+            jobs=jobs,
         )
         self._handle: OrchestratorHandle | None = None
         self._leak = False

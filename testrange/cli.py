@@ -183,7 +183,7 @@ def _build(args: argparse.Namespace) -> int:
     mgr = _build_manager(args)
     try:
         with live_output(verbose=args.verbose):
-            run_id = build_range(plan, cache_manager=mgr, profile=profile)
+            run_id = build_range(plan, cache_manager=mgr, profile=profile, jobs=args.jobs)
     except DriverError as e:
         # Binding/pin mismatch or a backend-agnostic plan with no --profile.
         print(f"error: {e}", file=sys.stderr)
@@ -225,6 +225,7 @@ def _run(args: argparse.Namespace) -> int:
                 require_cache=args.require_cache,
                 profile=profile,
                 verbose=args.verbose,
+                jobs=args.jobs,
             )
     except DriverError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -708,6 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_build.add_argument("plan", help="path to the plan file (.py)")
+    _add_jobs_arg(p_build)
     _add_connect_arg(p_build)
     p_build.set_defaults(func=_build)
 
@@ -728,6 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="fail fast if any artifact is missing instead of auto-building it first",
     )
+    _add_jobs_arg(p_run)
     _add_connect_arg(p_run)
     p_run.set_defaults(func=_run)
 
@@ -746,6 +749,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_repl.set_defaults(func=_repl)
 
     return parser
+
+
+def _add_jobs_arg(parser: argparse.ArgumentParser) -> None:
+    """Attach ``--jobs N`` to a plan-taking verb (run/build).
+
+    Caps the I/O phases' bounded thread pool (ADR-0020): per-VM bring-up
+    uploads, build-disk downloads, and readiness waits. Omit for the default
+    cap; ``--jobs 1`` forces the phases serial (handy for debugging).
+    """
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="max concurrent workers for the I/O phases (default: bounded; 1 = serial)",
+    )
 
 
 def _add_connect_arg(parser: argparse.ArgumentParser) -> None:

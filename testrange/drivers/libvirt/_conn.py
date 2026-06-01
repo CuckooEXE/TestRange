@@ -26,6 +26,7 @@ import contextlib
 import hashlib
 import socket
 import tempfile
+import threading
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,6 +117,12 @@ class LibvirtClient:
         # listener is opened in create_vm and accept()ed later by the sink.
         self._serial_dir: Path | None = None
         self._serial_listeners: dict[str, tuple[Any, str]] = {}
+        # Serializes QGA agent commands on this one shared connection so the run
+        # phase can poll several guests' readiness concurrently (ADR-0020). Held
+        # only for the duration of a single command — the readiness loops' sleeps
+        # happen outside it, so the waits still overlap. Re-entrant because a
+        # guest op (exec/read/write) issues several agent commands in sequence.
+        self.call_lock = threading.RLock()
 
     def connect(self) -> None:
         libvirt = _import_libvirt()
