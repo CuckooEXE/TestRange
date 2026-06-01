@@ -131,7 +131,7 @@ PLAN = Plan(
 )
 ```
 
-`examples/px_hello.py` is a scheme-pinned-Proxmox plan.
+`examples/capabilities-px.py` is a scheme-pinned-Proxmox plan.
 
 A scheme-pinned plan still **requires** `--profile` — the entry carries no
 connection. The profile's `driver` scheme **must** match the pinned scheme; a

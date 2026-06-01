@@ -989,9 +989,9 @@ docs/
     adr/                        # architecture decision records (0001–0010)
     index.md, conf.py           # Sphinx site
 examples/
-    hello_world.py  data_disk.py  native_agent.py
-    network_modes.py  private_public.py  px_hello.py
-    capabilities.py             # broad-coverage: every driver-facing feature
+    hello_world.py  native_agent.py
+    capabilities.py             # broad-coverage portable cert: every driver-facing feature
+    capabilities-px.py          # Proxmox-specific showcase (scheme-pinned)
 testrange/
     builders/
         base.py                 # Builder ABC (+ wait_ready)

@@ -26,7 +26,7 @@ The driver layer is multi-backend (ADR-0008). What ships today:
   run` of an example to green still needs a real backend.)
 - **Proxmox** — green end-to-end on a single-node PVE 9.x host (`proxmoxer`
   over the PVE REST API; `pip install -e '.[proxmox]'`). See
-  `examples/px_hello.py` for a runnable plan and the connection/credential +
+  `examples/capabilities-px.py` for a runnable plan and the connection/credential +
   build-egress prereqs. A dedicated setup page is pending (PVE-34); multi-node
   clusters and block storage are not yet supported (PVE-31, PVE-33).
 - **libvirt** — rebuilt against the current multi-backend ABC (BACKEND-1):

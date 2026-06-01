@@ -251,8 +251,9 @@ Switch("internet", Network("a"), cidr="10.53.0.0/24",
 Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="egress")
 ```
 
-The shipped `examples/network_modes.py` exercises four of these in one
-plan (`bare-sw`, `mgmt-sw`, `uplink-sw`, `both-sw`).
+The shipped `examples/capabilities.py` exercises these across its switches —
+an isolated `priv-sw` (bare), a `mgmt`+`uplink`+`nat` `pub-sw`, and the
+`nat`+`uplink` build switch.
 
 ## The build switch (`build_switch`)
 

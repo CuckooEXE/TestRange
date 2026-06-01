@@ -214,7 +214,7 @@ VMSpec(
 ```
 
 Seed the disk in `post_install_commands` (format, mount, write, persist via
-`/etc/fstab`); see `examples/data_disk.py`. Because the disk's `size_gb` and the
+`/etc/fstab`); see the `fileserver` VM in `examples/capabilities.py`. Because the disk's `size_gb` and the
 data-disk count fold into the build cache key, changing either rebuilds the set.
 
 ### Static-NIC netplan staging

@@ -59,9 +59,8 @@ TESTS = [test_ok]
 """
 
 # A VM with a data disk, on the Mock backend, for the build->capture->run-import
-# lifecycle assertions. Kept inline (not loaded from examples/data_disk.py, which
-# now targets ProxmoxHypervisor) so the Mock coverage doesn't depend on an
-# example's backend.
+# lifecycle assertions. Kept inline (not loaded from an example) so the Mock
+# coverage doesn't depend on an example's backend.
 _DATA_DISK_PLAN_SRC = """
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
