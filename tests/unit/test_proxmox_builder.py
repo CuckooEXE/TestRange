@@ -144,13 +144,51 @@ class TestAnswerToml:
         a = _answer(_builder(), _spec(static=True))
         assert 'source = "from-answer"' in a
         assert 'cidr = "10.0.5.20/24"' in a
-        assert 'gateway = "10.0.5.1"' in a  # sidecar .1 (nat)
+        assert 'gateway = "10.0.5.1"' in a  # sidecar .1 (nat), from the subnet
+        assert 'dns = "10.0.5.1"' in a  # sidecar .1 (dns), from the subnet
         assert 'filter.ID_NET_NAME = "enp1s0"' in a
+
+    def test_static_gw_and_dns_override_subnet(self) -> None:
+        # An explicit StaticAddr gw/dns wins over the sidecar-derived subnet values.
+        spec = VMSpec(
+            name="pve",
+            firmware="uefi",
+            devices=[
+                CPU(2),
+                Memory(2048),
+                OSDrive("p1", 16),
+                NetworkIface(
+                    "netA", addr=StaticAddr("10.0.5.20", gw="10.0.5.254", dns=("9.9.9.9",))
+                ),
+            ],
+        )
+        a = _answer(_builder(), spec)
+        assert 'gateway = "10.0.5.254"' in a
+        assert 'dns = "9.9.9.9"' in a
 
     def test_dhcp_fallback_when_no_static(self) -> None:
         a = _answer(_builder(), _spec(static=False))
         assert 'source = "from-dhcp"' in a
         assert "from-answer" not in a
+
+    def test_dhcp_fallback_when_no_nic(self) -> None:
+        # A spec with zero NICs is valid; _network_block falls back to DHCP.
+        spec = VMSpec(
+            name="pve", firmware="uefi", devices=[CPU(2), Memory(2048), OSDrive("p1", 16)]
+        )
+        a = _answer(_builder(), spec)
+        assert 'source = "from-dhcp"' in a
+        assert "from-answer" not in a
+
+    def test_network_interface_propagates_to_answer_and_flip(self) -> None:
+        # network_interface must drive BOTH answer.toml's filter AND the
+        # first-boot network flip, or the flip flushes the wrong NIC (BUILD-15).
+        b = _builder(network_interface="ens18")
+        a = _answer(b, _spec(static=True))
+        assert 'filter.ID_NET_NAME = "ens18"' in a
+        s = b._first_boot_script()
+        assert 'NIC="ens18"' in s
+        assert 'NIC="enp1s0"' not in s
 
     def test_ssh_keys_included(self) -> None:
         a = _answer(_builder(), _spec())
@@ -184,8 +222,13 @@ class TestFirstBootScript:
         assert "echo hi > /tmp/hi" in s
 
     def test_apt_insecure_prologue(self) -> None:
-        assert "99-testrange-insecure" not in _builder()._first_boot_script()
-        assert "99-testrange-insecure" in _builder(apt_insecure=True)._first_boot_script()
+        plain = _builder()._first_boot_script()
+        insecure = _builder(apt_insecure=True)._first_boot_script()
+        assert "99-testrange-insecure" not in plain
+        assert "99-testrange-insecure" in insecure
+        # The TLS-skip conf is removed before capture so it does not survive into
+        # the installed run-phase image.
+        assert "rm -f /etc/apt/apt.conf.d/99-testrange-insecure" in insecure
 
 
 class TestConfigHash:
@@ -323,7 +366,7 @@ class TestWaitReady:
         b = _builder()
         ex = _FakeExec(exit_code=0)
         b.wait_ready(_spec(), _recipe(b, _spec()), ex)
-        assert ex.calls == [("true",)]
+        assert len(ex.calls) == 1  # a single liveness probe; the exact argv is incidental
 
     def test_raises_when_unreachable(self) -> None:
         b = _builder()

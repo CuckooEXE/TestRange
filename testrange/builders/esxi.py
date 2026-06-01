@@ -1,4 +1,4 @@
-"""ESXiKickstartBuilder — kickstart-driven unattended ESXi 8 install.
+"""ESXiKickstartBuilder — kickstart-driven unattended ESXi install (validated on 8).
 
 Installs an ESXi node *as a guest* (nested-virt labs) via weasel's kickstart.
 Installer-origin (BUILD-1): ``os_disk_base()`` is None and ``boot_media()`` is
@@ -9,10 +9,11 @@ separate seed. The build-result contract lives in the kickstart's ``%firstboot``
 block (serial ``TESTRANGE-RESULT`` + poweroff, ADR-0012).
 
 Firmware comes from :attr:`VMSpec.firmware`. The proven-working combo is BIOS +
-i440fx + IDE single-CDROM; ``uefi`` is accepted but UNVALIDATED (ESXi 8 + OVMF +
-AHCI hits a "late-filesystems jumpstart plugin activation failed" event, and
-Secure Boot needs VMware's signed bootloader CA pre-installed in OVMF). The
-installer needs a system disk >= ~33 GiB — size the VM's ``OSDrive`` to >= 33.
+i440fx + IDE single-CDROM; ``uefi`` is accepted but UNVALIDATED (OVMF + AHCI hits
+a "late-filesystems jumpstart plugin activation failed" event, and Secure Boot
+needs VMware's signed bootloader CA pre-installed in OVMF). Size the VM's
+``OSDrive`` for the installer's system partitions (~33 GiB on 8.x); the installer
+itself fails loud on an undersized disk.
 
 Distinct from the ESXi *driver* (BACKEND-2) and the VMware Tools communicator
 (COMM-2): this builder only renders ks.cfg + patches the installer ISO; SSH (via
@@ -39,9 +40,15 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
 
-# ESXi 8 wants ~33 GiB for the system partitions; below this the install fails to
-# space-allocate. Surfaced as a fail-loud guard rather than a silent round-up.
-_MIN_OS_DISK_GB = 33
+
+def _reject_control_chars(value: str, what: str) -> None:
+    """Reject newlines/control chars that would break out of a ks.cfg directive."""
+    bad = {c for c in value if c == "\n" or c == "\r" or ord(c) < 0x20}
+    if bad:
+        raise ValueError(
+            f"ESXiKickstartBuilder {what} contains control characters {sorted(bad)!r} "
+            "that would corrupt the generated kickstart"
+        )
 
 
 class ESXiKickstartBuilder(Builder):
@@ -52,7 +59,7 @@ class ESXiKickstartBuilder(Builder):
         builder patches it (xorriso, ADR-0022) into a kickstart ISO during
         staging; this entry's content sha keys the cache.
       credentials: baked into the install. MUST include a ``root`` PosixCred
-        with a non-empty password (ESXi 8 complexity rules reject an empty one).
+        with a non-empty password (ESXi complexity rules reject an empty one).
         The root credential's SSH key, if present, is installed to
         ``/etc/ssh/keys-root/authorized_keys`` and sshd is enabled.
     """
@@ -77,8 +84,16 @@ class ESXiKickstartBuilder(Builder):
         if not isinstance(root, PosixCred) or not root.password:
             raise ValueError(
                 "ESXiKickstartBuilder's root Credential must be a PosixCred with a non-empty "
-                "password (ESXi 8 password-complexity rules reject an empty rootpw)"
+                "password (ESXi password-complexity rules reject an empty rootpw)"
             )
+        # The password lands raw on the ks.cfg ``rootpw`` line and the SSH key in
+        # a heredoc; a newline/control char would break out of the directive and
+        # emit a malformed (or directive-injecting) kickstart. Not a security
+        # boundary (lab guest install), but a footgun — reject at construction.
+        _reject_control_chars(root.password, "root password")
+        for c in creds:
+            if isinstance(c, PosixCred) and c.ssh_key is not None:
+                _reject_control_chars(c.ssh_key.auth_line, f"{c.username!r} SSH key")
         usernames = [c.username for c in creds]
         dupes = {u for u in usernames if usernames.count(u) > 1}
         if dupes:
@@ -146,11 +161,6 @@ class ESXiKickstartBuilder(Builder):
         (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
         """
         del recipe, addressing, macs, build_nic
-        if spec.os_drive.size_gb < _MIN_OS_DISK_GB:
-            raise ValueError(
-                f"ESXiKickstartBuilder needs an OSDrive >= {_MIN_OS_DISK_GB} GiB "
-                f"(ESXi 8 system partitions); got {spec.os_drive.size_gb}"
-            )
         root = self._root_credential()
         has_ssh = root.ssh_key is not None
         combined = (
@@ -176,8 +186,9 @@ class ESXiKickstartBuilder(Builder):
 
     def _render_kickstart(self) -> str:
         root = self._root_credential()
+        assert root.password is not None  # construction guarantees a non-empty root password
         ssh_key = root.ssh_key.auth_line if root.ssh_key is not None else None
-        return render_kickstart(root_password=root.password or "", ssh_key=ssh_key)
+        return render_kickstart(root_password=root.password, ssh_key=ssh_key)
 
     def _root_credential(self) -> PosixCred:
         for c in self._credentials:

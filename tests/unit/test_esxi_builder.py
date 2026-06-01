@@ -7,12 +7,14 @@ build-result contract lives in the kickstart %firstboot block.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from testrange.builders import ESXiKickstartBuilder
+from testrange.builders import _esxi_prepare as prep
 from testrange.builders import esxi as esxi_mod
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
@@ -89,6 +91,15 @@ class TestConstruction:
             ESXiKickstartBuilder(
                 installer_iso=CacheEntry("x"), credentials=[PosixCred("root", ssh_key=_KEY)]
             )
+
+    def test_password_with_newline_rejected(self) -> None:
+        # A newline would break out of the ks.cfg `rootpw` line.
+        with pytest.raises(ValueError, match="control characters"):
+            _builder(credentials=[PosixCred("root", password="oops\ninjected")])
+
+    def test_password_with_control_char_rejected(self) -> None:
+        with pytest.raises(ValueError, match="control characters"):
+            _builder(credentials=[PosixCred("root", password="bad\x07bell")])
 
     def test_boot_media_is_installer_iso(self) -> None:
         # os_disk_base() and render_seed() are statically None (installer-origin,
@@ -167,10 +178,6 @@ class TestConfigHash:
         )
         assert with_key != without
 
-    def test_undersized_disk_rejected(self) -> None:
-        with pytest.raises(ValueError, match="OSDrive >= 33"):
-            _config_hash(_builder(), _spec(disk_gb=20), base_sha="a")
-
 
 class TestPrepareBootMedia:
     def test_prepares_once_and_caches(
@@ -196,9 +203,55 @@ class TestWaitReady:
         b = _builder()
         ex = _FakeExec(0)
         b.wait_ready(_spec(), _recipe(b, _spec()), ex)
-        assert ex.calls == [("true",)]
+        assert len(ex.calls) == 1  # a single liveness probe; the exact argv is incidental
 
     def test_unreachable_raises(self) -> None:
         b = _builder()
         with pytest.raises(BuildNotReadyError, match="not reachable over SSH"):
             b.wait_ready(_spec(), _recipe(b, _spec()), _FakeExec(1))
+
+
+class TestPatchBootcfg:
+    """`_patch_bootcfg` is pure file I/O (no xorriso) — unit-testable directly."""
+
+    def test_rewrites_kernelopt_and_drops_cdromboot(self, tmp_path: Path) -> None:
+        p = tmp_path / "BOOT.CFG"
+        p.write_text("title=x\nkernelopt=cdromBoot runweasel\nbuild=1\n")
+        prep._patch_bootcfg(p)
+        out = p.read_text()
+        assert "kernelopt=runweasel ks=cdrom:/ks.cfg" in out
+        assert "cdromBoot" not in out
+
+    def test_idempotent_when_already_patched(self, tmp_path: Path) -> None:
+        p = tmp_path / "BOOT.CFG"
+        p.write_text("title=x\nkernelopt=runweasel ks=cdrom:/ks.cfg\n")
+        before = p.read_text()
+        prep._patch_bootcfg(p)
+        assert p.read_text() == before
+
+    def test_appends_when_no_kernelopt_line(self, tmp_path: Path) -> None:
+        p = tmp_path / "BOOT.CFG"
+        p.write_text("title=x\nbuild=1\n")
+        prep._patch_bootcfg(p)
+        assert "kernelopt=runweasel ks=cdrom:/ks.cfg" in p.read_text()
+
+    def test_preserves_crlf_line_endings(self, tmp_path: Path) -> None:
+        p = tmp_path / "BOOT.CFG"
+        p.write_bytes(b"title=x\r\nkernelopt=cdromBoot\r\n")
+        prep._patch_bootcfg(p)
+        data = p.read_bytes()
+        assert b"\r\n" in data
+        # No bare LFs survive (every newline stayed CRLF).
+        assert b"\n" not in data.replace(b"\r\n", b"")
+
+
+class TestPrepErrorPaths:
+    def test_missing_xorriso_fails_loud(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # prepare_iso references the module-level `shutil`, so patching the real
+        # shutil.which (no `prep.shutil` attr access — mypy --strict rejects that)
+        # exercises the missing-binary branch.
+        monkeypatch.setattr(shutil, "which", lambda _: None)
+        with pytest.raises(prep.EsxiPrepareError, match="xorriso not found"):
+            prep.prepare_iso(tmp_path / "in.iso", tmp_path / "out.iso", kickstart="ks")

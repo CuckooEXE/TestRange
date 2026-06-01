@@ -1,7 +1,7 @@
-# ADR-0022: `xorriso` is sanctioned for PVE installer-ISO preparation
+# ADR-0022: `xorriso` is sanctioned for installer-ISO preparation
 
 Status: Accepted
-Date: 2026-05-31
+Date: 2026-05-31 (rescoped 2026-06-01 to cover the ESXi prep module — BUILD-8)
 
 **Invokes [ADR-0001](0001-subprocess-ban.md)'s escape hatch.** That ADR bans
 `import subprocess` under `testrange/` but provides for exactly this case:
@@ -43,11 +43,14 @@ and libvirtd's internal `qemu-img convert` behind a single stream-API call.
 
 ## Decision
 
-**`xorriso` (libisoburn's CLI) is a sanctioned subprocess, used in exactly one
-module: `testrange/builders/_proxmox_prepare.py`.** Nothing else under
-`testrange/` may `import subprocess`.
+**`xorriso` (libisoburn's CLI) is a sanctioned subprocess, used in exactly two
+modules: `testrange/builders/_proxmox_prepare.py` and
+`testrange/builders/_esxi_prepare.py`.** Nothing else under `testrange/` may
+`import subprocess`. The same reasoning — hybrid/boot-sensitive installer ISOs a
+`pycdlib` rebuild would break — applies to both; they share the one external
+command with a fixed, internal-data-only argument vector (no shell).
 
-The module drives:
+### Proxmox (`_proxmox_prepare.py`)
 
 ```
 xorriso -return_with FAILURE 32 \
@@ -70,19 +73,40 @@ xorriso -return_with FAILURE 32 \
   three paths (UEFI via GPT, BIOS via El Torito, hybrid-USB via MBR boot code).
   Real write-side problems still surface as `FAILURE`/`FATAL` and exit non-zero.
 
+PVE 9.x only. 8.x put the activation file inside the installer initrd; that is
+a different prep strategy and out of scope.
+
+### ESXi (`_esxi_prepare.py`)
+
+The ESXi installer (weasel) activates kickstart mode when the kernel cmdline
+carries `ks=cdrom:/ks.cfg`. The module extracts and patches `/BOOT.CFG` (BIOS)
+and `/EFI/BOOT/BOOT.CFG` (UEFI, tolerated-absent on pre-7 ISOs), then re-emits
+the ISO with `ks.cfg` at the root. Three flags **differ** from the PVE path:
+
+- `-boot_image any patch` (NOT `keep`) — injecting files shifts the layout, and
+  ESXi's ISOLINUX boot-info-table carries a self-LBA checksum that must be
+  recomputed; `keep` leaves a stale checksum and SeaBIOS bombs with "ISOLINUX:
+  Image checksum error" before the kernel loads.
+- `-rockridge off` — ESXi's stripped cdfs is pure ISO9660 and rejects
+  Rock-Ridge-decorated entries; with RR on, `ks.cfg` is invisible to weasel.
+- `-compliance lowercase` — strict ISO9660 uppercases filenames, but weasel's
+  `ks=cdrom:/ks.cfg` lookup is case-sensitive; without this, `ks.cfg` lands as
+  `KS.CFG` and the install silently falls back to interactive. (`BOOT.CFG` is
+  authored uppercase on the source and stays that way.)
+
+`-return_with FAILURE 32` is shared (same benign post-write `SORRY`).
+
 Enforcement carve-out (mirrors ADR-0001's mechanism):
 
-- ruff's `flake8-tidy-imports.banned-api` gets a per-file ignore for
-  `testrange/builders/_proxmox_prepare.py`.
-- `tests/unit/test_subprocess_ban.py`'s source grep adds that one module to its
-  whitelist.
-- The module fails loud when `xorriso` is absent on `$PATH`, with the install
+- ruff's `flake8-tidy-imports.banned-api` gets a per-file ignore for **both**
+  `testrange/builders/_proxmox_prepare.py` and `_esxi_prepare.py`.
+- `tests/unit/test_subprocess_ban.py`'s source grep whitelists exactly those two
+  modules (and asserts each still exists and still imports `subprocess`, so a
+  stale whitelist entry can't silently widen the ban).
+- Each module fails loud when `xorriso` is absent on `$PATH`, with the install
   hint (`apt install xorriso` / `dnf install xorriso` / `brew install
   xorriso`). `xorriso` ships with libisoburn on every mainstream distro and is
   already in the Proxmox toolchain.
-
-PVE 9.x only. 8.x put the activation file inside the installer initrd; that is
-a different prep strategy and out of scope.
 
 ## Consequences
 
@@ -91,11 +115,11 @@ a different prep strategy and out of scope.
   later" — is preserved, because the surface is one module with one external
   command and a fixed argument vector built from internal data (no shell, no
   user-interpolated flags).
-- `xorriso` becomes a runtime system dependency of the `proxmox` extra's
-  installer-origin path. It is *not* required for the cloud-init builder, the
-  libvirt reference backend, or any run-phase operation — only for *building* a
-  PVE-node disk from installer media. Documented in the install notes for that
-  extra.
+- `xorriso` becomes a runtime system dependency of the installer-origin build
+  path (both `ProxmoxAnswerBuilder` and `ESXiKickstartBuilder`). It is *not*
+  required for the cloud-init builder, the libvirt reference backend, or any
+  run-phase operation — only for *building* a node disk from installer media.
+  Documented in `docs/user/drivers/index.md`.
 - The prepared ISO is a derived, cacheable artifact keyed by
   `(vanilla sha + first-boot digest)`, so the subprocess runs once per
   `(ISO version, first-boot script)` pair, not per build.

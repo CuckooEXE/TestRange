@@ -116,6 +116,39 @@ def builder_origin_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
     return tuple(out)
 
 
+def unsupported_firmware_findings(
+    plan: Plan, supported: Iterable[str], *, driver_name: str
+) -> tuple[PreflightFinding, ...]:
+    """Reject a VM whose ``spec.firmware`` the bound backend cannot realize.
+
+    ``spec.firmware`` (``bios``/``uefi``) must be reproduced identically at build
+    and run — a UEFI-installed disk panics under SeaBIOS (BUILD-1b) — so a backend
+    that cannot realize the requested firmware must fail loud here, before any
+    resource stands up, rather than define a VM under the wrong firmware. Each
+    driver passes the firmware set it realizes; a backend that grows support
+    widens its set. Backend-agnostic helper; one finding per offending VM.
+    """
+    supported_set = frozenset(supported)
+    out: list[PreflightFinding] = []
+    for vm in plan.hypervisor.vms:
+        fw = vm.spec.firmware
+        if fw not in supported_set:
+            out.append(
+                PreflightFinding(
+                    code="unsupported-firmware",
+                    message=(
+                        f"vm {vm.spec.name!r} requests firmware {fw!r}, but the "
+                        f"{driver_name} backend realizes only {sorted(supported_set)}"
+                    ),
+                    fix_hint=(
+                        f"set VMSpec.firmware to one of {sorted(supported_set)}, or run "
+                        "the plan against a backend that realizes the requested firmware"
+                    ),
+                )
+            )
+    return tuple(out)
+
+
 def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
     """Gate ``Switch(mgmt=True)`` until its cross-backend semantics are settled.
 

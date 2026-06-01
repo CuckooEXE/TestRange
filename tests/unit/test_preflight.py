@@ -7,7 +7,6 @@ from testrange.builders import CloudInitBuilder
 from testrange.builders.base import Builder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
-from testrange.credentials.base import Credential
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.networks import Network, Sidecar, Switch
 from testrange.preflight import (
@@ -15,31 +14,13 @@ from testrange.preflight import (
     PreflightReport,
     builder_origin_findings,
     unknown_uplink_findings,
+    unsupported_firmware_findings,
 )
 from testrange.vms import VMRecipe, VMSpec
-from tests.mock_driver import MockHypervisor
+from tests.mock_driver import MockHypervisor, OriginlessBuilder
 
 
-class _OriginlessBuilder(Builder):
-    """A builder that declares no OS-disk origin at all — the misconfiguration."""
-
-    @property
-    def credentials(self) -> tuple[Credential, ...]:
-        return ()
-
-    def os_disk_base(self) -> None:
-        return None
-
-    def config_hash(  # type: ignore[no-untyped-def]
-        self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
-    ):
-        return "0" * 16
-
-    def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
-        return None
-
-
-def _plan_with(builder: Builder) -> Plan:
+def _plan_with(builder: Builder, *, firmware: str = "bios") -> Plan:
     return Plan(
         "p",
         MockHypervisor(
@@ -47,7 +28,11 @@ def _plan_with(builder: Builder) -> Plan:
             pools=[StoragePool("pool1", 16)],
             vms=[
                 VMRecipe(
-                    spec=VMSpec(name="vm", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)]),
+                    spec=VMSpec(
+                        name="vm",
+                        firmware=firmware,
+                        devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
+                    ),
                     builder=builder,
                     communicator=SSHCommunicator("u"),
                 )
@@ -62,16 +47,33 @@ class TestBuilderOriginFindings:
         assert builder_origin_findings(plan) == ()
 
     def test_no_origin_is_flagged(self) -> None:
-        findings = builder_origin_findings(_plan_with(_OriginlessBuilder()))
+        findings = builder_origin_findings(_plan_with(OriginlessBuilder()))
         assert len(findings) == 1
         assert findings[0].code == "no-os-disk-origin"
 
     def test_installer_origin_is_clean(self) -> None:
-        class _InstallerBuilder(_OriginlessBuilder):
+        class _InstallerBuilder(OriginlessBuilder):
             def boot_media(self) -> CacheEntry:
                 return CacheEntry("installer-iso")
 
         assert builder_origin_findings(_plan_with(_InstallerBuilder())) == ()
+
+
+class TestUnsupportedFirmwareFindings:
+    """The per-driver firmware-capability gate (BUILD-1b): a VM requesting a
+    firmware the bound backend can't realize is rejected at preflight, before any
+    resource stands up. Each driver passes the set it realizes."""
+
+    def test_supported_firmware_is_clean(self) -> None:
+        plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")), firmware="uefi")
+        assert unsupported_firmware_findings(plan, {"bios", "uefi"}, driver_name="D") == ()
+
+    def test_unsupported_firmware_is_flagged(self) -> None:
+        plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")), firmware="uefi")
+        findings = unsupported_firmware_findings(plan, {"bios"}, driver_name="BiosOnly")
+        assert [f.code for f in findings] == ["unsupported-firmware"]
+        assert "uefi" in findings[0].message
+        assert "BiosOnly" in findings[0].message
 
 
 class TestReport:

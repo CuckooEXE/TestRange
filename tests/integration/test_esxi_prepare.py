@@ -7,7 +7,7 @@ root and the boot config's kernelopt was rewritten to ``runweasel
 ks=cdrom:/ks.cfg``. Skips where ``xorriso`` is absent.
 
 The runnable slice of the nested-ESXi smoke (BUILD-8); the full install to green
-needs a real ESXi 8 ISO + nested KVM (BIOS/i440fx/IDE) + a bound profile.
+needs a real ESXi ISO + nested KVM (BIOS/i440fx/IDE) + a bound profile.
 """
 
 from __future__ import annotations
@@ -69,11 +69,45 @@ def test_prepare_injects_ks_and_patches_kernelopt(tmp_path: Path) -> None:
 
     assert out.exists()
     names = _iso_filenames(out)
-    assert "KS.CFG" in names or "ks.cfg" in names, f"ks.cfg not injected: {names}"
+    # Must be LOWERCASE: ESXi cdfs is case-sensitive and weasel looks up the exact
+    # `ks=cdrom:/ks.cfg`. An uppercase `KS.CFG` (strict-ISO9660 default) would
+    # silently fail the install — the bug the `-compliance lowercase` flag fixes.
+    assert "ks.cfg" in names, f"ks.cfg not injected lowercase: {names}"
+    assert "KS.CFG" not in names, f"ks.cfg landed uppercase (weasel would ENOENT): {names}"
     # The boot config's kernelopt was rewritten and the original cdromBoot dropped.
     patched = _read_iso_file(out, "/BOOT.CFG;1").decode("utf-8", "replace")
     assert "ks=cdrom:/ks.cfg" in patched, patched
     assert "cdromBoot" not in patched, patched
+
+
+def test_prepare_rejects_non_esxi_iso(tmp_path: Path) -> None:
+    # An ISO with no /BOOT.CFG is not a recognizable ESXi installer image.
+    from testrange.builders._esxi_prepare import EsxiPrepareError, prepare_iso, render_kickstart
+
+    pycdlib = pytest.importorskip("pycdlib")
+    src = tmp_path / "notesxi.iso"
+    iso = pycdlib.PyCdlib()
+    iso.new(interchange_level=3, vol_ident="NOTESXI")
+    payload = b"nope\n"
+    iso.add_fp(io.BytesIO(payload), len(payload), "/OTHER.TXT;1")
+    with src.open("wb") as fp:
+        iso.write_fp(fp)
+    iso.close()
+
+    with pytest.raises(EsxiPrepareError, match="not a recognizable ESXi"):
+        prepare_iso(src, tmp_path / "out.iso", kickstart=render_kickstart(root_password="VMware1!"))
+
+
+def test_nonzero_xorriso_exit_wrapped(tmp_path: Path) -> None:
+    # A valid ESXi-shaped ISO whose -commit cannot write (output parent missing)
+    # exercises the non-zero-exit wrapper in _run_xorriso.
+    from testrange.builders._esxi_prepare import EsxiPrepareError, prepare_iso, render_kickstart
+
+    src = tmp_path / "esxi.iso"
+    _make_esxi_like_iso(src)
+    bad_out = tmp_path / "nonexistent-dir" / "out.iso"
+    with pytest.raises(EsxiPrepareError, match="xorriso failed"):
+        prepare_iso(src, bad_out, kickstart=render_kickstart(root_password="VMware1!"))
 
 
 def test_render_kickstart_rejects_empty_password() -> None:

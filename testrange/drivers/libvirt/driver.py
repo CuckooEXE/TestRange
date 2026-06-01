@@ -38,6 +38,7 @@ from testrange.preflight import (
     PreflightReport,
     builder_origin_findings,
     unknown_uplink_findings,
+    unsupported_firmware_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -65,6 +66,10 @@ class LibvirtDriver(HypervisorDriver):
     """libvirt backend. Holds exactly one :class:`LibvirtClient`."""
 
     DRIVER_NAME = "LibvirtDriver"
+
+    # Firmware this backend realizes (BUILD-1b): bios via SeaBIOS on `pc`, uefi
+    # via OVMF (libvirt's `firmware='efi'` auto-descriptor) on `q35` — see _vm._os_xml.
+    SUPPORTED_FIRMWARES = frozenset({"bios", "uefi"})
 
     def __init__(
         self,
@@ -125,6 +130,11 @@ class LibvirtDriver(HypervisorDriver):
         switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(builder_origin_findings(plan))
+        findings.extend(
+            unsupported_firmware_findings(
+                plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
+            )
+        )
         return PreflightReport(findings=tuple(findings))
 
     def _resolve_uplink(self, switch: Switch) -> str | None:

@@ -29,6 +29,10 @@ The driver layer is multi-backend (ADR-0008). What ships today:
   `examples/capabilities-px.py` for a runnable plan and the connection/credential +
   build-egress prereqs. A dedicated setup page is pending (PVE-34); multi-node
   clusters and block storage are not yet supported (PVE-31, PVE-33).
+  Installer-origin builders (`ProxmoxAnswerBuilder`, `ESXiKickstartBuilder`) also
+  need the system `xorriso` binary on the orchestrator host to prepare the
+  installer ISO (`apt install xorriso` / `dnf install xorriso` / `brew install
+  xorriso`, ADR-0022); it is not needed for cloud-init/image-origin builds.
 - **libvirt** — rebuilt against the current multi-backend ABC (BACKEND-1):
   VM lifecycle, L2 via the libvirt network API + sidecar DHCP discovery, the
   serial build-result sink, QGA guest-ops, and per-run directory pools with

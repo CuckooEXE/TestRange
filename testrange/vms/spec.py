@@ -20,13 +20,14 @@ from testrange.devices.memory.base import Memory
 from testrange.devices.network.base import NetworkIface
 
 # Platform firmware the VM boots under. ``bios`` is SeaBIOS (the cross-backend
-# default cloud images expect); ``uefi`` is OVMF, required by installer-origin
-# builders whose media only boots under EFI (e.g. the PVE installer's
-# x86_64-efi GRUB). Modeled as a validated str — matching the project's other
-# hardware knobs (e.g. ``ProxmoxHardDrive.bus``) rather than an enum. Firmware
-# is a whole-VM property, NOT a builder one: a UEFI install produces a disk that
-# panics under SeaBIOS, so the *same* firmware must be reproduced at run-phase
-# create — hence it lives on the spec, which both phases read (BUILD-1b).
+# default cloud images expect); ``uefi`` is OVMF — the firmware the installer
+# media was validated under (e.g. booting the PVE installer via its x86_64-efi
+# GRUB path rather than the BIOS El-Torito one). Modeled as a validated str —
+# matching the project's other hardware knobs (e.g. ``ProxmoxHardDrive.bus``)
+# rather than an enum. Firmware is a whole-VM property, NOT a builder one: a UEFI
+# install produces a disk that panics under SeaBIOS, so the *same* firmware must
+# be reproduced at run-phase create — hence it lives on the spec, which both
+# phases read (BUILD-1b).
 FIRMWARES = frozenset({"bios", "uefi"})
 
 

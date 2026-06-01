@@ -43,6 +43,7 @@ from testrange.preflight import (
     PreflightReport,
     builder_origin_findings,
     unknown_uplink_findings,
+    unsupported_firmware_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -116,6 +117,10 @@ class ProxmoxDriver(HypervisorDriver):
 
     DRIVER_NAME = "ProxmoxDriver"
 
+    # Firmware this backend realizes (BUILD-1b): bios via SeaBIOS, uefi via OVMF
+    # (`bios=ovmf` + an efidisk0 on q35) — see _vm.create_vm.
+    SUPPORTED_FIRMWARES = frozenset({"bios", "uefi"})
+
     def __init__(
         self,
         conn: ProxmoxConn,
@@ -183,6 +188,11 @@ class ProxmoxDriver(HypervisorDriver):
         switches = [*plan.hypervisor.all_switches, build_switch]
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(builder_origin_findings(plan))
+        findings.extend(
+            unsupported_firmware_findings(
+                plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
+            )
+        )
         findings.extend(self._uplink_bridge_findings(plan, build_switch))
         findings.extend(self._import_content_findings())
         return PreflightReport(findings=tuple(findings))

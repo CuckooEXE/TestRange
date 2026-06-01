@@ -15,9 +15,9 @@ Torito boot record and strips the hybrid GPT, so the prepared ISO boots to
 
 We therefore drive ``xorriso`` with ``-boot_image any keep``, which preserves
 the original boot infrastructure byte-for-byte while appending the new files.
-This is the **only** sanctioned ``subprocess`` use under ``testrange/``; the
-project-wide ban (ADR-0001) carves out exactly this with its own ADR and module
-(ADR-0022). ``xorriso`` ships with libisoburn on every mainstream distro.
+This is a sanctioned ``subprocess`` use (ADR-0022, shared with the ESXi prep
+module ``_esxi_prepare.py``); the project-wide ban (ADR-0001) carves out exactly
+those two modules. ``xorriso`` ships with libisoburn on every mainstream distro.
 
 PVE 8.x used a different activation mechanism (the mode file lived inside the
 installer initrd), so this module is intentionally PVE 9.x-shaped.

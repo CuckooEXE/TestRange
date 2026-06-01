@@ -80,3 +80,20 @@ def test_missing_xorriso_fails_loud(tmp_path: Path, monkeypatch: pytest.MonkeyPa
             partition_label="PROXMOX-AIS",
             first_boot_script="#!/bin/bash\n",
         )
+
+
+def test_nonzero_xorriso_exit_wrapped(tmp_path: Path) -> None:
+    # A valid source whose -commit cannot write (output parent missing) drives a
+    # genuine non-zero xorriso exit; the wrapper surfaces it loud.
+    from testrange.builders._proxmox_prepare import ProxmoxPrepareError, prepare_iso
+
+    src = tmp_path / "source.iso"
+    _make_source_iso(src)
+    bad_out = tmp_path / "nonexistent-dir" / "out.iso"
+    with pytest.raises(ProxmoxPrepareError, match="failed"):
+        prepare_iso(
+            src,
+            bad_out,
+            partition_label="PROXMOX-AIS",
+            first_boot_script="#!/bin/bash\n",
+        )

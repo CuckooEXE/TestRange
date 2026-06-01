@@ -103,19 +103,18 @@ class Builder(ABC):
 
         The orchestrator resolves :meth:`boot_media` to a local file and passes
         its path here; the returned path is what gets uploaded and booted.
-        Default identity — most installer media boots as-is.
+        Default identity — most installer media boots as-is. An installer-origin
+        builder whose installer needs an activation payload baked into the booted
+        ISO overrides this to return a transformed copy.
 
-        A builder whose installer needs an activation payload baked into the
-        booted ISO overrides this: the PVE auto-installer, for instance, only
-        runs unattended when ``/auto-installer-mode.toml`` (and the first-boot
-        script) are present at the ISO root, so its builder returns a *prepared*
-        copy (cached, keyed by the vanilla sha + first-boot digest). The vanilla
-        medium's content sha still keys the cache via ``config_hash``'s
-        ``base_sha``; any prep that varies the installed system (the first-boot
-        script) is folded into ``config_hash`` separately by the builder, so the
-        transform here need not be content-addressed by the orchestrator. Called
-        only on a build miss, so an expensive prep (ISO rewrite) runs at most
-        once per ``(medium, script)`` pair.
+        Called once per build miss (never on a cache hit), with the same resolved
+        ``media_path`` each time — the orchestrator does **not** memoize across
+        misses, so a builder whose transform is expensive (an ISO rewrite) owns
+        its own caching, keyed however it likes. The vanilla medium's content sha
+        already keys the build cache via ``config_hash``'s ``base_sha``; a
+        transform that varies the installed system must fold its inputs into
+        ``config_hash`` itself, so the orchestrator need not content-address the
+        returned path.
         """
         return media_path
 

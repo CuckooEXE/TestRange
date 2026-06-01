@@ -23,18 +23,19 @@ from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
-from testrange.devices.network import NetworkIface
+from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.base import VolumeRef
 from testrange.exceptions import BuildFailedError, DriverError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
+from testrange.networks.base import BuildNic
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.backend import ResolvedBackend
-from testrange.orchestrator.build_phase import build_phase
+from testrange.orchestrator.build_phase import _VMBuildPlan, build_phase
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms import VMRecipe, VMSpec
-from tests.mock_driver import MockDriver, MockHypervisor
+from tests.mock_driver import MockDriver, MockHypervisor, OriginlessBuilder
 
 
 def _plan(*, data_disks: int = 1) -> Plan:
@@ -275,24 +276,7 @@ class TestBuildPhase:
         # (os_disk_base) NOR a boot medium (boot_media) has no way to populate an
         # OS disk and fails loud at probe. (The installer-origin happy path —
         # os_disk_base None + boot_media set — is covered separately.)
-        from testrange.builders.base import Builder
-        from testrange.credentials.base import Credential
-
-        class _OriginlessBuilder(Builder):
-            @property
-            def credentials(self) -> tuple[Credential, ...]:
-                return ()
-
-            def os_disk_base(self) -> None:
-                return None
-
-            def config_hash(  # type: ignore[no-untyped-def]
-                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
-            ):
-                return "0" * 16
-
-            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
-                return b""
+        from tests.mock_driver import OriginlessBuilder
 
         cache, driver = env
         plan = Plan(
@@ -313,7 +297,7 @@ class TestBuildPhase:
                                 NetworkIface("netA"),
                             ],
                         ),
-                        builder=_OriginlessBuilder(),
+                        builder=OriginlessBuilder(),
                         communicator=SSHCommunicator("u"),
                     ),
                 ],
@@ -391,17 +375,14 @@ class TestBuildPhase:
         assert sidecar.firmware == "bios"
         assert sidecar.boot_media is None
 
-        # The OS disk was materialized BLANK (create_blank_volume), and the
-        # install medium was uploaded to the pool (the sidecar uploads its own
-        # base too, so we assert the boot medium is among the uploads — not that
-        # it is the only one).
-        ops = [name for name, _, _ in driver.calls]
-        assert "create_blank_volume" in ops
+        # Behavioral, not string-sniffing: the recorded OS-disk ref was created
+        # BLANK and never base-uploaded, and the recorded boot-media ref was
+        # uploaded to the pool.
+        blank_targets = [c[1][0] for c in driver.calls if c[0] == "create_blank_volume"]
         upload_targets = [c[1][0] for c in driver.calls if c[0] == "upload_to_pool"]
-        assert any("bootmedia" in t for t in upload_targets)
-        # The build VM's OS disk was never base-uploaded (it's blank): no upload
-        # targets a ``build_vm`` qcow2 (the boot medium is a ``-bootmedia.iso``).
-        assert not any(t.endswith(".qcow2") and "build_vm" in t for t in upload_targets)
+        assert created.os_disk in blank_targets
+        assert created.os_disk not in upload_targets
+        assert created.boot_media in upload_targets
 
         # And the build produced a cached OS disk (full lifecycle reached capture).
         assert _built_names(cache)
@@ -667,3 +648,48 @@ class TestSidecarReadinessGate:
             run_phase(ctx)
         # The user VM never started — the gate blocked first.
         assert not any(c[0] == "create_vm" and c[1][0].startswith("tr_vm_") for c in driver.calls)
+
+
+class TestVMBuildPlanOriginInvariant:
+    """_VMBuildPlan must carry exactly one OS-disk origin (ORCH-21): base_path
+    XOR boot_media_path. installer_origin reads base_path alone, so 'both' would
+    silently drop the boot medium and 'neither' would yield a blank, unbootable
+    disk — the dataclass backstops a future edit that violates this."""
+
+    def _make(self, *, base_path: Path | None, boot_media_path: Path | None) -> _VMBuildPlan:
+        sw = Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+        vm = VMRecipe(
+            spec=VMSpec(name="vm", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)]),
+            builder=OriginlessBuilder(),
+            communicator=SSHCommunicator("u"),
+        )
+        return _VMBuildPlan(
+            vm=vm,
+            builder=OriginlessBuilder(),
+            config_hash="0" * 16,
+            macs=(),
+            build_nic=BuildNic(
+                mac="02:00:00:aa:bb:cc",
+                network="n",
+                addr=StaticAddr("10.0.0.3"),
+                addressing=NetworkAddressing.from_switch(sw),
+            ),
+            base_path=base_path,
+            boot_media_path=boot_media_path,
+            roles=("os",),
+            cached_paths=None,
+        )
+
+    def test_image_origin_ok(self) -> None:
+        self._make(base_path=Path("/base.qcow2"), boot_media_path=None)
+
+    def test_installer_origin_ok(self) -> None:
+        self._make(base_path=None, boot_media_path=Path("/inst.iso"))
+
+    def test_both_origins_rejected(self) -> None:
+        with pytest.raises(OrchestratorError, match="exactly one OS-disk origin"):
+            self._make(base_path=Path("/base.qcow2"), boot_media_path=Path("/inst.iso"))
+
+    def test_no_origin_rejected(self) -> None:
+        with pytest.raises(OrchestratorError, match="exactly one OS-disk origin"):
+            self._make(base_path=None, boot_media_path=None)

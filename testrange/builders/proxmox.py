@@ -199,8 +199,10 @@ class ProxmoxAnswerBuilder(Builder):
         separately by :meth:`render_seed`.
         """
         script = self._first_boot_script()
+        # Key the prepared ISO on both baked-in inputs: the first-boot script and
+        # the partition_label (which lands in /auto-installer-mode.toml).
         digest = hashlib.sha256(
-            (script + "\x00" + self.partition_label).encode("utf-8")
+            (self._first_boot_digest() + "\x00" + self.partition_label).encode("utf-8")
         ).hexdigest()[:16]
         prepared = media_path.parent / f"{media_path.stem}-prepared-{digest}.iso"
         if not prepared.exists():
@@ -239,9 +241,7 @@ class ProxmoxAnswerBuilder(Builder):
         settings = "|".join(
             [self.country, self.keyboard, self.timezone, self.fqdn_domain, self.mailto]
         )
-        first_boot_digest = hashlib.sha256(self._first_boot_script().encode("utf-8")).hexdigest()[
-            :24
-        ]
+        first_boot_digest = self._first_boot_digest()[:24]
         combined = (
             f"settings:{settings}\n---\nfqdn:{recipe.name}.{self.fqdn_domain}\n---\n"
             f"root-password:{root.password}\n---\nnetwork:\n{network}\n---\n"
@@ -293,6 +293,7 @@ class ProxmoxAnswerBuilder(Builder):
         installed system where ``[first-boot]`` runs and powers off.
         """
         root = self._root_credential()
+        assert root.password is not None  # construction guarantees a non-empty root password
         ssh_keys = [
             c.ssh_key.auth_line
             for c in self._credentials
@@ -304,7 +305,7 @@ class ProxmoxAnswerBuilder(Builder):
             f"timezone = {_toml_str(self.timezone)}",
             f"fqdn = {_toml_str(f'{recipe.name}.{self.fqdn_domain}')}",
             f"mailto = {_toml_str(self.mailto)}",
-            f"root-password = {_toml_str(root.password or '')}",
+            f"root-password = {_toml_str(root.password)}",
         ]
         if ssh_keys:
             global_block.append(
@@ -372,12 +373,13 @@ class ProxmoxAnswerBuilder(Builder):
         """Render ``/proxmox-first-boot``: network-flip → repo-swap → provisioning
         → framed serial result → poweroff, all fail-fast.
 
-        Depends only on builder config (packages/commands/apt_insecure), so the
-        prepared ISO keys on this script's digest (:meth:`prepare_boot_media`).
+        Depends only on builder config (network_interface/packages/commands/
+        apt_insecure), so the prepared ISO keys on this script's digest
+        (:meth:`prepare_boot_media`).
         """
         apt_pkgs = [p.name for p in self.packages if isinstance(p, Apt)]
         pips = [p for p in self.packages if isinstance(p, Pip)]
-        lines = [_FIRST_BOOT_PROLOGUE, _NETWORK_FLIP, _REPO_SWAP]
+        lines = [_FIRST_BOOT_PROLOGUE, _network_flip(self.network_interface), _REPO_SWAP]
         if self.apt_insecure:
             lines.append(_APT_INSECURE)
         lines.append("apt-get update")
@@ -385,8 +387,21 @@ class ProxmoxAnswerBuilder(Builder):
             lines.append(f"apt-get install -y {' '.join(apt_pkgs)}")
         lines.extend(_pip_install_lines(pips))
         lines.extend(self.post_install_commands)
+        if self.apt_insecure:
+            # Drop the build-time TLS-skip before capture so it does not survive
+            # into the installed (run-phase) system.
+            lines.append(f"rm -f {_APT_INSECURE_CONF}")
         lines.append(_FIRST_BOOT_FOOTER)
         return "\n".join(lines) + "\n"
+
+    def _first_boot_digest(self) -> str:
+        """Full SHA-256 hex of the first-boot script; callers slice as needed.
+
+        The single source for hashing the script — :meth:`config_hash` (cache
+        key) and :meth:`prepare_boot_media` (prepared-ISO filename) both derive
+        from this, so they can never drift on what "the script's digest" means.
+        """
+        return hashlib.sha256(self._first_boot_script().encode("utf-8")).hexdigest()
 
     def _build_seed_iso_bytes(self, answer_toml: str) -> bytes:
         """The ``PROXMOX-AIS``-labelled ISO carrying ``/answer.toml`` (pycdlib)."""
@@ -398,7 +413,7 @@ class ProxmoxAnswerBuilder(Builder):
             iso.add_fp(
                 io.BytesIO(data),
                 len(data),
-                "/ANSWER.TOM;1",
+                "/ANSWER.;1",
                 joliet_path="/answer.toml",
             )
             buf = io.BytesIO()
@@ -430,12 +445,17 @@ __tr_emit_fail() {{
 trap __tr_emit_fail ERR
 set -eE"""
 
+
 # Network-flip: the answer.toml-installed static lives on vmbr0 (the L3 bridge,
 # with the physical NIC enslaved). Flush it + drop the default route, then DHCP
 # off the build switch's sidecar so apt reaches the mirror. /etc/network/
-# interfaces on disk is untouched, so the run boot comes up on the static.
-_NETWORK_FLIP = """\
-NIC="enp1s0"
+# interfaces on disk is untouched, so the run boot comes up on the static. The
+# NIC name is the same one answer.toml's filter.ID_NET_NAME applied the static
+# to (``network_interface``), so the two must agree — hence it is threaded in
+# rather than hard-coded.
+def _network_flip(nic: str) -> str:
+    return f"""\
+NIC="{nic}"
 BR="vmbr0"
 ip addr flush dev "$BR" 2>/dev/null || true
 ip addr flush dev "$NIC" 2>/dev/null || true
@@ -446,6 +466,7 @@ done
 ip link set "$NIC" up
 ip link set "$BR" up
 dhclient -1 -v "$BR\""""
+
 
 # Swap the enterprise repo (401s without a subscription, tanks apt under set -e)
 # for the public no-subscription mirror. Both .list and .sources variants removed
@@ -461,10 +482,12 @@ echo "deb http://download.proxmox.com/debian/pve $codename pve-no-subscription" 
 export DEBIAN_FRONTEND=noninteractive"""
 
 # apt_insecure: skip TLS peer/host verification for HTTPS apt (internal mirror
-# with a CA outside the default trust store). Survives in the installed system.
-_APT_INSECURE = """\
+# with a CA outside the default trust store). Build-time only — _first_boot_script
+# removes the conf before capture so it does NOT survive into the run image.
+_APT_INSECURE_CONF = "/etc/apt/apt.conf.d/99-testrange-insecure"
+_APT_INSECURE = f"""\
 mkdir -p /etc/apt/apt.conf.d
-cat >/etc/apt/apt.conf.d/99-testrange-insecure <<'EOF'
+cat >{_APT_INSECURE_CONF} <<'EOF'
 Acquire::https::Verify-Peer "false";
 Acquire::https::Verify-Host "false";
 EOF"""

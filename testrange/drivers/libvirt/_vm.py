@@ -97,7 +97,7 @@ def _disk_xml(path: str, dev: str, *, boot_order: int | None = None) -> str:
     )
 
 
-def _cdrom_xml(path: str, dev: str = "sda", *, boot_order: int | None = None) -> str:
+def _cdrom_xml(path: str, dev: str, *, boot_order: int | None = None) -> str:
     return (
         "<disk type='file' device='cdrom'>"
         "<driver name='qemu' type='raw'/>"

@@ -1510,7 +1510,9 @@ The seam:
   pending live-PVE certification — libvirt is the certified installer-origin
   path).
 - Preflight (`builder_origin_findings`) rejects a builder that declares neither
-  origin, before any backend resource stands up.
+  origin, and each driver's preflight runs `unsupported_firmware_findings`
+  against its own `SUPPORTED_FIRMWARES` so a VM requesting a firmware the bound
+  backend can't realize fails loud — both before any backend resource stands up.
 
 Two concretes ship on this seam:
 
@@ -1519,11 +1521,13 @@ Two concretes ship on this seam:
   contract live in `/proxmox-first-boot` (PVE has no `answer.toml` runcmd
   equivalent): network-flip → repo-swap → threaded packages/commands → framed
   `TESTRANGE-RESULT:` to serial → poweroff.
-- **`ESXiKickstartBuilder`** (BUILD-8): an ESXi 8 node via weasel's kickstart.
-  **Single-CDROM** — `render_seed()` returns `None`; the ks.cfg is patched *into*
-  the boot ISO (`ks=cdrom:/ks.cfg`, two-pass xorriso: patch each `BOOT.CFG`
-  kernelopt + inject ks.cfg, `-rockridge off` + `-boot_image any patch`). The
-  build-result contract lives in the kickstart `%firstboot` block.
+- **`ESXiKickstartBuilder`** (BUILD-8): an ESXi node (validated on 8) via
+  weasel's kickstart. **Single-CDROM** — `render_seed()` returns `None`; the
+  ks.cfg is patched *into* the boot ISO (`ks=cdrom:/ks.cfg`, two-pass xorriso:
+  patch each `BOOT.CFG` kernelopt + inject ks.cfg, `-rockridge off` +
+  `-boot_image any patch` + `-compliance lowercase` so the case-sensitive
+  `ks.cfg` lookup resolves). The build-result contract lives in the kickstart
+  `%firstboot` block.
 
 That no-separate-seed shape forced a contract refinement: the **serial sink and
 the build-vs-run discriminator key on `seed OR boot_media`**, not seed presence

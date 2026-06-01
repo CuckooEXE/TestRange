@@ -201,9 +201,9 @@ class HypervisorDriver(ABC):
 
         ``kind`` is one of the orchestrator's logical volume kinds
         (``build_disk``, ``run_disk``, ``data_disk``, ``base_image``,
-        ``build_seed``). Drivers return the right extension for their
-        on-disk format (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for
-        cloud-init seeds).
+        ``build_seed``, ``boot_iso``). Drivers return the right extension for
+        their on-disk format (e.g., ``.qcow2`` for libvirt disks, ``.iso`` for
+        cloud-init seeds and installer boot media).
         """
 
     @abstractmethod
@@ -467,9 +467,9 @@ class HypervisorDriver(ABC):
     def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
         """Destroy a resource by kind (default dispatch).
 
-        Volume kinds (``build_disk``, ``build_seed``, ``data_disk``,
-        ``run_disk``) require a ``pool_backend`` in ``metadata`` so the
-        driver knows which pool to remove the volume from.
+        Volume kinds (``build_disk``, ``build_seed``, ``boot_iso``,
+        ``data_disk``, ``run_disk``) require a ``pool_backend`` in ``metadata``
+        so the driver knows which pool to remove the volume from.
         """
         if kind in ("network", "build_network"):
             self.destroy_network(backend_name)
@@ -480,6 +480,7 @@ class HypervisorDriver(ABC):
         elif kind in (
             "build_disk",
             "build_seed",
+            "boot_iso",
             "run_disk",
             "data_disk",
             "base_image",

@@ -21,8 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
+from testrange.builders.base import Builder
 from testrange.communicators.base import ExecResult
 from testrange.connect import BackendProfile, register_profile
+from testrange.credentials.base import Credential
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
@@ -52,6 +54,7 @@ _SUFFIXES = {
     "data_disk": ".qcow2",
     "base_image": ".qcow2",
     "build_seed": ".iso",
+    "boot_iso": ".iso",
     "sidecar_disk": ".qcow2",
     "sidecar_config": ".iso",
 }
@@ -82,6 +85,31 @@ class _CreatedVM:
     vm_name: str
     firmware: str
     boot_media: str | None
+    os_disk: str
+
+
+class OriginlessBuilder(Builder):
+    """A builder that declares no OS-disk origin at all (``os_disk_base`` and
+    ``boot_media`` both ``None``) — the misconfiguration the origin gates reject.
+
+    Shared by the preflight and build-phase suites; subclass and override
+    ``boot_media``/``os_disk_base`` for the installer-/image-origin happy paths.
+    """
+
+    @property
+    def credentials(self) -> tuple[Credential, ...]:
+        return ()
+
+    def os_disk_base(self) -> None:
+        return None
+
+    def config_hash(  # type: ignore[no-untyped-def]
+        self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+    ):
+        return "0" * 16
+
+    def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+        return None
 
 
 # Default serial output of a clean build: the positive token the orchestrator
@@ -336,7 +364,7 @@ class MockDriver(HypervisorDriver):
         build_nic: BuildNic | None = None,
         boot_media_ref: VolumeRef | None = None,
     ) -> Any:
-        del plan_name, os_disk_ref, seed_iso_ref
+        del plan_name, seed_iso_ref
         if self.fail_create_vm:
             raise RuntimeError("simulated create_vm failure")
         # The NICs actually attached: the single build NIC at build (ADR-0017),
@@ -352,6 +380,7 @@ class MockDriver(HypervisorDriver):
             vm_name=spec.name,
             firmware=spec.firmware,
             boot_media=str(boot_media_ref) if boot_media_ref is not None else None,
+            os_disk=str(os_disk_ref),
         )
         self._record(
             "create_vm", backend_name, spec.name, tuple(str(r) for r in data_disk_refs), nics

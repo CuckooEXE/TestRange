@@ -25,6 +25,7 @@ _SUFFIXES = {
     "data_disk": ".qcow2",
     "base_image": ".qcow2",
     "build_seed": ".iso",
+    "boot_iso": ".iso",
     "sidecar_disk": ".qcow2",
     "sidecar_config": ".iso",
 }

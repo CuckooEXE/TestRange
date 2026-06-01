@@ -83,6 +83,20 @@ class _VMBuildPlan:
     # role -> cached path on a full hit; None when any role misses (whole-VM miss).
     cached_paths: dict[str, Path] | None
 
+    def __post_init__(self) -> None:
+        # Exactly one OS-disk origin: an image base (upload+grow) XOR an installer
+        # boot medium (blank disk the installer partitions). installer_origin reads
+        # base_path alone, so a plan with *both* set would silently drop the boot
+        # medium and one with *neither* would yield a blank, unbootable disk.
+        # _probe_vm constructs these mutually exclusive; this backstops a future
+        # edit (or a test) that doesn't.
+        if (self.base_path is None) == (self.boot_media_path is None):
+            raise OrchestratorError(
+                f"vm {self.vm.name!r}: _VMBuildPlan needs exactly one OS-disk origin "
+                f"(base_path xor boot_media_path); got base_path={self.base_path!r}, "
+                f"boot_media_path={self.boot_media_path!r}"
+            )
+
     @property
     def installer_origin(self) -> bool:
         return self.base_path is None
@@ -322,10 +336,10 @@ def build_one_vm(
         # auto-installer activation file + first-boot script into the ISO).
         # Default identity; runs only here, on a build miss.
         prepared_media = bp.builder.prepare_boot_media(bp.boot_media_path)
-        boot_media_name = f"{build_vm_backend}-bootmedia{ctx.driver.volume_suffix('build_seed')}"
+        boot_media_name = f"{build_vm_backend}-bootmedia{ctx.driver.volume_suffix('boot_iso')}"
         boot_media_ref = ctx.driver.compose_volume_ref(build_pool_backend, boot_media_name)
         ctx.store.record_intent(
-            kind="build_seed",
+            kind="boot_iso",
             backend_name=boot_media_name,
             plan_name=vm.name,
             pool_backend=build_pool_backend,
