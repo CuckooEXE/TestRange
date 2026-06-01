@@ -341,13 +341,6 @@ def _describe(args: argparse.Namespace) -> int:
 def _print_binding(plan: Plan, profile: BackendProfile | None) -> bool:
     """Print the resolved backend binding; return whether it is usable.
 
-    Under CORE-19 a concrete ``*Hypervisor`` is a topology-only scheme marker,
-    so *every* runnable plan needs ``--profile``; the unbound message names the
-    pinned scheme (when known) so the dev sees which profile flavor is needed.
-    The per-backend field list comes from ``profile.describe_fields()`` (each
-    backend renders its own representative bits, with passwords masked). Build
-    egress is the plan's ``build_switch`` now (ADR-0016), not a binding knob.
-
     Returns ``False`` only when a profile was given but the binding failed to
     resolve — that error goes to **stderr** and the caller exits non-zero, so a
     ``describe && run`` chain stops instead of proceeding on a broken binding
@@ -606,11 +599,12 @@ def _print_list(entries: Iterable[CacheEntryInfo]) -> None:
 
 
 def _format_size(n: int) -> str:
+    size = float(n)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if n < 1024:
-            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
-        n //= 1024
-    return f"{n} TiB"
+        if size < 1024:
+            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PiB"
 
 
 def build_parser() -> argparse.ArgumentParser:

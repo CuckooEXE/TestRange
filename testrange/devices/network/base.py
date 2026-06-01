@@ -12,13 +12,9 @@ from testrange.devices.base import Device
 class DHCPAddr:
     """Run-phase DHCP: the NIC requests a lease at boot.
 
-    Carries no fields — where the lease comes from is the link's business,
-    not the NIC's. On a Switch with ``dhcp=True`` the per-Switch sidecar
-    serves it; on a Switch *without* managed DHCP this still renders
-    ``dhcp4: true`` on the assumption that something on the segment answers.
-    An out-of-band DHCP server is a legitimate topology: the Switch ``dhcp``
-    flag describes only whether *TestRange's* sidecar serves leases, not what
-    is on the wire, so this is intentionally not policed.
+    Carries no fields — where the lease comes from is the link's business, not
+    the NIC's. Always renders ``dhcp4: true`` on the assumption that something on
+    the segment answers, whether or not the owning Switch serves leases itself.
     """
 
 
@@ -43,8 +39,7 @@ class StaticAddr:
       when ``dns`` is on); else *no* ``nameservers`` stanza. Like ``gw``,
       absence is valid, not an error.
 
-    Frozen and hashable (``dns`` normalizes to a tuple) so a NIC carrying one
-    flows through :meth:`CloudInitBuilder.config_hash`.
+    Frozen and hashable (``dns`` normalizes to a tuple).
     """
 
     addr: str

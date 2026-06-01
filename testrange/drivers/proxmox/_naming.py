@@ -98,15 +98,6 @@ def vnet_id(backend_name: str) -> str:
     return "v" + hashlib.sha1(backend_name.encode(), usedforsecurity=False).hexdigest()[:7]
 
 
-def volid_storage(ref: str) -> str:
-    """The storage id portion of a volid (the part before the first ``:``)."""
-    return ref.split(":", 1)[0]
-
-
-def is_iso_ref(ref: str) -> bool:
-    return ":iso/" in ref
-
-
 def parse_disk_ref(ref: str) -> tuple[str, str]:
     """Recover ``(pool_backend, vol_name)`` from a content/disk ``VolumeRef``.
 
@@ -119,15 +110,6 @@ def parse_disk_ref(ref: str) -> tuple[str, str]:
     filename = ref.split(":", 1)[1].split("/", 1)[1]
     pool_backend, vol_name = filename.split("__", 1)
     return pool_backend, vol_name
-
-
-def volid_filename(volid: str) -> str:
-    """The bare filename of a volid (``local:import/p__web.qcow2`` → ``p__web.qcow2``).
-
-    The name PVE should store the uploaded file under, so the resulting volid
-    equals the ref the orchestrator composed.
-    """
-    return volid.split("/", 1)[1]
 
 
 def volid_relpath(volid: str) -> str:

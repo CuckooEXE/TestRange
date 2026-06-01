@@ -84,12 +84,12 @@ The deviation analysis behind the ABC's shape is
    register(
        hypervisor_cls=MyHypervisor,
        driver_name=MyDriver.DRIVER_NAME,
-       from_hypervisor=MyDriver.from_hypervisor,
-       from_uri=MyDriver.from_uri,
+       scheme="mydriver",            # the Hypervisor-type scheme marker
+       from_uri=MyDriver.from_uri,   # rebuilds the driver from the stored URI (cleanup)
    )
    ```
 
-   Then add `from testrange.drivers import myhyp as _myhyp` to
+   Then add `from testrange.drivers import mydriver as _mydriver` to
    `testrange/drivers/__init__.py` so registration runs at import time.
 
 4. **Honor the locator-type rules.** `Path` means **orchestrator-host

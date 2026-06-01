@@ -15,7 +15,7 @@ covers the topology the entry carries either way.
 ## Minimal plan
 
 ```python
-from testrange import OrchestratorHandle, Plan, run_tests
+from testrange import Hypervisor, OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
@@ -23,7 +23,6 @@ from testrange.credentials import PosixCred
 from testrange.utils import SSHKey
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
-from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
@@ -34,7 +33,7 @@ from testrange.vms import VMRecipe, VMSpec
 _KEY = SSHKey.generate(comment="hello")
 
 PLAN = Plan(
-    MockHypervisor(
+    Hypervisor(
         build_switch=Switch(
             "build",
             Network("build"),
@@ -94,9 +93,12 @@ Then:
 ```sh
 testrange cache add https://cloud.debian.org/.../debian-13-generic-amd64.qcow2 \
     --name debian-13
-testrange describe path/to/plan.py
-testrange run path/to/plan.py
+testrange describe path/to/plan.py --profile libvirt-local
+testrange run path/to/plan.py --profile libvirt-local
 ```
+
+The generic `Hypervisor` above takes its backend from the `--profile` connection
+profile; see [Connecting to a backend](connecting-to-a-backend.md).
 
 ## Networking
 

@@ -57,9 +57,6 @@ def _host_path(client: ProxmoxClient, volid: str) -> str:
     return f"{client.storage_path().rstrip('/')}/{_naming.volid_relpath(volid)}"
 
 
-# -- pools (a filename-prefix namespace, not a PVE object) -----------------
-
-
 def create_pool(client: ProxmoxClient, pool: StoragePool, backend_name: str) -> str:
     """No backend allocation: the pool is the ``<backend_name>__`` filename prefix.
 
@@ -87,9 +84,6 @@ def destroy_pool(client: ProxmoxClient, backend_name: str) -> None:
         filename = volid.split("/", 1)[-1]
         if filename.startswith(prefix):
             _delete_content(client, volid)
-
-
-# -- volume I/O ------------------------------------------------------------
 
 
 def write_to_pool(client: ProxmoxClient, target_ref: VolumeRef, data: bytes) -> VolumeRef:
@@ -156,8 +150,15 @@ def download_from_pool(client: ProxmoxClient, vol_ref: VolumeRef, dest_path: Pat
     # (ProxmoxHardDrive lets a data disk be virtio/sata/ide, not just scsi). The
     # slot number is unique per disk, so scan the buses for it — capture stays
     # bus-agnostic without threading the device's bus through the resolution.
+    # Skip ``media=cdrom`` entries: the seed/boot CDROMs sit at ``ide0``/``ide2``
+    # and would otherwise be matched at a colliding slot, downloading the ISO
+    # instead of the disk.
     key = next(
-        (f"{bus}{slot}" for bus in ("scsi", "virtio", "sata", "ide") if f"{bus}{slot}" in config),
+        (
+            f"{bus}{slot}"
+            for bus in ("scsi", "virtio", "sata", "ide")
+            if f"{bus}{slot}" in config and "media=cdrom" not in str(config[f"{bus}{slot}"])
+        ),
         None,
     )
     entry = config.get(key) if key is not None else None
@@ -199,9 +200,6 @@ def _delete_content(client: ProxmoxClient, volid: str) -> None:
     result = client.api.nodes(client.node).storage(client.storage).content(volid).delete()
     if isinstance(result, str) and result.startswith("UPID:"):
         client.wait_task(result)
-
-
-# -- deferred-to-create_vm sizing (PVE-8 owns the realisation) -------------
 
 
 def create_blank_volume(target_ref: VolumeRef, size_gb: int) -> VolumeRef:

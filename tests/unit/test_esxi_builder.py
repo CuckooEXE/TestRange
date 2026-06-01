@@ -10,6 +10,7 @@ from __future__ import annotations
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -255,3 +256,36 @@ class TestPrepErrorPaths:
         monkeypatch.setattr(shutil, "which", lambda _: None)
         with pytest.raises(prep.EsxiPrepareError, match="xorriso not found"):
             prep.prepare_iso(tmp_path / "in.iso", tmp_path / "out.iso", kickstart="ks")
+
+    def test_extract_partial_output_on_failure_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # BUILD-19: a non-zero xorriso exit that left a *partial* file behind
+        # must raise (not be mistaken for a clean extraction), and the partial
+        # must be removed. (subprocess is patched by dotted path so the test file
+        # need not import the project-banned `subprocess`.)
+        out = tmp_path / "BOOT.CFG"
+
+        def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            out.write_bytes(b"truncated")  # xorriso left a partial extraction
+            return SimpleNamespace(
+                returncode=32, stdout="", stderr="xorriso : FAILURE : write error"
+            )
+
+        monkeypatch.setattr("testrange.builders._esxi_prepare.subprocess.run", fake_run)
+        with pytest.raises(prep.EsxiPrepareError, match="exit 32"):
+            prep._extract("xorriso", tmp_path / "in.iso", "/EFI/BOOT/BOOT.CFG", out)
+        assert not out.exists()
+
+    def test_extract_absent_source_is_not_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out = tmp_path / "BOOT.CFG"
+
+        def fake_run(argv: list[str], **kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                returncode=1, stdout="", stderr="xorriso : FAILURE : file object not found"
+            )
+
+        monkeypatch.setattr("testrange.builders._esxi_prepare.subprocess.run", fake_run)
+        assert prep._extract("xorriso", tmp_path / "in.iso", "/EFI/BOOT/BOOT.CFG", out) is False

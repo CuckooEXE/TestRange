@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from testrange.exceptions import StateError
 from testrange.state.schema import (
     PHASE_DONE,
     Resource,
@@ -54,6 +57,21 @@ class TestState:
         s = State(resources=(r1, r2))
         s2 = s.remove_resource("a")
         assert s2.resources == (r2,)
+
+    def test_replace_resource(self) -> None:
+        r1 = Resource(kind="pool", backend_name="a", plan_name="p", intent_at="t")
+        s = State(resources=(r1,))
+        new = r1.with_outcome("t2", bridge="virbr-tr-1")
+        s2 = s.replace_resource("a", new)
+        assert s2.resources == (new,)
+        assert s.resources == (r1,)  # immutable
+
+    def test_replace_resource_missing_raises(self) -> None:
+        # Fail loud: replacing a name that isn't present is a bug, not a no-op.
+        r1 = Resource(kind="pool", backend_name="a", plan_name="p", intent_at="t")
+        s = State(resources=(r1,))
+        with pytest.raises(StateError, match="no resource named 'nope'"):
+            s.replace_resource("nope", r1)
 
     def test_json_roundtrip(self) -> None:
         s = State(

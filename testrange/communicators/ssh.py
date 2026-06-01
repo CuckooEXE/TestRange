@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import shlex
 import socket
+import threading
 import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
@@ -233,14 +234,16 @@ class SSHCommunicator(Communicator):
     ) -> ExecResult:
         """Run ``argv`` over the SSH channel and return its :class:`ExecResult`.
 
-        stdout is drained before stderr. A command that floods stderr could in
-        principle fill the stderr pipe and wedge before stdout closes; ``timeout``
-        (set on the channel) bounds that — a stalled read raises rather than
-        hanging forever, and is surfaced as a :class:`CommunicatorError` here
-        (paramiko's raw ``socket.timeout`` / ``SSHException`` would otherwise leak
-        past the communicator boundary). **Not thread-safe**: the cached paramiko
-        client is shared, and TestRange is single-threaded / single-instance
-        (ADR-0002, ADR-0018), so one communicator is driven by one caller.
+        stdout and stderr share one channel, so they are drained *concurrently*
+        (stderr on a helper thread): a command that floods one stream cannot fill
+        its channel window and wedge the read of the other. ``timeout`` (set on
+        the channel, and on the stderr join) bounds a stalled stream — a stall
+        raises rather than hanging forever, surfaced as a :class:`CommunicatorError`
+        here (paramiko's raw ``socket.timeout`` / ``SSHException`` would otherwise
+        leak past the communicator boundary). **Not thread-safe across callers**:
+        the cached paramiko client is shared, and TestRange is single-threaded /
+        single-instance (ADR-0002, ADR-0018), so one communicator is driven by one
+        caller; the stderr helper thread is internal to a single ``execute`` call.
         """
         if not argv:
             raise ValueError("execute(argv) requires a non-empty list")
@@ -255,9 +258,30 @@ class SSHCommunicator(Communicator):
         start = time.monotonic()
         try:
             _stdin, stdout, stderr = client.exec_command(cmd, timeout=timeout)
-            stdout_bytes = stdout.read()
-            stderr_bytes = stderr.read()
-            exit_code = stdout.channel.recv_exit_status()
+            err_chunks: list[bytes] = []
+            err_exc: list[BaseException] = []
+
+            def _drain_stderr() -> None:
+                try:
+                    err_chunks.append(stderr.read())
+                except BaseException as exc:  # re-raised on the main thread post-join
+                    err_exc.append(exc)
+
+            drain = threading.Thread(target=_drain_stderr, name="tr-ssh-stderr", daemon=True)
+            drain.start()
+            try:
+                stdout_bytes = stdout.read()
+                exit_code = stdout.channel.recv_exit_status()
+            finally:
+                drain.join(timeout)
+            if drain.is_alive():
+                raise CommunicatorError(
+                    f"SSH stderr drain of {cmd!r} on {self._host} did not finish "
+                    f"within {timeout:.0f}s"
+                )
+            if err_exc:
+                raise err_exc[0]
+            stderr_bytes = err_chunks[0] if err_chunks else b""
         except (TimeoutError, OSError, EOFError, paramiko.SSHException) as e:
             # socket.timeout is TimeoutError; OSError covers socket.error; the
             # rest are channel-level failures. Wrap them so callers see one
@@ -287,8 +311,14 @@ class SSHCommunicator(Communicator):
         client = self._ensure_connected()
         sftp = client.open_sftp()
         try:
-            with sftp.open(path, "wb") as f:
-                f.write(data)
+            # confirm=True stats the remote file after upload and raises if its
+            # size doesn't match the source, so a truncated transfer fails loud
+            # instead of silently leaving a short file.
+            sftp.putfo(io.BytesIO(data), path, confirm=True)
+        except OSError as e:
+            raise CommunicatorError(
+                f"SFTP write of {len(data)} bytes to {path!r} on {self._host} failed: {e}"
+            ) from e
         finally:
             sftp.close()
 

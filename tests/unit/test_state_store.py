@@ -197,10 +197,10 @@ class TestStateStore:
         )
         original = store.state_path.read_text()
 
-        def _boom(self: Path, target: object) -> None:
+        def _boom(src: object, dst: object) -> None:
             raise OSError("simulated crash before rename completes")
 
-        monkeypatch.setattr(Path, "replace", _boom)
+        monkeypatch.setattr("os.replace", _boom)
         with pytest.raises(OSError):
             store.set_phase(PHASE_DONE)
         # Canonical path untouched: old content still fully readable.

@@ -159,6 +159,22 @@ class TestDownload:
         with pytest.raises(DriverError, match="no disk at slot 0"):
             _storage.download_from_pool(c, ref, Path("/tmp/out.qcow2"))
 
+    def test_download_never_resolves_to_a_cdrom_at_a_colliding_slot(self) -> None:
+        # PVE-55: a seed/boot CDROM (ide0/ide2) sharing a slot index with the
+        # resolved disk must NOT be matched — that would download the ISO. With
+        # only the cdrom present at the slot, resolution fails loud instead.
+        c = _client()
+        c.api.vms = [{"vmid": 107, "name": "tr-vm-x-web"}]
+        c.api.configs[107] = {
+            "scsi0": "local:107/vm-107-disk-0.qcow2",
+            "ide2": "local:iso/seed.iso,media=cdrom",  # slot 2 = seed CDROM
+        }
+        # ``-data1`` resolves to slot 2, which only has the cdrom here.
+        ref = _naming.compose_volume_ref("local", "tr-pool-x-p1", "tr-vm-x-web-data1.qcow2")
+        with pytest.raises(DriverError, match="no disk at slot 2"):
+            _storage.download_from_pool(c, ref, Path("/tmp/out.qcow2"))
+        assert c.got == []  # nothing was downloaded
+
 
 # --- delete / pools / deferred sizing -------------------------------------
 

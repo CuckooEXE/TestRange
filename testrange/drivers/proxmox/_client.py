@@ -338,8 +338,6 @@ class ProxmoxClient:
         if exit_status != "OK":
             raise DriverError(f"PVE task {upid!r} failed: exitstatus={exit_status!r}")
 
-    # -- SSH/SFTP (download_from_pool only) --------------------------------
-
     def _ensure_ssh(self) -> Any:
         # Double-checked under call_lock: a parallel build (ADR-0023) runs
         # download_from_pool concurrently across build VMs, so two workers could
@@ -439,8 +437,6 @@ class ProxmoxClient:
                 "(only 'dir'/'nfs'-style storages are supported)"
             )
         return str(path)
-
-    # -- serial console websocket (build-result sink, PVE-17) --------------
 
     def open_serial_websocket(self, vmid: int) -> Any:
         """Open a vm's ``serial0`` console as a connected, authenticated websocket.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from testrange.utils.fsutil import durable_replace
 from testrange.utils.sshkey import SSHKey
 
-__all__ = ["SSHKey"]
+__all__ = ["SSHKey", "durable_replace"]

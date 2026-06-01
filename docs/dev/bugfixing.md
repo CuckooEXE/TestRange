@@ -59,7 +59,7 @@ part of the contract.
 ruff check .
 ruff format --check .
 mypy --strict testrange tests
-pytest -m "not proxmox"
+pytest -m "not proxmox and not libvirt"
 ```
 
 All four must pass (this mirrors `.pre-commit-config.yaml`).

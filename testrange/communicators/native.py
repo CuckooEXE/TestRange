@@ -22,10 +22,12 @@ class NativeCommunicator(Communicator):
     Backend-agnostic by design: it fronts whatever native agent the driver
     exposes — QEMU Guest Agent (libvirt, Proxmox), VMware Tools guest-ops,
     Hyper-V integration / PowerShell Direct. Constructed with no Plan-time
-    arguments — the agent's identity is the VM itself. At run-phase bring-up
-    the orchestrator binds it with three VM-bound callables pulled from the
-    driver; this class is a thin shim that delegates to them and never sees a
-    driver type or backend wire protocol.
+    arguments — the agent's identity is the VM itself. A thin shim over three
+    VM-bound callables it is :meth:`bind`-ed with; it never sees a driver type
+    or backend wire protocol.
+
+    Single-use: once closed it cannot be re-bound — construct a fresh instance
+    per VM.
     """
 
     def __init__(self) -> None:
@@ -94,8 +96,7 @@ class NativeCommunicator(Communicator):
             )
 
     def close(self) -> None:
-        """Close the communicator. Terminal and idempotent — a closed
-        communicator cannot be re-bound (construct a fresh instance per VM)."""
+        """Close the communicator. Terminal and idempotent."""
         self._closed = True
         self._execute = None
         self._read_file = None

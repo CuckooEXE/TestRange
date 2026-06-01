@@ -20,20 +20,22 @@ pip install -e '.[all,dev]'
 ruff check .
 ruff format --check .
 mypy --strict testrange tests
-pytest -m "not proxmox"
+pytest -m "not proxmox and not libvirt"
 ```
 
 All four must pass (this mirrors `.pre-commit-config.yaml`; note mypy covers
-both ``testrange`` and ``tests``). The ``proxmox`` mark gates integration tests against a
-live Proxmox VE host (they skip without ``TESTRANGE_PVE_HOST`` configured); the
-unit suite runs entirely against the in-memory ``MockDriver`` and needs no
-backend.
+both ``testrange`` and ``tests``). The ``proxmox`` and ``libvirt`` marks gate
+integration tests against a live backend (they run out-of-band, skipping without
+the backend configured); the unit suite runs entirely against the in-memory
+``MockDriver`` and needs no backend.
 
 ## Discipline
 
 - TDD: tests land before or alongside code.
 - ``import subprocess`` is forbidden anywhere in ``testrange/`` (ruff
-  enforces this; ADR-0001).
+  enforces this; ADR-0001), except the ADR-0022-sanctioned ISO-prep modules
+  (``builders/_proxmox_prepare.py``, ``builders/_esxi_prepare.py``) that shell
+  out to ``xorriso``.
 - ABCs live at the bottom of each subpackage; concretes import
   ABCs and never each other.
 - The orchestrator is the only thing allowed to know about multiple

@@ -27,6 +27,7 @@ from testrange._log import get_logger
 from testrange.cache._names import validate_name
 from testrange.cache.local import CacheEntryInfo
 from testrange.exceptions import CacheError, CacheMissError
+from testrange.utils import durable_replace
 
 _log = get_logger(__name__)
 
@@ -159,6 +160,7 @@ class HttpCache:
         _log.info("fetching %s ← http cache → %s", sha[:16], dest_path)
         digest = hashlib.sha256()
         fd, tmp_name = tempfile.mkstemp(dir=dest_path.parent, suffix=".partial")
+        os.fchmod(fd, 0o644)  # mkstemp is 0600; match the umask-typical cache perms
         tmp = Path(tmp_name)
         try:
             with os.fdopen(fd, "wb") as out:
@@ -172,7 +174,7 @@ class HttpCache:
                     f"http cache: fetched /isos/{sha[:16]}.bin but its bytes hash to "
                     f"{actual[:16]}… — corrupt or tampered transfer; not cached"
                 )
-            tmp.replace(dest_path)
+            durable_replace(tmp, dest_path)
         finally:
             tmp.unlink(missing_ok=True)
 

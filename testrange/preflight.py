@@ -56,14 +56,7 @@ def unknown_uplink_findings(
     *,
     profile_hint: str = "the connection profile",
 ) -> tuple[PreflightFinding, ...]:
-    """Reject a ``Switch.uplink`` whose logical name the bound profile doesn't map.
-
-    ``Switch.uplink`` is a logical name (ADR-0016) the driver resolves against the
-    profile's ``[uplinks]`` map to a host iface. A name the bound profile does not
-    map cannot be realized, so it fails loud here rather than at ``create_switch``.
-    Shared across drivers; each calls it from ``preflight`` with its own resolved
-    ``uplinks`` and the run + build switches. One finding per offending Switch.
-    """
+    """Returns one finding per ``switch`` whose ``uplink`` isn't a key in ``uplinks``."""
     out: list[PreflightFinding] = []
     for sw in switches:
         if sw.uplink is not None and sw.uplink not in uplinks:
@@ -84,17 +77,9 @@ def unknown_uplink_findings(
 
 
 def builder_origin_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
-    """Reject a VM whose builder declares no OS-disk origin (BUILD-1).
-
-    Every builder must populate the OS disk one of two ways: an image base
-    (:meth:`Builder.os_disk_base`) the orchestrator uploads + grows, or a boot
-    medium (:meth:`Builder.boot_media`) it boots against a freshly-materialized
-    blank disk (installer-origin, ADR-0010 §6). A builder that returns ``None``
-    from *both* has no way to produce a disk; that is a plan misconfiguration,
-    so it fails loud here — before any backend resource stands up — rather than
-    at the build probe. Backend-agnostic: every driver calls it from
-    ``preflight``. Both seams are pure (no I/O), so this stays read-only.
-    """
+    """Returns one finding per VM whose builder declares neither an OS-disk base
+    image (:meth:`Builder.os_disk_base`) nor a boot medium
+    (:meth:`Builder.boot_media`) — it has no way to produce an OS disk."""
     out: list[PreflightFinding] = []
     for vm in plan.hypervisor.vms:
         builder = vm.builder
@@ -119,15 +104,8 @@ def builder_origin_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
 def unsupported_firmware_findings(
     plan: Plan, supported: Iterable[str], *, driver_name: str
 ) -> tuple[PreflightFinding, ...]:
-    """Reject a VM whose ``spec.firmware`` the bound backend cannot realize.
-
-    ``spec.firmware`` (``bios``/``uefi``) must be reproduced identically at build
-    and run — a UEFI-installed disk panics under SeaBIOS (BUILD-1b) — so a backend
-    that cannot realize the requested firmware must fail loud here, before any
-    resource stands up, rather than define a VM under the wrong firmware. Each
-    driver passes the firmware set it realizes; a backend that grows support
-    widens its set. Backend-agnostic helper; one finding per offending VM.
-    """
+    """Returns one finding per VM whose ``spec.firmware`` is not in ``supported``
+    (the firmware set the ``driver_name`` backend can realize)."""
     supported_set = frozenset(supported)
     out: list[PreflightFinding] = []
     for vm in plan.hypervisor.vms:
@@ -150,17 +128,9 @@ def unsupported_firmware_findings(
 
 
 def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
-    """Gate ``Switch(mgmt=True)`` until its cross-backend semantics are settled.
-
-    No driver realizes the mgmt host adapter yet, and what ``.2`` *promises*
-    differs by backend (host-reachable only when the orchestrator is on-box;
-    ambiguous "which host?" on vCenter+DVS / Proxmox clusters). Rather than
-    silently provision an adapter the test runner may not reach, we fail loud
-    at preflight. One finding per offending Switch. See ADR-0009.
-
-    Shared across drivers: a backend that grows real mgmt support drops the
-    call from its ``preflight``.
-    """
+    """Returns one finding per ``Switch`` with ``mgmt=True`` — no backend realizes
+    the mgmt host adapter yet and its cross-backend semantics are unsettled
+    (ADR-0009)."""
     return tuple(
         PreflightFinding(
             code="mgmt-unsupported",

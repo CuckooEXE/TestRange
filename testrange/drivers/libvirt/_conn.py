@@ -250,7 +250,8 @@ class LibvirtClient:
 
         Raises :class:`DriverError` if no listener was opened for this VM.
         """
-        entry = self._serial_listeners.get(backend_name)
+        with self.call_lock:  # guard the shared map; release before the blocking accept
+            entry = self._serial_listeners.get(backend_name)
         if entry is None:
             raise DriverError(f"no serial listener open for {backend_name!r}")
         srv, _path = entry

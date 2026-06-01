@@ -31,6 +31,7 @@ from typing import Any
 from testrange._log import get_logger
 from testrange.cache._names import validate_name
 from testrange.exceptions import CacheError, CacheMissError
+from testrange.utils import durable_replace
 
 _log = get_logger(__name__)
 
@@ -161,6 +162,36 @@ class LocalCache:
             self._write_sidecar(sidecar, info)
         _log.info("added cache entry %s (%d bytes)", sha[:16], info.size)
         return info
+
+    def write_materialized_sidecar(self, info: CacheEntryInfo) -> CacheEntryInfo:
+        """Record the sidecar for an already-materialized ``<sha>.bin`` under the lock.
+
+        The cache manager streams an HTTP-tier entry's bytes into ``isos/``
+        itself, then calls this to write the sidecar. Taking :attr:`_write_lock`
+        (and merging name aliases with any sidecar a concurrent same-sha ``add``
+        already wrote) keeps materialize from racing the local add path and
+        losing aliases.
+        """
+        sidecar = self.isos / f"{info.sha256}.json"
+        with self._write_lock:
+            if sidecar.exists():
+                existing = self._read_sidecar(sidecar)
+                merged = tuple(dict.fromkeys((*existing.names, *info.names)))
+                if merged == existing.names:
+                    return existing
+                existing = CacheEntryInfo(
+                    sha256=existing.sha256,
+                    size=existing.size,
+                    names=merged,
+                    origin=existing.origin,
+                    added_at=existing.added_at,
+                    description=existing.description,
+                    path=existing.path,
+                )
+                self._write_sidecar(sidecar, existing)
+                return existing
+            self._write_sidecar(sidecar, info)
+            return info
 
     def _download_url(self, url: str) -> tuple[Path, str]:
         """Stream ``url`` into a unique temp file under ``isos/``. Returns (tmp_path, url).
@@ -371,7 +402,7 @@ def _atomic_copy(src: Path, dst: Path) -> None:
     try:
         with os.fdopen(fd, "wb") as w, src.open("rb") as r:
             shutil.copyfileobj(r, w)
-        tmp.replace(dst)
+        durable_replace(tmp, dst)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -389,7 +420,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        tmp.replace(path)
+        durable_replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

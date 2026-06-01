@@ -97,3 +97,22 @@ class TestParseFinalPass:
 
     def test_ok_without_trailing_newline_at_eof(self) -> None:
         assert parse_build_result(b"TESTRANGE-RESULT: ok", final=True) == BuildResult(ok=True)
+
+
+class TestParseTokenStrictness:
+    """Success is the explicit ``ok`` token, not any ``ok``-prefixed word."""
+
+    def test_ok_prefixed_token_is_not_success(self) -> None:
+        # "okay" / "ok_pending" must NOT parse as success — they are unrecognized
+        # tokens on a complete line, so they fail rather than green a bad build.
+        assert parse_build_result(b"TESTRANGE-RESULT: okay\n") == BuildResult(ok=False)
+        assert parse_build_result(b"TESTRANGE-RESULT: ok_pending\n") == BuildResult(ok=False)
+
+    def test_fail_prefixed_token_is_not_a_fail_record(self) -> None:
+        # Only the bare ``fail`` token triggers the rc/cmd/log fail path; an
+        # unrecognized ``fail``-prefixed token is a generic failure.
+        assert parse_build_result(b"TESTRANGE-RESULT: failure\n") == BuildResult(ok=False)
+
+    def test_ok_with_trailing_field_still_succeeds(self) -> None:
+        # First-token match: trailing chatter on the same line doesn't break ok.
+        assert parse_build_result(b"TESTRANGE-RESULT: ok extra\n") == BuildResult(ok=True)

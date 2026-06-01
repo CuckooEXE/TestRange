@@ -165,8 +165,6 @@ class ProxmoxDriver(HypervisorDriver):
         # deadlock in test rather than hiding it.
         self._state_lock = threading.Lock()
 
-    # -- construction paths ------------------------------------------------
-
     @classmethod
     def from_uri(cls, uri: str) -> ProxmoxDriver:
         return cls(ProxmoxConn.from_uri(uri))
@@ -174,8 +172,6 @@ class ProxmoxDriver(HypervisorDriver):
     @property
     def uri(self) -> str:
         return self._conn.to_uri()
-
-    # -- connection --------------------------------------------------------
 
     @_translates
     def connect(self) -> None:
@@ -279,8 +275,6 @@ class ProxmoxDriver(HypervisorDriver):
             if bridge not in bridges
         )
 
-    # -- deterministic naming ----------------------------------------------
-
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str:
         return _naming.compose_resource_name(run_id, kind, name)
 
@@ -292,8 +286,6 @@ class ProxmoxDriver(HypervisorDriver):
 
     def volume_suffix(self, kind: str) -> str:
         return _naming.volume_suffix(kind)
-
-    # -- switches & networks (driver owns L2; delegates to _sdn) -----------
 
     @_translates
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:
@@ -350,8 +342,6 @@ class ProxmoxDriver(HypervisorDriver):
         # by ``destroy_switch``. Nothing to do here.
         del backend_name
 
-    # -- pools & volumes (PVE-3; delegates to _storage) --------------------
-
     @_translates
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any:
         return _storage.create_pool(self._client, pool, backend_name)
@@ -381,8 +371,6 @@ class ProxmoxDriver(HypervisorDriver):
     @_translates
     def delete_volume(self, vol_ref: VolumeRef) -> None:
         _storage.delete_volume(self._client, vol_ref)
-
-    # -- VM lifecycle (PVE-8; delegates to _vm) ----------------------------
 
     @_translates
     def create_vm(
@@ -434,8 +422,6 @@ class ProxmoxDriver(HypervisorDriver):
     def get_vm_power_state(self, backend_name: str) -> str:
         return _vm.get_vm_power_state(self._client, backend_name)
 
-    # -- native guest agent (PVE-4; QGA via _guest) ------------------------
-
     def guest_gateway(self) -> GuestGateway:
         """Reach guests by SSH-jumping through the PVE host.
 
@@ -462,12 +448,8 @@ class ProxmoxDriver(HypervisorDriver):
     def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
         return _guest.make_write_file(self._client, backend_name)
 
-    # -- build-result sink (PVE-17; serial0 over websocket, delegates to _serial) --
-
     def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:
         return _serial.read_build_result_sink(self._client, backend_name)
-
-    # -- snapshots (PVE-5; delegates to _vm) -------------------------------
 
     @_translates
     def create_snapshot(

@@ -2,21 +2,14 @@
 
 A nested hypervisor wears two hats at once. To the outer (L0) host it is an
 ordinary VM: it carries the same ``spec`` / ``builder`` / ``communicator`` as any
-:class:`~testrange.vms.recipe.VMRecipe`, so the build, run, and communicator-bind
-phases handle it with no special casing. To its inner (L1) plan it is a
-Hypervisor: the added ``inner`` field is the L1 topology (networks/pools/vms) the
-orchestrator brings up *against the running guest* (ADR-0021).
+:class:`~testrange.vms.recipe.VMRecipe`. To its inner (L1) plan it is a
+Hypervisor: the added ``inner`` field is the L1 topology (networks/pools/vms) run
+against the running guest (ADR-0021).
 
-Because it subclasses :class:`VMRecipe`, the only code that needs to know about
-nesting is ``orchestrator.nested_phase``, which selects the entries to recurse
-into with ``isinstance(vm, GuestHypervisor)``. Everything else treats it as a VM.
-
-The :meth:`libvirt` classmethod is the ergonomic front door: it fills the
-qemu/libvirt-stack :class:`~testrange.builders.CloudInitBuilder`, an
-``SSHCommunicator`` for the admin user, and an inner ``LibvirtHypervisor`` (the
-existing scheme marker, reused as the inner topology container — installing
-libvirtd into the guest pins the inner backend to libvirt), so the common case
-needs no hand-written package list.
+The :meth:`GuestHypervisor.libvirt` classmethod is the ergonomic front door: it
+fills the qemu/libvirt-stack :class:`~testrange.builders.CloudInitBuilder`, an
+``SSHCommunicator`` for the admin user, and an inner ``LibvirtHypervisor``, so the
+common case needs no hand-written package list.
 """
 
 from __future__ import annotations
@@ -54,11 +47,9 @@ _LIBVIRT_APT_STACK = (
 class GuestHypervisor(VMRecipe):
     """A :class:`VMRecipe` that also hosts an inner :class:`Hypervisor` plan.
 
-    ``inner`` is the L1 topology brought up recursively against this guest once
+    ``inner`` is the L1 topology (networks/pools/vms) run against this guest once
     its hypervisor stack is live (ADR-0021). The inner backend is libvirt-only in
-    v1 (enforced at construction); it is *synthesized at run time* from this
-    running guest (``qemu+ssh`` to its discovered address), not bound via
-    ``--profile``.
+    v1 (enforced at construction).
     """
 
     inner: Hypervisor

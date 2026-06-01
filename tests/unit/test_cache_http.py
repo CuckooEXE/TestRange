@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -139,6 +140,17 @@ class TestFetch:
         assert dest.read_bytes() == payload
         assert fake_requests.get.call_args.kwargs["stream"] is True
         assert list(tmp_path.glob("*.partial")) == []  # temp promoted, not left behind
+
+    def test_fetched_bin_is_world_readable(self, fake_requests: Any, tmp_path: Path) -> None:
+        # CACHE-7: the fetched .bin lands at 0644, not mkstemp's 0600, matching
+        # locally-added entries in the same content-addressed store.
+        payload = b"PAYLOAD"
+        sha = hashlib.sha256(payload).hexdigest()
+        fake_requests.get.return_value = _resp(200, body=payload)
+        c = HttpCache("https://h")
+        dest = tmp_path / "out.bin"
+        c.fetch(sha, dest)
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o644
 
     def test_sha_mismatch_rejected_and_no_residue(self, fake_requests: Any, tmp_path: Path) -> None:
         # B3: a body that doesn't hash to the requested sha (corruption, or a

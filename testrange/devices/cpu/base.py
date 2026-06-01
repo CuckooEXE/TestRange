@@ -13,10 +13,7 @@ class CPU(Device):
 
     ``nested`` is a portable "this guest must run hardware-accelerated VMs" knob
     (ADR-0021): a guest with ``nested=True`` needs the host's virtualization
-    extensions (``vmx``/``svm``) exposed. The libvirt backend already passes the
-    host CPU through (``<cpu mode='host-passthrough'/>``), so the flag exists to
-    give preflight a hook — the L0 driver verifies host nested KVM is enabled and
-    fails loud early rather than letting an inner VM fail to boot under emulation.
+    extensions (``vmx``/``svm``) exposed.
     """
 
     count: int

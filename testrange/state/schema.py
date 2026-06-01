@@ -96,6 +96,8 @@ class State:
         return replace(self, resources=(*self.resources, r))
 
     def replace_resource(self, backend_name: str, new: Resource) -> State:
+        if not any(r.backend_name == backend_name for r in self.resources):
+            raise StateError(f"replace_resource: no resource named {backend_name!r} in state")
         return replace(
             self,
             resources=tuple(new if r.backend_name == backend_name else r for r in self.resources),

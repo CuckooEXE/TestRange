@@ -34,6 +34,7 @@ from testrange.state.schema import (
     Resource,
     State,
 )
+from testrange.utils import durable_replace
 
 _log = get_logger(__name__)
 
@@ -289,7 +290,7 @@ class StateStore:
         text = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"
         tmp = self.state_path.with_suffix(".json.partial")
         tmp.write_text(text, encoding="utf-8")
-        tmp.replace(self.state_path)
+        durable_replace(tmp, self.state_path)
 
     def _write_pid_atomic(self, pid: int) -> None:
         tmp = self.pid_path.with_suffix(".pid.partial")

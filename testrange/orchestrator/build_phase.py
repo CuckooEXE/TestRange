@@ -124,14 +124,8 @@ _BUILD_IP_SLOTS: tuple[int, ...] = (
 
 
 def _build_ip_offset(vm_index: int) -> int:
-    """Deterministic per-VM build-switch host offset (ADR-0017 / ADR-0023).
-
-    Serial build reused the single ``.3`` slot; parallel build (ORCH-4) needs a
-    **distinct** build IP per in-flight VM. Keyed on the VM's *plan position*,
-    not scheduling order — the build IP feeds ``config_hash``, so a
-    scheduling-dependent address would churn the cache key. A VM's offset is thus
-    stable across runs and independent of how many peers hit or miss.
-    """
+    """Deterministic per-VM build-switch host offset, keyed on the VM's plan
+    position (not scheduling order, since the build IP feeds ``config_hash``)."""
     if vm_index >= len(_BUILD_IP_SLOTS):
         raise OrchestratorError(
             f"build needs a distinct build-switch address per VM, but VM #{vm_index} "
@@ -238,15 +232,10 @@ def build_nested_inner_vms(ctx: RunContext) -> None:
 def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
     """A RunContext for building ``inner_plan`` on the outer driver + shared cache.
 
-    Shares the outer driver binding, state store, and cache (the inner build's
-    transient backend resources live on L0 under the outer run). It gets a
-    *distinct* run id derived from the outer run id + inner plan name: backend
-    resource names are composed from ``run_id`` (e.g. the build pool is
-    ``tr-build_pool-<run_id[:8]>-build``), so sharing the outer run id would
-    collide the inner build pool with the outer's — safe only by serial accident
-    today, and a failed best-effort delete leaving a same-named outer resource in
-    the ledger would corrupt cleanup. The derivation is deterministic so the
-    cleanup walker rebuilds the same names without live state.
+    Shares the outer driver binding, state store, and cache, but gets a distinct
+    run id deterministically derived from the outer run id + inner plan name, so
+    its ``run_id``-composed backend resource names don't collide with the outer
+    run's.
     """
     inner_run_id = hashlib.sha256(f"{ctx.run_id}/{inner_plan.name}".encode()).hexdigest()
     return RunContext(
@@ -685,10 +674,11 @@ def parse_build_result(data: bytes, *, final: bool = False) -> BuildResult | Non
     else:
         line = rest[:nl]
     text = line.decode("utf-8", "replace").strip()
+    tag = text.split(maxsplit=1)[0] if text else ""
 
-    if text.startswith("ok"):
+    if tag == "ok":
         return BuildResult(ok=True)
-    if text.startswith("fail"):
+    if tag == "fail":
         rc_m = _RC_RE.search(text)
         cmd_m = _CMD_RE.search(text)
         log, complete = _extract_log(data[idx:])

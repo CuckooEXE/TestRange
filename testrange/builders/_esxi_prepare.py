@@ -235,15 +235,17 @@ def _extract(xorriso: str, iso: Path, iso_path: str, out: Path) -> bool:
         check=False,
         env=_C_LOCALE_ENV,
     )
-    if proc.returncode != 0 and not out.exists():
+    if proc.returncode != 0:
         # A genuinely-absent source (the UEFI BOOT.CFG on a legacy-only ISO) is
         # not an error. xorriso words this several ways depending on version:
         # "not found", "No such file or directory", "Cannot determine attributes
         # of (ISO) source file". Match all so absence is tolerated; anything else
-        # is a real failure.
+        # is a real failure — including a non-zero exit that left a *partial*
+        # file behind, which must not be mistaken for a clean extraction.
         stderr = (proc.stderr or "").lower()
         if any(s in stderr for s in ("not found", "no such file", "cannot determine attributes")):
             return False
+        out.unlink(missing_ok=True)  # drop any partial extraction before failing
         raise EsxiPrepareError(
             f"xorriso -extract {iso_path!r} failed (exit {proc.returncode}): "
             f"{(proc.stderr or '').strip() or '(no stderr)'}"

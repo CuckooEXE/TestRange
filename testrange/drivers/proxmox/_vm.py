@@ -108,9 +108,6 @@ def resolve_disk(client: ProxmoxClient, disk_ref: str) -> tuple[int, int]:
     return owner
 
 
-# -- lifecycle (PVE-8) -----------------------------------------------------
-
-
 def _await(client: ProxmoxClient, result: Any) -> None:
     """Block on a PVE task if the call returned a UPID; no-op otherwise."""
     if isinstance(result, str) and result.startswith("UPID:"):
@@ -377,9 +374,6 @@ def get_vm_power_state(client: ProxmoxClient, backend_name: str) -> str:
 def _await_with_margin(client: ProxmoxClient, result: Any, timeout: float) -> None:
     if isinstance(result, str) and result.startswith("UPID:"):
         client.wait_task(result, timeout=timeout + 30.0)
-
-
-# -- snapshots (PVE-5) -----------------------------------------------------
 
 
 def _snapshot_names(client: ProxmoxClient, vmid: int) -> list[str]:

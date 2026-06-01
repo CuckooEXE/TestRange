@@ -17,6 +17,23 @@ def cache_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return tmp_path / "testrange" / "isos"
 
 
+class TestFormatSize:
+    def test_bytes_are_integers(self) -> None:
+        assert cli._format_size(0) == "0 B"
+        assert cli._format_size(512) == "512 B"
+
+    def test_fractional_units_are_preserved(self) -> None:
+        # Regression (CORE-45): integer floor-division collapsed every size to
+        # "X.0". 1.5 KiB must render as 1.5 KiB, not 1.0 KiB.
+        assert cli._format_size(1536) == "1.5 KiB"
+        assert cli._format_size(1024) == "1.0 KiB"
+
+    def test_scales_through_units(self) -> None:
+        assert cli._format_size(5 * 1024**2) == "5.0 MiB"
+        assert cli._format_size(int(1.6 * 1024**3)) == "1.6 GiB"
+        assert cli._format_size(3 * 1024**4) == "3.0 TiB"
+
+
 class TestCacheAdd:
     def test_add_local(
         self,

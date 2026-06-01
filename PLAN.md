@@ -838,9 +838,8 @@ not a runnable copy. Per §19, plan-side tests do **not** carry a
 that.
 
 ```python
-from testrange import Plan, OrchestratorHandle, run_tests
+from testrange import Hypervisor, Plan, OrchestratorHandle, run_tests
 from testrange.cache import CacheEntry
-from testrange.drivers.mock import MockHypervisor
 from testrange.networks import Switch, Network
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
@@ -854,7 +853,7 @@ from testrange.utils import SSHKey
 _KEY = SSHKey.generate(comment="testrange-hello")
 
 PLAN = Plan(
-    MockHypervisor(
+    Hypervisor(
         build_switch=Switch(
             "build", Network("build"), cidr="10.97.99.0/24", uplink="eth0",
             sidecar=Sidecar(dhcp=True, dns=True, nat=True),

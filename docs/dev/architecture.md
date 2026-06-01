@@ -8,18 +8,18 @@ functions, and tears the range down.
 ## High-level shape
 
 ```
-Plan(name, MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]))
-                                            │
-                                            ▼
+Plan(name, Hypervisor(networks=, pools=, vms=[VMRecipe(...)]))
+                                         │
+                                         ▼
                           Orchestrator
                           │
               ┌───────────┼───────────┐
               ▼           ▼           ▼
        CacheManager   HypervisorDriver  StateStore
-       (local-only,   (registry; MockDriver  (state.json
-        for now)       in-memory today;       + state.pid)
-                       libvirt/Proxmox/ESXi/
-                       Hyper-V planned)
+       (local + HTTP   (registry; libvirt  (state.json
+        tier)           reference backend,   + state.pid)
+                        Proxmox in progress;
+                        MockDriver is test-only)
 ```
 
 ## Key components
@@ -27,13 +27,16 @@ Plan(name, MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]))
 - **`Plan(name, *hypervisors)`** — the top-level user declaration.
   Currently exactly one hypervisor; the variadic shape is locked in for
   future multi-hypervisor without changing the call shape.
-- **`MockHypervisor(networks=, pools=, vms=, build_switch=, ...)`** —
-  the top-level entry selecting the in-memory `MockDriver` (the reference
-  backend until the real ones are written). Each backend ships its own such
-  dataclass; the driver is constructed from its class via the driver registry
-  (`testrange.drivers.driver_for`). `build_switch` is the user-declared build
-  network (`Switch | None`, ADR-0016 — portable topology, realized like a
-  run-phase switch); `None` means an
+- **`Hypervisor(networks=, pools=, vms=, build_switch=, ...)`** —
+  the top-level user entry. It is **portable** topology (no host/credentials);
+  the backend is selected at run time by a `--profile` connection profile
+  (ADR-0015/0016), which the registry turns into a concrete driver. A plan may
+  instead pin a concrete `*Hypervisor` (e.g. `LibvirtHypervisor`). libvirt is
+  the certified reference backend (ADR-0019); Proxmox is in progress; the
+  in-memory `MockDriver` is test-only (`tests/mock_driver.py`). For cleanup the
+  driver is rebuilt from the stored URI via `testrange.drivers.driver_for_name`.
+  `build_switch` is the user-declared build network (`Switch | None`, ADR-0016 —
+  portable topology, realized like a run-phase switch); `None` means an
   isolated build network with no egress (see the build phase below).
 - **`VMSpec`** — hardware-only (`name`, `devices=[CPU, Memory,
   OSDrive, HardDrive, NetworkIface]`). Singleton-device runtime
@@ -63,7 +66,9 @@ Plan(name, MockHypervisor(networks=, pools=, vms=[VMRecipe(...)]))
   sidecar owns DHCP, so a lease lives in the sidecar's `dnsmasq` lease file,
   which the orchestrator reads over the native-guest transport — not in
   anything the hypervisor manages. Concretes register themselves with the
-  driver registry at import time. Today: `MockDriver` (in-memory).
+  driver registry at import time. libvirt is the certified reference backend
+  (ADR-0019); Proxmox is in progress; `MockDriver` is the test-only backend the
+  unit suite drives (`tests/mock_driver.py`).
 - **Per-Switch sidecar VM** — a pre-built Alpine image with
   `dnsmasq`, `nftables`, and `qemu-guest-agent` baked in
   (`tools/build-sidecar-image/build.sh`). The orchestrator
@@ -189,16 +194,20 @@ CacheEntry("debian-13") in Plan
   is pure. Per-driver, with the right OUI. Required because
   cloud-init's rendered network-config on the cached disk can be
   MAC-keyed.
-- **PID-gated cleanup**: a sibling `state.pid` file records the owning
-  process. `testrange cleanup` refuses to act on a run whose PID is
-  still alive.
+- **Lock-gated cleanup**: the owning process holds an exclusive advisory
+  lock on `state.lock` (`fcntl.flock`) for the run's lifetime. `testrange
+  cleanup` probes that lock (`require_dead`) and refuses to act on a run whose
+  owner is still alive — a recycled PID cannot fool it (ADR-0018). The sibling
+  `state.pid` file is a human-readable breadcrumb only.
 
 ## Subprocess discipline
 
-`testrange` itself runs no subprocesses. Every operation has a Python
-library (the backend SDK, paramiko, pycdlib, urllib, cryptography).
-Ruff's `flake8-tidy-imports` banned-api blocks `import subprocess` at
-lint time and a CI test enforces the same.
+`testrange` runs no subprocesses except the ADR-0022-sanctioned ISO-prep
+modules (`builders/_proxmox_prepare.py`, `builders/_esxi_prepare.py`), which
+shell out to `xorriso`. Every other operation has a Python library (the backend
+SDK, paramiko, pycdlib, urllib, cryptography). Ruff's `flake8-tidy-imports`
+banned-api blocks `import subprocess` at lint time outside those two modules
+(per-file ignores) and a CI test enforces the same.
 
 What a backend's own service does on our behalf (e.g. libvirtd invoking
 `qemu-img`, a hypervisor flattening a disk during a full clone) is that

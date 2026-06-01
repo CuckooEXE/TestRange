@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock
@@ -60,10 +61,19 @@ class _FakeSFTP:
     def __init__(self) -> None:
         self.files: dict[str, _FakeSFTPFile] = {}
         self.opened: list[tuple[str, str]] = []
+        self.put_short = False  # simulate a truncated transfer for confirm=True
 
     def open(self, path: str, mode: str) -> _FakeSFTPFile:
         self.opened.append((path, mode))
         return self.files.setdefault(path, _FakeSFTPFile())
+
+    def putfo(self, fl: Any, path: str, confirm: bool = True) -> None:
+        data = fl.read()
+        stored = data[:-1] if self.put_short else data
+        f = self.files.setdefault(path, _FakeSFTPFile())
+        f.written = stored
+        if confirm and len(stored) != len(data):
+            raise OSError(f"size mismatch: {len(stored)} of {len(data)} bytes")
 
     def close(self) -> None:
         pass
@@ -314,6 +324,57 @@ class TestSFTP:
         c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
         c.write_file("/tmp/foo", b"data")
         assert client.sftp.files["/tmp/foo"].written == b"data"
+
+    def test_write_file_truncated_raises(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        # A short transfer (remote size != source size) must fail loud, not be
+        # silently swallowed (COMM-5).
+        _, client = fake_paramiko
+        client.sftp.put_short = True
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        with pytest.raises(CommunicatorError, match="SFTP write"):
+            c.write_file("/tmp/foo", b"data")
+
+
+class TestConcurrentDrain:
+    """stdout and stderr share one channel and must be drained concurrently."""
+
+    def test_stderr_flood_does_not_wedge_stdout(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # Regression (COMM-5): the old code read stdout fully *before* stderr.
+        # Here stdout cannot complete until stderr has been drained (mimicking
+        # the shared-channel-window backpressure) — sequential draining would
+        # deadlock; concurrent draining completes.
+        _, client = fake_paramiko
+        stderr_drained = threading.Event()
+
+        class _BlockingStdout:
+            def __init__(self) -> None:
+                self.channel = _FakeChannel(0)
+
+            def read(self) -> bytes:
+                if not stderr_drained.wait(timeout=5.0):
+                    raise AssertionError("stdout wedged: stderr was never drained")
+                return b"out"
+
+        class _SignalStderr:
+            channel = _FakeChannel(0)
+
+            def read(self) -> bytes:
+                stderr_drained.set()
+                return b"E" * 100_000
+
+        def _exec(cmd: str, **kwargs: Any) -> tuple[Any, Any, Any]:
+            client.exec_commands.append((cmd, kwargs))
+            return (object(), _BlockingStdout(), _SignalStderr())
+
+        client.exec_command = _exec  # type: ignore[method-assign]
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        res = c.execute(["noisy"])
+        assert res.stdout == b"out"
+        assert res.stderr == b"E" * 100_000
 
 
 class TestClose:

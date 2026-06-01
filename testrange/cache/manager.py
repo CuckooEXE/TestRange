@@ -81,7 +81,6 @@ class CacheManager:
         """Stream HTTP-tier ``info`` into the local cache and return the local entry."""
         assert self.http is not None
         bin_path = self.local.isos / f"{info.sha256}.bin"
-        sidecar = self.local.isos / f"{info.sha256}.json"
         # bin first, sidecar LAST — a crash mid-fetch leaves an orphan
         # ``<sha>.bin`` that resolve() ignores (it scans sidecars).
         self.http.fetch(info.sha256, bin_path)
@@ -94,7 +93,9 @@ class CacheManager:
             description=info.description,
             path=bin_path,
         )
-        self.local._write_sidecar(sidecar, local_info)
+        # Write the sidecar through the locked LocalCache path (not the private
+        # ``_write_sidecar``) so a concurrent same-sha add can't lose aliases.
+        local_info = self.local.write_materialized_sidecar(local_info)
         _log.info("fetched %s from http cache (%d bytes)", info.sha256[:16], info.size)
         return local_info
 

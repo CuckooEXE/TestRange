@@ -14,12 +14,9 @@ nothing attached. ``sidecar=Sidecar(...)`` materializes a sidecar VM at
 ``uplink="<nic>"`` asks the driver to bridge the Switch to a physical NIC.
 
 ``uplink`` is a **logical name** (ADR-0016), resolved per-run against the bound
-connection profile's ``[uplinks]`` map to a host iface; the driver owns the
-lookup and what it does with the iface (host bridge + NIC enslavement for
-libvirt, a ``vmnic`` on a vSwitch for ESXi, a vmbr port for Proxmox, an External
-VMSwitch for Hyper-V). The orchestrator never realizes L2 itself. Egress is
-out-of-band — a named uplink is a host bridge the operator provisions (NAT/DHCP
-behind it); TestRange only attaches to it.
+connection profile's ``[uplinks]`` map to a host iface. Egress is out-of-band —
+a named uplink is a host bridge the operator provisions (NAT/DHCP behind it);
+TestRange only attaches to it.
 """
 
 from __future__ import annotations
@@ -152,21 +149,17 @@ class BuildNic:
 
     Independent of the VM's declared ``spec.nics``: every build VM gets exactly
     one of these on the build switch, and its declared NICs are *not* attached
-    during build. The orchestrator's build phase synthesizes it; two consumers
-    read disjoint halves of it:
+    during build.
 
-    - the **builder** renders its netplan stanza from ``addr`` + ``addressing``,
-      matched by ``mac`` — the same per-NIC logic a declared :class:`StaticAddr`
-      uses, deriving prefix/gateway/DNS from ``addressing``;
-    - the **driver** attaches one interface at ``create_vm`` time, wiring ``mac``
-      onto the backend network keyed by ``network`` in its ``network_refs``.
-
-    ``addr`` is a :class:`~testrange.devices.network.StaticAddr` from the build
-    switch's ``.3`` infra slot (:data:`~testrange.networks._addressing_consts.BUILD_NIC_OFFSET`):
-    deterministic, and — when the build switch is ``nat`` — its gateway/DNS
-    resolve to the sidecar at ``.1`` so ``apt``/``pip`` egress during build. The
-    stanza is inert at run (its MAC is absent), so the same baked netplan serves
-    both phases.
+    - ``mac`` / ``network`` — the NIC's address and the build-switch Network it
+      attaches to.
+    - ``addr`` — a :class:`~testrange.devices.network.StaticAddr` from the build
+      switch's ``.3`` infra slot
+      (:data:`~testrange.networks._addressing_consts.BUILD_NIC_OFFSET`):
+      deterministic, and — when the build switch is ``nat`` — its gateway/DNS
+      resolve to the sidecar at ``.1`` so ``apt``/``pip`` egress during build.
+    - ``addressing`` — the build switch's :class:`NetworkAddressing`, used to
+      derive prefix/gateway/DNS for ``addr``.
     """
 
     mac: str
@@ -188,12 +181,12 @@ class Switch:
     - ``cidr`` — the IPv4 subnet for every Network on this Switch.
       Strict network form (``192.168.10.0/24``); host-form raises.
     - ``uplink`` — a **logical name** (ADR-0016) resolved against the bound
-      profile's ``[uplinks]`` map to a host iface. When set, the driver
-      attaches the Switch to that iface. Without a NAT sidecar, guests
-      egress with their own MACs and IPs (pure L2 to the LAN behind it).
-      With a ``Sidecar(nat=True)``, the guest segment stays isolated and the
-      sidecar MASQUERADEs out a second NIC on a driver-provided uplink
-      segment. An unmapped name fails at preflight.
+      profile's ``[uplinks]`` map to a host iface. When set, the Switch is
+      attached to that iface. Without a NAT sidecar, guests egress with their
+      own MACs and IPs (pure L2 to the LAN behind it). With a
+      ``Sidecar(nat=True)``, the guest segment stays isolated and the sidecar
+      MASQUERADEs out a second NIC on the uplink segment. An unmapped name
+      fails at preflight.
     - ``mgmt`` — host adapter at ``.2`` on the Switch's subnet. Just an
       adapter — no NAT, no forwarding, no router semantics.
     - ``sidecar`` — an optional :class:`Sidecar` bundling the services to

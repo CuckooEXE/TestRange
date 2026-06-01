@@ -220,10 +220,10 @@ class TestLocalCacheAdd:
         bin_path = cache.isos / f"{info.sha256}.bin"
         committed = bin_path.read_bytes()
 
-        def _boom(self: Path, target: object) -> None:
+        def _boom(src: object, dst: object) -> None:
             raise OSError("simulated crash before rename completes")
 
-        monkeypatch.setattr(Path, "replace", _boom)
+        monkeypatch.setattr("os.replace", _boom)
         payload2 = b"second-different\n"
         sha2 = hashlib.sha256(payload2).hexdigest()
         with pytest.raises(OSError):
@@ -232,6 +232,31 @@ class TestLocalCacheAdd:
         assert not (cache.isos / f"{sha2}.bin").exists()
         # …and the previously-committed entry is intact.
         assert bin_path.read_bytes() == committed
+
+    def test_write_materialized_sidecar_fresh(self, tmp_path: Path) -> None:
+        # CACHE-7: the manager streams the .bin itself, then records the sidecar
+        # via this locked path. Fresh (no prior sidecar) → written as-is.
+        cache = LocalCache(root=tmp_path / "c")
+        payload = b"materialized\n"
+        sha = hashlib.sha256(payload).hexdigest()
+        bin_path = cache.isos / f"{sha}.bin"
+        bin_path.write_bytes(payload)
+        info = CacheEntryInfo(sha, len(payload), ("http-name",), "http://h", "t", None, bin_path)
+        out = cache.write_materialized_sidecar(info)
+        assert out.names == ("http-name",)
+        assert (cache.isos / f"{sha}.json").exists()
+
+    def test_write_materialized_sidecar_merges_existing_names(self, tmp_path: Path) -> None:
+        # A concurrent local add may already have written a sidecar for the same
+        # sha; materialize must merge aliases under the lock, not clobber them.
+        cache = LocalCache(root=tmp_path / "c")
+        info = cache.add(_make_blob(tmp_path / "src.bin", payload=b"x\n"), name="local-name")
+        materialized = CacheEntryInfo(
+            info.sha256, info.size, ("http-name",), "http://h", info.added_at, None, info.path
+        )
+        merged = cache.write_materialized_sidecar(materialized)
+        assert set(merged.names) == {"local-name", "http-name"}
+        assert set(cache.resolve(info.sha256).names) == {"local-name", "http-name"}
 
     def test_sidecar_schema(self, tmp_path: Path) -> None:
         cache = LocalCache(root=tmp_path / "c")

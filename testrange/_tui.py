@@ -66,8 +66,6 @@ class LiveTail(logging.Handler):
         self._step: str | None = None
         self._step_start = now()
 
-    # -- logging.Handler hook -------------------------------------------------
-
     def emit(self, record: logging.LogRecord) -> None:
         try:
             text = self.format(record)
@@ -77,8 +75,6 @@ class LiveTail(logging.Handler):
                 self.commit(text)
         except Exception:  # never let a render error escape into the log call
             self.handleError(record)
-
-    # -- public surface for callers that know their own step boundaries -------
 
     def resize(self, *, width: int | None, height: int) -> None:
         """Adopt a new terminal size (SIGWINCH); re-cap the ring to ``height``."""
@@ -99,8 +95,6 @@ class LiveTail(logging.Handler):
         if self._tty:
             self._erase_region()
             self._write("\x1b[?25h")  # ensure the cursor is visible again
-
-    # -- transient region -----------------------------------------------------
 
     def _feed(self, text: str, step: str | None) -> None:
         if step is not None and step != self._step:
@@ -136,8 +130,6 @@ class LiveTail(logging.Handler):
     def _truncate(self, line: str) -> str:
         # A wrapped line would desync the cursor-up count, so hard-cap to width.
         return line[: self._width] if self._width else line
-
-    # -- permanent lines + step summaries ------------------------------------
 
     def commit(self, text: str) -> None:
         """Print ``text`` as a permanent line above the live region."""
