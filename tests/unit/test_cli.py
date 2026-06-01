@@ -278,10 +278,10 @@ class TestDescribeBinding:
         self, capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-        # CORE-19: px_hello.py is scheme-pinned (ProxmoxHypervisor) but carries no
+        # CORE-19: capabilities-px.py is scheme-pinned (ProxmoxHypervisor) but carries no
         # connection, so describe without --profile renders an UNBOUND binding
         # that names the pinned scheme so the dev knows which profile to point at.
-        rc = cli.main(["describe", str(EXAMPLES / "px_hello.py")])
+        rc = cli.main(["describe", str(EXAMPLES / "capabilities-px.py")])
         assert rc == 0
         out = capsys.readouterr().out
         assert "Plan (ProxmoxHypervisor)" in out
@@ -294,7 +294,7 @@ class TestDescribeBinding:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         prof = tmp_path / "connect.toml"
         prof.write_text('[p]\ndriver = "proxmox"\nhost = "10.0.0.5"\npassword = "Secret123!"\n')
-        rc = cli.main(["describe", str(EXAMPLES / "px_hello.py"), "--profile", f"{prof}:p"])
+        rc = cli.main(["describe", str(EXAMPLES / "capabilities-px.py"), "--profile", f"{prof}:p"])
         assert rc == 0
         out = capsys.readouterr().out
         assert "Plan (ProxmoxHypervisor)" in out
