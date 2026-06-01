@@ -6,10 +6,13 @@ the driver matching your hypervisor and follow that page's prereqs.
 ```{toctree}
 :maxdepth: 1
 
+proxmox
 networking-modes
 out-of-band-egress
 ```
 
+[Proxmox VE](proxmox.md) is the per-driver setup page (profile shape, storage
+prereqs, named uplinks, `mgmt` semantics, certification status).
 [Networking modes](networking-modes.md) covers the `Switch` API and
 how each driver realizes the flags (uplink/mgmt/dhcp/dns/nat).
 [Out-of-band egress](out-of-band-egress.md) is the per-driver recipe for the
@@ -24,11 +27,11 @@ The driver layer is multi-backend (ADR-0008). What ships today:
   and is the substrate the test suite drives the full orchestration lifecycle
   against. (It simulates the backend, not a real guest, so a live `testrange
   run` of an example to green still needs a real backend.)
-- **Proxmox** — green end-to-end on a single-node PVE 9.x host (`proxmoxer`
-  over the PVE REST API; `pip install -e '.[proxmox]'`). See
-  `examples/capabilities-px.py` for a runnable plan and the connection/credential +
-  build-egress prereqs. A dedicated setup page is pending (PVE-34); multi-node
-  clusters and block storage are not yet supported (PVE-31, PVE-33).
+- **Proxmox** — **certified** on a single-node PVE 9.x host (`proxmoxer`
+  over the PVE REST API; `pip install -e '.[proxmox]'`): the portable
+  `examples/capabilities.py` runs full-green, wired into `pytest -m proxmox`.
+  See [Proxmox VE](proxmox.md) for the full setup; multi-node clusters and block
+  storage are not yet supported (PVE-31, PVE-33).
   Installer-origin builders (`ProxmoxAnswerBuilder`, `ESXiKickstartBuilder`) also
   need the system `xorriso` binary on the orchestrator host to prepare the
   installer ISO (`apt install xorriso` / `dnf install xorriso` / `brew install

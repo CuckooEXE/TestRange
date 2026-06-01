@@ -1083,8 +1083,10 @@ live in the ADRs and the design sections above. Current state:
   ABC (ADR-0008) and drive the unit suite, but as a unit-only fixture at
   `tests/mock_driver.py` (registered via `tests/conftest.py`) — the mock
   simulates a backend, not a real guest, so the live-certified driver is the
-  reference. The Proxmox driver is in progress on `feature/proxmox` (see
-  *Proxmox backend* below).
+  reference. The **Proxmox driver is also certified** (PVE-CERT, 2026-06-01):
+  `examples/capabilities.py` runs full-green on a live single-node PVE host,
+  wired into `pytest -m proxmox` (`test_proxmox.py::test_capabilities_example_certifies`)
+  the same way libvirt's BACKEND-1.D cert is — see *Proxmox backend* below.
 - **Build/run split (ADR-0010) complete:** `build_phase` warms the cache and
   nothing else; `run_phase` creates the user's pools, gates sidecar readiness,
   pushes every built disk (OS + each data disk) per VM, and runs tests.
@@ -1099,7 +1101,18 @@ live in the ADRs and the design sections above. Current state:
 The detailed phase history is recoverable from git (the ADR commits plus the
 `wip(claude)` checkpoints). Forward-looking work lives in `TODO.md`.
 
-### Proxmox backend (in progress, `feature/proxmox`)
+### Proxmox backend (certified, `feature/pve-cert`)
+
+**Certified 2026-06-01 (PVE-CERT).** The portable `examples/capabilities.py`
+runs full-green against a live single-node PVE host, bound through a connect.toml
+`proxmox` profile, and that run is wired into the integration suite as
+`tests/integration/test_proxmox.py::test_capabilities_example_certifies`
+(marked `proxmox`, gated on `TESTRANGE_PVE_PROFILE`) — the Proxmox analog of the
+libvirt BACKEND-1.D cert. Certification scope is **single-node**, `dir`/`nfs`
+storage. Out of cert scope and tracked as their own tasks: block-storage
+StoragePools (PVE-33, lvm/zfs/ceph), QGA chunked guest-file-write (PVE-45,
+deferred — no capabilities payload needs it), multi-node clusters (PVE-31), and
+the nested-PVE installer-origin build smoke (BUILD-13, environment-blocked).
 
 Sequenced on the `ktui` board as the `PVE-*` series (`PVE-1`…`PVE-8` built;
 `PVE-9`…`PVE-24` the live-shakeout/finish work, **now closed** — see *Open work*
