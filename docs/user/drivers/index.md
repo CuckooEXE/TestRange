@@ -7,12 +7,14 @@ the driver matching your hypervisor and follow that page's prereqs.
 :maxdepth: 1
 
 proxmox
+esxi
 networking-modes
 out-of-band-egress
 ```
 
-[Proxmox VE](proxmox.md) is the per-driver setup page (profile shape, storage
-prereqs, named uplinks, `mgmt` semantics, certification status).
+[Proxmox VE](proxmox.md) and [ESXi](esxi.md) are the per-driver setup pages
+(profile shape, storage/uplink prereqs, named uplinks, `mgmt` semantics,
+certification status).
 [Networking modes](networking-modes.md) covers the `Switch` API and
 how each driver realizes the flags (uplink/mgmt/dhcp/dns/nat).
 [Out-of-band egress](out-of-band-egress.md) is the per-driver recipe for the
@@ -41,5 +43,13 @@ The driver layer is multi-backend (ADR-0008). What ships today:
   serial build-result sink, QGA guest-ops, and per-run directory pools with
   streamed volume I/O. Exercised by the capabilities + integration suite against
   a local `qemu:///system` (`pip install -e '.[libvirt]'`); the rebuild is still
-  wrapping up. ESXi and Hyper-V are on the long-term roadmap. See the `ktui`
-  board and ADR-0008.
+  wrapping up.
+- **ESXi (standalone)** — pyVmomi driver, **code-complete and gate-green**
+  (`pip install -e '.[esxi]'`): standard vSwitch/portgroup L2, datastore
+  `/folder` volume I/O with qcow2↔vmdk conversion at the boundary, VM lifecycle,
+  snapshots, VMware Tools guest-ops, and the datastore-file serial sink. `connect`
+  + inventory + byte I/O are live-proven; the full `examples/capabilities.py`
+  live certification is in progress (ESXI-13). Requires a non-free vSphere
+  license (the API write path is license-gated). See [ESXi](esxi.md) and
+  [ADR-0025](../../adr/0025-esxi-standalone-driver.md). Hyper-V remains on the
+  long-term roadmap.

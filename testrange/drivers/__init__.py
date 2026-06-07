@@ -15,9 +15,10 @@ the reference implementation.)
 from __future__ import annotations
 
 # Side-effect imports: each driver module calls register() at module scope.
-# Both backend packages import cleanly without their SDKs installed — the SDK
-# imports (proxmoxer / libvirt-python) are lazy (only on connect()), so
-# registration costs nothing at import.
+# Every backend package imports cleanly without its SDK installed — the SDK
+# imports (proxmoxer / libvirt-python / pyvmomi) are lazy (only on connect()),
+# so registration costs nothing at import.
+from testrange.drivers import esxi as _esxi  # noqa: F401
 from testrange.drivers import libvirt as _libvirt  # noqa: F401
 from testrange.drivers import proxmox as _proxmox  # noqa: F401
 from testrange.drivers._registry import (

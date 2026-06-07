@@ -184,7 +184,13 @@ def _build(args: argparse.Namespace) -> int:
     mgr = _build_manager(args)
     try:
         with live_output(verbose=args.verbose):
-            run_id = build_range(plan, cache_manager=mgr, profile=profile, jobs=args.jobs)
+            run_id = build_range(
+                plan,
+                cache_manager=mgr,
+                profile=profile,
+                jobs=args.jobs,
+                build_timeout_s=args.build_timeout,
+            )
     except DriverError as e:
         # Binding/pin mismatch or a backend-agnostic plan with no --profile.
         print(f"error: {e}", file=sys.stderr)
@@ -227,6 +233,8 @@ def _run(args: argparse.Namespace) -> int:
                 profile=profile,
                 verbose=args.verbose,
                 jobs=args.jobs,
+                build_timeout_s=args.build_timeout,
+                lease_timeout_s=args.lease_timeout,
             )
     except DriverError as e:
         print(f"error: {e}", file=sys.stderr)
@@ -715,6 +723,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_build.add_argument("plan", help="path to the plan file (.py)")
+    p_build.add_argument(
+        "--build-timeout",
+        type=float,
+        default=600.0,
+        metavar="SECONDS",
+        help="max seconds a build VM may take to report its result over serial (default 600)",
+    )
     _add_jobs_arg(p_build)
     _add_connect_arg(p_build)
     p_build.set_defaults(func=_build)
@@ -735,6 +750,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-cache",
         action="store_true",
         help="fail fast if any artifact is missing instead of auto-building it first",
+    )
+    p_run.add_argument(
+        "--build-timeout",
+        type=float,
+        default=600.0,
+        metavar="SECONDS",
+        help="max seconds a build VM may take to report its result over serial (default 600)",
+    )
+    p_run.add_argument(
+        "--lease-timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="max seconds a run VM may take to acquire its DHCP lease (default 120)",
     )
     _add_jobs_arg(p_run)
     _add_connect_arg(p_run)

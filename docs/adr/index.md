@@ -29,4 +29,9 @@ context, the decision, and the consequences. Listed oldest-first.
 0021-nested-virtualization
 0022-xorriso-installer-iso-prep
 0023-in-process-io-parallelism
+0024-qemu-img-disk-conversion
+0025-esxi-standalone-driver
+0026-libvirt-concrete-device-types
+0027-bare-metal-provisioning
+0028-release-validation-strategy
 ```

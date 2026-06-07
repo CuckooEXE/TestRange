@@ -7,8 +7,12 @@ installer ISO itself. Two-pass xorriso:
 
 1. Extract ``/BOOT.CFG`` (BIOS, every ESXi 5+) and ``/EFI/BOOT/BOOT.CFG`` (UEFI,
    ESXi 7+ only — tolerate absence) and patch each ``kernelopt=`` line to
-   ``runweasel ks=cdrom:/ks.cfg`` (DROP the original ``cdromBoot`` — it makes
-   weasel handle the boot CD specially and skip the ks= search).
+   ``runweasel ks=cdrom:/ks.cfg logPort=com1 gdbPort=none`` (DROP the original
+   ``cdromBoot`` — it makes weasel handle the boot CD specially and skip the ks=
+   search). ``logPort=com1`` makes the **installer's** vmkernel stream its log out
+   COM1; ``%post`` injects the build-result record into that vmkernel log via
+   ``vsish`` (see :func:`render_kickstart`), which is the only userspace→serial
+   channel ESXi has — the build VM's serial sink reads it host-side.
 2. Re-emit the ISO with the patched configs back at their paths + ``ks.cfg`` at
    the root.
 
@@ -54,9 +58,11 @@ _C_LOCALE_ENV = {**os.environ, "LC_ALL": "C"}
 
 _BOOTCFG_BIOS = "/BOOT.CFG"
 _BOOTCFG_UEFI = "/EFI/BOOT/BOOT.CFG"
-_KICKSTART_KERNELOPT = "runweasel ks=cdrom:/ks.cfg"
+# logPort=com1 streams the installer vmkernel log out COM1 so the %post
+# build-result (injected via `vsish -e set /system/log`) reaches the build VM's
+# serial sink; gdbPort=none keeps the kernel debugger off the UARTs.
+_KICKSTART_KERNELOPT = "runweasel ks=cdrom:/ks.cfg logPort=com1 gdbPort=none"
 _KICKSTART_FILENAME = "ks.cfg"
-_SERIAL_DEVICE = "/dev/ttyS0"
 
 
 class EsxiPrepareError(BuilderError):
@@ -64,22 +70,54 @@ class EsxiPrepareError(BuilderError):
     a corrupt/unrecognized vanilla ISO, or a non-zero ``xorriso`` exit)."""
 
 
-def render_kickstart(*, root_password: str, ssh_key: str | None = None) -> str:
+def render_kickstart(
+    *, root_password: str, ssh_key: str | None = None, license: str | None = None
+) -> str:
     """Build a ks.cfg that installs ESXi unattended and reports a build result.
 
-    The ``%firstboot`` block (busybox) optionally enables SSH + writes the key,
-    then frames the build-result record to the serial console (ADR-0012) and
-    powers off — replacing the prior power-off-edge keying. Provisioning runs in
-    a ``set -e`` subshell so a failure emits ``fail`` (not a false ``ok``) and
-    the guest still powers off.
+    Build-result over serial, ESXi-style (ADR-0012). ESXi has **no userspace
+    serial write path** — ``/dev/char/serial/uart*`` is held by the vmkernel and
+    is not a tty, so the Linux-guest idiom ``echo … > /dev/ttyS0`` is silently
+    swallowed. The one channel that works: the **installer's** vmkernel streams
+    its log out COM1 (``logPort=com1``, patched into the installer BOOT.CFG by
+    :func:`_patch_bootcfg`), and ``vsish -e set /system/log "<text>"`` injects an
+    arbitrary line into that vmkernel log. So the record is emitted from ``%post``
+    — which runs in the installer, *after* weasel has written the disk — straight
+    onto the build VM's serial sink.
+
+    Reaching ``%post`` means the install succeeded (weasel halts before ``%post``
+    on a failed install), so ``%post`` emits ``ok`` unconditionally, then powers
+    the installer off with ``poweroff -f`` and the orchestrator captures the disk.
+    A failed install never reaches ``%post``: the console closes without ``ok``
+    and the orchestrator raises ``BuildFailedError`` (the silent-corrupt-cache
+    guard). ``poweroff -f`` is the *only* hostd-free poweroff that works in the
+    installer — ``esxcli``/``localcli system shutdown`` need hostd, which is the
+    original ESXI-17 hang; the install is already finalized when ``%post`` runs, so
+    a hard poweroff is safe.
+
+    The marker is assembled from shell variables (``${_t}-${_r}``) so the literal
+    ``TESTRANGE-RESULT:`` never appears in the ks.cfg **source**: weasel echoes
+    every section body to the same serial at parse time, and a verbatim marker
+    there would false-trigger the orchestrator's parser before the real emission.
+
+    ``%firstboot`` carries run-phase provisioning only (SSH key + sshd enable). It
+    runs when the *captured* disk is booted for a run, not during the build, so a
+    provisioning hiccup there can't corrupt the build-result signal.
 
     Args:
       root_password: plaintext root password (``rootpw``). ESXi enforces
         complexity (>=8 chars, mixed classes); the caller's Credential is the
         source of truth, so we only reject an empty password here.
-      ssh_key: optional OpenSSH public key. When set, ``%firstboot`` enables
-        sshd, opens the ``sshServer`` firewall ruleset, and writes the key to
-        ``/etc/ssh/keys-root/authorized_keys`` (ESXi's path, NOT ``~root/.ssh``).
+      ssh_key: optional OpenSSH public key. When set, ``%firstboot`` writes it to
+        ``/etc/ssh/keys-root/authorized_keys`` (ESXi's path, NOT ``~root/.ssh``)
+        and enables sshd via ``/etc/rc.local.d/local.sh`` (which runs late, after
+        hostd — ``vim-cmd`` in ``%firstboot`` itself runs too early and hangs).
+        NOTE: ESXi 8 sshd runs in FIPS mode and rejects Ed25519 keys; the key
+        should be RSA or ECDSA.
+      license: optional ESXi license key. When set, weasel applies it at install
+        time via the top-level ``serialnum --esx=<key>`` directive, so the node
+        boots licensed instead of on the read-only free/evaluation edition.
+        ``None`` leaves the default evaluation license in place.
     """
     if not root_password:
         raise EsxiPrepareError(
@@ -89,6 +127,9 @@ def render_kickstart(*, root_password: str, ssh_key: str | None = None) -> str:
     install = [
         "# Generated by ESXiKickstartBuilder — do not edit by hand.",
         "accepteula",
+        # serialnum is a top-level weasel directive (alongside accepteula/rootpw),
+        # applied during install — not a %firstboot esxcli/vim-cmd call.
+        *([f"serialnum --esx={license}"] if license else []),
         f"rootpw {root_password}",
         # --firstdisk picks the first non-install-source disk; --overwritevmfs
         # clears any prior VMFS so a re-run is idempotent.
@@ -96,37 +137,50 @@ def render_kickstart(*, root_password: str, ssh_key: str | None = None) -> str:
         "network --bootproto=dhcp --device=vmnic0",
         "reboot",
         "",
-        "%firstboot --interpreter=busybox",
     ]
-    provision: list[str] = []
-    if ssh_key:
-        provision = [
-            "vim-cmd hostsvc/enable_ssh",
-            "vim-cmd hostsvc/start_ssh",
-            "esxcli network firewall ruleset set --enabled=true --ruleset-id=sshServer",
-            "mkdir -p /etc/ssh/keys-root",
-            "cat > /etc/ssh/keys-root/authorized_keys <<'KEYEOF'",
-            ssh_key,
-            "KEYEOF",
-            "chmod 600 /etc/ssh/keys-root/authorized_keys",
-            "chown root:root /etc/ssh/keys-root/authorized_keys",
-        ]
-    # Always-powers-off, emits ok/fail. The subshell aborts on the first failure
-    # under set -e; the `if` captures it so a half-provisioned install reports
-    # `fail` instead of a false `ok`. --delay=10 lets %firstboot output flush.
+    # %post (installer env): the install is done and the installer vmkernel is
+    # streaming its log out COM1, so inject the build-result into that log via
+    # vsish and power the installer off. _t/_r keep the literal marker out of the
+    # ks.cfg source (weasel echoes section bodies to the serial at parse time).
     result = [
-        "if (",
-        "  set -e",
-        *[f"  {line}" for line in provision],
-        "  true",
-        "); then",
-        f'  echo "TESTRANGE-RESULT: ok" > {_SERIAL_DEVICE}',
-        "else",
-        f'  echo "TESTRANGE-RESULT: fail rc=$?" > {_SERIAL_DEVICE}',
-        "fi",
-        'esxcli system shutdown poweroff --reason="testrange install done" --delay=10',
+        "%post --interpreter=busybox --ignorefailure=true",
+        "_t=TESTRANGE",
+        "_r=RESULT",
+        'vsish -e set /system/log "${_t}-${_r}: ok"',
+        # let the record drain out the serial before the hard poweroff
+        "sleep 2",
+        "poweroff -f",
     ]
-    return "\n".join([*install, *result]) + "\n"
+    return "\n".join([*install, *result, *_firstboot(ssh_key)]) + "\n"
+
+
+def _firstboot(ssh_key: str | None) -> list[str]:
+    """Run-phase ``%firstboot`` provisioning (empty when no SSH key).
+
+    Drops the root key (pure filesystem, hostd-free) and defers the sshd enable to
+    ``/etc/rc.local.d/local.sh`` — that runs late in boot, after hostd, where
+    ``vim-cmd``/``esxcli`` work; calling them directly in ``%firstboot`` runs
+    before hostd and hangs. Flat layout (no indentation): busybox only closes a
+    plain ``cat <<'EOF'`` heredoc on a column-0 terminator, so an indented body
+    would let the heredoc swallow the rest of the script.
+    """
+    if not ssh_key:
+        return []
+    return [
+        "",
+        "%firstboot --interpreter=busybox",
+        "mkdir -p /etc/ssh/keys-root",
+        "cat > /etc/ssh/keys-root/authorized_keys <<'KEYEOF'",
+        ssh_key,
+        "KEYEOF",
+        "chmod 600 /etc/ssh/keys-root/authorized_keys",
+        "chown root:root /etc/ssh/keys-root/authorized_keys",
+        "cat >> /etc/rc.local.d/local.sh <<'RCEOF'",
+        "vim-cmd hostsvc/enable_ssh",
+        "vim-cmd hostsvc/start_ssh",
+        "esxcli network firewall ruleset set --enabled true --ruleset-id sshServer",
+        "RCEOF",
+    ]
 
 
 def prepare_iso(vanilla_iso: Path, out_path: Path, *, kickstart: str) -> None:
@@ -152,6 +206,9 @@ def prepare_iso(vanilla_iso: Path, out_path: Path, *, kickstart: str) -> None:
             "configs while preserving the hybrid boot setup (ADR-0022)."
         )
     _log.info("preparing ESXi ISO %s -> %s", vanilla_iso, out_path)
+    # xorriso's -outdev refuses to clobber an existing image (exits non-zero), so
+    # clear any stale prepared ISO first — re-preparing the same target is normal.
+    out_path.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="testrange-esxi-prep-") as td:
         tmp = Path(td)
         ks_path = tmp / _KICKSTART_FILENAME

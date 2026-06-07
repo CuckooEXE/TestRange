@@ -12,6 +12,7 @@ from testrange.preflight import PreflightReport
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
+    from testrange.credentials.base import Credential
     from testrange.devices.pool.base import StoragePool
     from testrange.gateways.base import GuestGateway
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
@@ -92,16 +93,19 @@ class HypervisorDriver(ABC):
         plan: Plan,
         *,
         cache_manager: CacheManager,
-        build_switch: Switch,
+        build_switch: Switch | None,
     ) -> PreflightReport:
         """Read-only checks against the live backend.
 
-        ``build_switch`` is the transient Switch the orchestrator will
-        bring up for the build phase, resolved from the Hypervisor's
-        user-declared ``build_switch`` (ADR-0016). Preflight includes it in
-        CIDR-overlap checks (and the ``[uplinks]`` resolution check) so a
-        colliding or unmapped build switch is caught here rather than at build
-        time.
+        ``build_switch`` is the transient Switch the orchestrator will bring up
+        for the build phase, resolved from the Hypervisor's user-declared
+        ``build_switch`` (ADR-0016) — or ``None`` when this run will **not** build
+        (a cache-only ``require_cache`` run, e.g. a nested inner run whose disks
+        were warmed on L0). Preflight includes a concrete build switch in its
+        CIDR-overlap and ``[uplinks]`` resolution checks so a colliding or
+        unmapped build switch is caught here rather than at build time; a ``None``
+        build switch is never realized and so is excluded from those checks (use
+        :func:`testrange.preflight.preflight_switches` to assemble the sweep).
         """
 
     @abstractmethod
@@ -347,23 +351,30 @@ class HypervisorDriver(ABC):
     # callables. They are non-abstract: the default for a backend with no
     # native agent is a clean DriverError, not a missing method.
     #
-    # NOTE: backends whose guest channel requires per-call guest OS
-    # credentials (VMware Tools, Hyper-V PowerShell Direct) will add an
-    # optional ``credential`` keyword to these accessors when that driver
-    # lands (see ADR-0008); QGA-style agents need none, so the parameter is
-    # deliberately not introduced before a backend exercises it.
+    # The optional ``credential`` keyword is the per-call guest OS login some
+    # channels require (CORE-60, ADR-0008): VMware Tools guest-ops and Hyper-V
+    # PowerShell Direct authenticate against the guest OS on *every* operation,
+    # so the driver binds it into the returned callable. QGA-style agents
+    # authenticate at the channel and ignore it; ``None`` is the QGA default. A
+    # backend that *needs* a credential raises a clean error when handed ``None``.
 
-    def native_guest_execute(self, backend_name: str) -> GuestExec:
+    def native_guest_execute(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestExec:
         """A VM-bound callable that runs a command in the guest via the
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")
 
-    def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
+    def native_guest_read_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestReadFile:
         """A VM-bound callable that reads a file from the guest via the
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")
 
-    def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
+    def native_guest_write_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestWriteFile:
         """A VM-bound callable that writes a file into the guest via the
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")

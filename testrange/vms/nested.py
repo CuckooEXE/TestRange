@@ -6,10 +6,12 @@ ordinary VM: it carries the same ``spec`` / ``builder`` / ``communicator`` as an
 Hypervisor: the added ``inner`` field is the L1 topology (networks/pools/vms) run
 against the running guest (ADR-0021).
 
-The :meth:`GuestHypervisor.libvirt` classmethod is the ergonomic front door: it
-fills the qemu/libvirt-stack :class:`~testrange.builders.CloudInitBuilder`, an
-``SSHCommunicator`` for the admin user, and an inner ``LibvirtHypervisor``, so the
-common case needs no hand-written package list.
+Two ergonomic front doors fill the common cases. :meth:`GuestHypervisor.libvirt`
+builds a Linux guest running the qemu/libvirt stack (a
+:class:`~testrange.builders.CloudInitBuilder`, an ``SSHCommunicator``, an inner
+``LibvirtHypervisor``). :meth:`GuestHypervisor.esxi` builds an ESXi node installed
+unattended (an :class:`~testrange.builders.ESXiKickstartBuilder`, an
+``SSHCommunicator`` for root, an inner ``ESXiHypervisor`` reached over pyVmomi).
 """
 
 from __future__ import annotations
@@ -48,24 +50,26 @@ class GuestHypervisor(VMRecipe):
     """A :class:`VMRecipe` that also hosts an inner :class:`Hypervisor` plan.
 
     ``inner`` is the L1 topology (networks/pools/vms) run against this guest once
-    its hypervisor stack is live (ADR-0021). The inner backend is libvirt-only in
-    v1 (enforced at construction).
+    its hypervisor stack is live (ADR-0021). The inner backend is libvirt or ESXi
+    (enforced at construction); use the :meth:`libvirt` / :meth:`esxi` front doors.
     """
 
     inner: Hypervisor
 
     def __post_init__(self) -> None:
-        # Fail at the trust boundary, not deep in nested_phase: the inner backend
-        # is libvirt-only in v1 (ADR-0021), so a non-libvirt inner Hypervisor —
-        # which the ``Hypervisor`` annotation still type-checks — must be rejected
-        # here at construction rather than after the outer guest is already up.
-        # Lazy import keeps this module a leaf (no vms -> drivers edge at load).
+        # Fail at the trust boundary, not deep in nested_phase: a non-supported
+        # inner Hypervisor — which the ``Hypervisor`` annotation still type-checks
+        # — must be rejected here at construction rather than after the outer guest
+        # is already up. The supported inner backends are libvirt (`.libvirt()`,
+        # qemu+ssh) and ESXi (`.esxi()`, pyVmomi) — ADR-0021. Lazy imports keep
+        # this module a leaf (no vms -> drivers edge at load).
+        from testrange.drivers.esxi import ESXiHypervisor
         from testrange.drivers.libvirt import LibvirtHypervisor
 
-        if not isinstance(self.inner, LibvirtHypervisor):
+        if not isinstance(self.inner, LibvirtHypervisor | ESXiHypervisor):
             raise TypeError(
-                f"GuestHypervisor.inner must be a LibvirtHypervisor (the inner "
-                f"backend is libvirt-only in v1, ADR-0021); got "
+                f"GuestHypervisor.inner must be a LibvirtHypervisor or ESXiHypervisor "
+                f"(the supported nested inner backends, ADR-0021); got "
                 f"{type(self.inner).__name__}"
             )
 
@@ -122,6 +126,56 @@ class GuestHypervisor(VMRecipe):
             spec=spec,
             builder=builder,
             communicator=SSHCommunicator(admin.username),
+            inner=inner,
+        )
+
+    @classmethod
+    def esxi(
+        cls,
+        *,
+        spec: VMSpec,
+        root: PosixCred,
+        installer_iso: CacheEntry,
+        license: str | None = None,
+        networks: Sequence[Switch] = (),
+        pools: Sequence[StoragePool] = (),
+        vms: Sequence[VMRecipe] = (),
+        build_switch: Switch | None = None,
+    ) -> GuestHypervisor:
+        """Build an ESXi-backed nested host, installed unattended via kickstart.
+
+        The guest is an ESXi node (installer-origin, :class:`ESXiKickstartBuilder`)
+        whose inner plan runs against it over pyVmomi once it is up (ADR-0021).
+
+        ``root`` is the privileged credential the install bakes: its password
+        drives the inner pyVmomi bind and the ESXi ``guest_gateway`` SSH jump, and
+        its SSH key (required) lets the outer run phase reach the guest over SSH to
+        discover its address. ``installer_iso`` is the vanilla ESXi installer (a
+        cache entry); ``license`` is applied at install time (``serialnum``).
+        ``networks`` / ``pools`` / ``vms`` / ``build_switch`` are the *inner* (L1)
+        topology run against the nested ESXi.
+
+        The guest ``spec`` must declare ESXi-compatible hardware — a
+        :class:`~testrange.devices.disk.libvirt.LibvirtOSDrive` on ``sata``/``ide``
+        and a :class:`~testrange.devices.network.libvirt.LibvirtNetworkIface` on
+        ``e1000e`` (ESXi has no virtio drivers), plus ``CPU(nested=True)`` so the
+        L0 host exposes VMX for the nested guest's own VMs. The caller owns that
+        choice; this front door only wires the builder/communicator/inner.
+        """
+        # Lazy imports keep this module a leaf (no vms -> drivers/builders edge at
+        # load) and follow the optional-dependency idiom for the driver.
+        from testrange.builders import ESXiKickstartBuilder
+        from testrange.communicators import SSHCommunicator
+        from testrange.drivers.esxi import ESXiHypervisor
+
+        builder = ESXiKickstartBuilder(
+            installer_iso=installer_iso, credentials=[root], license=license
+        )
+        inner = ESXiHypervisor(networks=networks, pools=pools, vms=vms, build_switch=build_switch)
+        return cls(
+            spec=spec,
+            builder=builder,
+            communicator=SSHCommunicator(root.username),
             inner=inner,
         )
 

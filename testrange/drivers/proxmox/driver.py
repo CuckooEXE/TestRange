@@ -43,12 +43,14 @@ from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
     builder_origin_findings,
+    preflight_switches,
     unknown_uplink_findings,
     unsupported_firmware_findings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
+    from testrange.credentials.base import Credential
     from testrange.devices.pool.base import StoragePool
     from testrange.gateways.base import GuestGateway
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
@@ -198,7 +200,7 @@ class ProxmoxDriver(HypervisorDriver):
 
     @_translates
     def preflight(
-        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
+        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch | None
     ) -> PreflightReport:
         """Plan-side checks plus a live uplink-bridge existence check.
 
@@ -207,10 +209,9 @@ class ProxmoxDriver(HypervisorDriver):
         the "drops the gate" path other unrealized backends still keep.
         """
         del cache_manager
-        # build_switch is always a concrete Switch here — the orchestrator runs
-        # it through resolve_build_switch (synthesizing the default isolated
-        # switch when the plan declares none), so there is no None to guard (H2).
-        switches = [*plan.hypervisor.all_switches, build_switch]
+        # build_switch is None for a cache-only run (require_cache) that never
+        # realizes it; preflight_switches drops it from the sweep (CORE-65).
+        switches = preflight_switches(plan, build_switch)
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(builder_origin_findings(plan))
         findings.extend(
@@ -246,7 +247,7 @@ class ProxmoxDriver(HypervisorDriver):
         )
 
     def _uplink_bridge_findings(
-        self, plan: Plan, build_switch: Switch
+        self, plan: Plan, build_switch: Switch | None
     ) -> tuple[PreflightFinding, ...]:
         """Verify every ``uplink+nat`` Switch resolves to an existing host bridge.
 
@@ -258,7 +259,7 @@ class ProxmoxDriver(HypervisorDriver):
         *unmapped* name is already flagged by ``unknown_uplink_findings``). A
         missing bridge would otherwise surface as an opaque create-time failure.
         """
-        switches = [*plan.hypervisor.all_switches, build_switch]
+        switches = preflight_switches(plan, build_switch)
         # (logical name, resolved bridge) for each nat+uplink switch whose name
         # the profile actually maps.
         wanted: set[tuple[str, str]] = {
@@ -459,13 +460,22 @@ class ProxmoxDriver(HypervisorDriver):
             password=self._conn.ssh_password or self._conn.password or None,
         )
 
-    def native_guest_execute(self, backend_name: str) -> GuestExec:
+    def native_guest_execute(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestExec:
+        del credential  # QGA authenticates at the channel; no per-call guest login
         return _guest.make_execute(self._client, backend_name)
 
-    def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
+    def native_guest_read_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestReadFile:
+        del credential
         return _guest.make_read_file(self._client, backend_name)
 
-    def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
+    def native_guest_write_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestWriteFile:
+        del credential
         return _guest.make_write_file(self._client, backend_name)
 
     def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:

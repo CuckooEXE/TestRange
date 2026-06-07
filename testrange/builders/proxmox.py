@@ -230,9 +230,14 @@ class ProxmoxAnswerBuilder(Builder):
         Folds: the ``[network]`` block (baked into ``/etc/network/interfaces`` —
         a different static IP is a different installed system), the installer
         settings + disk layout, the first-boot script digest (which folds the
-        threaded packages/post-install/apt_insecure), and ``base_sha`` (the
-        vanilla installer ISO's content sha). **Excludes SSH keys** — key
-        rotation must not bust the cache. Pure: no clocks/run_id/I/O (ADR-0007).
+        threaded packages/post-install/apt_insecure), the baked SSH public keys
+        (the answer file's ``root-ssh-keys`` — CORE-64), and ``base_sha`` (the
+        vanilla installer ISO's content sha). Pure: no clocks/run_id/I/O (ADR-0007).
+
+        SSH keys are folded by value: run VMs boot the cached disk with no re-seed
+        (``seed_iso_ref=None``), so the keys baked at install are the only
+        ``authorized_keys`` there is — excluding them would let a plan with a
+        different key cache-hit a disk it cannot log into.
         """
         del macs, build_nic
         root = self._root_credential()
@@ -241,10 +246,16 @@ class ProxmoxAnswerBuilder(Builder):
         settings = "|".join(
             [self.country, self.keyboard, self.timezone, self.fqdn_domain, self.mailto]
         )
+        ssh_keys = "|".join(
+            c.ssh_key.auth_line
+            for c in self._credentials
+            if isinstance(c, PosixCred) and c.ssh_key is not None
+        )
         first_boot_digest = self._first_boot_digest()[:24]
         combined = (
             f"settings:{settings}\n---\nfqdn:{recipe.name}.{self.fqdn_domain}\n---\n"
-            f"root-password:{root.password}\n---\nnetwork:\n{network}\n---\n"
+            f"root-password:{root.password}\n---\nssh-keys:{ssh_keys}\n---\n"
+            f"network:\n{network}\n---\n"
             f"disks:{disks}\n---\nfirst-boot:{first_boot_digest}\n---\n"
             f"base:{base_sha}\n---\nsidecar:{sidecar_sha}"
         )

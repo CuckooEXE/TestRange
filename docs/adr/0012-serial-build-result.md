@@ -79,6 +79,20 @@ log tail onto `/dev/ttyS0`; on success it `sync`s, emits `ok`, and powers off.
 trapped script** precisely so a package failure is caught fail-fast rather
 than logged-and-ignored.
 
+**ESXi dialect (ESXI-17, amended 2026-06-06).** ESXi has no userspace serial
+write — the UART char device is held by the vmkernel and is not a tty — so the
+`echo > /dev/ttyS0` idiom is silently swallowed. The `ESXiKickstartBuilder`'s
+record-emit dialect is instead: boot the installer with `logPort=com1` (patched
+into the installer BOOT.CFG) so the installer vmkernel log streams out COM1, then
+emit the record from `%post` via `vsish -e set /system/log` (which injects a line
+into that vmkernel log) and power the installer off with `poweroff -f` — `esxcli`/
+`localcli system shutdown` need hostd, which isn't up that early. Reaching `%post`
+means the install succeeded, so it emits `ok` unconditionally; a failed install
+halts before `%post`, closing the console without `ok` (the silent-corrupt-cache
+guard fires). The marker is assembled from shell vars so the literal never appears
+in the ks.cfg source, since weasel echoes section bodies to the same serial at
+parse time. The contract and read side are unchanged — it is still serial-only.
+
 ### 3. Orchestrator responsibility
 
 `wait_for_shutoff` is replaced by `wait_for_build_result(ctx, backend, vm)`:

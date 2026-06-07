@@ -28,6 +28,8 @@ Offsets are added to the Switch's network address (``switch.cidr``):
 
 from __future__ import annotations
 
+from testrange.credentials.posix import PosixCred
+
 SIDECAR_OFFSET = 1
 MGMT_OFFSET = 2
 BUILD_NIC_OFFSET = 3
@@ -40,12 +42,20 @@ USER_STATIC_HI = 254
 
 SIDECAR_CACHE_NAME = "testrange-sidecar"
 
+# The sidecar image's baked-in guest login. Credential-free native agents (QGA on
+# libvirt/Proxmox) ignore it; backends whose guest-ops authenticate against the
+# guest OS (ESXi VMware Tools, CORE-60) use it to reach the sidecar's native
+# agent. Kept in lockstep with tools/build-sidecar-image/build.sh
+# (``SIDECAR_ROOT_PW``); a drift desyncs the image content sha and rebuilds.
+SIDECAR_CRED = PosixCred("root", password="testrange-sidecar")  # noqa: S106
+
 __all__ = [
     "BUILD_NIC_OFFSET",
     "DHCP_RANGE_HI",
     "DHCP_RANGE_LO",
     "MGMT_OFFSET",
     "SIDECAR_CACHE_NAME",
+    "SIDECAR_CRED",
     "SIDECAR_OFFSET",
     "USER_STATIC_HI",
     "USER_STATIC_LO",

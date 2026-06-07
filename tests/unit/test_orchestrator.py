@@ -22,6 +22,7 @@ from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr, Storag
 from testrange.devices.network import NetworkIface
 from testrange.exceptions import (
     BuildNotReadyError,
+    BuildRequiredError,
     BuildTimeoutError,
     PreflightError,
 )
@@ -241,6 +242,35 @@ class TestEnterAndExit:
         # No state.json was written
         names = [c[0] for c in fake_driver.calls]
         assert "create_pool" not in names
+
+    def test_normal_run_preflights_a_concrete_build_switch(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # A run that may build (require_cache=False) validates the build switch.
+        mgr, _ = populated_cache
+        with Orchestrator(_plan(), cache_manager=mgr):
+            pass
+        preflights = [c for c in fake_driver.calls if c[0] == "preflight"]
+        assert preflights and preflights[0][2]["build_switch"] is not None
+
+    def test_require_cache_run_preflights_no_build_switch(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # A cache-only run (require_cache=True, e.g. a nested inner run) never
+        # builds, so the build switch is excluded from preflight (CORE-65).
+        # Preflight runs (and is recorded) before the cache-miss gate fires.
+        mgr, _ = populated_cache
+        with (
+            pytest.raises(BuildRequiredError),
+            Orchestrator(_plan(), cache_manager=mgr, require_cache=True),
+        ):
+            pass
+        preflights = [c for c in fake_driver.calls if c[0] == "preflight"]
+        assert preflights and preflights[0][2]["build_switch"] is None
 
     def test_build_timeout(
         self,

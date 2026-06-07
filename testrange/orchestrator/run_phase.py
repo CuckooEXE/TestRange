@@ -14,6 +14,7 @@ from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
 from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
+from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
 from testrange.devices.network import StaticAddr
 from testrange.devices.pool.base import StoragePool
@@ -23,6 +24,7 @@ from testrange.exceptions import (
     GuestAgentError,
     OrchestratorError,
 )
+from testrange.networks._addressing_consts import SIDECAR_CRED
 from testrange.networks.base import Switch
 from testrange.networks.sidecar import LEASEFILE, SIDECAR_DNSMASQ_CONF, parse_dnsmasq_leases
 from testrange.orchestrator._parallel import parallel_map
@@ -159,10 +161,14 @@ def _bind_one_communicator(ctx: RunContext, vm: VMRecipe) -> None:
         )
     elif isinstance(comm, NativeCommunicator):
         backend = ctx.driver.compose_resource_name(ctx.run_id, "vm", vm.name)
+        # Per-call guest login for credential-requiring native channels (VMware
+        # Tools / Hyper-V); QGA ignores it (CORE-60, ADR-0008). Resolved from the
+        # VM's builder, or None when the builder bakes no credential.
+        native_cred = native_guest_credential(vm)
         comm.bind(
-            execute=ctx.driver.native_guest_execute(backend),
-            read_file=ctx.driver.native_guest_read_file(backend),
-            write_file=ctx.driver.native_guest_write_file(backend),
+            execute=ctx.driver.native_guest_execute(backend, credential=native_cred),
+            read_file=ctx.driver.native_guest_read_file(backend, credential=native_cred),
+            write_file=ctx.driver.native_guest_write_file(backend, credential=native_cred),
         )
         _log.info("vm %s: bound NativeCommunicator via %s", vm.name, backend)
     else:
@@ -191,7 +197,7 @@ def wait_sidecars_ready(ctx: RunContext) -> None:
 
 
 def _wait_one_sidecar_ready(ctx: RunContext, switch_name: str, sidecar_backend: str) -> None:
-    read_file = ctx.driver.native_guest_read_file(sidecar_backend)
+    read_file = ctx.driver.native_guest_read_file(sidecar_backend, credential=SIDECAR_CRED)
     deadline = time.monotonic() + ctx.sidecar_ready_timeout_s
     last_err: GuestAgentError | None = None
     while time.monotonic() < deadline:
@@ -325,7 +331,7 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
             f"{switch.name!r} has no sidecar lease file to poll"
         )
     mac = ctx.driver.compose_mac(ctx.plan_name, vm.name, nic_idx).lower()
-    read_leasefile = ctx.driver.native_guest_read_file(sidecar_backend)
+    read_leasefile = ctx.driver.native_guest_read_file(sidecar_backend, credential=SIDECAR_CRED)
     deadline = time.monotonic() + ctx.lease_timeout_s
     while time.monotonic() < deadline:
         try:
@@ -373,11 +379,33 @@ def lookup_credential(vm: VMRecipe) -> PosixCred:
     return cred
 
 
+def native_guest_credential(vm: VMRecipe) -> Credential | None:
+    """The guest OS login a native-agent channel authenticates with, or ``None``.
+
+    QGA-style agents (libvirt/Proxmox) authenticate at the channel and need none
+    — ``None`` is correct and the driver ignores it. VMware Tools / Hyper-V
+    guest-ops require a per-call guest credential (CORE-60); the orchestrator
+    sources it from the VM's builder: the admin credential if one is marked, else
+    the sole declared credential, else ``None`` (a credential-requiring backend
+    then fails loud rather than guessing). A non-``CloudInitBuilder`` carries no
+    credentials here, so it resolves to ``None``.
+    """
+    builder = vm.builder
+    if not isinstance(builder, CloudInitBuilder):
+        return None
+    creds = builder.credentials
+    admins = [c for c in creds if c.admin]
+    if admins:
+        return admins[0]
+    return creds[0] if len(creds) == 1 else None
+
+
 __all__ = [
     "await_guest_readiness",
     "bind_communicators",
     "discover_ip",
     "lookup_credential",
+    "native_guest_credential",
     "run_phase",
     "wait_communicators_ready",
     "wait_sidecars_ready",

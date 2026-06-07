@@ -13,6 +13,7 @@ from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
     builder_origin_findings,
+    preflight_switches,
     unknown_uplink_findings,
     unsupported_firmware_findings,
 )
@@ -104,6 +105,32 @@ class TestReport:
         assert "cache_miss" in text
         assert "ERROR" in text
         assert "fix:" in text
+
+
+class TestPreflightSwitches:
+    """The shared switch-sweep builder (CORE-65): run-phase switches plus the
+    transient build switch *only when there is one*. A cache-only run
+    (``require_cache``) never realizes its build switch, so the orchestrator
+    passes ``None`` and it drops out of every preflight check."""
+
+    _BUILD = Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+
+    def test_concrete_build_switch_is_appended(self) -> None:
+        plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")))
+        switches = preflight_switches(plan, self._BUILD)
+        assert switches == [*plan.hypervisor.all_switches, self._BUILD]
+
+    def test_none_build_switch_is_excluded(self) -> None:
+        plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")))
+        switches = preflight_switches(plan, None)
+        assert switches == list(plan.hypervisor.all_switches)
+        assert self._BUILD not in switches
 
 
 class TestUnknownUplinkFindings:

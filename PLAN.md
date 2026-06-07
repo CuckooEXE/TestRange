@@ -62,7 +62,8 @@ is a long-term TODO that does not break the call shape.
 
 A backend-specific Hypervisor dataclass (e.g. `LibvirtHypervisor(...)`, the
 certified reference backend; `MockHypervisor`, the in-memory test fixture;
-`ProxmoxHypervisor`, in progress) is the top-level Plan
+`ProxmoxHypervisor`, certified; `ESXiHypervisor`, code-complete + gate-green,
+live cert in progress) is the top-level Plan
 entry, carrying `networks=`, `pools=`, `vms=` plus per-backend connection
 config. It is the *host*, not a VM. The driver is inferred from the Hypervisor
 type via the driver registry (`testrange/drivers/_registry.py`):
@@ -345,6 +346,16 @@ all `CacheEntry` references and verifies each resolves; misses go in the
 report as errors with a `fix_hint`:
 `testrange cache add <…> --name <…>`. `describe` is best-effort —
 missing entries print "⚠ not in cache" but do not error.
+
+`preflight` takes `build_switch: Switch | None`. A run that **will not build**
+— a cache-only `require_cache` run, e.g. a nested inner run whose disks were
+warmed on L0 — passes `None`: it never realizes the build switch, so the build
+switch has no live host resources (uplink pNIC/bridge, CIDR) to validate and is
+excluded from every check. Drivers assemble their switch sweep via the shared
+`preflight.preflight_switches(plan, build_switch)` helper, which drops a `None`
+build switch. This is what lets a nested ESXi inner run preflight cleanly even
+though its manufactured profile carries the *outer* backend's uplink vocabulary
+(a libvirt bridge name, not a vmnic) — CORE-65.
 
 ### 13. `execute(argv)` returns `ExecResult`
 
@@ -719,8 +730,9 @@ flow). It abstracts the per-backend *host read* of the serial console:
 - **Mock** — yields a canned stream; unit tests inject `ok` / `fail` records to
   drive both the success and the (live-untestable) failure path end-to-end in
   the unit suite.
-- **ESXi / Hyper-V** (future) — datastore-file-backed serial / named pipe; the
-  abstraction must not preclude these.
+- **ESXi** — datastore-file-backed `VirtualSerialPort` (`[ds] <vm>/serial0.log`)
+  tailed over the `/folder` HTTPS endpoint with Range GETs (ESXI-8, ADR-0025).
+- **Hyper-V** (future) — named pipe; the abstraction must not preclude it.
 
 This is a hypervisor capability, distinct from `native_guest_*`; absence of
 QGA does not affect it.
@@ -731,6 +743,20 @@ serial console host-side (the mechanism differs — websocket on PVE, pty/file o
 libvirt, datastore file on ESXi — but it's serial everywhere). So the builder
 emits the record to the **serial console only**; the driver capability hides
 the per-backend read.
+
+The *write* side is also per-dialect, and **ESXi-as-a-built-guest is the awkward
+one** (ESXI-17, resolved 2026-06-06): ESXi has no userspace serial write —
+`/dev/char/serial/uart*` is held by the vmkernel and isn't a tty, so
+`echo > /dev/ttyS0` is silently swallowed. The one channel that works is the
+vmkernel log: the installer boots with `logPort=com1` (patched into the installer
+BOOT.CFG) so its vmkernel log streams out COM1, and `vsish -e set /system/log
+"<text>"` injects an arbitrary line into that log. So the ESXi kickstart emits the
+record from `%post` (installer env, where the disk is already written) via `vsish`,
+then powers the installer off with `poweroff -f` (`esxcli`/`localcli` shutdown need
+hostd, which isn't up — that was the original ESXI-17 hang). The marker is assembled
+from shell vars so the literal never appears in the ks.cfg source, because weasel
+echoes section bodies to the same serial at parse time. Read side is unchanged: on a
+nested-on-libvirt build the COM1 stream lands on the build VM's unix-socket sink.
 
 **Transport-policy amendment (accepted 2026-05-24).** The Proxmox driver was
 "proxmoxer-only, sole exception = SFTP `download_from_pool`". Reading serial
@@ -910,8 +936,12 @@ Key shape invariants this demonstrates:
   format) for `pubkey=` and `.priv` (OpenSSH PEM) for `privkey=`.
 - `NetworkIface` is exported from `testrange.devices.network` (and re-exported
   from top-level `testrange.devices`), as are the address modes (`DHCPAddr`,
-  `StaticAddr`). Backend-specific NIC subtypes, if a backend needs one, live
-  under that backend's device module.
+  `StaticAddr`). Backend-specific device subtypes, if a backend needs one, live
+  under that backend's device submodule and are imported directly from there:
+  `testrange.devices.disk.libvirt` (`LibvirtOSDrive`/`LibvirtDataDrive`, `bus=`)
+  and `testrange.devices.network.libvirt` (`LibvirtNetworkIface`, `model=`), plus
+  the `Proxmox*`/`ESXi*` disk variants under `testrange/drivers/<backend>/`
+  (ADR-0026).
 
 ## v0 phases
 
@@ -996,10 +1026,13 @@ Exit codes: 0 = success; 1 = test failure; 2 = preflight failure;
 
 ## File layout
 
-Reflects the tree as built (regenerated 2026-05-22). The device subpackages
-collapsed to `base.py` per device (no `generic.py`/`libvirt.py` split — that
-predated the multi-backend ABC and the libvirt deletion, ADR-0008). The
-orchestrator is split into per-phase modules (the planned single `phases.py`).
+Reflects the tree as built (regenerated 2026-05-22). The device subpackages are
+`base.py` per device for the portable types; a `<backend>.py` alongside it holds
+that backend's concrete variants when one exists (`disk/libvirt.py`,
+`network/libvirt.py` carry `LibvirtOSDrive`/`LibvirtDataDrive` `bus` +
+`LibvirtNetworkIface` `model`, ADR-0026 — ESXi has no virtio so a nested ESXi
+guest needs sata/ide + e1000e). The orchestrator is split into per-phase modules
+(the planned single `phases.py`).
 
 ```
 docs/
@@ -1114,7 +1147,7 @@ StoragePools (PVE-33, lvm/zfs/ceph), QGA chunked guest-file-write (PVE-45,
 deferred — no capabilities payload needs it), multi-node clusters (PVE-31), and
 the nested-PVE installer-origin build smoke (BUILD-13, environment-blocked).
 
-Sequenced on the `ktui` board as the `PVE-*` series (`PVE-1`…`PVE-8` built;
+Sequenced in `TODO.md` as the `PVE-*` series (`PVE-1`…`PVE-8` built;
 `PVE-9`…`PVE-24` the live-shakeout/finish work, **now closed** — see *Open work*
 below). **Green end-to-end as of 2026-05-24** (PVE-9): a full `testrange run` of
 `examples/px_hello.py` (debian + nginx, reached over QGA) built and ran to green
@@ -1559,7 +1592,9 @@ Two concretes ship on this seam:
   patch each `BOOT.CFG` kernelopt + inject ks.cfg, `-rockridge off` +
   `-boot_image any patch` + `-compliance lowercase` so the case-sensitive
   `ks.cfg` lookup resolves). The build-result contract lives in the kickstart
-  `%firstboot` block.
+  `%firstboot` block. An optional `license=` kwarg (BUILD-21) emits the top-level
+  `serialnum --esx=<key>` directive so the node installs licensed (folds into
+  `config_hash`); used by the nested-ESXi certification path (ORCH-32).
 
 That no-separate-seed shape forced a contract refinement: the **serial sink and
 the build-vs-run discriminator key on `seed OR boot_media`**, not seed presence
@@ -1569,27 +1604,35 @@ combo); `uefi` is accepted but unvalidated for ESXi.
 
 ### Nested virtualization via recursive orchestration (ADR-0021)
 
-A guest that is itself a hypervisor — an L1 libvirt host running its own inner
-plan of L2 guests — brought up automatically as part of the outer run. It is
-**the existing pipeline, recursed**, not a new execution model.
+A guest that is itself a hypervisor — an L1 host (libvirt **or** ESXi) running
+its own inner plan of L2 guests — brought up automatically as part of the outer
+run. It is **the existing pipeline, recursed**, not a new execution model.
 
 - **Shape:** `GuestHypervisor(VMRecipe)` adds one field `inner: Hypervisor` (the
   L1 plan). It lives in `Hypervisor.vms` alongside ordinary recipes; build / run
   / bind treat it as a VM via its shared `.spec`/`.builder`/`.communicator`, and
-  only `nested_phase` selects it with `isinstance(vm, GuestHypervisor)`. A
-  `GuestHypervisor.libvirt(...)` classmethod fills the qemu/libvirt-stack
-  `CloudInitBuilder` + `SSHCommunicator` + an inner `LibvirtHypervisor` (reused
-  as the inner-scheme marker — installing libvirtd into the guest pins the inner
-  backend to libvirt).
+  only `nested_phase` selects it with `isinstance(vm, GuestHypervisor)`. Two
+  front doors: `GuestHypervisor.libvirt(...)` (qemu/libvirt-stack
+  `CloudInitBuilder` + `SSHCommunicator` + inner `LibvirtHypervisor`) and
+  `GuestHypervisor.esxi(...)` (kickstart `ESXiKickstartBuilder` with `license=` +
+  `SSHCommunicator("root")` + inner `ESXiHypervisor`, ADR-0021 amendment /
+  ORCH-32). The inner backend is libvirt or ESXi (enforced at construction).
 - **Recursion:** after L0 run-phase brings the guest-hypervisor VM up,
-  `nested_phase` waits for libvirtd, then **synthesizes the inner binding from
-  the running guest** — its discovered IP + the SSH key the builder baked →
-  an in-process `LibvirtProfile`/driver for `qemu+ssh://<admin>@<L1-ip>/system`.
+  `nested_phase._synthesize_inner_binding` **synthesizes the inner binding from
+  the running guest**, dispatching on the inner type. *libvirt:* wait for
+  libvirtd, then an in-process `LibvirtProfile` for `qemu+ssh://<admin>@<L1-ip>/
+  system` keyed by the baked SSH key. *ESXi:* wait for the guest's vSphere API
+  (`wait_esxi_ready`), then an in-process `ESXiProfile` (pyVmomi, the baked root
+  password, no key file; inner-VM reach via the ESXi `guest_gateway` SSH jump).
   It enters a full inner `Orchestrator(Plan("<outer>.<host>", vm.inner),
-  require_cache=True, <shared cache>)`. To the inner run this is an ordinary
-  remote-libvirt run. No `--profile` for the inner plan — it is derived, which
-  is what makes nesting automatic. The inner handle is exposed as
+  require_cache=True, <shared cache>)`. No `--profile` for the inner plan — it is
+  derived, which is what makes nesting automatic. The inner handle is exposed as
   `OrchestratorHandle.nested["<host>"]` (`.vms`/`.driver`/`.run_id` + `.host`).
+  A nested ESXi guest must declare ESXi-compatible hardware — `LibvirtOSDrive(
+  bus="sata"/"ide")` + `LibvirtNetworkIface(model="e1000e")` (ADR-0026; ESXi has
+  no virtio) + `CPU(nested=True)`. The nested-ESXi path is what unblocks ESXi
+  capabilities certification (the physical host had no VM egress; build-on-L0
+  gives it).
 - **Build on L0:** inner VM disks always build during the **outer** build phase
   on the **L0** backend into the shared cache (real egress for apt). The inner
   run (`require_cache=True`) only uploads the cached disk to the L1 pool and
@@ -1613,6 +1656,152 @@ plan of L2 guests — brought up automatically as part of the outer run. It is
   disk sets and timing out at L2. A directly-gateway-bound L0 guest is likewise
   rejected. The real fix (a `GuestGateway` jumping through host-a, ADR-0020) is
   deferred; full findings in ADR-0021.
+
+### Bare-metal provisioning via out-of-band controller (ADR-0027)
+
+A third CLI verb, `provision`, installs a hypervisor (or any installer-origin OS)
+onto **physical** hardware via its out-of-band management controller (Redfish /
+iLO / iDRAC), then leaves a host the existing `build`/`run` target with a normal
+`--profile`. It is **the existing builder seam pointed at iron**, not a new build
+model. Pipeline: `provision` (iron → hypervisor) → `build` (hypervisor → cached
+disks) → `run` (cached disks → live range + tests), each consuming the prior's
+output.
+
+- **Verb & lifecycle:** `testrange provision <plan> --profile <name> --controller
+  <name>`. `--profile` is the *post-install* connection (where the host will
+  answer, its API creds, uplinks) and feeds the answer file; `--controller
+  [file:]name` resolves a `connect.toml` section by `driver=` for the BMC.
+  `provision` is **idempotent** (skip if the host is already current), slow,
+  destructive, and has **no teardown** — leaving the host running is the point. It
+  is deliberately NOT a flag on `run`: re-imaging iron is once-per-server, not
+  once-per-test-run. The "one command does everything" story is `provision &&
+  run`, not an overloaded verb.
+
+- **Shape:** `ProvisioningPlan(host: HostRecipe)` — **nameless** (the box is the
+  resource; no co-tenancy to namespace, no per-plan MAC/cache namespace, no
+  teardown; the idempotency identity is the recipe's `config_hash` stamped into
+  the install, not an author-given name). `HostRecipe = spec × builder` — **no
+  communicator** (follow-on config is baked into the answer file / first-boot and
+  run by the installer, not pushed afterward over a connection); the builder is
+  constructed and injected explicitly — **no per-backend front-door classmethods**.
+  `HostRecipe` is a `VMRecipe`-shaped leaf and follows `VMRecipe`'s
+  explicit-builder convention, not `GuestHypervisor`'s composite-assembly one
+  (which earns its `.libvirt()`/`.esxi()` doors by wiring a builder + communicator
+  + inner plan + package stack; `HostRecipe` has nothing to hide).
+
+- **`HostSpec` is a requirements contract, not a construction order.** Where
+  `VMSpec` *materializes* hardware (`CPU(2)` creates 2 vCPUs, 25 `DataDrive`s
+  create 25 vmdks), `HostSpec` *asserts minimums against discovered inventory*.
+  Scalar `firmware` (top-level, mirroring `VMSpec.firmware`) + a discrete
+  `devices` list of `Required*` entries: `RequiredCPU(cores)`,
+  `RequiredMemory(mb)`, `RequiredOSDrive(gb)`, `RequiredDataDrive(gb)`,
+  `RequiredNIC()`. Positional, value-is-a-minimum (the `Required*` prefix carries
+  "≥"), **discrete 1:1** — no `count` (two data drives are two entries, which also
+  lets heterogeneous requirements differ). Backend-agnostic — NOT the
+  `Libvirt*`/`ESXi*` device concretes — so the plan stays portable. Textually
+  identical to a `VMSpec` device list except the type names and the
+  assert-vs-construct flip.
+
+- **Inventory matching:** the provisioner pulls inventory from the controller
+  (`inventory()`), then solves a **1:1 bipartite match** of `Required*` entries ↔
+  physical resources (size minimums as edges; deterministic tiebreak — OS =
+  smallest sufficient, data = remaining largest-first, stable by hardware id). The
+  constraints usually disambiguate themselves; the matcher only tiebreaks the
+  all-identical case. It **prints the resolved assignment** ("OS→disk0 …, data→…,
+  untouched: …") before any destructive step, and claims **only** the matched
+  devices — undeclared hardware is never touched (an iron data-safety rule with no
+  VM analog). No author-specified disk identity/selector in the portable plan; if
+  a real box ever defeats the matcher, the narrowest override lands at the bind
+  layer then (a provision-time flag or a `connect.toml` map), not now.
+
+- **The controller is its own ABC, not a `HypervisorDriver`.**
+  `OutOfBandController`: `connect`/`disconnect`, `inventory()`,
+  `attach_media(url)`/`detach_media`, `set_boot_override(target, persist=)`,
+  `power`/`power_cycle`/`power_state`. It knows nothing about
+  switches/networks/pools/VMs — the physical box hosts exactly one thing (itself),
+  so a `HypervisorDriver` would `NotImplementedError` its entire core and force
+  every caller to special-case it. `ControllerProfile` mirrors `BackendProfile`
+  (scheme ClassVar + `_from_table` + `build_controller`, registry dispatch via
+  `load_controller`). First concrete: **Redfish** (covers
+  iLO5+/iDRAC9+/XCC/Supermicro X11+), lazy-imported via `_import_redfish()` with a
+  `[redfish]` extra hint. Legacy iLO4 / raw-IPMI deferred.
+
+- **Provisioner orchestrator (separate, lean):** preflight (`controller.connect` →
+  `inventory()` → 1:1 match → print assignment → idempotency gate via
+  `profile.build_driver().connect()` + version) → build (reuse the Builder seam +
+  cache unchanged) → stage (serve the prepared ISO at the BMC-reachable
+  `media_url_base`) → realize (`attach_media` → `set_boot_override(CD, one-time)` →
+  `power_cycle`) → wait (readiness = profile driver connects, bounded by
+  `--provision-timeout`) → finalize (`set_boot_override(DISK, persist)` →
+  `detach_media`). **No** switch/network/pool/nested phase, **no teardown**. Shares
+  the builder/cache substrate and the build-result micro-sequence with the run
+  orchestrator; none of its phase machinery.
+
+- **New infra + its one wrinkle:** an ephemeral HTTP(S) server stages the prepared
+  ISO for the BMC to pull. The ISO embeds the baked answer file (root cred), so
+  plain HTTP on the BMC LAN is credential-on-the-wire — mitigate with a one-time
+  unguessable URL torn down post-realize, or Redfish-over-HTTPS / CIFS/NFS
+  virtual media.
+
+- **Scoped deferrals (named, not silent):** **installer-origin only** in v1 (the
+  BMC boots the ISO, the installer writes the disk). Image-origin onto iron has no
+  "upload to pool" equivalent — it needs a writer stage (boot a live/iPXE env, dd
+  the image, reboot) — so it is later work. **No disk-identity override** until a
+  concrete box defeats the constraints-plus-deterministic match. `provision` also
+  generalizes to non-hypervisor installer-origin OSes (a bare Debian box is an end
+  in itself); when the output IS a hypervisor, `run --profile` targets it next.
+  Provisioning is a **controller** capability, so it gets its own
+  `examples/provision-proxmox.py`, NOT a `examples/capabilities.py` entry (that is
+  the portable *driver* survey).
+
+### 1.0.0 validation & release (ADR-0028)
+
+The road to 1.0.0 is a validation pass, not a feature: prove all three backends
+(libvirt, Proxmox, ESXi) hold up under the same adversarial suite, on the same
+plans, on independently-built hosts — then freeze the public API. Tracked as the
+`REL` epic.
+
+- **Adversarial e2e suite in `tests/end-to-end/`, distinct from
+  `capabilities.py`.** `capabilities.py` is the breadth survey (one VM per
+  capability, happy path — "does the driver implement the contract"). The e2e
+  suite is the depth layer: churn, adversarial topologies, and the edges where
+  TestRange's *own* logic (cache reuse, teardown, concurrency, snapshot
+  lifecycles, error paths) is most likely wrong. Each plan is a portable
+  `PLAN` + `TESTS` module opening with a docstring stating **what** it stresses
+  and **why** that edge is failure-prone; run the normal way (`testrange run
+  --profile <name> tests/end-to-end/plans/<plan>.py`) and *also* wrapped by
+  `test_e2e_<backend>.py` harnesses behind the per-backend markers
+  (`libvirt`/`proxmox`/`esxi`, the last newly added), gated on
+  `TESTRANGE_*_PROFILE`. Two tiers: **generic** plans run on every backend;
+  **backend-specific** plans (`*_specific.py`) exercise what only that backend
+  exposes. `capabilities.py` stays THE survey (CLAUDE.md rule 4 unchanged); the
+  e2e suite is additive, never a replacement.
+
+- **Unmanaged, scripted nested host fleet in `tools/hypervisor-hosts/`.** Each
+  hypervisor is stood up as a **raw libvirt VM** (`virt-install` + kickstart /
+  answer ISO), **independent of TestRange** — no `GuestHypervisor`, no driver.
+  Validating TestRange *with* TestRange would be circular; the substrate must be
+  independent. The hosts sit on the `tr-egress` NAT network, giving their build
+  VMs the egress the bare-metal ESXi host lacked — this **supersedes the
+  environment block on ESXI-11/12/13 and BUILD-13**. The harness emits the
+  `connect.toml` profiles binding TestRange to each host (`esxi-e2e`,
+  `proxmox-e2e`, `libvirt-remote-e2e`). The ESXi host reuses the install lessons
+  from BACKEND-13 (IDE installer CD on BIOS), BUILD-22 (heredoc terminator), and
+  ESXI-17 (`%post` `vsish`→`logPort=com1` build-result + `poweroff -f`) — as a
+  standalone kickstart, not via the driver.
+
+- **1.0.0 = all three backends green + a public-API freeze.** The gate is the
+  full e2e suite passing on hosted ESXi, then Proxmox, then libvirt; each run
+  emits a `docs/dev/e2e-findings-<backend>.md` and every discrepancy becomes a
+  bug ticket fixed before the gate clears. 1.0.0 is a real SemVer commitment:
+  `major_version_zero` flips to `false`, an `/api-diff` baseline is captured, and
+  the public surface (`testrange.__init__` exports, the driver ABC, the CLI) is
+  frozen. The `PLAN.md` / `TODO.md` / `docs/` reconciliation happens *after* the
+  validation pass, so it tracks validated reality, not intent.
+
+- **Sequencing:** the epic is gated on the in-flight ESXi Builder effort
+  (ESXI-16/17) landing; the generic suite and the libvirt/Proxmox hosts proceed
+  in parallel with it.
 
 ### Deferred (named, not built)
 

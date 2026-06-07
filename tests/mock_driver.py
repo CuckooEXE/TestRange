@@ -35,6 +35,7 @@ from testrange.preflight import (
     PreflightReport,
     builder_origin_findings,
     mgmt_unsupported_findings,
+    preflight_switches,
     unknown_uplink_findings,
 )
 
@@ -186,15 +187,15 @@ class MockDriver(HypervisorDriver):
         self._record("disconnect")
 
     def preflight(
-        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
+        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch | None
     ) -> PreflightReport:
         del cache_manager
-        self._record("preflight")
+        self._record("preflight", build_switch=build_switch)
         if self.preflight_override is not None:
             return self.preflight_override
-        # build_switch is always a concrete Switch here (resolve_build_switch) —
-        # no None to guard (H2).
-        switches = [*plan.hypervisor.all_switches, build_switch]
+        # build_switch is None for a cache-only run (require_cache) that never
+        # realizes it; preflight_switches drops it from the sweep (CORE-65).
+        switches = preflight_switches(plan, build_switch)
         findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
         findings.extend(builder_origin_findings(plan))
         findings.extend(self._pool_capacity_findings(plan))
@@ -408,7 +409,11 @@ class MockDriver(HypervisorDriver):
 
     # -- native guest agent (QGA-shaped: unauthenticated, all ops) ---------
 
-    def native_guest_execute(self, backend_name: str) -> GuestExec:
+    def native_guest_execute(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestExec:
+        del credential  # mock has no guest OS to authenticate against
+
         def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
             del timeout, cwd
             self._record("native_guest_execute", backend_name, tuple(argv))
@@ -416,7 +421,11 @@ class MockDriver(HypervisorDriver):
 
         return _execute
 
-    def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
+    def native_guest_read_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestReadFile:
+        del credential
+
         def _read_file(path: str) -> bytes:
             self._record("native_guest_read_file", backend_name, path)
             if self.guest_agent_unreachable:
@@ -430,7 +439,11 @@ class MockDriver(HypervisorDriver):
 
         return _read_file
 
-    def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
+    def native_guest_write_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestWriteFile:
+        del credential
+
         def _write_file(path: str, data: bytes) -> None:
             del data
             self._record("native_guest_write_file", backend_name, path)

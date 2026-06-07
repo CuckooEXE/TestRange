@@ -277,8 +277,10 @@ class TestConfigHash:
         h2 = _config_hash(_builder(packages=[Apt("nginx")]), spec, base_sha="x")
         assert h1 != h2
 
-    def test_insensitive_to_ssh_key_rotation(self) -> None:
-        # Key rotation must NOT bust the cache (the installed system is the same).
+    def test_sensitive_to_ssh_key_value(self) -> None:
+        # The keys are baked into the answer file's root-ssh-keys and not re-seeded
+        # at run, so a different key MUST bust the cache (CORE-64) — else a plan
+        # with a new key cache-hits a disk it can't log into.
         spec = _spec()
         other = SSHKey.generate(comment="rotated")
         h1 = _config_hash(
@@ -291,7 +293,7 @@ class TestConfigHash:
             spec,
             base_sha="x",
         )
-        assert h1 == h2
+        assert h1 != h2
 
     def test_sensitive_to_root_password(self) -> None:
         spec = _spec()

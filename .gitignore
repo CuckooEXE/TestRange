@@ -51,3 +51,6 @@ cache-server/storage/
 tools/build-sidecar-image/*.qcow2
 tools/build-sidecar-image/*.raw
 tools/build-sidecar-image/*.manifest.json
+
+# Research scratch (diag scripts, captures, screenshots, RE notes) — not codebase
+notes/

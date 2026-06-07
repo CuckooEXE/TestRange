@@ -16,7 +16,9 @@ from typing import Any
 import pytest
 
 from testrange.devices import CPU, HardDrive, Memory, OSDrive
+from testrange.devices.disk.libvirt import LibvirtDataDrive, LibvirtOSDrive
 from testrange.devices.network import NetworkIface, StaticAddr
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.libvirt import _serial, _vm
 from testrange.exceptions import DriverError
@@ -178,13 +180,17 @@ class TestDomainXML:
             os_path="/p/os.qcow2",
             data_paths=["/p/b.qcow2", "/p/c.qcow2"],
             seed_path="/p/seed.iso",
-            nics=[("02:aa:bb:cc:dd:01", "net-a"), ("02:aa:bb:cc:dd:02", "net-b")],
+            nics=[
+                ("02:aa:bb:cc:dd:01", "net-a", "virtio"),
+                ("02:aa:bb:cc:dd:02", "net-b", "virtio"),
+            ],
             serial_sock="/run/tr/web.sock",
         )
         assert "<name>tr-vm-x-web</name>" in xml
         assert "<memory unit='MiB'>1024</memory>" in xml and "<vcpu>2</vcpu>" in xml
         # OS at vda, data at vdb/vdc (the fileserver capability depends on order).
         assert "dev='vda'" in xml and "dev='vdb'" in xml and "dev='vdc'" in xml
+        assert "bus='virtio'" in xml and "<model type='virtio'/>" in xml  # default models
         assert "device='cdrom'" in xml and "/p/seed.iso" in xml
         assert xml.count("<interface type='network'>") == 2
         assert "org.qemu.guest_agent.0" in xml
@@ -207,6 +213,84 @@ class TestDomainXML:
         assert "<serial type='pty'>" in xml
         assert "device='cdrom'" not in xml
         assert "<interface" not in xml
+
+
+class TestLibvirtDeviceVariants:
+    """ESXi-shaped guest: sata/ide disk + e1000e NIC, via the libvirt variants."""
+
+    def test_sata_os_disk_and_e1000e_nic(self) -> None:
+        spec = VMSpec(
+            name="esxi",
+            firmware="bios",
+            devices=[
+                CPU(4, nested=True),
+                Memory(8192),
+                LibvirtOSDrive("pool1", 33, bus="sata"),
+                LibvirtNetworkIface("lab", model="e1000e"),
+            ],
+        )
+        xml = _vm._domain_xml(
+            "tr-vm-x-esxi",
+            spec,
+            os_path="/p/os.qcow2",
+            data_paths=[],
+            seed_path=None,
+            boot_media_path="/p/esxi.iso",
+            nics=[("02:aa:bb:cc:dd:10", "lab-net", "e1000e")],
+            serial_sock="/run/tr/esxi.sock",
+        )
+        # OS disk on sata -> sd-prefix; the installer CDROM is IDE on BIOS/i440fx
+        # (ESXi weasel only finds ks= on an IDE CDROM), so they don't even share a
+        # prefix namespace: OS disk sda, installer CD hda.
+        assert "<target dev='sda' bus='sata'/>" in xml  # OS disk
+        assert "dev='hda' bus='ide'" in xml  # installer CDROM on IDE
+        assert "<model type='e1000e'/>" in xml
+        # No disk hangs off virtio-blk and the NIC isn't virtio-net (the QGA
+        # virtio-serial channel still carries an unrelated type='virtio').
+        assert "bus='virtio'" not in xml
+        assert "<model type='virtio'/>" not in xml
+
+    def test_ide_os_disk_uses_hd_prefix(self) -> None:
+        spec = VMSpec(
+            name="esxi",
+            devices=[CPU(2), Memory(4096), LibvirtOSDrive("pool1", 33, bus="ide")],
+        )
+        xml = _vm._domain_xml(
+            "tr-vm-x-esxi",
+            spec,
+            os_path="/p/os.qcow2",
+            data_paths=[],
+            seed_path=None,
+            boot_media_path="/p/esxi.iso",
+            nics=[],
+            serial_sock="/run/tr/esxi.sock",
+        )
+        # IDE OS disk -> hda; the installer CDROM is also IDE (BIOS), so the shared
+        # per-prefix allocator gives it the next hd letter (hdb) — no collision.
+        assert "<target dev='hda' bus='ide'/>" in xml  # ide OS disk
+        assert "dev='hdb' bus='ide'" in xml  # installer CDROM, next hd slot
+
+    def test_libvirt_data_drive_bus_honored(self) -> None:
+        spec = VMSpec(
+            name="vm",
+            devices=[
+                CPU(2),
+                Memory(1024),
+                OSDrive("pool1", 8),  # plain -> virtio (vda)
+                LibvirtDataDrive("pool1", 4, bus="sata"),
+            ],
+        )
+        xml = _vm._domain_xml(
+            "tr-vm-x-vm",
+            spec,
+            os_path="/p/os.qcow2",
+            data_paths=["/p/d.qcow2"],
+            seed_path=None,
+            nics=[],
+            serial_sock=None,
+        )
+        assert "<target dev='vda' bus='virtio'/>" in xml
+        assert "<target dev='sda' bus='sata'/>" in xml  # data disk on sata
 
 
 _BUILD_NIC = BuildNic(
@@ -239,6 +323,33 @@ class TestCreateVM:
         )
         assert client.serial_opened == ["tr-vm-x-web"]  # build VM => serial listener
         assert "mode='connect' path=\"/run/tr/tr-vm-x-web.sock\"" in client.conn.defined_xml[0]
+
+    def test_build_nic_inherits_declared_e1000e_model(self) -> None:
+        # The build NIC stands in for the guest's hardware: an ESXi-shaped guest
+        # that declares an e1000e NIC must install over an e1000e build interface
+        # (it has no virtio-net driver).
+        client = FakeClient()
+        client.vols["bp/tr-vm-x-esxi.qcow2"] = FakeVol("/img/os.qcow2")
+        spec = VMSpec(
+            name="esxi",
+            devices=[
+                CPU(4, nested=True),
+                Memory(8192),
+                LibvirtOSDrive("pool1", 33, bus="sata"),
+                LibvirtNetworkIface("lab", model="e1000e"),
+            ],
+        )
+        _vm.create_vm(
+            client,  # type: ignore[arg-type]
+            "tr-vm-x-esxi",
+            spec,
+            "plan",
+            os_disk_ref=VolumeRef("bp/tr-vm-x-esxi.qcow2"),
+            seed_iso_ref=None,
+            network_refs={"build-net": "tr-build-net"},
+            build_nic=_BUILD_NIC,
+        )
+        assert "<model type='e1000e'/>" in client.conn.defined_xml[0]
 
     def test_sidecar_seed_vm_gets_pty_not_serial_sink(self) -> None:
         # A seed-carrying VM that is NOT a build VM (no build_nic) — e.g. a sidecar

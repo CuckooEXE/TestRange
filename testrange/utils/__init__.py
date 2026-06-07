@@ -3,6 +3,6 @@
 from __future__ import annotations
 
 from testrange.utils.fsutil import durable_replace
-from testrange.utils.sshkey import SSHKey
+from testrange.utils.sshkey import EcdsaKey, SSHKey
 
-__all__ = ["SSHKey", "durable_replace"]
+__all__ = ["EcdsaKey", "SSHKey", "durable_replace"]

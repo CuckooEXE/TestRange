@@ -203,3 +203,44 @@ any *depth-1* `SSHCommunicator` inner VM — kept as BACKEND-11), but depth-2 ne
 all three of (host route into the inner net) + (nested-host libvirt provisioned
 for it) + (`qemu+ssh` jump support). Not pursued here — this confirms the
 original "don't patch depth-2" call empirically.
+
+## Amendment 2026-06-02: ESXi inner backend (ORCH-32)
+
+The original decision pinned the inner backend to libvirt ("we just installed
+libvirtd into the guest"). We now also support a **nested ESXi** inner — an ESXi
+node installed unattended on the L0, running an inner plan over pyVmomi. The
+motivation is concrete: ESXi certification (`examples/capabilities.py` full
+green) was **environment-blocked** on the physical host — its build VMs need
+internet egress to `apt`, and a single-public-IP ESXi host offers no VM-egress
+path. Decision §3 dissolves exactly that: inner VM disks build on the **libvirt
+L0** (which has working NAT egress) and the nested ESXi only ever *boots*
+pre-built disks. So a nested ESXi unblocks certification with no change to the
+egress model — it is decision §3 applied to a second inner backend.
+
+What changed:
+
+- **The inner-type guard widens.** `GuestHypervisor.__post_init__` accepts
+  `LibvirtHypervisor` **or** `ESXiHypervisor`; anything else still fails at
+  construction. A `.esxi(...)` front door mirrors `.libvirt(...)`: it fills an
+  `ESXiKickstartBuilder` (root credential + optional `license`), an
+  `SSHCommunicator("root")`, and an inner `ESXiHypervisor`.
+- **The recursion is unchanged; the per-backend pieces move behind a dispatch.**
+  `nested_phase._synthesize_inner_binding` switches on the inner `Hypervisor`
+  type. The libvirt path is exactly as before (libvirtd readiness gate →
+  `qemu+ssh` `LibvirtProfile` + a materialized key file). The ESXi path waits on
+  the guest's **vSphere API** (`wait_esxi_ready`, a throwaway `SmartConnect`
+  poll — the run-phase SSH readiness can pass before hostd serves SOAP) and
+  synthesizes an in-process **`ESXiProfile`** (pyVmomi, password-based, **no key
+  file**) from the guest's discovered address + the root password the kickstart
+  baked. Inner-VM reach uses the ESXi driver's existing SSH `guest_gateway`.
+- **The guest must declare ESXi-compatible hardware.** The L0 is libvirt and
+  ESXi has no virtio drivers, so the guest's OS disk must hang off `sata`/`ide`
+  and its NIC must be `e1000e` — expressed with the libvirt-concrete device
+  types (`LibvirtOSDrive`/`LibvirtNetworkIface`, see ADR-0026). The guest also
+  carries `CPU(nested=True)`: the L0's `host-passthrough` exposes VMX so the
+  ESXi guest can power on its *own* VMs (L0 KVM → L1 ESXi → L2 guest). The
+  existing nested-KVM preflight (`nested-kvm-disabled`) already covers this.
+
+Unchanged: depth-1 only (`reject_unsupported_nesting` still fires); the L1 guest
+must be directly reachable (no gateway-bound L0); inner disks build on L0 and the
+inner run is `require_cache=True` upload-and-boot.

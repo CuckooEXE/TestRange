@@ -13,27 +13,35 @@ from typing import Any
 
 import pytest
 
-from testrange.builders import CloudInitBuilder
+from testrange.builders import CloudInitBuilder, ESXiKickstartBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import NativeCommunicator, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive
+from testrange.devices.disk.libvirt import LibvirtOSDrive
+from testrange.devices.network.libvirt import LibvirtNetworkIface
+from testrange.drivers.esxi import ESXiHypervisor, ESXiProfile
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import OrchestratorError
 from testrange.gateways import SSHJumpGateway
+from testrange.orchestrator import nested_phase as np
 from testrange.orchestrator.nested_phase import (
     NestedHandle,
     NestedRun,
+    _esxi_root_password,
+    _synthesize_inner_binding,
     _write_keyfile,
     run_nested_phase,
     teardown_nested,
 )
-from testrange.utils import SSHKey
+from testrange.utils import EcdsaKey, SSHKey
 from testrange.vms import GuestHypervisor, VMSpec
 from testrange.vms.handle import VMHandle
 from tests.mock_driver import MockHypervisor
 
 _KEY = SSHKey.generate(comment="nested-phase-test")
+# ESXi's FIPS sshd rejects Ed25519, so its root cred needs an ECDSA key (CORE-63).
+_ESXI_KEY = EcdsaKey.generate(comment="nested-phase-esxi")
 
 
 def _guest(
@@ -72,10 +80,11 @@ class TestRunNestedPhaseGuards:
         with pytest.raises(OrchestratorError, match="SSHCommunicator"):
             run_nested_phase(_ctx(_guest(comm=NativeCommunicator())))
 
-    def test_non_libvirt_inner_rejected_at_construction(self) -> None:
-        # GuestHypervisor.__post_init__ enforces the libvirt-only inner at the
-        # trust boundary, so a bad plan never reaches run_nested_phase.
-        with pytest.raises(TypeError, match="LibvirtHypervisor"):
+    def test_unsupported_inner_rejected_at_construction(self) -> None:
+        # GuestHypervisor.__post_init__ enforces the supported inner backends
+        # (libvirt, ESXi) at the trust boundary, so a bad plan never reaches
+        # run_nested_phase. A MockHypervisor inner is neither.
+        with pytest.raises(TypeError, match="LibvirtHypervisor or ESXiHypervisor"):
             _guest(comm=SSHCommunicator("admin"), inner=MockHypervisor())
 
     def test_unbound_communicator_has_no_host(self) -> None:
@@ -174,3 +183,74 @@ class TestTeardownNested:
         teardown_nested(runs)  # must not raise
         assert log == ["b", "a"]  # b failed but a still torn down
         assert not kf_a.exists() and not kf_b.exists()  # both keyfiles cleaned
+
+
+def _esxi_guest(*, license: str | None = None, root: PosixCred | None = None) -> GuestHypervisor:
+    return GuestHypervisor.esxi(
+        spec=VMSpec(
+            name="esxi-a",
+            firmware="bios",
+            devices=[
+                CPU(4, nested=True),
+                Memory(8192),
+                LibvirtOSDrive("pool1", 33, bus="sata"),
+                LibvirtNetworkIface("lab", model="e1000e"),
+            ],
+        ),
+        root=root or PosixCred("root", password="VMware1!", ssh_key=_ESXI_KEY),
+        installer_iso=CacheEntry("esxi-installer"),
+        license=license,
+    )
+
+
+def _esxi_ctx() -> Any:
+    return types.SimpleNamespace(
+        agent_ready_timeout_s=1.0, resolved=types.SimpleNamespace(uplinks={"egress": "tr-egress"})
+    )
+
+
+class TestEsxiInner:
+    def test_front_door_wires_builder_communicator_and_inner(self) -> None:
+        guest = _esxi_guest(license="HG00K-03H8K-48929-8K1NP-3LUJ4")
+        assert isinstance(guest.inner, ESXiHypervisor)
+        assert isinstance(guest.builder, ESXiKickstartBuilder)
+        assert isinstance(guest.communicator, SSHCommunicator)
+        assert guest.communicator.username == "root"
+        assert "serialnum --esx=HG00K-03H8K-48929-8K1NP-3LUJ4" in guest.builder.build_kickstart()
+
+    def test_synthesize_binding_picks_esxi_profile_no_keyfile(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The vSphere readiness gate would dial a live host; stub it out so the
+        # dispatch is exercised without pyvmomi / a network.
+        seen: dict[str, Any] = {}
+
+        def _fake_wait(host: str, user: str, password: str, **_kw: Any) -> None:
+            seen["wait"] = (host, user, password)
+
+        monkeypatch.setattr(np, "wait_esxi_ready", _fake_wait)
+        profile, keyfile = _synthesize_inner_binding(
+            _esxi_ctx(), _esxi_guest(), SSHCommunicator("root"), "10.50.0.9"
+        )
+        assert isinstance(profile, ESXiProfile)
+        assert profile.host == "10.50.0.9" and profile.password == "VMware1!"
+        assert profile.uplinks == {"egress": "tr-egress"}  # inherits outer uplink map
+        assert keyfile is None  # pyVmomi bind is password-based, no key file
+        assert seen["wait"] == ("10.50.0.9", "root", "VMware1!")  # readiness gated first
+
+    def test_root_password_extracted_from_builder(self) -> None:
+        assert _esxi_root_password(_esxi_guest()) == "VMware1!"
+
+    def test_root_password_rejects_non_esxi_builder(self) -> None:
+        # A GuestHypervisor with an ESXi inner is allowed, but its builder must be
+        # an ESXiKickstartBuilder for the inner pyVmomi auth to have a root password.
+        bad = GuestHypervisor(
+            spec=VMSpec(name="x", devices=[CPU(2), Memory(2048), OSDrive("pool1", 20)]),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"), credentials=[PosixCred("admin", ssh_key=_KEY)]
+            ),
+            communicator=SSHCommunicator("root"),
+            inner=ESXiHypervisor(),
+        )
+        with pytest.raises(OrchestratorError, match="not ESXiKickstartBuilder"):
+            _esxi_root_password(bad)

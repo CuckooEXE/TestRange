@@ -11,12 +11,15 @@ from pathlib import Path
 
 _SUBPROCESS_PAT = re.compile(r"^\s*(import subprocess|from subprocess\b)", re.MULTILINE)
 
-# The sanctioned subprocess modules: installer-ISO prep via xorriso (ADR-0022).
-# Preserving the hybrid-boot layouts a pure-pycdlib rebuild strips needs xorriso;
-# ADR-0001's escape hatch permits these sanctioned modules.
+# The sanctioned subprocess modules. Installer-ISO prep via xorriso (ADR-0022):
+# preserving the hybrid-boot layouts a pure-pycdlib rebuild strips needs xorriso.
+# Disk-format conversion via qemu-img (ADR-0024, CORE-2): a non-qcow2 backend
+# (ESXi vmdk) converts at its driver boundary; qemu-img is a host binary, not a
+# wheel. All ride ADR-0001's escape hatch.
 _SANCTIONED = {
     "testrange/builders/_proxmox_prepare.py",
     "testrange/builders/_esxi_prepare.py",
+    "testrange/drivers/_diskconvert.py",
 }
 
 

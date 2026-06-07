@@ -19,6 +19,7 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
 from testrange.communicators import ExecResult, NativeCommunicator
 from testrange.credentials import PosixCred
+from testrange.credentials.base import Credential
 from testrange.devices import CPU, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.exceptions import GuestAgentError, OrchestratorError
@@ -48,7 +49,11 @@ class _SleepyNativeDriver(MockDriver):
         self._in_flight = 0
         self.max_in_flight = 0
 
-    def native_guest_execute(self, backend_name: str) -> GuestExec:
+    def native_guest_execute(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestExec:
+        del credential
+
         def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
             with self._lock:
                 self._in_flight += 1
@@ -66,7 +71,11 @@ class _SleepyNativeDriver(MockDriver):
 class _OneUnreachableDriver(MockDriver):
     """The VM whose backend name contains ``vm2`` never gets a live agent."""
 
-    def native_guest_execute(self, backend_name: str) -> GuestExec:
+    def native_guest_execute(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestExec:
+        del credential
+
         def _execute(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
             if "vm2" in backend_name:
                 raise GuestAgentError(f"mock: agent down on {backend_name!r}")

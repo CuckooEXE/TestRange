@@ -41,15 +41,25 @@ def build_range(
     cache_manager: CacheManager | None = None,
     profile: BackendProfile | None = None,
     jobs: int | None = None,
+    build_timeout_s: float = 600.0,
 ) -> str:
     """Warm the cache for ``plan`` (``testrange build``); run no tests.
 
     Runs preflight + the build phase only, tearing down all build infra. The
     backend holds nothing afterward. Returns the run id (for logging).
     ``profile`` binds a backend-agnostic plan to a backend (CORE-10/-11).
-    ``jobs`` caps the build phase's worker pool (ADR-0023).
+    ``jobs`` caps the build phase's worker pool (ADR-0023). ``build_timeout_s``
+    bounds how long a build VM may take to report its result over serial (default
+    600s); slow installer-origin builds — notably a nested ESXi guest install
+    under nested KVM — need a larger value.
     """
-    o = Orchestrator(plan, cache_manager=cache_manager, profile=profile, jobs=jobs)
+    o = Orchestrator(
+        plan,
+        cache_manager=cache_manager,
+        profile=profile,
+        jobs=jobs,
+        build_timeout_s=build_timeout_s,
+    )
     o.build()
     return o.run_id
 
@@ -65,6 +75,8 @@ def run_tests(
     profile: BackendProfile | None = None,
     verbose: bool = False,
     jobs: int | None = None,
+    build_timeout_s: float = 600.0,
+    lease_timeout_s: float = 120.0,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
@@ -75,10 +87,22 @@ def run_tests(
     ``leak_on_failure=True``, if any test fails the orchestrator skips
     teardown and the user can SSH in to debug; tear down later with
     ``testrange cleanup <run_id>``.
+
+    ``build_timeout_s`` bounds how long a build VM may take to report its result
+    over serial (default 600s). ``lease_timeout_s`` bounds how long a run VM may
+    take to acquire its DHCP lease (default 120s). Slow guests — notably a nested
+    ESXi node, whose install and whose cold boot to a vmk0 DHCP lease are both
+    slow under nested KVM — need larger values.
     """
     results: list[TestResult] = []
     o = Orchestrator(
-        plan, cache_manager=cache_manager, require_cache=require_cache, profile=profile, jobs=jobs
+        plan,
+        cache_manager=cache_manager,
+        require_cache=require_cache,
+        profile=profile,
+        jobs=jobs,
+        build_timeout_s=build_timeout_s,
+        lease_timeout_s=lease_timeout_s,
     )
     with o as orch:
         _execute_tests(orch, tests, results, fail_fast=fail_fast, verbose=verbose)

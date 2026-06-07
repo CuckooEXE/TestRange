@@ -41,6 +41,14 @@ proxmox = [
 libvirt = [
     "libvirt-python>=10",
 ]
+# pyvmomi is the ESXi control plane (SmartConnect + managed objects); it imports
+# lazily (on connect), so the package registers without it installed. requests
+# carries the datastore /folder byte I/O (pool upload/download); qemu-img (a host
+# binary, ADR-0024) converts qcow2<->vmdk at the boundary and is not a wheel.
+esxi = [
+    "pyvmomi>=8",
+    "requests>=2.31",
+]
 docs = [
     "sphinx>=8",
     "furo>=2024.8",
@@ -62,7 +70,7 @@ dev = [
     "proxmoxer>=2",
 ]
 all = [
-    "testrange[ssh,cloudinit,http,proxmox,libvirt]",
+    "testrange[ssh,cloudinit,http,proxmox,libvirt,esxi]",
 ]
 
 [project.scripts]
@@ -74,6 +82,9 @@ include = ["testrange*"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+# notes/ holds research scratch and reproducible spike scripts (e.g. live-host
+# recon), not shipped code — kept as artifacts but out of the strict gate.
+extend-exclude = ["notes"]
 
 [tool.ruff.lint]
 select = [
@@ -112,10 +123,12 @@ ignore = [
 # The CLI's job is to print to stdout; T201 guards library code, not the CLI.
 "testrange/cli.py" = ["T201"]
 # ADR-0022: the sanctioned subprocess modules (installer-ISO prep via xorriso, to
-# preserve hybrid-boot layouts a pure-pycdlib rebuild strips). Scoped here so the
-# project-wide ban still holds everywhere else.
+# preserve hybrid-boot layouts a pure-pycdlib rebuild strips). ADR-0024: qemu-img
+# disk-format conversion at a non-qcow2 driver boundary (CORE-2). Scoped here so
+# the project-wide ban still holds everywhere else.
 "testrange/builders/_proxmox_prepare.py" = ["TID251", "S404", "S603"]
 "testrange/builders/_esxi_prepare.py" = ["TID251", "S404", "S603"]
+"testrange/drivers/_diskconvert.py" = ["TID251", "S404", "S603"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -140,6 +153,10 @@ module = [
     "websocket.*",
     "libvirt",
     "libvirt_qemu",
+    "pyVim",
+    "pyVim.*",
+    "pyVmomi",
+    "pyVmomi.*",
 ]
 ignore_missing_imports = true
 

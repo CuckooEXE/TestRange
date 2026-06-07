@@ -151,7 +151,15 @@ class Orchestrator:
 
     def _preflight_and_initialize(self) -> None:
         """Run read-only preflight (abort on error) and open the state file."""
-        build_switch = resolve_build_switch(self.plan.hypervisor.build_switch)
+        # A cache-only run (require_cache) never builds, so it never realizes the
+        # build switch — pass None so preflight skips its live checks (CORE-65).
+        # A nested inner run is the motivating case: its build switch was realized
+        # on L0/libvirt during build_nested_inner_vms, and the manufactured inner
+        # profile carries the *outer* backend's uplink vocabulary, which an ESXi
+        # inner would otherwise mis-validate as a vmnic.
+        build_switch = (
+            None if self._require_cache else resolve_build_switch(self.plan.hypervisor.build_switch)
+        )
         report = self.ctx.driver.preflight(
             self.plan,
             cache_manager=self.ctx.cache,

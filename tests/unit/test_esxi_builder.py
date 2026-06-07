@@ -26,10 +26,12 @@ from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.base import BuildNic
-from testrange.utils import SSHKey
+from testrange.orchestrator.build_phase import parse_build_result
+from testrange.utils import EcdsaKey, SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
-_KEY = SSHKey.generate(comment="esxi-test")
+# ESXi's FIPS sshd rejects Ed25519, so the builder requires ECDSA/RSA (CORE-63).
+_KEY = EcdsaKey.generate(comment="esxi-test")
 
 _SW = Switch("swA", Network("netA"), cidr="10.0.5.0/24", sidecar=Sidecar(dhcp=True))
 ADDR: Mapping[str, NetworkAddressing] = {"netA": NetworkAddressing.from_switch(_SW)}
@@ -93,6 +95,17 @@ class TestConstruction:
                 installer_iso=CacheEntry("x"), credentials=[PosixCred("root", ssh_key=_KEY)]
             )
 
+    def test_ed25519_root_key_rejected(self) -> None:
+        # ESXi 8 FIPS sshd silently denies Ed25519; the builder must fail loud.
+        with pytest.raises(ValueError, match=r"Ed25519.*FIPS"):
+            _builder(
+                credentials=[PosixCred("root", password="VMware1!", ssh_key=SSHKey.generate())]
+            )
+
+    def test_ecdsa_root_key_accepted(self) -> None:
+        b = _builder(credentials=[PosixCred("root", password="VMware1!", ssh_key=_KEY)])
+        assert b.credentials[0].username == "root"
+
     def test_password_with_newline_rejected(self) -> None:
         # A newline would break out of the ks.cfg `rootpw` line.
         with pytest.raises(ValueError, match="control characters"):
@@ -118,25 +131,86 @@ class TestKickstart:
         assert "network --bootproto=dhcp --device=vmnic0" in ks
         assert "%firstboot --interpreter=busybox" in ks
 
-    def test_build_result_contract(self) -> None:
+    def test_build_result_emitted_from_post_via_vsish(self) -> None:
+        # ESXi has no userspace serial write, so the record is injected into the
+        # installer vmkernel log (-> COM1 via logPort) from %post, then the
+        # installer is hard-powered-off. The old /dev/ttyS0 echo + esxcli poweroff
+        # (which hung — the ESXI-17 bug) are gone.
         ks = _builder()._render_kickstart()
-        assert "TESTRANGE-RESULT: ok" in ks
-        assert "TESTRANGE-RESULT: fail" in ks
-        assert "/dev/ttyS0" in ks
-        assert "esxcli system shutdown poweroff" in ks
+        assert "%post --interpreter=busybox" in ks
+        assert "vsish -e set /system/log" in ks
+        assert "poweroff -f" in ks
+        assert "/dev/ttyS0" not in ks
+        assert "esxcli system shutdown poweroff" not in ks
+
+    def test_marker_never_verbatim_in_source(self) -> None:
+        # weasel echoes every ks.cfg section body to the same serial at parse time,
+        # so a literal `TESTRANGE-RESULT:` in the SOURCE would false-trigger the
+        # orchestrator's parser before the real emission. The marker must be
+        # assembled at runtime from shell vars and never appear verbatim.
+        ks = _builder()._render_kickstart()
+        assert "TESTRANGE-RESULT:" not in ks
+        # ...but the runtime-assembled emission is present.
+        assert '"${_t}-${_r}: ok"' in ks
+        assert "_t=TESTRANGE" in ks
+        assert "_r=RESULT" in ks
+
+    def test_emitted_marker_parses_as_ok(self) -> None:
+        # The line vsish puts on the wire is `<ts> cpuN:NNN)TESTRANGE-RESULT: ok`.
+        # Tie the builder's marker to the orchestrator parser: it must read `ok`.
+        emitted = b"2026-01-01T00:00:00.000Z cpu0:12345)TESTRANGE-RESULT: ok\n"
+        result = parse_build_result(emitted)
+        assert result is not None and result.ok
 
     def test_ssh_block_when_key_present(self) -> None:
         ks = _builder()._render_kickstart()
-        assert "vim-cmd hostsvc/enable_ssh" in ks
+        assert "%firstboot --interpreter=busybox" in ks
         assert "/etc/ssh/keys-root/authorized_keys" in ks
         assert _KEY.auth_line in ks
-        assert "ruleset-id=sshServer" in ks
+        # sshd enable is deferred to rc.local.d (vim-cmd in %firstboot runs before
+        # hostd and hangs); the ruleset is opened there too.
+        assert "/etc/rc.local.d/local.sh" in ks
+        assert "vim-cmd hostsvc/enable_ssh" in ks
+        assert "--ruleset-id sshServer" in ks
 
-    def test_no_ssh_block_without_key(self) -> None:
+    def test_heredoc_terminators_and_key_at_column_zero(self) -> None:
+        # busybox only closes a plain `cat <<'EOF'` heredoc on a line that is
+        # *exactly* the terminator (no leading whitespace). An indented %firstboot
+        # body would let a heredoc swallow the rest of the script. Guard the flat
+        # layout for both the key file and the rc.local.d block.
+        ks = _builder()._render_kickstart()
+        lines = ks.splitlines()
+        assert "KEYEOF" in lines  # exact, column-0 terminator (not "  KEYEOF")
+        assert "RCEOF" in lines
+        assert _KEY.auth_line in lines  # key written without leading whitespace
+
+    def test_no_firstboot_block_without_key(self) -> None:
         b = _builder(credentials=[PosixCred("root", password="VMware1!")])
         ks = b._render_kickstart()
+        assert "%firstboot" not in ks  # no run-phase provisioning to do
         assert "enable_ssh" not in ks
-        assert "TESTRANGE-RESULT: ok" in ks  # still reports + powers off
+        # the build-result emission lives in %post and is independent of the key.
+        assert "vsish -e set /system/log" in ks
+        assert "poweroff -f" in ks
+
+
+class TestLicense:
+    def test_serialnum_emitted_when_license_set(self) -> None:
+        ks = _builder(license="HG00K-03H8K-48929-8K1NP-3LUJ4")._render_kickstart()
+        assert "serialnum --esx=HG00K-03H8K-48929-8K1NP-3LUJ4" in ks
+        # Top-level directive (install section), not a %firstboot esxcli/vim-cmd call.
+        assert ks.index("serialnum") < ks.index("%firstboot")
+
+    def test_no_serialnum_without_license(self) -> None:
+        assert "serialnum" not in _builder()._render_kickstart()
+
+    def test_license_with_newline_rejected(self) -> None:
+        with pytest.raises(ValueError, match="control characters"):
+            _builder(license="HG00K\ninjected")
+
+    def test_empty_license_rejected(self) -> None:
+        with pytest.raises(ValueError, match="non-empty license key"):
+            _builder(license="   ")
 
 
 class TestConfigHash:
@@ -156,9 +230,21 @@ class TestConfigHash:
         assert base != _config_hash(b, _spec(firmware="uefi"), base_sha="a")
         assert base != _config_hash(b, _spec(disk_gb=60), base_sha="a")
 
-    def test_insensitive_to_ssh_key_rotation(self) -> None:
+    def test_sensitive_to_license(self) -> None:
         spec = _spec()
-        other = SSHKey.generate(comment="rotated")
+        unlicensed = _config_hash(_builder(), spec, base_sha="a")
+        licensed = _config_hash(
+            _builder(license="HG00K-03H8K-48929-8K1NP-3LUJ4"), spec, base_sha="a"
+        )
+        other = _config_hash(_builder(license="AAAAA-BBBBB-CCCCC-DDDDD-EEEEE"), spec, base_sha="a")
+        assert unlicensed != licensed != other != unlicensed
+
+    def test_sensitive_to_ssh_key_value(self) -> None:
+        # The key is baked into %firstboot's authorized_keys and not re-seeded at
+        # run, so a different key MUST bust the cache (CORE-64) — else a plan with
+        # a new key cache-hits a disk it can't log into.
+        spec = _spec()
+        other = EcdsaKey.generate(comment="rotated")
         h1 = _config_hash(
             _builder(credentials=[PosixCred("root", password="VMware1!", ssh_key=_KEY)]),
             spec,
@@ -169,7 +255,7 @@ class TestConfigHash:
             spec,
             base_sha="a",
         )
-        assert h1 == h2
+        assert h1 != h2
 
     def test_sensitive_to_ssh_presence(self) -> None:
         spec = _spec()

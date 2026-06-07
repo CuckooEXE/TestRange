@@ -5,8 +5,13 @@ Installer-origin (BUILD-1): ``os_disk_base()`` is None and ``boot_media()`` is
 the ESXi installer ISO. **Single-CDROM mode** — unlike the cloud-init/PVE
 builders, ``render_seed()`` returns None: the ks.cfg is patched *into* the boot
 ISO (``ks=cdrom:/ks.cfg``) by :meth:`prepare_boot_media`, not delivered as a
-separate seed. The build-result contract lives in the kickstart's ``%firstboot``
-block (serial ``TESTRANGE-RESULT`` + poweroff, ADR-0012).
+separate seed. The build-result contract is honored serial-side like every other
+builder (ADR-0012), but ESXi has no userspace serial write: the kickstart's
+``%post`` injects ``TESTRANGE-RESULT: ok`` into the installer vmkernel log via
+``vsish`` (the log streams out COM1 via ``logPort=com1``) and powers the installer
+off — see :func:`testrange.builders._esxi_prepare.render_kickstart`. ``%firstboot``
+carries only run-phase provisioning (SSH key + sshd), which runs when the captured
+disk is booted, not during the build.
 
 Firmware comes from :attr:`VMSpec.firmware`. The proven-working combo is BIOS +
 i440fx + IDE single-CDROM; ``uefi`` is accepted but UNVALIDATED (OVMF + AHCI hits
@@ -62,6 +67,12 @@ class ESXiKickstartBuilder(Builder):
         with a non-empty password (ESXi complexity rules reject an empty one).
         The root credential's SSH key, if present, is installed to
         ``/etc/ssh/keys-root/authorized_keys`` and sshd is enabled.
+      license: optional ESXi license key. When set, the kickstart applies it at
+        install time via ``serialnum --esx=<key>`` (the native weasel directive),
+        so the installed node comes up licensed rather than on the read-only
+        free/evaluation edition. ``None`` leaves the install on its default
+        evaluation license. The key folds into :meth:`config_hash` — a different
+        license is a different installed system.
     """
 
     def __init__(
@@ -69,9 +80,11 @@ class ESXiKickstartBuilder(Builder):
         *,
         installer_iso: CacheEntry,
         credentials: Sequence[Credential] = (),
+        license: str | None = None,
     ) -> None:
         self.installer_iso = installer_iso
         self._credentials = self._validate_credentials(credentials)
+        self._license = self._validate_license(license)
 
     @staticmethod
     def _validate_credentials(credentials: Sequence[Credential]) -> tuple[Credential, ...]:
@@ -91,6 +104,15 @@ class ESXiKickstartBuilder(Builder):
         # emit a malformed (or directive-injecting) kickstart. Not a security
         # boundary (lab guest install), but a footgun — reject at construction.
         _reject_control_chars(root.password, "root password")
+        # ESXi 8's sshd runs in FIPS mode and SILENTLY rejects Ed25519 pubkeys
+        # (CORE-63), so a node installed with one is unreachable over SSH at run
+        # phase. Fail loud at construction with a fix, rather than mysteriously
+        # later. RSA/ECDSA are FIPS-approved; EcdsaKey is the in-tree choice.
+        if root.ssh_key is not None and root.ssh_key.algorithm == "ed25519":
+            raise ValueError(
+                "ESXiKickstartBuilder's root SSH key is Ed25519, which ESXi's FIPS-mode "
+                "sshd silently rejects — use testrange.utils.EcdsaKey (P-256) or an RSA key"
+            )
         for c in creds:
             if isinstance(c, PosixCred) and c.ssh_key is not None:
                 _reject_control_chars(c.ssh_key.auth_line, f"{c.username!r} SSH key")
@@ -101,6 +123,24 @@ class ESXiKickstartBuilder(Builder):
                 f"ESXiKickstartBuilder.credentials has duplicate usernames: {sorted(dupes)}"
             )
         return creds
+
+    @staticmethod
+    def _validate_license(license: str | None) -> str | None:
+        """Reject an empty/control-char license; ``None`` (no license) is fine.
+
+        The key lands raw on the ks.cfg ``serialnum --esx=`` line, so a newline or
+        control char would break out of the directive (same footgun as the root
+        password — a lab-install footgun, not a security boundary).
+        """
+        if license is None:
+            return None
+        _reject_control_chars(license, "license")
+        if not license.strip():
+            raise ValueError(
+                "ESXiKickstartBuilder license must be a non-empty license key (or None to "
+                "leave the install on its default evaluation license)"
+            )
+        return license
 
     @property
     def credentials(self) -> tuple[Credential, ...]:
@@ -155,16 +195,23 @@ class ESXiKickstartBuilder(Builder):
         """Deterministic 16-char hex hash keying the installed ESXi disk.
 
         Folds: the root password (baked into the install — a change is a
-        different system), the SSH-block *presence* (it flips ``%firstboot``;
-        the key *value* is excluded so rotation does not bust the cache, per the
-        PVE builder), the install disk size, ``spec.firmware``, and ``base_sha``
-        (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
+        different system), the root SSH **public key** (its ``auth_line``, baked
+        into ``%firstboot``'s ``authorized_keys`` — a different key, or none, is a
+        different installed system; CORE-64), the license key (baked at install
+        via ``serialnum``), the install disk size, ``spec.firmware``, and
+        ``base_sha`` (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
+
+        The key is folded by value, NOT just presence: run VMs boot the cached
+        disk with no re-seed (``seed_iso_ref=None``), so the baked key is the only
+        ``authorized_keys`` there is — excluding it would let a plan with a
+        different key cache-hit a disk it cannot log into.
         """
         del recipe, addressing, macs, build_nic
         root = self._root_credential()
-        has_ssh = root.ssh_key is not None
+        ssh_key = root.ssh_key.auth_line if root.ssh_key is not None else ""
         combined = (
-            f"root-password:{root.password}\n---\nssh-block:{has_ssh}\n---\n"
+            f"root-password:{root.password}\n---\nssh-key:{ssh_key}\n---\n"
+            f"license:{self._license}\n---\n"
             f"disk:{spec.os_drive.size_gb}\n---\nfirmware:{spec.firmware}\n---\n"
             f"base:{base_sha}\n---\nsidecar:{sidecar_sha}"
         )
@@ -188,7 +235,7 @@ class ESXiKickstartBuilder(Builder):
         root = self._root_credential()
         assert root.password is not None  # construction guarantees a non-empty root password
         ssh_key = root.ssh_key.auth_line if root.ssh_key is not None else None
-        return render_kickstart(root_password=root.password, ssh_key=ssh_key)
+        return render_kickstart(root_password=root.password, ssh_key=ssh_key, license=self._license)
 
     def _root_credential(self) -> PosixCred:
         for c in self._credentials:

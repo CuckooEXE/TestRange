@@ -41,6 +41,7 @@ from testrange.preflight import (
     PreflightFinding,
     PreflightReport,
     builder_origin_findings,
+    preflight_switches,
     unknown_uplink_findings,
     unsupported_firmware_findings,
 )
@@ -73,6 +74,7 @@ def _probe_host_nested_kvm() -> bool | None:
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
+    from testrange.credentials.base import Credential
     from testrange.devices.pool.base import StoragePool
     from testrange.gateways.base import GuestGateway
     from testrange.guest_io import GuestExec, GuestReadFile, GuestWriteFile
@@ -174,7 +176,7 @@ class LibvirtDriver(HypervisorDriver):
         )
 
     def preflight(
-        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch
+        self, plan: Plan, *, cache_manager: CacheManager, build_switch: Switch | None
     ) -> PreflightReport:
         """Plan-side read-only checks (the named-uplink resolution check, ADR-0016).
 
@@ -187,10 +189,9 @@ class LibvirtDriver(HypervisorDriver):
         uplink network present on the host) land with the L2 phase.
         """
         del cache_manager
-        # build_switch is always a concrete Switch here — the orchestrator runs
-        # it through resolve_build_switch (synthesizing the default isolated
-        # switch when the plan declares none), so there is no None to guard (H2).
-        switches = [*plan.hypervisor.all_switches, build_switch]
+        # build_switch is None for a cache-only run (require_cache) that never
+        # realizes it; preflight_switches drops it from the sweep (CORE-65).
+        switches = preflight_switches(plan, build_switch)
         findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
         findings.extend(builder_origin_findings(plan))
         findings.extend(
@@ -368,13 +369,22 @@ class LibvirtDriver(HypervisorDriver):
     def get_vm_power_state(self, backend_name: str) -> str:
         return _vm.get_vm_power_state(self._client, backend_name)
 
-    def native_guest_execute(self, backend_name: str) -> GuestExec:
+    def native_guest_execute(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestExec:
+        del credential  # QGA authenticates at the channel; no per-call guest login
         return _guest.make_execute(self._client, backend_name)
 
-    def native_guest_read_file(self, backend_name: str) -> GuestReadFile:
+    def native_guest_read_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestReadFile:
+        del credential
         return _guest.make_read_file(self._client, backend_name)
 
-    def native_guest_write_file(self, backend_name: str) -> GuestWriteFile:
+    def native_guest_write_file(
+        self, backend_name: str, *, credential: Credential | None = None
+    ) -> GuestWriteFile:
+        del credential
         return _guest.make_write_file(self._client, backend_name)
 
     def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:

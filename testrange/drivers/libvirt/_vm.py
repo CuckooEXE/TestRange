@@ -7,16 +7,25 @@ map, crash-safe teardown.
 
 ``create_vm`` renders domain XML:
 
-- **disks** — qcow2, virtio-blk: OS at ``vda``, data disks at ``vdb`` … (the
-  ``fileserver`` capability depends on this device ordering). The seed (cloud-init
-  / sidecar config) is a read-only ``sata`` CD-ROM so the guest reads ``cidata``;
-  boot is pinned to ``hd``.
+- **disks** — qcow2 on the controller the disk's ``bus`` selects (virtio-blk by
+  default → OS at ``vda``, data disks at ``vdb`` …; the ``fileserver`` capability
+  depends on that virtio ordering). A :class:`LibvirtOSDrive` / `LibvirtDataDrive`
+  can pin ``sata``/``ide``/``scsi`` instead — a nested ESXi guest needs ``sata``/
+  ``ide`` (no virtio-blk driver). Dev names are allocated per bus prefix so a
+  non-virtio OS disk never collides with the seed/installer CDROMs. The seed
+  (cloud-init / sidecar config) and installer media ride a CDROM on the firmware's
+  controller — **IDE** on BIOS/i440fx (ESXi weasel only finds a ``ks=cdrom:``
+  kickstart on IDE), **sata** on UEFI/q35 (no IDE controller); boot is pinned to
+  ``hd``.
 - **NICs** — one ``<interface type='network'>`` per ``spec.nics[i]`` on the
   libvirt network named by ``network_refs`` (every L2 segment, including the
   resolved uplink, is a libvirt network here), with the stable MAC
   ``compose_mac(plan, vm, i)`` so DHCP hands out a predictable lease (ADR-0006).
-  At build (``build_nic`` set, ADR-0017) the declared NICs are replaced by a
-  single build-NIC interface on the build network.
+  The emulated model is virtio-net by default; a :class:`LibvirtNetworkIface` can
+  pin ``e1000e`` etc. for a guest with no virtio-net driver (ESXi). At build
+  (``build_nic`` set, ADR-0017) the declared NICs are replaced by a single
+  build-NIC interface — emulated as the guest's declared model (``_build_nic_model``)
+  so an ESXi-shaped guest installs over a NIC it can drive.
 - **serial build-result sink** — a **build VM** (the one with a ``build_nic``,
   ADR-0017) gets a ``<serial type='unix' mode='connect'>`` pointing at a socket
   the driver already listens on (see ``_conn``); its serial is tailed by
@@ -41,12 +50,16 @@ from typing import TYPE_CHECKING, Any
 from xml.sax.saxutils import escape, quoteattr
 
 from testrange._log import get_logger
+from testrange.devices.disk.libvirt import _LibvirtDisk
+from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.libvirt._conn import _import_libvirt
 from testrange.exceptions import DriverError
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
+    from testrange.devices.disk.base import _Disk
+    from testrange.devices.network.base import NetworkIface
     from testrange.drivers.base import VolumeRef
     from testrange.drivers.libvirt._conn import LibvirtClient
     from testrange.networks.base import BuildNic
@@ -56,6 +69,63 @@ _log = get_logger(__name__)
 
 # Power-state poll cadence for the graceful-shutdown wait.
 _POLL_INTERVAL_S = 1.0
+
+# Guest-visible device-node prefix per disk bus. virtio-blk -> /dev/vd*; sata and
+# scsi -> /dev/sd*; ide -> /dev/hd*. Dev names are allocated per-prefix (see
+# _dev_name) so a sata OS disk and an ide/sata seed/installer CDROM never collide.
+_BUS_PREFIX = {"virtio": "vd", "sata": "sd", "scsi": "sd", "ide": "hd"}
+
+
+def _cdrom_bus(firmware: str) -> str:
+    """Controller bus for the seed / installer CDROMs, keyed by firmware/machine.
+
+    A ``pc`` (BIOS, i440fx) machine has a native IDE controller, and ESXi's weasel
+    only finds a ``ks=cdrom:`` kickstart on an **IDE** optical unit — its early
+    kickstart scan does not enumerate an AHCI/sata CDROM, so a sata installer CD
+    fails with "cannot find kickstart file on cd-rom" before touching the disk
+    (proven empirically; matches the ESXiKickstartBuilder "i440fx + IDE
+    single-CDROM" note). A ``q35`` (UEFI) machine has no IDE controller, so its
+    CDROMs must ride sata (AHCI). Linux cloud-init / PVE seed CDs are read by
+    filesystem label, so the bus is immaterial to them — IDE is equally fine.
+    """
+    return "ide" if firmware != "uefi" else "sata"
+
+
+def _dev_name(prefix: str, counters: dict[str, int]) -> str:
+    """Next free ``<prefix><letter>`` within a bus prefix (vda, vdb, …; sda, …).
+
+    Shared across disks *and* CDROMs so devices that land on the same controller
+    family (e.g. a sata OS disk + the sata installer CDROM) get distinct letters.
+    """
+    idx = counters.get(prefix, 0)
+    if idx >= 26:
+        raise DriverError(f"libvirt backend: too many devices on the {prefix!r} bus (>26)")
+    counters[prefix] = idx + 1
+    return f"{prefix}{chr(ord('a') + idx)}"
+
+
+def _disk_bus(disk: _Disk) -> str:
+    """The controller bus for a disk — the libvirt variant's ``bus`` or virtio."""
+    return disk.bus if isinstance(disk, _LibvirtDisk) else "virtio"
+
+
+def _nic_model(nic: NetworkIface) -> str:
+    """The emulated NIC model — the libvirt variant's ``model`` or virtio-net."""
+    return nic.model if isinstance(nic, LibvirtNetworkIface) else "virtio"
+
+
+def _build_nic_model(spec: VMSpec) -> str:
+    """NIC model for the build-phase build NIC.
+
+    The build NIC stands in for the guest's declared hardware, so it must be a
+    model the guest can actually drive: an ESXi-shaped guest installs over the
+    ``e1000e`` it declares (it has no virtio-net). Use the first declared NIC's
+    model; default virtio when the guest declares no libvirt-variant NIC.
+    """
+    for nic in spec.nics:
+        if isinstance(nic, LibvirtNetworkIface):
+            return nic.model
+    return "virtio"
 
 
 def _resolve_domain(client: LibvirtClient, backend_name: str) -> Any:
@@ -88,35 +158,35 @@ def _boot_order_xml(boot_order: int | None) -> str:
     return f"<boot order='{boot_order}'/>" if boot_order is not None else ""
 
 
-def _disk_xml(path: str, dev: str, *, boot_order: int | None = None) -> str:
+def _disk_xml(path: str, dev: str, *, bus: str = "virtio", boot_order: int | None = None) -> str:
     return (
         "<disk type='file' device='disk'>"
         "<driver name='qemu' type='qcow2'/>"
         f"<source file={quoteattr(path)}/>"
-        f"<target dev='{dev}' bus='virtio'/>"
+        f"<target dev='{dev}' bus='{bus}'/>"
         f"{_boot_order_xml(boot_order)}"
         "</disk>"
     )
 
 
-def _cdrom_xml(path: str, dev: str, *, boot_order: int | None = None) -> str:
+def _cdrom_xml(path: str, dev: str, *, bus: str, boot_order: int | None = None) -> str:
     return (
         "<disk type='file' device='cdrom'>"
         "<driver name='qemu' type='raw'/>"
         f"<source file={quoteattr(path)}/>"
-        f"<target dev='{dev}' bus='sata'/>"
+        f"<target dev='{dev}' bus='{bus}'/>"
         f"{_boot_order_xml(boot_order)}"
         "<readonly/>"
         "</disk>"
     )
 
 
-def _interface_xml(mac: str, network: str) -> str:
+def _interface_xml(mac: str, network: str, *, model: str = "virtio") -> str:
     return (
         "<interface type='network'>"
         f"<source network={quoteattr(network)}/>"
         f"<mac address={quoteattr(mac)}/>"
-        "<model type='virtio'/>"
+        f"<model type='{model}'/>"
         "</interface>"
     )
 
@@ -172,30 +242,57 @@ def _domain_xml(
     data_paths: Sequence[str],
     seed_path: str | None,
     boot_media_path: str | None = None,
-    nics: Sequence[tuple[str, str]],
+    nics: Sequence[tuple[str, str, str]],
     serial_sock: str | None,
 ) -> str:
     installer = boot_media_path is not None
+    # Dev names are allocated per bus prefix (vd*/sd*/hd*) so a non-virtio OS disk
+    # (e.g. a sata/ide ESXi guest) never collides with the sata seed/installer
+    # CDROMs. The default (all-virtio) case still yields vda, vdb…, sda, sdb —
+    # identical to the prior hard-coded layout, so existing plans are unchanged.
+    counters: dict[str, int] = {}
+    os_bus = _disk_bus(spec.os_drive)
     # Installer-origin: the empty OS disk is boot order 1; firmware skips it
     # (no boot sector / EFI loader) and falls through to the installer CDROM at
     # order 2. Post-install the disk is bootable and wins. Image-origin: no
     # per-device order (the <os> form pins hd).
-    devices = [_disk_xml(os_path, "vda", boot_order=1 if installer else None)]
-    if len(data_paths) > 25:
-        # vdb..vdz is 25 slots; past 'z' the chr() arithmetic silently produces
-        # "vd{" and beyond. Fail loud rather than emit a bogus target dev.
-        raise DriverError(
-            f"libvirt backend supports at most 25 data disks (vdb..vdz); got {len(data_paths)}"
+    devices = [
+        _disk_xml(
+            os_path,
+            _dev_name(_BUS_PREFIX[os_bus], counters),
+            bus=os_bus,
+            boot_order=1 if installer else None,
         )
+    ]
+    if len(data_paths) > 25:
+        # 25 slots after the OS disk within a bus prefix; past 'z' the chr()
+        # arithmetic produces bogus names. Fail loud rather than emit one.
+        raise DriverError(f"libvirt backend supports at most 25 data disks; got {len(data_paths)}")
+    # spec.data_drives is parallel to data_paths (the orchestrator stages one
+    # volume per declared data drive, in order), so index it for each disk's bus.
+    data_drives = spec.data_drives
     for i, path in enumerate(data_paths):
-        devices.append(_disk_xml(path, f"vd{chr(ord('b') + i)}"))
-    # Seed is always *data* (cidata / PVE answer-file), CD at sda. The installer
-    # medium (when present) is the *bootable* CD at sdb, boot order 2.
+        bus = _disk_bus(data_drives[i]) if i < len(data_drives) else "virtio"
+        devices.append(_disk_xml(path, _dev_name(_BUS_PREFIX[bus], counters), bus=bus))
+    # Seed is always *data* (cidata / PVE answer-file). The installer medium (when
+    # present) is the *bootable* CD at boot order 2. Both ride the firmware's CDROM
+    # controller — IDE on BIOS/i440fx (ESXi weasel only finds ks= on IDE), sata on
+    # UEFI/q35 (no IDE controller there).
+    cdrom_bus = _cdrom_bus(spec.firmware)
     if seed_path is not None:
-        devices.append(_cdrom_xml(seed_path, "sda"))
+        devices.append(
+            _cdrom_xml(seed_path, _dev_name(_BUS_PREFIX[cdrom_bus], counters), bus=cdrom_bus)
+        )
     if boot_media_path is not None:
-        devices.append(_cdrom_xml(boot_media_path, "sdb", boot_order=2))
-    devices.extend(_interface_xml(mac, net) for mac, net in nics)
+        devices.append(
+            _cdrom_xml(
+                boot_media_path,
+                _dev_name(_BUS_PREFIX[cdrom_bus], counters),
+                bus=cdrom_bus,
+                boot_order=2,
+            )
+        )
+    devices.extend(_interface_xml(mac, net, model=model) for mac, net, model in nics)
     devices.append(_serial_xml(serial_sock))
     devices.append(_QGA_CHANNEL)
     # A VGA adapter is REQUIRED even though the VM is headless: libvirt emits
@@ -266,10 +363,10 @@ def create_vm(
     seed_path = _vol_path(client, seed_iso_ref) if seed_iso_ref is not None else None
     boot_media_path = _vol_path(client, boot_media_ref) if boot_media_ref is not None else None
     if build_nic is not None:
-        nics = [(build_nic.mac, network_refs[build_nic.network])]
+        nics = [(build_nic.mac, network_refs[build_nic.network], _build_nic_model(spec))]
     else:
         nics = [
-            (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network])
+            (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network], _nic_model(nic))
             for idx, nic in enumerate(spec.nics)
         ]
     # The unix-socket serial sink is opened for a boot whose TESTRANGE-RESULT the

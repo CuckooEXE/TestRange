@@ -50,6 +50,19 @@ class PreflightReport:
         return "preflight:\n" + "\n".join(lines)
 
 
+def preflight_switches(plan: Plan, build_switch: Switch | None) -> list[Switch]:
+    """The switches a driver's preflight sweeps: run-phase switches + the build one.
+
+    ``build_switch`` is ``None`` for a run that will not build — a cache-only run
+    (``require_cache``), such as a nested inner run whose disks were already warmed
+    on L0. That run never realizes its build switch, so it has no live host
+    resources (uplink pNIC/bridge, CIDR) to validate and is excluded from every
+    preflight check. A concrete build switch is appended exactly as before.
+    """
+    extra = [build_switch] if build_switch is not None else []
+    return [*plan.hypervisor.all_switches, *extra]
+
+
 def unknown_uplink_findings(
     switches: Iterable[Switch],
     uplinks: Mapping[str, str],

@@ -26,10 +26,17 @@ set -euo pipefail
 
 # Bump on any intentional change to the image contents (packages, the
 # config-staging service, the pinned Alpine branch).
-SIDECAR_VERSION="1"
+SIDECAR_VERSION="3"
 # Pinned release branch rather than `latest-stable`; bump deliberately.
 ALPINE_BRANCH="v3.21"
-PACKAGES="dnsmasq nftables qemu-guest-agent openrc blkid"
+# qemu-guest-agent is the native channel on libvirt/Proxmox; open-vm-tools is the
+# native channel on ESXi (VMware Tools guest-ops). Both ship so one sidecar image
+# is portable across backends — each backend uses its own and the other's service
+# is condition-skipped where its transport is absent (ESXI-12).
+PACKAGES="dnsmasq nftables qemu-guest-agent open-vm-tools open-vm-tools-plugins-all openrc blkid"
+# Guest login VMware Tools guest-ops authenticate as on ESXi (CORE-60). QGA
+# backends never use it. Kept in sync with networks._addressing_consts.SIDECAR_CRED.
+SIDECAR_ROOT_PW="testrange-sidecar"
 
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$here/testrange-sidecar.qcow2"
@@ -97,7 +104,16 @@ rc-update add networking default
 rc-update add dnsmasq default
 rc-update add nftables default
 rc-update add qemu-guest-agent default
+# open-vm-tools: the ESXi native-guest channel. Harmless on a non-VMware
+# hypervisor (vmtoolsd detects no backdoor and idles).
+rc-update add open-vm-tools default
 CUSTOMIZE
+
+# Bake the sidecar root password so ESXi VMware Tools guest-ops can authenticate
+# (CORE-60); appended outside the literal heredoc so the host-side value lands.
+cat >>"$customize" <<EOF
+echo 'root:$SIDECAR_ROOT_PW' | chpasswd
+EOF
 
 # Append a version-marker step (host-side values baked in; the block above
 # stays a literal quoted heredoc). Lands /etc/testrange-sidecar-version
