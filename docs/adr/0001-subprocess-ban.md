@@ -42,3 +42,12 @@ chose to satisfy it via a subprocess on its own side.
 - The cloud-init seed is built with ``pycdlib`` (no ``genisoimage``).
 - Cache downloads go through ``urllib.request.urlopen``, not
   ``curl`` / ``wget``.
+
+> **Addendum (2026-06-08, DOCS-20):** the libvirt-internals examples above
+> describe the *pre-rebuild* driver and are now historical. The rebuilt
+> reference driver (ADR-0019) uses **full-content qcow2 with no backing chains**
+> — there is no ``<backingStore>`` overlay and no ``createXMLFrom``/``qemu-img
+> convert`` flattening in ``download_from_pool``; volume bytes stream through the
+> libvirt stream API. The subprocess-ban decision itself is unchanged; only the
+> illustrative libvirt mechanics drifted. (qcow2-cache-wide conversion at a
+> non-qcow2 boundary is the sanctioned exception in ADR-0024.)

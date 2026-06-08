@@ -209,7 +209,7 @@ original "don't patch depth-2" call empirically.
 The original decision pinned the inner backend to libvirt ("we just installed
 libvirtd into the guest"). We now also support a **nested ESXi** inner — an ESXi
 node installed unattended on the L0, running an inner plan over pyVmomi. The
-motivation is concrete: ESXi certification (`examples/capabilities.py` full
+motivation is concrete: ESXi certification (the full portable corpus
 green) was **environment-blocked** on the physical host — its build VMs need
 internet egress to `apt`, and a single-public-IP ESXi host offers no VM-egress
 path. Decision §3 dissolves exactly that: inner VM disks build on the **libvirt

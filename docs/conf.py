@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 project = "testrange"
 author = "testrange contributors"
-copyright = f"{author}"
+copyright = f"2026, {author}"
+
+try:
+    release = _pkg_version("testrange")
+except PackageNotFoundError:  # docs built without the package installed
+    release = ""
+version = ".".join(release.split(".")[:2])
 
 extensions = [
     "myst_parser",

@@ -2097,6 +2097,45 @@ on 2026-06-06.
 
 ### DOCS
 
+- [x] **DOCS-14** · `EPIC` — docs/ audit remediation: fix drift, broken examples, missing pages _(done: 2026-06-08)_
+
+  > Full-tree docs/ quality pass (2026-06-08), 48 tracked source files cross-checked against testrange/ HEAD. Prose clean (zero misspellings); findings were almost all DRIFT. All children DOCS-15..21 landed; `sphinx -b html` builds clean (only the pre-existing `_static` warning). Did NOT subsume DOCS-8 (still open).
+
+- [x] **DOCS-15** · `bugfix` — P0: fix broken minimal-plan example in writing-a-plan.md _(done: 2026-06-08)_
+
+  > writing-a-plan.md headline: `Plan(Hypervisor(...), name="hello")` → `Plan("hello", Hypervisor(...))` (real sig `Plan(name, *hypervisors)`); `PosixCred(pubkey=, privkey=, sudo=)` → `PosixCred("alice", ssh_key=_KEY, admin=True)` (real fields). Verified all minimal-plan imports resolve.
+
+- [x] **DOCS-16** · `docs` — P1: sweep dead examples/capabilities.py references → tests/plans/ _(done: 2026-06-08)_
+
+  > Repointed all live "run it" instructions in user/dev docs to `tests/plans/` (proxmox.md, esxi.md, drivers/index.md, networking-modes.md → generic/networking.py, writing-a-plan.md → generic/build_cache.py `fileserver`, connecting-to-a-backend.md → proxmox/devices.py, bugfixing.md, drivers.md). ADRs back-annotated not rewritten: 0019 addendum (cert gate → tests/plans, ADR-0028); 0017/0021/0025/0027 dead filenames dropped in-line. 0028's own refs left (it's the retiring ADR).
+
+- [x] **DOCS-17** · `docs` — P1: fix dev/extending/* ABC signature drift _(done: 2026-06-08)_
+
+  > builders.md: added abstract `os_disk_base`, `boot_media`/`prepare_boot_media` seam, `build_nic: BuildNic` kw + `bytes | None` on render methods, `sidecar_sha` now ABC (fixed the "not part of the ABC" claim), example overrides updated. devices.md: "none exist yet" → real Libvirt* concretes + private-mixin+MI precedent (verified `_LibvirtDisk`/`LibvirtOSDrive`). drivers.md: `credential=` present-tense + new `guest_gateway()` bullet + cert-suite vs tests/plans wording. communicators.md: `bind` gateway param + VMware-Tools wording.
+
+- [x] **DOCS-18** · `docs` — P1: add missing user/drivers/libvirt.md reference-backend page _(done: 2026-06-08)_
+
+  > Authored docs/user/drivers/libvirt.md parallel to proxmox.md/esxi.md (Connecting / Prereqs / Named uplinks / mgmt option-B / Certification). Wired into the drivers toctree + intro; index.md libvirt bullet now names it the certified reference backend (dropped stale "rebuild still wrapping up"). Sphinx confirms libvirt.html builds + is linked.
+
+- [x] **DOCS-19** · `docs` — P2: internal inconsistencies + over-promising _(done: 2026-06-08)_
+
+  > ADR-0028 Consequences reconciled with its REL-2/REL-10 amendments. proxmox.md de-overpromised (driver-primitives live-proven; full cert tracked under REL) + cert block fixed to real test functions/env vars (`TESTRANGE_PVE_HOST`-family). mgmt unified to "L2 presence" (matches ADR-0009; fixed networking-modes.md). ADR-0015 px_hello/`--connect` addendum. `mock` scheme removed from connect.toml.example + connecting-to-a-backend.md (test-only, unregistered in shipped CLI).
+
+- [x] **DOCS-20** · `docs` — P2: addenda on stale "Accepted" ADRs describing deleted libvirt behavior _(done: 2026-06-08)_
+
+  > Dated addenda added to ADR-0001 (createXMLFrom/backingStore → full-content qcow2 stream), ADR-0002 (ThreadPoolExecutor/--jobs per ADR-0023; pyroute2 dropped), ADR-0006 (`match: name: en*` removed, MAC-only). Decisions left intact; only the drifted mechanics annotated.
+
+- [x] **DOCS-21** · `docs` — P3: config + cosmetic fixes _(done: 2026-06-08)_
+
+  > conf.py: `copyright` now carries a year + `version`/`release` from `importlib.metadata` (ruff-clean). running-tests.md backend name → `tr-vm-<run_id[:8]>-web`. connecting-to-a-backend.md describe sample → ASCII `->` (matches cli.py:378). ADR-0027 "populate"→"populated"; ADR-0009 dead `managed_build_egress_findings` pointer annotated. NOTE: the alleged "ADR-0016 should be 0015" multi-profile attribution was VERIFIED CORRECT (cli.py:151) — left as-is; the illustrative `nginx_is_running` test left as a valid generic example.
+
+- [x] **DOCS-13** · `chore` — delete `RESEARCH.md` (OBE) _(done: 2026-06-08)_
+
+  > User directive 2026-06-08: the repo-root `RESEARCH.md` (open design-notes /
+  > candidate-direction scratchpad, distinct from PLAN.md) is overcome-by-events —
+  > everything in it has either landed in PLAN.md/ADRs or been abandoned. Deleted.
+  > PLAN.md remains the living-design source of truth; TODO.md the work queue.
+
 - [x] **DOCS-12** · `docs` — ADR-0021 amendment (ESXi inner) + ADR-002x libvirt device concretes
   _(done: 2026-06-02)_
 

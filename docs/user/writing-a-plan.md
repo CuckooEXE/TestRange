@@ -33,6 +33,7 @@ from testrange.vms import VMRecipe, VMSpec
 _KEY = SSHKey.generate(comment="hello")
 
 PLAN = Plan(
+    "hello",
     Hypervisor(
         build_switch=Switch(
             "build",
@@ -67,9 +68,8 @@ PLAN = Plan(
                     credentials=[
                         PosixCred(
                             "alice",
-                            pubkey=_KEY.auth_line,
-                            privkey=_KEY.priv,
-                            sudo=True,
+                            ssh_key=_KEY,
+                            admin=True,
                         ),
                     ],
                     packages=[Apt("nginx")],
@@ -78,7 +78,6 @@ PLAN = Plan(
             ),
         ],
     ),
-    name="hello",
 )
 
 def nginx_is_running(orch: OrchestratorHandle) -> None:
@@ -216,7 +215,7 @@ VMSpec(
 ```
 
 Seed the disk in `post_install_commands` (format, mount, write, persist via
-`/etc/fstab`); see the `fileserver` VM in `examples/capabilities.py`. Because the disk's `size_gb` and the
+`/etc/fstab`); see the `fileserver` VM in `tests/plans/generic/build_cache.py`. Because the disk's `size_gb` and the
 data-disk count fold into the build cache key, changing either rebuilds the set.
 
 ### Static-NIC netplan staging

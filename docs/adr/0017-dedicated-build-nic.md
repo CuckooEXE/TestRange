@@ -26,7 +26,7 @@ network_refs = {nic.network: build_net_backend for nic in spec.nics}
 `spec.nics` in `_vm.py`.) Two failures fall out of that one line:
 
 - **Zero-NIC VMs build with no network.** A VM reached only over the QGA
-  `NativeCommunicator` at run time (e.g. `examples/capabilities.py` `no-net`)
+  `NativeCommunicator` at run time (e.g. a `no-net` VM with zero NICs)
   declares zero NICs, so its build boots with no interface on the build switch.
   Any builder that needs the network dies — `apt-get install qemu-guest-agent`
   exits 100. This is the ORCH-9 finding from BACKEND-1.D libvirt certification;

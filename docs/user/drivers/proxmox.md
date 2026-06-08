@@ -1,9 +1,10 @@
 # Proxmox VE
 
-The Proxmox driver runs a portable testrange plan against a Proxmox VE host. It
-is **certified** against the broad-coverage `examples/capabilities.py` on a
-single-node PVE 9.x host (PVE-CERT), the same bar libvirt clears as the
-reference backend.
+The Proxmox driver runs a portable testrange plan against a Proxmox VE host. Its
+driver primitives — connect, SDN switches, streamed volume I/O, VM lifecycle,
+snapshots, and QGA exec — are live-proven against a single-node PVE 9.x host; the
+full `tests/plans/` certification sweep (the same corpus libvirt clears as the
+reference backend) is tracked under the 1.0.0 validation epic (REL).
 
 Install the extra:
 
@@ -26,7 +27,7 @@ host and password, and select it by name:
 
 ```sh
 cp examples/connect.toml.example connect.toml   # gitignored — it holds a password
-testrange run examples/capabilities.py --profile pve
+testrange run --profile pve tests/plans/generic/lifecycle.py
 ```
 
 The profile table:
@@ -101,18 +102,28 @@ from a remote test runner.
 
 | Capability | Status |
 | --- | --- |
-| `examples/capabilities.py` full green (live, single-node) | **certified** (PVE-CERT) |
-| Integration wiring | `pytest -m proxmox` → `test_proxmox.py::test_capabilities_example_certifies` |
+| `tests/plans/` generic + `proxmox/` sweep (live, single-node) | in progress (REL) |
+| Integration wiring | `pytest -m proxmox` → driver-primitive tests in `test_proxmox.py` (connect/SDN/storage/VM/QGA) |
 | Block-storage StoragePools (lvm/zfs/ceph) | not supported (PVE-33) |
 | Multi-node clusters | not supported — single-node only (PVE-31) |
 | QGA chunked guest-file-write (>~45 KB single write) | deferred (PVE-45) |
 | Nested-PVE installer-origin build smoke | environment-blocked (BUILD-13) |
 
-Reproduce the certification on a live host by pointing the marked integration
-test at a profile:
+Run the live driver-primitive suite against a host by exporting its coordinates
+(it drives the driver directly, so it takes host env vars rather than a profile):
 
 ```sh
-export TESTRANGE_PVE_PROFILE=./connect.toml      # the connect.toml above
-export TESTRANGE_PVE_PROFILE_NAME=pve            # the table name (default: proxmox)
-pytest -m proxmox tests/integration/test_proxmox.py::test_capabilities_example_certifies
+export TESTRANGE_PVE_HOST=10.0.0.5
+export TESTRANGE_PVE_PASSWORD='Target123!'
+export TESTRANGE_PVE_BASE_QCOW2=/path/to/debian-13.qcow2   # disk/VM tests only
+pytest -m proxmox tests/integration/test_proxmox.py
+```
+
+Certify the backend end-to-end by running the portable corpus against the
+profile:
+
+```sh
+for p in tests/plans/generic/*.py tests/plans/proxmox/*.py; do
+    testrange run --profile pve "$p" || break
+done
 ```

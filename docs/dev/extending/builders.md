@@ -14,6 +14,12 @@ class Builder(ABC):
     def credentials(self) -> tuple[Credential, ...]: ...
 
     @abstractmethod
+    def os_disk_base(self) -> CacheEntry | None: ...
+    # The OS-disk origin. An image-origin builder (cloud-init) returns the
+    # base image; an installer-origin builder returns None and instead
+    # supplies an install medium from boot_media() below.
+
+    @abstractmethod
     def config_hash(
         self,
         spec: VMSpec,
@@ -21,7 +27,9 @@ class Builder(ABC):
         *,
         addressing: Mapping[str, NetworkAddressing],
         base_sha: str = "",
+        sidecar_sha: str = "",
         macs: Sequence[str] = (),
+        build_nic: BuildNic,
     ) -> str: ...
 
     @abstractmethod
@@ -32,7 +40,15 @@ class Builder(ABC):
         *,
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
-    ) -> bytes: ...
+        build_nic: BuildNic,
+    ) -> bytes | None: ...
+
+    # Non-abstract installer-origin seam. An installer-based builder returns
+    # its install ISO from boot_media() and may rewrite it (e.g. inject an
+    # answer file) in prepare_boot_media(); image-origin builders leave both
+    # at the defaults (None / identity).
+    def boot_media(self) -> CacheEntry | None: ...
+    def prepare_boot_media(self, media_path: Path) -> Path: ...
 
     # Non-abstract — default is a no-op (no readiness check).
     def wait_ready(
@@ -45,7 +61,15 @@ orchestrator brokers in — builders stay hypervisor-agnostic and never
 see the hypervisor type. `macs` (one per NIC, in spec order) lets a
 builder bake positional NIC config (run-phase netplan match-by-MAC,
 etc.) into the payload and key the cache on the stable MACs the
-orchestrator will assign at run-phase.
+orchestrator will assign at run-phase. `build_nic` is the dedicated build
+NIC the build phase attaches ([ADR-0017](../../adr/0017-dedicated-build-nic.md));
+its MAC/address are baked into the build-time netplan, so it is part of the
+cache key and a required keyword on both render methods.
+
+Every builder declares its **OS-disk origin** through `os_disk_base`: return a
+`CacheEntry` to clone a prebuilt image (cloud-init), or `None` to install from
+scratch — in which case `boot_media` must return the installer ISO. The
+orchestrator rejects a builder that returns `None` from both.
 
 ## The build-cache contract
 
@@ -63,17 +87,17 @@ constraints:
    any of them, the hash should change.
 
 A safe default: hash the rendered seed bytes + the base SHA + the disk
-sizes. See `CloudInitBuilder.config_hash` for the pattern; it additionally
-folds in the sidecar image's content sha (`sidecar_sha`), since every build
-boots against the build switch's sidecar and a drifted sidecar can produce
-byte-different disks ([ADR-0007](../../adr/0007-deterministic-config-hash.md)).
-`sidecar_sha` is a concrete extension `CloudInitBuilder` accepts, not part of
-the `Builder` ABC signature.
+sizes. See `CloudInitBuilder.config_hash` for the pattern. The ABC also passes
+`sidecar_sha` — the build sidecar image's content sha — since every build boots
+against the build switch's sidecar and a drifted sidecar can produce
+byte-different disks ([ADR-0007](../../adr/0007-deterministic-config-hash.md));
+fold it into the hash.
 
 ## Steps
 
-1. **Subclass `Builder`.** Implement `credentials`, `config_hash`,
-   `render_seed`.
+1. **Subclass `Builder`.** Implement `credentials`, `os_disk_base`,
+   `config_hash`, `render_seed`. Installer-origin builders also override
+   `boot_media` (and usually `prepare_boot_media`).
 
    ```python
    class AnswerFileBuilder(Builder):
@@ -84,15 +108,24 @@ the `Builder` ABC signature.
        def credentials(self) -> tuple[Credential, ...]:
            return self._credentials
 
-       def render_seed(self, spec, recipe, *, addressing, macs=()) -> bytes:
+       def os_disk_base(self) -> CacheEntry | None:
+           return self._base  # or None for an installer-origin builder
+
+       def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic) -> bytes | None:
            # Produce the build-time payload as bytes. The orchestrator
            # writes these into a pool volume the build VM mounts.
            ...
 
-       def config_hash(self, spec, recipe, *, addressing, base_sha="", macs=()) -> str:
-           # 16-char hex of (rendered seed + base SHA).
-           rendered = self.render_seed(spec, recipe, addressing=addressing, macs=macs)
-           h = hashlib.sha256(rendered + base_sha.encode()).hexdigest()[:16]
+       def config_hash(
+           self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+       ) -> str:
+           # 16-char hex of (rendered seed + base SHA + sidecar SHA).
+           rendered = self.render_seed(
+               spec, recipe, addressing=addressing, macs=macs, build_nic=build_nic
+           )
+           h = hashlib.sha256(
+               (rendered or b"") + base_sha.encode() + sidecar_sha.encode()
+           ).hexdigest()[:16]
            return h
    ```
 

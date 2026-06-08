@@ -26,7 +26,7 @@ A portable plan binds to a host at run time via a connection profile
 
 ```sh
 cp examples/connect.toml.example connect.toml   # gitignored — it holds a password
-testrange run examples/capabilities.py --profile esxi
+testrange run --profile esxi tests/plans/generic/lifecycle.py
 ```
 
 The profile table:
@@ -123,16 +123,18 @@ and end-to-end `hello_world` orchestration through to the build phase).
 | VM lifecycle + snapshots | **live-certified** |
 | VMware Tools guest-ops (with `open-vm-tools-plugins-all`) | **live-certified** |
 | Serial build-result sink + SSH `guest_gateway` | **live-proven** in the end-to-end run |
-| Full capabilities run on the **physical** host | **blocked: environment egress** — a build VM needs internet for `apt`, but a single-public-IP ESXi host with no internet-connected pNIC and no host-NAT provides no VM-egress path (unlike a Linux/PVE host's NAT bridge). Not a driver defect; needs an egress path provisioned. |
-| Full capabilities run on a **nested ESXi** | **in progress** — `examples/capabilities-nested-esxi.py` stands up an ESXi node on the libvirt L0 (`GuestHypervisor.esxi`, ADR-0021 amendment) and certifies against it. Sidesteps the egress block: inner VM disks build on the L0 (NAT egress) and the nested ESXi only boots pre-built disks. **Live status (2026-06-02):** the ESXi 8.0U3b install runs unattended to a bootable DCUI on the L0 once the installer CD is on IDE (BACKEND-13) and the kickstart heredoc is flat (BUILD-22). **Blocked on ESXI-17:** the kickstart `%firstboot` does not take effect on the installed guest (no sshd, no `TESTRANGE-RESULT` over serial, no poweroff), so the build VM times out — the nested-ESXi build-result signaling needs an ESXi-8 fix before the cert can go green. |
+| Full `tests/plans/` certification sweep on the **physical** host | **blocked: environment egress** — a build VM needs internet for `apt`, but a single-public-IP ESXi host with no internet-connected pNIC and no host-NAT provides no VM-egress path (unlike a Linux/PVE host's NAT bridge). Not a driver defect; needs an egress path provisioned. |
+| Full `tests/plans/` sweep on a **nested ESXi** | **lab path, shelved post-1.0.0** — a `GuestHypervisor.esxi` plan stands up an ESXi node on the libvirt L0 (ADR-0021 amendment) and certifies against it, sidestepping the egress block: inner VM disks build on the L0 (NAT egress) and the nested ESXi only boots pre-built disks. **Live status (2026-06-02):** the ESXi 8.0U3b install runs unattended to a bootable DCUI on the L0 once the installer CD is on IDE (BACKEND-13) and the kickstart heredoc is flat (BUILD-22), but `%firstboot` does not take effect on the installed guest (ESXI-17). Per the REL epic the standing ESXi cert instead runs on a raw-kickstart host (REL-11); this nested path is shelved. |
 | vCenter / DVS / dvportgroup | out of scope ([ADR-0025](../../adr/0025-esxi-standalone-driver.md)) |
 
 ### Nested ESXi (lab certification)
 
 Because the physical host can't give build VMs internet egress, the portable
-capabilities suite is certified against a **nested ESXi** instead — an ESXi node
-installed unattended (kickstart, with `license=` applied via `serialnum`) as a
-guest on the libvirt reference backend, which *does* have NAT egress. The
+`tests/plans/` corpus can be certified against a **nested ESXi** instead — an
+ESXi node installed unattended (kickstart, with `license=` applied via
+`serialnum`) as a guest on the libvirt reference backend, which *does* have NAT
+egress. This is a lab path: per the REL epic the standing ESXi cert runs on a
+raw-kickstart host (REL-11), and this nested approach is shelved post-1.0.0. The
 [nested-virtualization model](../../adr/0021-nested-virtualization.md) builds the
 inner (L2) VM disks on the L0 with real egress and then only *boots* them on the
 nested ESXi, so no VM-egress path is needed on the ESXi node itself. The guest
@@ -141,12 +143,13 @@ declares ESXi-compatible hardware via the libvirt-concrete device types (a
 [ADR-0026](../../adr/0026-libvirt-concrete-device-types.md)) since ESXi has no
 virtio drivers, and `CPU(nested=True)` so the L0 exposes VMX for the guest's own
 VMs. The installer CD-ROM is attached on **IDE** (not sata): on BIOS/i440fx,
-weasel's `ks=cdrom:` scan only enumerates an IDE optical unit. Run it with
+weasel's `ks=cdrom:` scan only enumerates an IDE optical unit. The cert plan is
+a bespoke `GuestHypervisor.esxi` topology (not a shipped example), run against
+the libvirt profile with a raised build timeout:
 
 ```sh
 export TESTRANGE_ESXI_LICENSE=XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-testrange run --build-timeout 1800 --profile libvirt-local \
-    examples/capabilities-nested-esxi.py
+testrange run --build-timeout 1800 --profile libvirt-local <nested-esxi-plan>.py
 ```
 
 `--build-timeout` is raised from the 600s default because an ESXi install +

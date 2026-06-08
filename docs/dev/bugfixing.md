@@ -24,8 +24,9 @@ The CLI passive check works on any plan with no backend:
 A live `testrange run examples/<x>.py` is **not** a mock smoke test: the
 example communicators do real I/O (`SSHCommunicator` opens a real paramiko
 connection; `NativeCommunicator` delegates to the driver's guest agent), and
-`MockDriver` does not serve a real guest. The end-to-end live `run` smoke
-returns with the first real backend (see [drivers](../user/drivers/index.md)).
+`MockDriver` does not serve a real guest. Run the live `run` smoke against a
+real backend instead — libvirt is the certified reference
+(see [drivers](../user/drivers/index.md)).
 
 ## Reproduction recipe
 
@@ -45,9 +46,10 @@ When you find a bug, the regression test goes in:
 - `tests/unit/test_<file>.py` — the home for almost everything, since the
   `MockDriver` makes the full orchestration path testable without a hypervisor.
   Most regressions fit here: render bugs, state-machine bugs, driver-flow bugs.
-- `tests/integration/` — reserved for tests that need a live backend
-  connection. Gated by the backend SDK being importable; they skip otherwise.
-  (Empty today; populated when a real driver lands.)
+- `tests/integration/` — tests that need a live backend connection, gated by
+  the backend SDK being importable (they skip otherwise) and by the matching
+  pytest marker. Holds `test_libvirt.py`, `test_proxmox.py`, and the
+  installer-ISO prep suites (`test_proxmox_prepare.py`, `test_esxi_prepare.py`).
 
 Pattern: drive the failing path through `MockDriver` and assert on the API call
 sequence + side effects. Avoid asserting on exact log strings — those are not
@@ -73,7 +75,7 @@ python -m testrange.cli --log-level DEBUG run examples/<plan>.py
 
 This cannot pass against `MockDriver` (it serves no real guest), so it is not
 part of the offline gate above; it lands as a gate the moment a real driver is
-wired up (Proxmox today via `examples/capabilities-px.py` with PVE credentials; see
+wired up (Proxmox today via the `tests/plans/` corpus with PVE credentials; see
 [drivers](../user/drivers/index.md)).
 
 ## Common gotchas

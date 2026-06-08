@@ -81,7 +81,7 @@ deterministic single-threaded logs while debugging.
 : User-facing Plan name.
 
 `vm.backend_name: str`
-: The driver-side handle (`tr_vm_<run_short>_web`). Pass to driver methods
+: The driver-side handle (`tr-vm-<run_id[:8]>-web`). Pass to driver methods
   like `orch.driver.create_snapshot(vm.backend_name, ...)`.
 
 `vm.communicator: Communicator`

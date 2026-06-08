@@ -15,7 +15,7 @@
 # testrange backends are firewalled lab environments.
 
 [pve]
-driver = "proxmox"          # required: "proxmox" | "libvirt" | "mock"
+driver = "proxmox"          # required: "proxmox" | "libvirt"
 host = "10.0.0.5"
 user = "root@pam"           # optional; a bare "root" takes the @pam realm
 password = "Target123!"

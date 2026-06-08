@@ -1,8 +1,9 @@
 # Adding a communicator
 
 A `Communicator` is the test-code-facing transport into a running VM.
-`SSHCommunicator` and `NativeCommunicator` (a hypervisor's native in-guest agent: QGA, VMware Tools, Hyper-V integration) are the
-built-ins; future ones include VMware Tools, WinRM, and serial console.
+`SSHCommunicator` and `NativeCommunicator` (a hypervisor's native in-guest
+agent: QGA today, with VMware Tools / Hyper-V integration as drivers implement
+them) are the built-ins; future transports include WinRM and serial console.
 
 The contract is in `testrange/communicators/base.py`:
 
@@ -46,8 +47,10 @@ orchestrator dispatches by communicator type at run-phase bring-up.
    transport needs. The two built-ins show the range:
 
    ```python
-   # SSHCommunicator — addressing the orchestrator discovers:
-   def bind(self, *, host: str, credential: PosixCred, port: int = 22) -> None: ...
+   # SSHCommunicator — addressing the orchestrator discovers (plus an optional
+   # GuestGateway to jump through when the guest isn't directly reachable):
+   def bind(self, *, host: str, credential: PosixCred, port: int = 22,
+            gateway: GuestGateway | None = None) -> None: ...
 
    # NativeCommunicator — VM-bound callables the orchestrator pulls off
    # the driver. The communicator never imports a driver type:

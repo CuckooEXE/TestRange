@@ -17,10 +17,11 @@ devices/
 └── pool/base.py        # StoragePool dataclass
 ```
 
-`base.py` per kind holds the **generic** shape. Every device shipped today is
-generic (a `base.py` dataclass). When a backend needs a driver-specific knob on
-a device, the variant lives in a driver-named file under the same package
-(e.g. a hypothetical `devices/network/proxmox.py`); none exist yet.
+`base.py` per kind holds the **generic** shape. When a backend needs a
+driver-specific knob on a device, the variant lives in a driver-named file under
+the same package — e.g. `devices/disk/libvirt.py` (`LibvirtOSDrive`,
+`LibvirtDataDrive`) and `devices/network/libvirt.py` (`LibvirtNetworkIface`),
+which expose libvirt bus/model strings the generic shapes don't carry.
 
 ## Generic vs driver-specific
 
@@ -77,6 +78,12 @@ driver-named path:
 ```python
 from testrange.devices.widget.proxmox import ProxmoxWidget
 ```
+
+The shipped precedent is `devices/disk/libvirt.py`: when a knob is shared across
+two generic shapes (`OSDrive` and `HardDrive`), factor it into a private
+intermediate (`_LibvirtDisk`) and pull it in by multiple inheritance —
+`class LibvirtOSDrive(_LibvirtDisk, OSDrive)` — rather than duplicating the
+field and its validation across both concretes.
 
 ## Adding to `VMSpec`
 
