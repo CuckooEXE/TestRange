@@ -2183,6 +2183,17 @@ on 2026-06-06.
 
 ### CI
 
+- [x] **CI-9** · `chore` — drop `uv.lock` + its pre-commit gate (pyproject is authoritative) _(done: 2026-06-08)_
+
+  > User directive 2026-06-08: TestRange is a library, not an app — `pyproject.toml`
+  > dependency ranges are the single authoritative declaration of what installs;
+  > a pinned lockfile adds drift-maintenance for no reproducible-deploy benefit.
+  > Deleted `uv.lock` (was 268 KB, 65 resolved pkgs), removed the `uv-lock-check`
+  > pre-commit hook (`uv lock --check`), and added `uv.lock` to `.gitignore` so a
+  > stray `uv lock` can't re-introduce it. Gate set unchanged otherwise
+  > (ruff/ruff-format/mypy --strict/pytest). The historical CI hook-add ticket
+  > note at the `uv lock --check` line stays as the audit trail.
+
 - [x] **CI-8b** · `ci` — pre-commit pytest excludes libvirt-marked tests (unit/MockDriver only)
   _(done: 2026-05-31)_
 
