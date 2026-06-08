@@ -554,6 +554,22 @@ class TestQGABinding:
         agent_calls = [c for c in fake_driver.calls if c[0] == "native_guest_execute"]
         assert any(c[1][1] == ("cloud-init", "status", "--wait") for c in agent_calls)
 
+    def test_qga_dhcp_nic_waits_for_sidecar_lease(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # REL-24: a NativeCommunicator VM binds the moment its agent answers,
+        # which races the guest's DHCP. The run phase must still gate on every
+        # DHCP NIC's lease (read off the sidecar) before handing tests a guest —
+        # even though the QGA bind itself needs no IP.
+        mgr, _ = populated_cache
+        with Orchestrator(_qga_plan(), cache_manager=mgr):
+            pass
+        assert any(
+            c[0] == "native_guest_read_file" and c[1][1] == LEASEFILE for c in fake_driver.calls
+        )
+
     def test_qga_communicator_execute_reaches_driver(
         self,
         fake_driver: MockDriver,

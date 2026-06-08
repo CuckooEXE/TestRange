@@ -16,7 +16,7 @@ from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
-from testrange.devices.network import StaticAddr
+from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.devices.pool.base import StoragePool
 from testrange.exceptions import (
     BuildNotReadyError,
@@ -322,15 +322,25 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
         nic_idx, nic = addressed[0]
     if isinstance(nic.addr, StaticAddr):
         return nic.addr.host
+    return _wait_for_dhcp_lease(ctx, vm.name, nic.network, nic_idx)
 
-    switch = _switch_for_network(ctx, nic.network)
+
+def _wait_for_dhcp_lease(ctx: RunContext, vm_name: str, network: str, nic_idx: int) -> str:
+    """Poll the per-Switch sidecar's dnsmasq lease file until the NIC's MAC leases.
+
+    The lease lives in the sidecar (not the hypervisor), keyed on the stable MAC
+    derived from ``(plan_name, vm_name, nic_idx)``. The orchestrator brokers the
+    driver's guest-file read of the sidecar against the dnsmasq lease path +
+    parser. Raises :class:`OrchestratorError` on a sidecar-less switch or timeout.
+    """
+    switch = _switch_for_network(ctx, network)
     sidecar_backend = ctx.sidecar_backends.get(switch.name)
     if sidecar_backend is None:
         raise OrchestratorError(
-            f"vm {vm.name!r}: DHCP NIC on {nic.network!r} but switch "
+            f"vm {vm_name!r}: DHCP NIC on {network!r} but switch "
             f"{switch.name!r} has no sidecar lease file to poll"
         )
-    mac = ctx.driver.compose_mac(ctx.plan_name, vm.name, nic_idx).lower()
+    mac = ctx.driver.compose_mac(ctx.plan_name, vm_name, nic_idx).lower()
     read_leasefile = ctx.driver.native_guest_read_file(sidecar_backend, credential=SIDECAR_CRED)
     deadline = time.monotonic() + ctx.lease_timeout_s
     while time.monotonic() < deadline:
@@ -343,9 +353,29 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
             return ip
         time.sleep(2.0)
     raise OrchestratorError(
-        f"vm {vm.name!r} did not acquire a DHCP lease on "
-        f"{nic.network!r} within {ctx.lease_timeout_s:.0f}s"
+        f"vm {vm_name!r} did not acquire a DHCP lease on "
+        f"{network!r} within {ctx.lease_timeout_s:.0f}s"
     )
+
+
+def wait_dhcp_leases(ctx: RunContext) -> None:
+    """Gate the run phase until every DHCP NIC on every VM has leased.
+
+    The SSH bind path already blocks on its target NIC's lease (``discover_ip``),
+    but a :class:`NativeCommunicator` VM binds the instant its guest agent
+    answers — seconds *before* the guest's DHCP client finishes — while a static
+    NIC on the same guest comes up at boot. Without this gate a plan can read
+    ``ip addr`` and see the static address but no lease yet (REL-24). Waiting here
+    closes that race for every communicator type. Backend-agnostic: it polls the
+    per-switch sidecar dnsmasq lease file, never the guest.
+    """
+
+    def _wait_one(vm: VMRecipe) -> None:
+        for idx, nic in enumerate(vm.spec.nics):
+            if isinstance(nic.addr, DHCPAddr):
+                _wait_for_dhcp_lease(ctx, vm.name, nic.network, idx)
+
+    parallel_map(_wait_one, ctx.plan.hypervisor.vms, jobs=ctx.jobs)
 
 
 def _switch_for_network(ctx: RunContext, network_name: str) -> Switch:
@@ -408,5 +438,6 @@ __all__ = [
     "native_guest_credential",
     "run_phase",
     "wait_communicators_ready",
+    "wait_dhcp_leases",
     "wait_sidecars_ready",
 ]

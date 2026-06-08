@@ -108,9 +108,20 @@ stovepipe rule):
   `execute`/`read_file`/`write_file` callables that wrap the driver's VM-bound
   ref in closures. The communicator never sees a backend type (ADR-0008 §7).
 
-Single-use guard on each concrete so a Communicator reused across two VMs
+Bind-once guard on each concrete so a Communicator reused across two VMs
 fails loud. No `clone()`, no install-phase binding — install is
-builder-driven.
+builder-driven. `close()` is **not** terminal, though: it ends the current
+session but leaves the communicator bound, and the next call reconnects
+(`SSHCommunicator` re-dials; `NativeCommunicator` waits out the agent's
+post-reboot window). That uniform contract is what lets a portable plan keep
+one communicator across a guest power cycle (`start_vm` → `close()` →
+`execute`), exercised by the `lifecycle`/`snapshots` cert plans.
+
+Run-phase readiness gating is communicator-agnostic: after bind, the
+orchestrator waits for each VM's agent/SSH (`wait_communicators_ready`) **and**
+for every DHCP NIC's lease (`wait_dhcp_leases`, polling the per-switch sidecar
+dnsmasq lease file) before tests run — so a NativeCommunicator VM, which binds
+the instant its agent answers, can't race its own DHCP (REL-24).
 
 ### 6. Credentials live on `Builder`; orchestrator brokers to Communicator
 

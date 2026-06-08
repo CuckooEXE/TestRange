@@ -57,10 +57,6 @@ class CommunicatorAlreadyBoundError(CommunicatorError):
     """A communicator was bound twice; construct a fresh instance per VM."""
 
 
-class CommunicatorClosedError(CommunicatorError):
-    """A communicator was used (or re-bound) after close(); it is one-shot."""
-
-
 class GatewayError(TestRangeError):
     """A guest-reachability gateway was misconfigured or could not be established.
 

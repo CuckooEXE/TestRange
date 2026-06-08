@@ -9,8 +9,8 @@ import pytest
 from testrange.communicators import NativeCommunicator
 from testrange.exceptions import (
     CommunicatorAlreadyBoundError,
-    CommunicatorClosedError,
     CommunicatorError,
+    GuestAgentError,
 )
 from testrange.guest_io import ExecResult
 
@@ -94,38 +94,71 @@ class TestNotBound:
 
 
 class TestClose:
+    """close() is a session reset, not terminal — mirrors SSHCommunicator.
+
+    A Plan power-cycles a guest, closes the communicator to drop the stale
+    session, and keeps using the same object; the next call re-establishes it
+    (the portable lifecycle/snapshot idiom, REL-23).
+    """
+
     def test_close_is_idempotent(self) -> None:
         c, _ = _bound()
         c.close()
         c.close()  # second close must not raise
 
-    def test_is_bound_false_after_close(self) -> None:
+    def test_stays_bound_after_close(self) -> None:
         c, _ = _bound()
         c.close()
-        assert c.is_bound is False
+        assert c.is_bound is True
 
-    def test_execute_after_close_raises_closed(self) -> None:
-        c, _ = _bound()
-        c.close()
-        with pytest.raises(CommunicatorClosedError, match="has been closed"):
-            c.execute(["echo"])
-
-    def test_read_file_after_close_raises_closed(self) -> None:
-        c, _ = _bound()
-        c.close()
-        with pytest.raises(CommunicatorClosedError, match="has been closed"):
-            c.read_file("/x")
-
-    def test_write_file_after_close_raises_closed(self) -> None:
-        c, _ = _bound()
-        c.close()
-        with pytest.raises(CommunicatorClosedError, match="has been closed"):
-            c.write_file("/x", b"y")
-
-    def test_rebind_after_close_raises_closed(self) -> None:
+    def test_execute_after_close_reconnects(self) -> None:
+        # First call after a close() pings the agent (reconnect), then delegates.
         c, rec = _bound()
         c.close()
-        with pytest.raises(CommunicatorClosedError, match="has been closed"):
+        r = c.execute(["echo", "hi"])
+        assert r.exit_code == 0
+        # A "true" readiness ping precedes the real command on the reconnect.
+        assert rec.exec_calls[0][0] == ("true",)
+        assert rec.exec_calls[-1][0] == ("echo", "hi")
+
+    def test_read_file_after_close_reconnects(self) -> None:
+        c, rec = _bound()
+        c.close()
+        assert c.read_file("/x") == b"file-contents"
+        assert rec.exec_calls[0][0] == ("true",)  # readiness ping ran first
+
+    def test_write_file_after_close_reconnects(self) -> None:
+        c, rec = _bound()
+        c.close()
+        c.write_file("/x", b"y")
+        assert rec.write_calls == [("/x", b"y")]
+        assert rec.exec_calls[0][0] == ("true",)
+
+    def test_reconnect_waits_for_agent_then_succeeds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The agent answers only on the 3rd ping after the reboot; the first two
+        # raise GuestAgentError and the communicator keeps polling (no real sleep).
+        monkeypatch.setattr("testrange.communicators.native.time.sleep", lambda _s: None)
+        rec = _Recorder()
+        pings = {"n": 0}
+
+        def flaky(argv: Any, *, timeout: float = 60.0, cwd: str | None = None) -> ExecResult:
+            if tuple(argv) == ("true",):
+                pings["n"] += 1
+                if pings["n"] < 3:
+                    raise GuestAgentError("agent not connected")
+            return rec.execute(argv, timeout=timeout, cwd=cwd)
+
+        c = NativeCommunicator()
+        c.bind(execute=flaky, read_file=rec.read_file, write_file=rec.write_file)
+        c.close()
+        assert c.execute(["echo"]).exit_code == 0
+        assert pings["n"] == 3
+
+    def test_rebind_after_close_still_raises_already_bound(self) -> None:
+        # close() does not unbind, so re-binding to another VM is still rejected.
+        c, rec = _bound()
+        c.close()
+        with pytest.raises(CommunicatorAlreadyBoundError):
             c.bind(
                 execute=rec.execute,
                 read_file=rec.read_file,

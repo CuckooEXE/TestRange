@@ -43,6 +43,7 @@ from testrange.orchestrator.run_phase import (
     bind_communicators,
     run_phase,
     wait_communicators_ready,
+    wait_dhcp_leases,
 )
 from testrange.orchestrator.teardown import teardown
 from testrange.plan import Plan
@@ -225,6 +226,7 @@ class Orchestrator:
                 run_phase(self.ctx)
                 bind_communicators(self.ctx)
                 wait_communicators_ready(self.ctx)
+                wait_dhcp_leases(self.ctx)
                 await_guest_readiness(self.ctx)
                 # Recurse into each GuestHypervisor (ADR-0021); built last so the
                 # returned handle carries the nested map. run_nested_phase tears
