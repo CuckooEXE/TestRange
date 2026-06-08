@@ -25,6 +25,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import Sequence
 
     from testrange.cache.entry import CacheEntry
+    from testrange.communicators.base import Communicator
     from testrange.credentials.posix import PosixCred
     from testrange.devices.pool.base import StoragePool
     from testrange.hypervisor import Hypervisor
@@ -137,6 +138,7 @@ class GuestHypervisor(VMRecipe):
         root: PosixCred,
         installer_iso: CacheEntry,
         license: str | None = None,
+        communicator: Communicator | None = None,
         networks: Sequence[Switch] = (),
         pools: Sequence[StoragePool] = (),
         vms: Sequence[VMRecipe] = (),
@@ -152,8 +154,13 @@ class GuestHypervisor(VMRecipe):
         its SSH key (required) lets the outer run phase reach the guest over SSH to
         discover its address. ``installer_iso`` is the vanilla ESXi installer (a
         cache entry); ``license`` is applied at install time (``serialnum``).
-        ``networks`` / ``pools`` / ``vms`` / ``build_switch`` are the *inner* (L1)
-        topology run against the nested ESXi.
+        ``communicator`` is how the outer run phase reaches the host (default
+        ``SSHCommunicator(root.username)``); it is also what decides whether the
+        builder provisions sshd — the builder gets ``enable_ssh`` set from whether
+        this is an :class:`~testrange.communicators.SSHCommunicator`, so a non-SSH
+        transport leaves no open sshd on the image (ESXI-19). ``networks`` /
+        ``pools`` / ``vms`` / ``build_switch`` are the *inner* (L1) topology run
+        against the nested ESXi.
 
         The guest ``spec`` must declare ESXi-compatible hardware — a
         :class:`~testrange.devices.disk.libvirt.LibvirtOSDrive` on ``sata``/``ide``
@@ -168,16 +175,17 @@ class GuestHypervisor(VMRecipe):
         from testrange.communicators import SSHCommunicator
         from testrange.drivers.esxi import ESXiHypervisor
 
+        communicator = communicator or SSHCommunicator(root.username)
         builder = ESXiKickstartBuilder(
-            installer_iso=installer_iso, credentials=[root], license=license
+            installer_iso=installer_iso,
+            credentials=[root],
+            license=license,
+            # the builder never sees a Communicator (Builder ABC); the SSH-enable
+            # decision is brokered here, where the transport is chosen (ESXI-19).
+            enable_ssh=isinstance(communicator, SSHCommunicator),
         )
         inner = ESXiHypervisor(networks=networks, pools=pools, vms=vms, build_switch=build_switch)
-        return cls(
-            spec=spec,
-            builder=builder,
-            communicator=SSHCommunicator(root.username),
-            inner=inner,
-        )
+        return cls(spec=spec, builder=builder, communicator=communicator, inner=inner)
 
 
 def reject_unsupported_nesting(hypervisor: Hypervisor) -> None:
