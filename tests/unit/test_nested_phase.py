@@ -221,7 +221,9 @@ class TestEsxiInner:
     def test_default_ssh_communicator_enables_sshd(self) -> None:
         # ESXI-19: the default SSHCommunicator transport -> the builder bakes the
         # root key + enables sshd.
-        ks = _esxi_guest().builder.build_kickstart()
+        builder = _esxi_guest().builder
+        assert isinstance(builder, ESXiKickstartBuilder)
+        ks = builder.build_kickstart()
         assert "vim-cmd hostsvc/enable_ssh" in ks
         assert "/etc/ssh/keys-root/authorized_keys" in ks
 
@@ -234,6 +236,7 @@ class TestEsxiInner:
             installer_iso=CacheEntry("esxi-installer"),
             communicator=NativeCommunicator(),
         )
+        assert isinstance(guest.builder, ESXiKickstartBuilder)
         ks = guest.builder.build_kickstart()
         assert "enable_ssh" not in ks
         assert "/etc/ssh/keys-root/authorized_keys" not in ks

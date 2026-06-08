@@ -112,7 +112,7 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (53)
+## Ready (54)
 
 ### CORE
 
@@ -157,6 +157,15 @@ on 2026-06-06.
 
 - [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
 
+  > **BUILDER FIX LANDED 2026-06-08 (merged to feature/release-check); live cert
+  > still SHELVED post-1.0.0.** `%firstboot` now seeds `local.sh` with a
+  > sentinel-guarded one-shot reboot that sets `Net.FollowHardwareMac=1` + persists
+  > (auto-backup.sh), and the rendered ks.cfg digest is folded into `config_hash`.
+  > Unit-gated. The live nested run-phase cert (run with `--lease-timeout ~600`;
+  > ad-hoc plan at `~/Desktop/TestRange-Adhoc/esxi-followhwmac.py`) remains shelved
+  > — and was NEVER actually live-tested (the earlier "Option A" live run executed
+  > pre-fix code from this branch). Earlier diagnosis below.
+  >
   > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** The diagnosis
   > below is complete and the deterministic fix is known (Fallback A/B); we are
   > parking nested ESXi until after the 1.0.0 release rather than finishing it now.
@@ -183,6 +192,18 @@ on 2026-06-06.
   > MAC. Needs a longer run-phase lease window (two nested-ESXi boots). Also fold
   > the rendered kickstart digest into ESXiKickstartBuilder.config_hash so the
   > template change busts the stale esxi-a cache (CORE-64-style gap). Live-verify.
+
+- [ ] **ESXI-19** · `bugfix` — ESXi builder enabled sshd from credential-key presence, not from SSH transport _(code landed + merged 2026-06-08)_
+
+  > Code landed and merged to feature/release-check 2026-06-08 (unit-gated).
+  > `ESXiKickstartBuilder` no longer infers sshd-enable from `root.ssh_key`
+  > presence; `GuestHypervisor.esxi` derives `enable_ssh=isinstance(communicator,
+  > SSHCommunicator)` and passes it to the builder (the Builder ABC forbids the
+  > builder seeing a Communicator). `enable_ssh` defaults True. The vmk0 MAC-follow
+  > block (ESXI-18) is un-gated — transport-independent. Latent until a non-SSH
+  > ESXi communicator (COMM-2) lands; pure hardening, no live cert needed. Move to
+  > Done at the next board sweep. Touchpoints: `builders/esxi.py`,
+  > `builders/_esxi_prepare.py`, `vms/nested.py` + unit tests.
 
 - [ ] **ESXI-11** · `test` — live testrange run smoke (hello_world) on 40.160.34.83
   _(blocks: ESXI-12; blocked by: ESXI-2, ESXI-3, ESXI-4, ESXI-8)_

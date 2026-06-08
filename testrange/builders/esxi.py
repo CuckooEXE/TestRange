@@ -10,8 +10,9 @@ builder (ADR-0012), but ESXi has no userspace serial write: the kickstart's
 ``%post`` injects ``TESTRANGE-RESULT: ok`` into the installer vmkernel log via
 ``vsish`` (the log streams out COM1 via ``logPort=com1``) and powers the installer
 off — see :func:`testrange.builders._esxi_prepare.render_kickstart`. ``%firstboot``
-carries only run-phase provisioning (SSH key + sshd), which runs when the captured
-disk is booted, not during the build.
+carries only run-phase provisioning (a ``local.sh`` block doing the vmk0 MAC-follow
+fix always, plus the SSH key + sshd enable when SSH is the transport), which runs
+when the captured disk is booted, not during the build.
 
 Firmware comes from :attr:`VMSpec.firmware`. The proven-working combo is BIOS +
 i440fx + IDE single-CDROM; ``uefi`` is accepted but UNVALIDATED (OVMF + AHCI hits
@@ -65,14 +66,21 @@ class ESXiKickstartBuilder(Builder):
         staging; this entry's content sha keys the cache.
       credentials: baked into the install. MUST include a ``root`` PosixCred
         with a non-empty password (ESXi complexity rules reject an empty one).
-        The root credential's SSH key, if present, is installed to
-        ``/etc/ssh/keys-root/authorized_keys`` and sshd is enabled.
       license: optional ESXi license key. When set, the kickstart applies it at
         install time via ``serialnum --esx=<key>`` (the native weasel directive),
         so the installed node comes up licensed rather than on the read-only
         free/evaluation edition. ``None`` leaves the install on its default
         evaluation license. The key folds into :meth:`config_hash` — a different
         license is a different installed system.
+      enable_ssh: whether to provision SSH access — install the root credential's
+        SSH key to ``/etc/ssh/keys-root/authorized_keys`` and enable sshd. This
+        tracks the *transport*, not the credential: it is True only when the VM is
+        reached over SSH, decided by the pairing site (``GuestHypervisor.esxi``,
+        which picks the communicator) since the Builder ABC forbids the builder
+        seeing a Communicator (ESXI-19). When False, the key is not baked and sshd
+        stays off, even if the root credential carries a key. Independent of this,
+        the vmk0 MAC-follow fix (ESXI-18) is always provisioned — it is a property
+        of the image, not of how the host is reached.
     """
 
     def __init__(
@@ -81,10 +89,12 @@ class ESXiKickstartBuilder(Builder):
         installer_iso: CacheEntry,
         credentials: Sequence[Credential] = (),
         license: str | None = None,
+        enable_ssh: bool = True,
     ) -> None:
         self.installer_iso = installer_iso
         self._credentials = self._validate_credentials(credentials)
         self._license = self._validate_license(license)
+        self._enable_ssh = enable_ssh
 
     @staticmethod
     def _validate_credentials(credentials: Sequence[Credential]) -> tuple[Credential, ...]:
@@ -198,8 +208,10 @@ class ESXiKickstartBuilder(Builder):
         different system), the root SSH **public key** (its ``auth_line``, baked
         into ``%firstboot``'s ``authorized_keys`` — a different key, or none, is a
         different installed system; CORE-64), the license key (baked at install
-        via ``serialnum``), the install disk size, ``spec.firmware``, and
-        ``base_sha`` (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
+        via ``serialnum``), the **rendered kickstart digest** (so a change to the
+        ks.cfg *template* itself — not just its inputs — busts a stale cached disk;
+        CORE-64-style), the install disk size, ``spec.firmware``, and ``base_sha``
+        (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
 
         The key is folded by value, NOT just presence: run VMs boot the cached
         disk with no re-seed (``seed_iso_ref=None``), so the baked key is the only
@@ -209,9 +221,10 @@ class ESXiKickstartBuilder(Builder):
         del recipe, addressing, macs, build_nic
         root = self._root_credential()
         ssh_key = root.ssh_key.auth_line if root.ssh_key is not None else ""
+        ks_digest = hashlib.sha256(self._render_kickstart().encode("utf-8")).hexdigest()[:16]
         combined = (
             f"root-password:{root.password}\n---\nssh-key:{ssh_key}\n---\n"
-            f"license:{self._license}\n---\n"
+            f"license:{self._license}\n---\nkickstart:{ks_digest}\n---\n"
             f"disk:{spec.os_drive.size_gb}\n---\nfirmware:{spec.firmware}\n---\n"
             f"base:{base_sha}\n---\nsidecar:{sidecar_sha}"
         )
@@ -234,7 +247,9 @@ class ESXiKickstartBuilder(Builder):
     def _render_kickstart(self) -> str:
         root = self._root_credential()
         assert root.password is not None  # construction guarantees a non-empty root password
-        ssh_key = root.ssh_key.auth_line if root.ssh_key is not None else None
+        # Bake the key + enable sshd only when SSH is the transport (ESXI-19); the
+        # MAC-follow fix is rendered unconditionally by render_kickstart.
+        ssh_key = root.ssh_key.auth_line if (self._enable_ssh and root.ssh_key) else None
         return render_kickstart(root_password=root.password, ssh_key=ssh_key, license=self._license)
 
     def _root_credential(self) -> PosixCred:
