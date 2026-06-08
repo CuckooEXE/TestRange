@@ -37,6 +37,8 @@ myst_heading_anchors = 3
 html_theme = "furo"
 html_title = "testrange"
 html_static_path = ["_static"]
+html_logo = "_static/testrange-icon.svg"
+html_favicon = "_static/testrange-icon.png"
 
 # Sphinx 9.x dropped the implicit "include common metadata" default — silence
 # the "no master document" warning by being explicit.

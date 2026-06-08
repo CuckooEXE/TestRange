@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/_static/testrange-logo-horizontal.png" alt="testrange" width="520">
+</p>
+
 # testrange
 
 Declarative Python plans → VM test-ranges → user test functions.

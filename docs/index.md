@@ -1,5 +1,11 @@
 # testrange documentation
 
+```{image} _static/testrange-logo-horizontal.svg
+:alt: testrange
+:width: 480px
+:align: center
+```
+
 `testrange` takes a declarative Python `Plan` of VM topologies, brings them
 up against a hypervisor, runs user test functions against the live range,
 and tears it all down. The aim is a fast, reproducible iteration loop for

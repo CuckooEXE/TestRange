@@ -72,6 +72,10 @@ on 2026-06-06.
 
 ### DOCS
 
+- [ ] **DOCS-22** · `docs` — integrate project logos into README + Sphinx site
+
+  > User added project logos (icon + horizontal wordmark, PNG + SVG). Moved them into `docs/_static/` (was `docs/images/`; `_static/` is what `html_static_path` already serves, and creating it also clears the pre-existing missing-`_static` build warning). Wire-up: README header (horizontal PNG), Sphinx `html_logo` = icon SVG + `html_favicon` = icon PNG in conf.py, horizontal SVG hero on `docs/index.md`.
+
 - [ ] **DOCS-8** · `docs` — ADR-0022 rescope (two prep modules + ESXi patch) + xorriso install note
 
   > Code-review remediation (feature/builders, 2026-06-01). ADR-0022 is scoped PVE-only / one module but the branch ships a second sanctioned subprocess module (_esxi_prepare.py), acknowledged by the ban whitelist + pyproject. Rescope ADR-0022 to installer-ISO prep generally; name both sanctioned modules; document the ESXi -boot_image any patch divergence (vs PVE keep) and the -rockridge off / two-pass flags. Add the 'apt install xorriso' system-dep note to docs/user/drivers (Proxmox section) — currently only pip install -e ..
