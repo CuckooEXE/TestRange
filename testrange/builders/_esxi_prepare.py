@@ -100,20 +100,22 @@ def render_kickstart(
     every section body to the same serial at parse time, and a verbatim marker
     there would false-trigger the orchestrator's parser before the real emission.
 
-    ``%firstboot`` carries run-phase provisioning only (SSH key + sshd enable). It
-    runs when the *captured* disk is booted for a run, not during the build, so a
-    provisioning hiccup there can't corrupt the build-result signal.
+    ``%firstboot`` carries run-phase provisioning only — the vmk0 MAC follow
+    (ESXI-18), always; plus the SSH key + sshd enable when ``ssh_key`` is set
+    (ESXI-19). It runs when the *captured* disk is booted for a run, not during the
+    build, so a provisioning hiccup there can't corrupt the build-result signal.
 
     Args:
       root_password: plaintext root password (``rootpw``). ESXi enforces
         complexity (>=8 chars, mixed classes); the caller's Credential is the
         source of truth, so we only reject an empty password here.
-      ssh_key: optional OpenSSH public key. When set, ``%firstboot`` writes it to
+      ssh_key: the root OpenSSH public key, or ``None`` when SSH is not the
+        transport (ESXI-19). When set, ``%firstboot`` writes it to
         ``/etc/ssh/keys-root/authorized_keys`` (ESXi's path, NOT ``~root/.ssh``)
         and enables sshd via ``/etc/rc.local.d/local.sh`` (which runs late, after
-        hostd — ``vim-cmd`` in ``%firstboot`` itself runs too early and hangs).
-        NOTE: ESXi 8 sshd runs in FIPS mode and rejects Ed25519 keys; the key
-        should be RSA or ECDSA.
+        hostd — ``vim-cmd`` in ``%firstboot`` itself runs too early and hangs). The
+        vmk0 MAC-follow fix rides that same ``local.sh`` regardless of this arg.
+        NOTE: ESXi 8 sshd runs in FIPS mode and rejects Ed25519 keys; use RSA/ECDSA.
       license: optional ESXi license key. When set, weasel applies it at install
         time via the top-level ``serialnum --esx=<key>`` directive, so the node
         boots licensed instead of on the read-only free/evaluation edition.
@@ -155,32 +157,69 @@ def render_kickstart(
 
 
 def _firstboot(ssh_key: str | None) -> list[str]:
-    """Run-phase ``%firstboot`` provisioning (empty when no SSH key).
+    """Run-phase ``%firstboot`` provisioning.
 
-    Drops the root key (pure filesystem, hostd-free) and defers the sshd enable to
-    ``/etc/rc.local.d/local.sh`` — that runs late in boot, after hostd, where
-    ``vim-cmd``/``esxcli`` work; calling them directly in ``%firstboot`` runs
-    before hostd and hangs. Flat layout (no indentation): busybox only closes a
-    plain ``cat <<'EOF'`` heredoc on a column-0 terminator, so an indented body
-    would let the heredoc swallow the rest of the script.
+    Runs once when the *captured* disk is first booted for a run (``%post`` powers
+    the installer off before any real boot). It seeds ``/etc/rc.local.d/local.sh``,
+    which runs late on *every* boot, after hostd — where ``vim-cmd``/``esxcli``
+    work (calling them in ``%firstboot`` itself runs before hostd and hangs).
+
+    **vmk0 MAC follow (ESXI-18), sentinel-guarded one-shot reboot — ALWAYS.** ESXi
+    pins ``vmk0``'s MAC to the pNIC present at *install* (the build NIC) and keeps
+    it (``Net.FollowHardwareMac=0`` default), so when the captured disk is booted on
+    a different *run* NIC, ``vmk0`` DHCPs under the stale build MAC and the
+    orchestrator's lease discovery — keyed on the run NIC's MAC — misses.
+    ``FollowHardwareMac`` is read only at ``vmk0`` *creation* and ``vmk0`` is already
+    up by the time ``local.sh`` runs, and a live down/up does NOT re-MAC it — so the
+    only lever is a reboot. On the first run boot the block sets the flag, persists
+    it (``auto-backup.sh``), drops a sentinel, and ``reboot``\\ s. The sentinel
+    (``/etc/vmware/.trfollowhwmac``, persisted by that same ``auto-backup.sh``) makes
+    it one-shot — the second boot skips the block. That second boot re-creates
+    ``vmk0`` under the run NIC's hardware MAC, so the lease lands under the polled
+    MAC. (``local.sh``'s plain reboot is what works here — a detached reboot from
+    ``%firstboot`` was tried and did not fire. Run-phase lease discovery must
+    tolerate the two boots.) This is independent of the transport: the orchestrator
+    DHCP-discovers the host however it is later reached, so it is always emitted.
+
+    **SSH (only when SSH is the transport, i.e. ``ssh_key`` is set; ESXI-19).** Drop
+    the root key (pure filesystem) before the MAC block, and enable sshd *after* the
+    ``fi`` — so on the first boot the MAC block reboots before reaching it, and on
+    the post-reboot boot (sentinel present) the block is skipped and sshd comes up.
+    When ``ssh_key`` is ``None`` the key write and sshd enable are omitted entirely
+    and the host gets no open sshd.
+
+    Flat layout (no indentation): busybox only closes a plain ``cat <<'EOF'``
+    heredoc on a column-0 terminator, so an indented body would let the heredoc
+    swallow the rest of the script — so the appended ``local.sh`` block (``if``
+    body included) is written unindented.
     """
-    if not ssh_key:
-        return []
-    return [
-        "",
-        "%firstboot --interpreter=busybox",
-        "mkdir -p /etc/ssh/keys-root",
-        "cat > /etc/ssh/keys-root/authorized_keys <<'KEYEOF'",
-        ssh_key,
-        "KEYEOF",
-        "chmod 600 /etc/ssh/keys-root/authorized_keys",
-        "chown root:root /etc/ssh/keys-root/authorized_keys",
+    lines = ["", "%firstboot --interpreter=busybox"]
+    if ssh_key:
+        lines += [
+            "mkdir -p /etc/ssh/keys-root",
+            "cat > /etc/ssh/keys-root/authorized_keys <<'KEYEOF'",
+            ssh_key,
+            "KEYEOF",
+            "chmod 600 /etc/ssh/keys-root/authorized_keys",
+            "chown root:root /etc/ssh/keys-root/authorized_keys",
+        ]
+    lines += [
         "cat >> /etc/rc.local.d/local.sh <<'RCEOF'",
-        "vim-cmd hostsvc/enable_ssh",
-        "vim-cmd hostsvc/start_ssh",
-        "esxcli network firewall ruleset set --enabled true --ruleset-id sshServer",
-        "RCEOF",
+        "if [ ! -f /etc/vmware/.trfollowhwmac ]; then",
+        "esxcli system settings advanced set -o /Net/FollowHardwareMac -i 1",
+        "touch /etc/vmware/.trfollowhwmac",
+        "/sbin/auto-backup.sh",
+        "reboot",
+        "fi",
     ]
+    if ssh_key:
+        lines += [
+            "vim-cmd hostsvc/enable_ssh",
+            "vim-cmd hostsvc/start_ssh",
+            "esxcli network firewall ruleset set --enabled true --ruleset-id sshServer",
+        ]
+    lines += ["RCEOF"]
+    return lines
 
 
 def prepare_iso(vanilla_iso: Path, out_path: Path, *, kickstart: str) -> None:

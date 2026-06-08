@@ -10,7 +10,7 @@ on 2026-06-06.
 
 > Migrated 294 tickets — Doing 13, Ready 26, Done 242, Archive 13.
 
-## Doing (14)
+## Doing (15)
 
 ### CORE
 
@@ -20,13 +20,48 @@ on 2026-06-06.
 
 ### ESXI
 
+- [ ] **ESXI-19** · `bugfix` — ESXi builder enables sshd from credential-key presence, not from SSH being the transport
+
+  > Code-review catch (2026-06-08, while on ESXI-18). `ESXiKickstartBuilder`
+  > baked the root `authorized_keys` + enabled sshd whenever the root cred carried
+  > an SSH key (`_render_kickstart` keyed on `root.ssh_key is not None`). That
+  > conflates "a key was supplied" with "SSH is the transport" — a cred could carry
+  > a key while the host is reached via a non-SSH communicator (COMM-2 VMware
+  > Tools/pyVmomi), and an open sshd there is a footgun. The Builder ABC forbids the
+  > builder seeing a Communicator type, so the decision is brokered at the pairing
+  > site (`GuestHypervisor.esxi`, which picks the communicator): it derives
+  > `enable_ssh=isinstance(communicator, SSHCommunicator)` and passes it to the
+  > builder; `_render_kickstart` bakes the key + sshd-enable only when set. The
+  > vmk0 MAC-follow block (ESXI-18) is UN-gated from the key — it's a property of
+  > the image (the orchestrator DHCP-discovers the host regardless of transport), so
+  > `%firstboot` always carries it. Latent today (`GuestHypervisor.esxi` hardcoded
+  > SSH); hardening for when a non-SSH communicator lands. `enable_ssh` defaults
+  > True (back-comat). Touchpoints: `builders/esxi.py`, `builders/_esxi_prepare.py`,
+  > `vms/nested.py`, `tests/unit/test_esxi_builder.py`, `tests/unit/test_nested_phase.py`.
+
 - [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
 
-  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** The diagnosis
-  > below is complete and the deterministic fix is known (Fallback A/B); we are
-  > parking nested ESXi until after the 1.0.0 release rather than finishing it now.
-  > The ESXi *backend* is certified via REL-11 (raw kickstart host), which needs
-  > none of this. Pick this up when nested ESXi becomes a priority.
+  > **BUILDER FIX LANDED 2026-06-08, live cert pending.** Builder-only change
+  > (gate-green: ruff/format/mypy --strict/pytest 1063). FIRST ATTEMPT (Option A:
+  > detached `(sleep 10 && reboot) &` from `%firstboot`) FAILED live 2026-06-08 —
+  > the detached reboot never fired (firstboot env reaps the background process),
+  > so vmk0 stayed on the build MAC and the run-phase lease discovery still missed.
+  > REVERTED to the live-informed design this ticket already documented: `%firstboot`
+  > seeds `/etc/rc.local.d/local.sh` (runs late, every boot, after hostd) with a
+  > SENTINEL-guarded one-shot block — `if [ ! -f /etc/vmware/.trfollowhwmac ]; then`
+  > set `Net.FollowHardwareMac=1`, `touch` the sentinel, `auto-backup.sh` persist,
+  > plain `reboot; fi` — then the sshd-enable after `fi`. Boot 1 sets+persists+reboots;
+  > boot 2 (sentinel present) skips the block, vmk0 is re-created under the run NIC's
+  > hardware MAC, lease lands under the polled MAC, sshd comes up. Also folded the
+  > rendered-kickstart digest into `ESXiKickstartBuilder.config_hash` so the template
+  > edit busts the stale esxi-a cache (CORE-64-style gap; PROVEN live — the rebuild
+  > keyed a new hash). Touchpoints: `builders/_esxi_prepare.py:_firstboot`,
+  > `builders/esxi.py:config_hash`, `tests/unit/test_esxi_builder.py`. REMAINING:
+  > the live nested run-phase cert — run with `--lease-timeout ~600` (two ESXi boots)
+  > via the ad-hoc plan at `~/Desktop/TestRange-Adhoc/esxi-followhwmac.py` (host-only
+  > repro; asserts host reachable + FollowHardwareMac=1 + vmk0 MAC == uplink pNIC
+  > MAC). The wider ESXi-as-a-guest cert (ESXI-16) stays shelved post-1.0.0; this
+  > unblocks it when picked back up.
   >
   > LIVE-FOUND under ESXI-16 (2026-06-07). esxi-a's run boot never satisfied
   > `discover_ip` → "did not acquire a DHCP lease on 'lab-net' within Ns". NOT a
