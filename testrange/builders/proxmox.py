@@ -19,9 +19,13 @@ Network (the install/run split)
 -------------------------------
 The static run-phase address is baked into the installed
 ``/etc/network/interfaces`` by ``answer.toml`` ``[network] source =
-"from-answer"`` (interface-name filtered, stable across the build→run MAC
-change). The first-boot script flushes that static off ``vmbr0`` and DHCPs off
-the build switch's sidecar so ``apt`` reaches the mirror during build; the
+"from-answer"``, with ``vmbr0`` bridging ``network_interface``. That name is a
+PCI-slot-derived predictable name, and the build NIC and run NIC sit at
+different slots, so the first-boot script also bakes a systemd ``.link`` that
+renames the run NIC to ``network_interface`` (see :func:`_pin_mgmt_nic`,
+CORE-67) — otherwise ``vmbr0``'s port is missing at run and the static is
+unreachable. The first-boot script flushes that static off ``vmbr0`` and DHCPs
+off the build switch's sidecar so ``apt`` reaches the mirror during build; the
 on-disk config is untouched, so the run boot comes up on the static.
 """
 
@@ -390,7 +394,12 @@ class ProxmoxAnswerBuilder(Builder):
         """
         apt_pkgs = [p.name for p in self.packages if isinstance(p, Apt)]
         pips = [p for p in self.packages if isinstance(p, Pip)]
-        lines = [_FIRST_BOOT_PROLOGUE, _network_flip(self.network_interface), _REPO_SWAP]
+        lines = [
+            _FIRST_BOOT_PROLOGUE,
+            _network_flip(self.network_interface),
+            _pin_mgmt_nic(self.network_interface),
+            _REPO_SWAP,
+        ]
         if self.apt_insecure:
             lines.append(_APT_INSECURE)
         lines.append("apt-get update")
@@ -479,6 +488,30 @@ ip link set "$BR" up
 dhclient -1 -v "$BR\""""
 
 
+# Pin the run-phase management NIC name. answer.toml binds vmbr0's bridge-port to
+# a kernel-predictable name (``network_interface``), but predictable names are
+# derived from the PCI slot: the build phase installs over a dedicated build NIC
+# and the run phase attaches the declared NIC at a *different* slot, so the run
+# NIC comes up under a different name, vmbr0's port is missing, and the static is
+# unreachable (CORE-67 — the same build→run NIC class as ESXI-18). A systemd
+# ``.link`` baked into the installed system renames the management NIC to
+# ``network_interface`` by driver match (slot-independent), so vmbr0 finds its
+# port at run. This lives in the installed system, NOT answer.toml — the PVE
+# auto-installer rejects unknown answer keys, so network-naming fixes can't go
+# there. Single managed NIC, matching what ``from-answer`` configures (nics[0]);
+# ``.link`` files are applied by udev, so systemd-networkd need not be enabled.
+def _pin_mgmt_nic(nic: str) -> str:
+    return f"""\
+mkdir -p /etc/systemd/network
+cat >/etc/systemd/network/10-testrange-mgmt.link <<'EOF'
+[Match]
+Driver=virtio_net
+
+[Link]
+Name={nic}
+EOF"""
+
+
 # Swap the enterprise repo (401s without a subscription, tanks apt under set -e)
 # for the public no-subscription mirror. Both .list and .sources variants removed
 # so we don't depend on which format the installer chose.
@@ -503,9 +536,20 @@ Acquire::https::Verify-Peer "false";
 Acquire::https::Verify-Host "false";
 EOF"""
 
-# Success footer: sync provisioning writes to disk before announcing ok (the
-# orchestrator captures the disk the moment it reads the token), then power off.
+# PVE gates its first-boot hook on this sentinel: the service runs only while it
+# exists (ConditionPathExists) and removes it in ExecStartPost *after* our script
+# (its ExecStart) returns. But our poweroff below pre-empts ExecStartPost, so the
+# sentinel survives into the captured image and PVE re-runs first-boot on the RUN
+# boot — which powers the node off ~10s in, before SSH (CORE-67, live-confirmed by
+# booting the captured disk). Remove it ourselves so first-boot runs exactly once,
+# at build. Path is PVE's, from proxmox-first-boot-*.service.
+_PVE_FIRSTBOOT_SENTINEL = "/var/lib/proxmox-first-boot/pending-first-boot-setup"
+
+# Success footer: drop PVE's first-boot sentinel so the hook doesn't re-run at
+# run, sync provisioning writes to disk before announcing ok (the orchestrator
+# captures the disk the moment it reads the token), then power off.
 _FIRST_BOOT_FOOTER = f"""\
+rm -f {_PVE_FIRSTBOOT_SENTINEL}
 sync
 printf 'TESTRANGE-RESULT: ok\\n' > {_SERIAL_DEVICE} 2>/dev/null
 systemctl poweroff"""

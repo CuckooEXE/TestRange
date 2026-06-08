@@ -505,7 +505,17 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (248)
+## Done (250)
+
+### CORE
+
+- [x] **CORE-66** · `bugfix` — run-phase lookup_credential rejects non-CloudInit builders _(done: 2026-06-08)_
+
+  > Live-found smoke-testing ProxmoxAnswerBuilder on libvirt L0: run-phase `bind_communicators` died in `lookup_credential` with "only CloudInitBuilder is supported in v0" — it hard-gated on `isinstance(builder, CloudInitBuilder)` though every Builder exposes the same `credentials` contract and an SSHCommunicator only needs the matching PosixCred. Fix: lifted `find_credential` from CloudInitBuilder to the Builder ABC (pure, over `self.credentials`) + dropped the gate in `lookup_credential` (kept the SSHCommunicator + PosixCred checks). `native_guest_credential` (QGA-only) and `nested_phase._admin_ssh_key` (libvirt-only) left narrowed. Gates green + hello_world libvirt smoke 3/3 + live PVE run green.
+
+- [x] **CORE-67** · `bugfix` — ProxmoxAnswerBuilder run phase: NIC-name swap + first-boot re-run _(done: 2026-06-08)_
+
+  > Two run-phase bugs, both confirmed by mounting/booting the captured disk (qemu-nbd + a serial-forced overlay). (1) `vmbr0` binds `bridge-ports enp1s0`, a PCI-slot-derived name; the build NIC and run NIC sit at different slots, so the run NIC came up under a different name and vmbr0's port was missing → static unreachable (same class as ESXI-18). (2) PVE's first-boot service is gated on the sentinel `/var/lib/proxmox-first-boot/pending-first-boot-setup`, removed in `ExecStartPost` AFTER our script — but our `systemctl poweroff` pre-empts it, so the sentinel survived and first-boot RE-RAN at run, powering the node off ~10s in. FIX: first-boot bakes `/etc/systemd/network/10-testrange-mgmt.link` (`Driver=virtio_net` → `Name=network_interface`, slot-independent rename) AND `rm -f`s the PVE sentinel before poweroff so first-boot runs once. answer.toml untouched (an earlier interface-name-pinning attempt was reverted — the PVE 9.2 installer chokes on it). config_hash folds the first-boot digest (cache-busts). Live-confirmed: node stays up, NIC enp0s2→enp1s0, vmbr0 UP 10.50.0.100/24, full run green (user-confirmed).
 
 ### REL
 

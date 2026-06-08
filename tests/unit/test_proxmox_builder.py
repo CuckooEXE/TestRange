@@ -189,6 +189,8 @@ class TestAnswerToml:
         s = b._first_boot_script()
         assert 'NIC="ens18"' in s
         assert 'NIC="enp1s0"' not in s
+        # the .link pin renames the run NIC to the same custom name (CORE-67)
+        assert "Name=ens18" in s
 
     def test_ssh_keys_included(self) -> None:
         a = _answer(_builder(), _spec())
@@ -209,11 +211,28 @@ class TestFirstBootScript:
         assert "/dev/ttyS0" in s
         assert "systemctl poweroff" in s
 
+    def test_drops_pve_firstboot_sentinel_before_poweroff(self) -> None:
+        # CORE-67: our poweroff pre-empts PVE's ExecStartPost sentinel removal, so
+        # we must drop the sentinel ourselves or first-boot re-runs (and powers
+        # off the node) on the RUN boot. Must happen before the poweroff.
+        s = _builder()._first_boot_script()
+        sentinel = "rm -f /var/lib/proxmox-first-boot/pending-first-boot-setup"
+        assert sentinel in s
+        assert s.index(sentinel) < s.index("systemctl poweroff")
+
     def test_network_flip_and_repo_swap(self) -> None:
         s = _builder()._first_boot_script()
         assert "dhclient -1 -v" in s
         assert "pve-no-subscription" in s
         assert "pve-enterprise.list" in s
+
+    def test_pins_mgmt_nic_by_link_file(self) -> None:
+        # CORE-67: a systemd .link renames the run NIC to network_interface so
+        # vmbr0's bridge-port survives the build->run PCI-slot change.
+        s = _builder()._first_boot_script()
+        assert "/etc/systemd/network/10-testrange-mgmt.link" in s
+        assert "Driver=virtio_net" in s
+        assert "Name=enp1s0" in s
 
     def test_threads_packages_and_commands(self) -> None:
         s = _builder()._first_boot_script()
