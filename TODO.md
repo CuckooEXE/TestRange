@@ -10,7 +10,7 @@ on 2026-06-06.
 
 > Migrated 294 tickets — Doing 13, Ready 26, Done 242, Archive 13.
 
-## Doing (14)
+## Doing (11)
 
 ### CORE
 
@@ -19,45 +19,6 @@ on 2026-06-06.
   > Code-review remediation (feature/builders, 2026-06-01). The Builder ABC says the driver MUST reproduce firmware/installer-origin, but nothing rejects a plan requesting firmware=uefi or installer-origin against a backend that cannot honor it (drivers/base.py:317-324). Latent today (only libvirt ships it). Add a per-driver preflight finding for unsupported firmware/origin, mirroring mgmt_unsupported_findings. User: drivers should offer their own pre-flight that rejects findings like this.
 
 ### ESXI
-
-- [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
-
-  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** The diagnosis
-  > below is complete and the deterministic fix is known (Fallback A/B); we are
-  > parking nested ESXi until after the 1.0.0 release rather than finishing it now.
-  > The ESXi *backend* is certified via REL-11 (raw kickstart host), which needs
-  > none of this. Pick this up when nested ESXi becomes a priority.
-  >
-  > LIVE-FOUND under ESXI-16 (2026-06-07). esxi-a's run boot never satisfied
-  > `discover_ip` → "did not acquire a DHCP lease on 'lab-net' within Ns". NOT a
-  > timeout: proven by reading the lab sidecar's dnsmasq.leases mid-run —
-  > esxi-a DID lease (10.50.0.33) but under `02:df:31:62:2b:5e` (the **build NIC**
-  > MAC), while the orchestrator polls the run/lab NIC MAC `02:54:e8:60:81:17`.
-  > ROOT CAUSE: ESXi binds vmk0's MAC to the pNIC present at **install** (the
-  > dedicated build NIC) and keeps it (`Net.FollowHardwareMac=0` default); the
-  > captured image is later booted on a different run NIC, so vmk0 DHCPs under the
-  > stale build MAC. FIX (user-chosen): bake `Net.FollowHardwareMac=1` into the
-  > kickstart so vmk0 follows its uplink's current hardware MAC. Wrinkle: %post
-  > powers off during build (ESXI-17), so %firstboot first runs in the run phase
-  > AFTER vmk0's early DHCP under the build MAC. LIVE-PROVEN 2026-06-07: setting the
-  > flag at runtime + bouncing vmk0 (down/up) does NOT move a live vmk0's MAC (DCUI
-  > still showed the build-MAC IPv6) and the down/up broke rc.local. So local.sh
-  > (after hostd) sets the flag, persists config (auto-backup.sh), and does a
-  > ONE-SHOT guarded reboot (sentinel /etc/vmware/.trfollowhwmac); the second boot
-  > re-inits vmk0 under the hardware (run) MAC so the lease lands under the polled
-  > MAC. Needs a longer run-phase lease window (two nested-ESXi boots). Also fold
-  > the rendered kickstart digest into ESXiKickstartBuilder.config_hash so the
-  > template change busts the stale esxi-a cache (CORE-64-style gap). Live-verify.
-
-- [ ] **ESXI-16** · `test` — examples/capabilities-nested-esxi.py portable nested-ESXi plan + TESTS + live cert
-
-  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** Build phase is
-  > certified end-to-end on libvirt L0; the run-phase nested cert is blocked only by
-  > ESXI-18 (vmk0 keeps the build-NIC MAC), whose fix is known but parked. The ESXi
-  > *backend* is certified via REL-11's raw kickstart host instead — nested adds no
-  > coverage the e2e suite needs. Resume post-1.0.0.
-  >
-  > examples/capabilities-nested-esxi.py + GuestHypervisor.esxi DONE (code+unit gate-green). LIVE 2026-06-02: fixed BACKEND-13 (IDE installer CD) + BUILD-22 (heredoc) + CORE-62 (--build-timeout). ESXi install now validated end-to-end to DCUI on libvirt L0. ESXI-17 RESOLVED 2026-06-06 (build-result via %post vsish→logPort=com1; build phase certified end-to-end on libvirt L0). CORE-63 RESOLVED 2026-06-06 (EcdsaKey for the FIPS-sshd run-phase key). CORE-65 RESOLVED 2026-06-07 (pNIC discovery: the inner cache-only run was spuriously pNIC-validating the build switch's uplink against the inherited libvirt bridge-name map; preflight now passes build_switch=None under require_cache so the never-realized build switch is exempt — unit-proven + hello_world smoke green). Remaining: the live nested run-phase cert (esxcli/SSH to the node + inner VM over pyVmomi) end-to-end on libvirt L0. Move to Done once that run-phase cert is green.
 
 - [ ] **ESXI** · `EPIC` — ESXi (pyVmomi) HypervisorDriver
 
@@ -77,14 +38,6 @@ on 2026-06-06.
   > 1. _VMBuildPlan (build_phase.py:68-88): add __post_init__ enforcing exactly-one-of (base_path is None) != (boot_media_path is None). installer_origin derives from base_path alone, so 'both set' silently drops the boot medium and 'neither' yields a blank unbootable disk; the only current guard is a remote OrchestratorError in _probe_vm.
   > 2. Boot media is staged under kind='build_seed' + volume_suffix('build_seed') (build_phase.py:325,329), conflating a bootable installer ISO with a cidata seed. Add a distinct 'boot_iso' (or 'build_media') kind to the documented suffix vocabulary (drivers/base.py:199-207) and use it.
 
-- [ ] **ORCH-2** · `feat` — nested orchestration
-
-  > `AbstractHypervisor` shape designed fresh (not copied from `.bak`).
-  >
-  > Goal (clarified 2026-05-31): a VM in the Plan can itself be a Hypervisor that hosts VMs — nested orchestration.
-  >
-  > In progress 2026-05-31 on branch feature/nested-virt (worktree .claude/worktrees/nested-virt).
-
 ### BUILD
 
 - [ ] **BUILD-18** · `chore` — review nits (ABC docstring, firmware comment, digest helper, dead code, ISO ids, test doubles)
@@ -98,10 +51,6 @@ on 2026-06-06.
   > - Dedup _OriginlessBuilder/_Weird test doubles across files.
   > - _vm.py:100 drop dead _cdrom_xml(dev='sda') default (seed/boot-media collision risk); make dev required.
 
-- [ ] **BUILD-17** · `test` — ISO-prep error-path + network-precedence coverage
-
-  > Code-review remediation (feature/builders). DONE 2026-06-01. Added unit tests: _patch_bootcfg idempotency/append/CRLF, missing-xorriso, ESXi+PVE non-zero-exit (via unwritable outdev), network gw/dns precedence + dns line + no-NIC + no-static, network_interface->answer+flip, ESXi pw control-char rejection. De-brittled: wait_ready argv (len==1), installer-origin asserts on recorded _CreatedVM.os_disk/boot_media not substrings, ks.cfg lowercase pinned. BONUS: exercising the assertions surfaced TWO real production bugs (fixed under this ticket): (1) xorriso -rockridge off uppercased ks.cfg -> KS.CFG, weasel's case-sensitive ks=cdrom:/ks.cfg would ENOENT -> added -compliance lowercase; (2) _patch_bootcfg used read_text() whose universal-newline xlate stripped \r, so CRLF was NEVER preserved despite the docstring -> switched to read_bytes/write_bytes. All 861 unit+prep tests green; ruff+mypy --strict clean.
-
 - [ ] **BUILD-16** · `bugfix` — drop gratuitous ESXi-8 version gating (disk floor + prose)
 
   > Code-review remediation (feature/builders, 2026-06-01). Unnecessary-limitation cleanup.
@@ -114,10 +63,6 @@ on 2026-06-06.
   > 1. ESXiKickstartBuilder rootpw injection footgun (_esxi_prepare.py:82): reject root passwords containing newlines/control chars at construction (lab env, not a security boundary, but a malformed-ks footgun). Same for ssh_key.
   > 2. apt_insecure persists TLS-off into the run image (proxmox.py:463-470): rm /etc/apt/apt.conf.d/99-testrange-insecure in the first-boot footer so it does not survive the build.
   > 3. _NETWORK_FLIP hardcodes NIC=enp1s0 (proxmox.py:437-448) while network_interface is configurable and feeds answer.toml filter.ID_NET_NAME. Parameterize the flip on self.network_interface (template/helper called from _first_boot_script) — also makes the prepared-ISO script digest vary with network_interface so a changed NIC re-preps.
-
-- [ ] **BUILD-10** · `chore` — feature/builders worktree (venv + .claude hooks)
-
-  > Git worktree at .claude/worktrees/builders on branch feature/builders for upcoming builders feature work. Copied the gitignored local env into it: .claude/hooks (auto-commit, log-interesting-commands, session-start) + settings.local.json, and the .venv with all absolute paths relocated to the worktree — bin/* console-script shebangs, activate VIRTUAL_ENV, and the editable-install MapPathFinder (__editable___testrange_0_2_0_finder.py MAPPING) — so 'import testrange' resolves to the worktree source, not main. Verified: ruff/mypy/pytest run from the worktree venv, 794 tests collect. Created 2026-05-31.
 
 ### BACKEND
 
@@ -143,11 +88,11 @@ on 2026-06-06.
 
   > Umbrella for the road to 1.0.0 — a validation pass, not a feature. Prove all three backends (libvirt, Proxmox, ESXi) hold up under the same adversarial end-to-end suite, on the same portable plans, on independently-built hosts; then reconcile docs/PLAN/TODO against validated reality and freeze the public API. Design of record: PLAN.md "1.0.0 validation & release" + ADR-0028 (REL-1).
   >
-  > Three pillars: (1) adversarial e2e suite in `tests/end-to-end/` — portable PLAN+TESTS modules (docstring states WHAT it stresses + WHY), run via `testrange run --profile <name> tests/end-to-end/plans/<plan>.py` AND wrapped by `test_e2e_<backend>.py` behind per-backend markers (libvirt/proxmox/esxi); generic tier (every backend) + backend-specific tier. DISTINCT from capabilities.py — that stays THE breadth/cert survey (CLAUDE.md rule 4 unchanged); e2e is the additive depth/edge-case layer. (2) Unmanaged, scripted nested host fleet in `tools/hypervisor-hosts/` — each hypervisor stood up as a RAW libvirt VM (virt-install + kickstart/answer), independent of TestRange (no GuestHypervisor — validating TestRange with TestRange is circular); tr-egress NAT gives build VMs egress, SUPERSEDING the env-block on ESXI-11/12/13 + BUILD-13. (3) 1.0.0 = all three backends green on the full e2e suite (hard gate) + public-API freeze (flip major_version_zero=false, /api-diff baseline).
+  > Three pillars: (1) a certification & regression corpus in `tests/plans/{generic,libvirt,proxmox,esxi}/` — one portable PLAN + a few TESTS per file (docstring states WHAT it stresses + WHY), run via `testrange run --profile <name> tests/plans/<tier>/<plan>.py` and NOT collected/executed by pytest (named without a `test_` prefix, no `__init__.py`); generic tier runs on every backend, per-driver tiers pin the driver Hypervisor + that backend's concrete device types. This IS the new backend certification (it supersedes examples/capabilities.py, which is slated for deletion). (2) Unmanaged, scripted nested host fleet in `tools/hypervisor-hosts/` — each hypervisor stood up as a RAW libvirt VM (virt-install + kickstart/answer), independent of TestRange (no GuestHypervisor — validating TestRange with TestRange is circular); tr-egress NAT gives build VMs egress, SUPERSEDING the env-block on ESXI-11/12/13 + BUILD-13. (3) 1.0.0 = all three backends green on the full e2e suite (hard gate) + public-API freeze (flip major_version_zero=false, /api-diff baseline).
   >
-  > Children: REL-1 (ADR/PLAN, done), REL-2 (scaffolding + esxi marker), REL-3..6 (generic plans), REL-7..9 (backend-specific plans), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
+  > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (59)
+## Ready (53)
 
 ### CORE
 
@@ -179,6 +124,45 @@ on 2026-06-06.
   > PARTIAL 2026-06-01. Runnable slice DONE: tests/integration/test_proxmox_prepare.py exercises the sanctioned xorriso prepare_iso end-to-end (real subprocess: injects /auto-installer-mode.toml + /proxmox-first-boot, preserves source content) — 2 tests green (xorriso present). BLOCKED on environment for the FULL nested-PVE build to green: needs a cached PVE 9 ISO + nested KVM + a bound libvirt-local profile (none in this sandbox). Run on a cert host: python -m testrange.cli run --profile libvirt-local examples/capabilities.py (pve-node).
 
 ### ESXI
+
+- [ ] **ESXI-16** · `test` — examples/capabilities-nested-esxi.py portable nested-ESXi plan + TESTS + live cert
+
+  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** Build phase is
+  > certified end-to-end on libvirt L0; the run-phase nested cert is blocked only by
+  > ESXI-18 (vmk0 keeps the build-NIC MAC), whose fix is known but parked. The ESXi
+  > *backend* is certified via REL-11's raw kickstart host instead — nested adds no
+  > coverage the e2e suite needs. Resume post-1.0.0.
+  >
+  > examples/capabilities-nested-esxi.py + GuestHypervisor.esxi DONE (code+unit gate-green). LIVE 2026-06-02: fixed BACKEND-13 (IDE installer CD) + BUILD-22 (heredoc) + CORE-62 (--build-timeout). ESXi install now validated end-to-end to DCUI on libvirt L0. ESXI-17 RESOLVED 2026-06-06 (build-result via %post vsish→logPort=com1; build phase certified end-to-end on libvirt L0). CORE-63 RESOLVED 2026-06-06 (EcdsaKey for the FIPS-sshd run-phase key). CORE-65 RESOLVED 2026-06-07 (pNIC discovery: the inner cache-only run was spuriously pNIC-validating the build switch's uplink against the inherited libvirt bridge-name map; preflight now passes build_switch=None under require_cache so the never-realized build switch is exempt — unit-proven + hello_world smoke green). Remaining: the live nested run-phase cert (esxcli/SSH to the node + inner VM over pyVmomi) end-to-end on libvirt L0. Move to Done once that run-phase cert is green.
+
+- [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
+
+  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** The diagnosis
+  > below is complete and the deterministic fix is known (Fallback A/B); we are
+  > parking nested ESXi until after the 1.0.0 release rather than finishing it now.
+  > The ESXi *backend* is certified via REL-11 (raw kickstart host), which needs
+  > none of this. Pick this up when nested ESXi becomes a priority.
+  >
+  > LIVE-FOUND under ESXI-16 (2026-06-07). esxi-a's run boot never satisfied
+  > `discover_ip` → "did not acquire a DHCP lease on 'lab-net' within Ns". NOT a
+  > timeout: proven by reading the lab sidecar's dnsmasq.leases mid-run —
+  > esxi-a DID lease (10.50.0.33) but under `02:df:31:62:2b:5e` (the **build NIC**
+  > MAC), while the orchestrator polls the run/lab NIC MAC `02:54:e8:60:81:17`.
+  > ROOT CAUSE: ESXi binds vmk0's MAC to the pNIC present at **install** (the
+  > dedicated build NIC) and keeps it (`Net.FollowHardwareMac=0` default); the
+  > captured image is later booted on a different run NIC, so vmk0 DHCPs under the
+  > stale build MAC. FIX (user-chosen): bake `Net.FollowHardwareMac=1` into the
+  > kickstart so vmk0 follows its uplink's current hardware MAC. Wrinkle: %post
+  > powers off during build (ESXI-17), so %firstboot first runs in the run phase
+  > AFTER vmk0's early DHCP under the build MAC. LIVE-PROVEN 2026-06-07: setting the
+  > flag at runtime + bouncing vmk0 (down/up) does NOT move a live vmk0's MAC (DCUI
+  > still showed the build-MAC IPv6) and the down/up broke rc.local. So local.sh
+  > (after hostd) sets the flag, persists config (auto-backup.sh), and does a
+  > ONE-SHOT guarded reboot (sentinel /etc/vmware/.trfollowhwmac); the second boot
+  > re-inits vmk0 under the hardware (run) MAC so the lease lands under the polled
+  > MAC. Needs a longer run-phase lease window (two nested-ESXi boots). Also fold
+  > the rendered kickstart digest into ESXiKickstartBuilder.config_hash so the
+  > template change busts the stale esxi-a cache (CORE-64-style gap). Live-verify.
 
 - [ ] **ESXI-11** · `test` — live testrange run smoke (hello_world) on 40.160.34.83
   _(blocks: ESXI-12; blocked by: ESXI-2, ESXI-3, ESXI-4, ESXI-8)_
@@ -410,80 +394,32 @@ on 2026-06-06.
 
 ### REL
 
-- [ ] **REL-2** · `test` — `tests/end-to-end/` scaffolding + `esxi` pytest marker
-  _(blocks: REL-3, REL-4, REL-5, REL-6, REL-7, REL-8, REL-9)_
+- [ ] **REL-11** · `chore` — unmanaged ESXi host (`esxi-e2e` profile)
 
-  > Lay the e2e suite foundation (ADR-0028). `tests/end-to-end/` tree: `plans/` (the portable PLAN+TESTS modules, run via `testrange run`), `test_e2e_libvirt.py`/`test_e2e_proxmox.py`/`test_e2e_esxi.py` harnesses that load each applicable plan module and assert a clean `run_tests` sweep, behind the per-backend markers gated on `TESTRANGE_*_PROFILE` (mirrors tests/integration/test_proxmox.py::test_capabilities_example_certifies). Add the `esxi` marker to pyproject [tool.pytest] markers (only libvirt/proxmox exist today). Conftest helper to resolve a profile + load a plan module. README.md indexing every plan with its WHAT/WHY one-liner; a docstring template (WHAT it stresses / WHY that edge is failure-prone) + the generic-vs-specific naming convention. Plan modules named WITHOUT `test_` prefix so pytest does not collect their TESTS functions directly.
+  > Stand up a standalone ESXi host (operator-provided — raw kickstart, virt-install on L0 or bare metal; NOT via the driver/GuestHypervisor), reusing the install lessons from BACKEND-13 (IDE installer CD on BIOS), BUILD-22 (heredoc terminator), ESXI-17 (%firstboot). Egress out-of-band. Emit the `esxi-e2e` profile bound to the host. Supersedes the egress block on ESXI-11/12/13. First host (user's order: ESXi -> PVE -> libvirt). _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08; standing the host up is the operator's job.)_
 
-- [ ] **REL-3** · `test` — generic e2e: VM lifecycle & power-state churn
-  _(blocked by: REL-2)_
+- [ ] **REL-12** · `chore` — unmanaged Proxmox host (`proxmox-e2e` profile)
 
-  > Portable generic plan(s) stressing lifecycle edges every backend must survive: power-cycle churn (start/shutdown/start repeatedly), graceful-shutdown timeout -> force-stop, destroy + recreate same name (teardown/recovery + stable MAC), reboot persistence, the zero-NIC native-agent path under churn, oversized OS drive grows on first boot. Each test docstrings WHAT/WHY. Runs on all three backends.
+  > Stand up a single-node Proxmox VE host (operator-provided — PVE auto-installer answer.toml). Egress out-of-band. Emit the `proxmox-e2e` profile bound to the host. Unblocks the nested-PVE build (BUILD-13). Second host. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
 
-- [ ] **REL-4** · `test` — generic e2e: networking edge matrix
-  _(blocked by: REL-2)_
+- [ ] **REL-13** · `chore` — unmanaged libvirt host (`libvirt-remote-e2e` profile)
 
-  > Generic plan(s) stressing the L2/L3 contract: multi-Network-per-Switch, the air-gap reachability matrix (private reachable internally, not externally; public reachable via NAT), NAT egress on vs off, multi-subnet mgmt, DHCP pool boundary leases, explicit per-NIC resolver, cross-label DNS resolution, exactly-one-default-route. Deepens the capabilities.py air-gap matrix into adversarial topologies. All three backends.
-
-- [ ] **REL-5** · `test` — generic e2e: build/cache reuse + disk integrity
-  _(blocked by: REL-2)_
-
-  > Generic plan(s) stressing the build/cache substrate: warm cache reuse across runs (build once, run twice — second run is a fast cache hit, byte-stable), installer-origin vs image-origin builders, multi-data-disk content integrity (disk-unique seed survives build->cache->run, no swap), apt + pip package managers, post-install command ordering. Exercises the ADR-0010/0011 cache + ADR-0022 installer-origin paths. All three backends.
-
-- [ ] **REL-6** · `test` — generic e2e: snapshots, concurrency, teardown/leak
-  _(blocked by: REL-2)_
-
-  > Generic plan(s) stressing: disk + memory snapshot churn (create/list/restore/delete, running-state restore from RAM), parallel build/run under `--jobs` N (ADR-0023), teardown completeness + `--leak-on-failure`, `cleanup --all` idempotence, re-run of an already-built plan. Targets the orchestrator logic most prone to off-by-one/race/leak. All three backends.
-
-- [ ] **REL-7** · `test` — libvirt-specific e2e plan
-  _(blocked by: REL-2)_
-
-  > `tests/end-to-end/plans/libvirt_specific.py` — what only libvirt exposes: device bus/model concretes (LibvirtOSDrive/LibvirtDataDrive bus, LibvirtNetworkIface model — CORE-61), UEFI/OVMF firmware boot, per-run dir StoragePools + stream I/O, and (if BACKEND-11 has landed) the remote qemu+ssh guest_gateway path. Marker: libvirt.
-
-- [ ] **REL-8** · `test` — proxmox-specific e2e plan
-  _(blocked by: REL-2)_
-
-  > `tests/end-to-end/plans/proxmox_specific.py` — PVE-only surface: QGA native communicator path, import-from OS-disk, single-node placement preflight, serial build-result sink, ProxmoxAnswerBuilder installer-origin. Block StoragePool (lvm/zfs/ceph) only if PVE-33 has landed, else note the deferral in the docstring. Marker: proxmox.
-
-- [ ] **REL-9** · `test` — esxi-specific e2e plan
-  _(blocked by: REL-2)_
-
-  > `tests/end-to-end/plans/esxi_specific.py` — ESXi-only surface: controller-bus selection, VMXNET3, datastore HTTPS pool I/O, vmdk volume format (qcow2->vmdk inflate, ADR-0024), VMware Tools communicator (COMM-2) guest-ops, bios firmware. Marker: esxi (added in REL-2). Subsumes the additive-example intent of ESXI-15.
-
-- [ ] **REL-10** · `feat` — unmanaged host harness: `tools/hypervisor-hosts/` common scaffold
-  _(blocks: REL-11, REL-12, REL-13)_
-
-  > Scripted, reproducible raw-libvirt provisioning harness (ADR-0028) — INDEPENDENT of TestRange (virt-install + virsh, no GuestHypervisor/driver). Common scaffold: nested-KVM enablement, the `tr-egress` libvirt NAT network the hosts hang off (gives build VMs egress — supersedes the bare-metal ESXi egress block), virt-install wrappers, and a `connect.toml` profile generator emitting `esxi-e2e`/`proxmox-e2e`/`libvirt-remote-e2e` bound to each host. docs/dev runbook for operating the fleet.
-
-- [ ] **REL-11** · `chore` — unmanaged ESXi host on L0 (`esxi-e2e` profile)
-  _(blocked by: REL-10)_
-
-  > Stand up a standalone ESXi host as a raw libvirt VM via virt-install + a standalone ESXi kickstart, reusing the install lessons from BACKEND-13 (IDE installer CD on BIOS), BUILD-22 (heredoc terminator), ESXI-17 (%firstboot) — as a plain kickstart, NOT via the driver. tr-egress NAT for egress. Emit the `esxi-e2e` profile. Supersedes the egress block on ESXI-11/12/13. First host (user's order: ESXi -> PVE -> libvirt).
-
-- [ ] **REL-12** · `chore` — unmanaged Proxmox host on L0 (`proxmox-e2e` profile)
-  _(blocked by: REL-10)_
-
-  > Stand up a single-node Proxmox VE host as a raw libvirt VM via virt-install + the PVE auto-installer answer.toml. tr-egress NAT for egress. Emit the `proxmox-e2e` profile. Unblocks the nested-PVE build (BUILD-13). Second host.
-
-- [ ] **REL-13** · `chore` — unmanaged libvirt host on L0 (`libvirt-remote-e2e` profile)
-  _(blocked by: REL-10)_
-
-  > Stand up a nested libvirt host (Debian + libvirtd) as a raw libvirt VM via virt-install, reachable over qemu+ssh. Emit the `libvirt-remote-e2e` profile. Exercises the remote-libvirt path (BACKEND-5 egress / BACKEND-11 guest_gateway) — a remote backend rather than the local qemu:///system the reference cert uses. Third host.
+  > Stand up a remote libvirt host (operator-provided — Debian + libvirtd), reachable over qemu+ssh. Emit the `libvirt-remote-e2e` profile bound to the host. Exercises the remote-libvirt path (BACKEND-5 egress / BACKEND-11 guest_gateway) — a remote backend rather than the local qemu:///system the reference cert uses. Third host. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
 
 - [ ] **REL-14** · `test` — run full e2e suite vs hosted ESXi -> discrepancy report
   _(blocked by: REL-3, REL-4, REL-5, REL-6, REL-9, REL-11)_
 
-  > Run the generic + esxi-specific e2e suite via `testrange run --profile esxi-e2e ...` against the hosted ESXi (REL-11) and `pytest -m esxi`. Record every discrepancy/bug/surprise in docs/dev/e2e-findings-esxi.md; file a bug ticket per finding in its swimlane (ESXI/CORE/ORCH/...). First in the run order. Report findings to the user before moving on.
+  > Loop `testrange run --profile esxi-e2e` over `tests/plans/generic/*.py` + `tests/plans/esxi/*.py` against the hosted ESXi (REL-11) — the corpus runs via `testrange run`, NOT pytest. Record every discrepancy/bug/surprise in docs/dev/e2e-findings-esxi.md; file a bug ticket per finding in its swimlane (ESXI/CORE/ORCH/...). First in the run order. Report findings to the user before moving on.
 
 - [ ] **REL-15** · `test` — run full e2e suite vs hosted Proxmox -> discrepancy report
   _(blocked by: REL-3, REL-4, REL-5, REL-6, REL-8, REL-12)_
 
-  > Run the generic + proxmox-specific e2e suite via `--profile proxmox-e2e` against the hosted PVE (REL-12) and `pytest -m proxmox`. Record findings in docs/dev/e2e-findings-proxmox.md; file a bug ticket per discrepancy. Second.
+  > Loop `testrange run --profile proxmox-e2e` over `tests/plans/generic/*.py` + `tests/plans/proxmox/*.py` against the hosted PVE (REL-12). Record findings in docs/dev/e2e-findings-proxmox.md; file a bug ticket per discrepancy. Second.
 
 - [ ] **REL-16** · `test` — run full e2e suite vs hosted libvirt -> discrepancy report
   _(blocked by: REL-3, REL-4, REL-5, REL-6, REL-7, REL-13)_
 
-  > Run the generic + libvirt-specific e2e suite via `--profile libvirt-remote-e2e` against the hosted libvirt (REL-13) and `pytest -m libvirt`. Record findings in docs/dev/e2e-findings-libvirt.md; file a bug ticket per discrepancy. Third.
+  > Loop `testrange run --profile libvirt-remote-e2e` over `tests/plans/generic/*.py` + `tests/plans/libvirt/*.py` against the hosted libvirt (REL-13). Record findings in docs/dev/e2e-findings-libvirt.md; file a bug ticket per discrepancy. Third.
 
 - [ ] **REL-17** · `docs` — documentation reconciliation pass (docs/user + docs/dev)
   _(blocked by: REL-14, REL-15, REL-16)_
@@ -505,13 +441,65 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (248)
+## Done (271)
 
 ### REL
+
+- [x] **REL-10** · `feat` — unmanaged host harness: `tools/hypervisor-hosts/` common scaffold _(wontdo: 2026-06-08)_
+
+  > WONTDO 2026-06-08 (user directive). Scripts/orchestration for standing up
+  > validation hosts will NOT live in this repo. If someone wants to validate or
+  > certify a backend, standing up the host is their job — the repo ships the
+  > certification corpus (`tests/plans/`) and the `testrange run` runner, not a
+  > nested-fleet provisioning harness. The planned deliverables (the
+  > `tools/hypervisor-hosts/` scaffold: nested-KVM enablement, `tr-egress` NAT
+  > network, virt-install wrappers, `connect.toml` profile generator, fleet
+  > runbook) are dropped. `tools/hypervisor-hosts/` was never created.
+  > Consequences: REL-11/12/13 no longer share an in-repo scaffold and are no
+  > longer blocked by this ticket — each `*-e2e` host is stood up out-of-band by
+  > the operator and bound to its profile. REL-14/15/16 run the corpus against
+  > those operator-provided profiles unchanged. PLAN.md + ADR-0028 pillar (2)
+  > still describe the scripted fleet — reconciled under REL-17/18.
 
 - [x] **REL-1** · `docs` — ADR-0028 + PLAN.md "1.0.0 validation & release" section (design of record) _(done: 2026-06-06)_
 
   > DONE 2026-06-06. ADR-0028 (docs/adr/0028-release-validation-strategy.md, indexed) + PLAN.md "1.0.0 validation & release (ADR-0028)" section both landed. Records the three pillars: (1) adversarial e2e suite in tests/end-to-end/ distinct from capabilities.py; (2) unmanaged scripted nested host fleet in tools/hypervisor-hosts/ (raw libvirt, NOT GuestHypervisor — circularity), tr-egress NAT supersedes the ESXi/PVE egress block; (3) 1.0.0 = all-three-backends-green hard gate + major_version_zero=false public-API freeze. Rejected: stress-in-capabilities.py (conflates survey vs depth), GuestHypervisor hosts (circular), ESXi-beta ship (gate is all three), manual runbook (not CI-able). Opens the REL epic.
+
+- [x] **REL-2** · `test` — `tests/plans/` scaffolding + README/conventions _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. REFRAMED from `tests/end-to-end/` + pytest harnesses → a standalone `testrange run` corpus under `tests/plans/{generic,libvirt,proxmox,esxi}/` (ADR-0028 amended in place). Created the tree + `tests/plans/README.md` (per-plan WHAT/WHY index, the how-a-backend-gets-certified workflow, docstring template + authoring conventions: one PLAN + a few TESTS per file, inline-single-use, generic-stays-portable, driver-tiers-pin-the-driver). DROPPED from the original design: the `test_e2e_<backend>.py` harnesses, the conftest profile helper, and the `esxi` pytest marker — the corpus is NOT collected/executed by pytest (files named without `test_` prefix, no `__init__.py`; confirmed `pytest -m "not proxmox and not libvirt"` collects 0 from tests/plans). It IS linted/typed (ruff + mypy --strict, gate-clean). This corpus is the new backend certification (supersedes examples/capabilities.py, slated for deletion).
+
+- [x] **REL-3** · `test` — generic: VM lifecycle, power churn & identity _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/generic/lifecycle.py` (power-cycle churn, graceful shutdown → shutoff, reboot persistence, oversized OS-drive first-boot growth, NIC-less native-agent under churn) + `tests/plans/generic/users_credentials.py` (SSH key vs password auth, non-admin sudo denied, declared group membership, explicit per-NIC resolver). Portable; runs on all three backends. Live cert rides REL-14/15/16.
+
+- [x] **REL-4** · `test` — generic: networking edge matrix _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/generic/networking.py` — multi-`Network`-per-`Switch`, the air-gap reachability matrix (private internal-only both ways, public via NAT), DHCP pool-boundary lease, exactly-one-default-route, cross-label DNS, and the negative isolation assertions (air-gapped segment cannot egress). Portable. Live cert rides REL-14/15/16.
+
+- [x] **REL-5** · `test` — generic: build/cache reuse + disk integrity _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/generic/build_cache.py` — multi-data-disk content integrity (disk-unique seed survives build→cache→run, no swap), apt + pip, post-install command ordering; docstring documents the run-twice warm-cache byte-stability procedure. Portable. Live cert rides REL-14/15/16.
+
+- [x] **REL-6** · `test` — generic: snapshots + concurrency _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/generic/snapshots.py` (disk snapshot create/list/restore/delete + memory snapshot restores running tmpfs state) + `tests/plans/generic/concurrency.py` (independent multi-VM fan-out, run with `--jobs N`, distinct hostname/lease per node + teardown completeness documented). Portable. Live cert rides REL-14/15/16.
+
+- [x] **REL-7** · `test` — libvirt-specific plans _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/libvirt/devices.py` (`LibvirtOSDrive`/`LibvirtDataDrive` bus → /dev/vd* virtio vs /dev/sd* sata/scsi; `LibvirtNetworkIface` e1000e model via sysfs driver check — CORE-61) + `tests/plans/libvirt/firmware_uefi.py` (`VMSpec(firmware="uefi")` OVMF boot, /sys/firmware/efi present). Pinned `LibvirtHypervisor`. The remote qemu+ssh guest_gateway path (BACKEND-11) is deferred to that ticket. Live cert rides REL-16.
+
+- [x] **REL-8** · `test` — proxmox-specific plan _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/proxmox/devices.py` — `ProxmoxHardDrive` bus → /dev/sd* (scsi) vs /dev/vd* (virtio), pinned `ProxmoxHypervisor`, native QGA communicator. Block StoragePool (lvm/zfs/ceph) deferred to PVE-33. Live cert rides REL-15.
+
+- [x] **REL-9** · `test` — esxi-specific plan _(done: 2026-06-07)_
+
+  > DONE 2026-06-07. `tests/plans/esxi/devices.py` — `ESXiHardDrive` bus → /dev/sd* (scsi/sata) vs /dev/nvme* (nvme), pinned `ESXiHypervisor`, VMware Tools native guest-ops (open-vm-tools-plugins-all), bios firmware; docstring notes the qcow2→vmdk inflate a booting guest certifies. Subsumes the additive-example intent of ESXI-15. Live cert rides REL-14.
+
+- [x] **REL-21** · `chore` — retire `examples/capabilities*` (superseded by tests/plans) _(done: 2026-06-07)_
+
+  > DONE 2026-06-07 (user directive). Deleted all four `examples/capabilities*.py` (portable cert, -px showcase, -nested + -nested-esxi demos) now that `tests/plans/` is the certification corpus. Removed the dependent pytest wiring: `tests/integration/test_nested.py` (existed solely to run capabilities-nested.py) deleted; `test_capabilities_example_certifies` + helpers removed from `tests/integration/test_proxmox.py` (driver-primitive PVE tests retained). CLAUDE.md rule 4 repointed examples/capabilities.py → tests/plans/. NOTE: nested-virt lost its example-as-test coverage (accepted); residual prose references to capabilities* across README/docs/user/PLAN/ADRs left for the REL-17/18 doc reconciliation.
 
 ### PROV
 
@@ -1496,6 +1484,14 @@ on 2026-06-06.
 
 ### ORCH
 
+- [x] **ORCH-2** · `feat` — nested orchestration _(done: 2026-06-08)_
+
+  > `AbstractHypervisor` shape designed fresh (not copied from `.bak`).
+  >
+  > Goal (clarified 2026-05-31): a VM in the Plan can itself be a Hypervisor that hosts VMs — nested orchestration.
+  >
+  > DONE: shipped via ADR-0021 (recursive orchestration over qemu+ssh; GuestHypervisor + inner Hypervisor) and merged to main (e4baae0). The feature/nested-virt branch + worktree were retired in the 2026-06-08 cleanup. Residuals carried as their own tickets: BACKEND-11 (remote-libvirt guest_gateway) and nested-ESXi (ESXI-16/18, shelved post-1.0.0).
+
 - [x] **ORCH-32** · `feat` — nested inner-backend dispatch + ESXi inner (GuestHypervisor.esxi)
   _(done: 2026-06-02)_
 
@@ -1729,6 +1725,16 @@ on 2026-06-06.
   > **Done 2026-05-22 (ADR-0010).** `build_phase` warms the cache and nothing else; `run_phase` creates pools, gates sidecar readiness, pushes every built disk (OS + data) per VM, runs tests. `testrange build` / `testrange run` (auto-build on miss; `--require-cache`) are distinct CLI verbs. `config_hash` keys the disk set; `create_blank_volume` + `resize_volume` replaced `create_disk_from_base`.
 
 ### BUILD
+
+- [x] **BUILD-10** · `chore` — feature/builders worktree (venv + .claude hooks) _(done: 2026-06-08)_
+
+  > Git worktree at .claude/worktrees/builders on branch feature/builders for upcoming builders feature work. Copied the gitignored local env into it: .claude/hooks (auto-commit, log-interesting-commands, session-start) + settings.local.json, and the .venv with all absolute paths relocated to the worktree — bin/* console-script shebangs, activate VIRTUAL_ENV, and the editable-install MapPathFinder (__editable___testrange_0_2_0_finder.py MAPPING) — so 'import testrange' resolves to the worktree source, not main. Verified: ruff/mypy/pytest run from the worktree venv, 794 tests collect. Created 2026-05-31.
+  >
+  > DONE 2026-06-08: worktree served its purpose — feature/builders merged to main (b51198e); the .claude/worktrees/builders worktree + branch were removed in the 2026-06-08 worktree cleanup.
+
+- [x] **BUILD-17** · `test` — ISO-prep error-path + network-precedence coverage _(done: 2026-06-01)_
+
+  > Code-review remediation (feature/builders). DONE 2026-06-01. Added unit tests: _patch_bootcfg idempotency/append/CRLF, missing-xorriso, ESXi+PVE non-zero-exit (via unwritable outdev), network gw/dns precedence + dns line + no-NIC + no-static, network_interface->answer+flip, ESXi pw control-char rejection. De-brittled: wait_ready argv (len==1), installer-origin asserts on recorded _CreatedVM.os_disk/boot_media not substrings, ks.cfg lowercase pinned. BONUS: exercising the assertions surfaced TWO real production bugs (fixed under this ticket): (1) xorriso -rockridge off uppercased ks.cfg -> KS.CFG, weasel's case-sensitive ks=cdrom:/ks.cfg would ENOENT -> added -compliance lowercase; (2) _patch_bootcfg used read_text() whose universal-newline xlate stripped \r, so CRLF was NEVER preserved despite the docstring -> switched to read_bytes/write_bytes. All 861 unit+prep tests green; ruff+mypy --strict clean.
 
 - [x] **BUILD-21** · `feat` — ESXiKickstartBuilder license= kwarg (serialnum at install)
   _(done: 2026-06-02)_
