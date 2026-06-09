@@ -144,3 +144,28 @@ creation, datastore pool, qcow2→vmdk conversion + datastore upload, VM +
 sidecar `CreateVM_Task`, the datastore-file serial sink, the build sidecar's full
 DHCP/DNS/NAT stack, and guest-ops to the sidecar. The ESXi *driver* pipeline is
 sound; only the nested vSwitch L2 falls short.
+
+### Disk-bus feature — LIVE-VERIFIED (M1, the cert's actual subject)
+
+`tests/plans/esxi/devices.py` asserts the **run-phase** disk-bus mapping, which
+is independent of the (build-blocked) network: the `buses` VM has no NIC. So it
+was verified directly against the leaked node, side-stepping the build — drive
+the ESXi driver to create a VM from the pre-built Alpine **sidecar** image as the
+OS disk (boots on ESXi via SCSI, ships open-vm-tools) plus three `ESXiHardDrive`s
+(`scsi`/`sata`/`nvme`), boot it, and read `/sys/block` over VMware-Tools guest-ops
+(`~/Desktop/TestRange-Adhoc/diskbus-verify.py`). Result:
+
+```
+guest block devices: [..loop.., nvme0n1, sda, sdb, sdc]
+  /dev/sd*   = ['sda', 'sdb', 'sdc']   (OS-scsi + scsi + sata)   -> exactly 3 ✓
+  /dev/nvme* = ['nvme0n1']             (the nvme data disk)      -> exactly 1 ✓
+DISK-BUS LIVE VERIFY: PASS ✓
+```
+
+That is precisely `esxi/devices.py`'s two assertions
+(`scsi_and_sata_disks_present_as_sd` → 3 on `/dev/sd*`; `nvme_disk_presents_as_nvme`
+→ 1 on `/dev/nvme*`). The M1 driver feature (`create_vm` reading
+`ESXiHardDrive.bus` off `spec.data_drives` and wiring LsiLogic/AHCI/NVMe
+controllers) is correct **live on real ESXi managed objects**, not just against
+the unit fakes. Only the cert's Debian-build prerequisite is blocked by the
+nested-vSwitch limit above.

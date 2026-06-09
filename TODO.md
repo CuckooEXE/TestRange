@@ -82,6 +82,12 @@ on 2026-06-06.
   >   no network. NOT a code defect (works on real ESXi); this is the documented
   >   ESXI-16 "nested build phase is finicky" reason ESXi certifies on a RAW host
   >   (REL-11), not nested. Full chain in `docs/dev/e2e-findings-esxi.md`.
+  > - M1 disk-bus feature LIVE-VERIFIED on the leaked node, side-stepping the
+  >   build (the cert's `buses` VM has no NIC, so its disk-bus assert is
+  >   NIC-independent): drove the driver to boot the pre-built sidecar image + 3
+  >   `ESXiHardDrive`s and read `/sys/block` over guest-ops → `sda`/`sdb`/`sdc` on
+  >   `/dev/sd*` (OS-scsi + scsi + sata) and `nvme0n1` on `/dev/nvme*` — exactly
+  >   `esxi/devices.py`'s two asserts. PASS, on real ESXi managed objects.
 
 ### ORCH
 
