@@ -416,9 +416,13 @@ def _switch_for_network(ctx: RunContext, network_name: str) -> Switch:
 
 
 def lookup_credential(vm: VMRecipe) -> PosixCred:
+    """The PosixCred an SSHCommunicator authenticates with, from the builder's
+    baked credentials. Builder-agnostic: every Builder exposes the same
+    credentials contract via :meth:`Builder.find_credential`, so the run phase
+    resolves an SSH login without knowing the builder type (CloudInit, Proxmox,
+    ESXi). The installer-origin builders need this — they reach the run phase the
+    same way cloud-init does."""
     builder = vm.builder
-    if not isinstance(builder, CloudInitBuilder):
-        raise OrchestratorError(f"vm {vm.name!r}: only CloudInitBuilder is supported in v0")
     if not isinstance(vm.communicator, SSHCommunicator):
         raise OrchestratorError(f"vm {vm.name!r}: communicator is not SSHCommunicator")
     cred = builder.find_credential(vm.communicator.username)

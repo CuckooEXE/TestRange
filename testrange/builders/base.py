@@ -59,6 +59,19 @@ class Builder(ABC):
         binding a Communicator that names a credential by username.
         """
 
+    def find_credential(self, username: str) -> Credential | None:
+        """The baked credential for *username*, or ``None`` if none matches.
+
+        Concrete over the abstract :attr:`credentials` property — credential
+        lookup is the same for every dialect, so the orchestrator resolves an
+        SSHCommunicator's login through this seam without knowing the builder
+        type. The run phase is builder-agnostic; this is not CloudInit-specific.
+        """
+        for c in self.credentials:
+            if c.username == username:
+                return c
+        return None
+
     @abstractmethod
     def os_disk_base(self) -> CacheEntry | None:
         """The cache entry that seeds the VM's OS disk, or ``None``.

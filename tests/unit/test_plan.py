@@ -190,8 +190,9 @@ class TestMockHypervisor:
 class TestVMRecipe:
     def test_credentials_lookup(self) -> None:
         r = _basic_recipe()
-        # find_credential is CloudInitBuilder-specific (the orchestrator narrows
-        # the same way — only CloudInitBuilder is supported in v0).
+        # find_credential is a builder-agnostic seam on the Builder ABC; this
+        # recipe happens to use a CloudInitBuilder, but the lookup is the same for
+        # any builder (see tests/unit/test_lookup_credential.py).
         builder = r.builder
         assert isinstance(builder, CloudInitBuilder)
         cred = builder.find_credential("u")

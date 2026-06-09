@@ -486,7 +486,13 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (286)
+## Done (287)
+
+### ORCH
+
+- [x] **ORCH-33** · `bugfix` — build-phase Ctrl-C / SIGTERM bypasses teardown (BaseException not caught) _(done: 2026-06-08)_
+
+  > DONE 2026-06-08. A Ctrl-C (or the SIGTERM/SIGHUP handler's raised KeyboardInterrupt) during the BUILD phase leaked all partial infra — build pool, network, sidecar, build VM — with no teardown. Two causes, both rooted in KeyboardInterrupt/SystemExit subclassing BaseException, not Exception: (1) __enter__'s teardown-on-failure handlers (runtime.py:236,242) were `except Exception`, so the interrupt slipped past untouched — a normal Exception like BuildTimeoutError WAS caught and tore down, which is why interrupts vs timeouts behaved inconsistently; (2) the interrupt fires inside __enter__, so Python never invokes __exit__ (where the run-phase teardown lives). The signal-handler docstring (runtime.py:273) claimed the handler "unwinds an in-flight bring-up into teardown" — false for the build phase until now. Fix: broaden both __enter__ handlers to `except BaseException` (cleanup-then-reraise; never swallows). Run-phase interrupts already cleaned up via __exit__ and are unchanged. Regression test: test_keyboard_interrupt_during_bringup_triggers_teardown (tests/unit/test_orchestrator.py) injects KeyboardInterrupt into create_vm and asserts create_pool→destroy_pool; RED before the fix (no destroy_pool), green after.
 
 ### REL
 

@@ -141,13 +141,6 @@ class CloudInitBuilder(Builder):
         """The base image bytes are uploaded onto the OS disk and grown."""
         return self.base
 
-    def find_credential(self, username: str) -> Credential | None:
-        """Look up a credential by username. Returns None if not found."""
-        for c in self._credentials:
-            if c.username == username:
-                return c
-        return None
-
     def render_user_data(self, spec: VMSpec, recipe: VMRecipe) -> str:
         """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header).
 

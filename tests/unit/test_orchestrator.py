@@ -348,6 +348,27 @@ class TestEnterAndExit:
         assert "create_pool" in names
         assert "destroy_pool" in names
 
+    def test_keyboard_interrupt_during_bringup_triggers_teardown(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # A Ctrl-C (or the SIGTERM/SIGHUP handler's raised KeyboardInterrupt)
+        # during the build phase must still tear down partial infra. The interrupt
+        # is a BaseException, not an Exception, and it fires inside __enter__ — so
+        # __exit__ never runs and teardown must come from __enter__'s own handler.
+        # If that handler only catches Exception, the pool leaks (the regression).
+        mgr, _ = populated_cache
+        with (
+            patch.object(fake_driver, "create_vm", side_effect=KeyboardInterrupt()),
+            pytest.raises(KeyboardInterrupt),
+            Orchestrator(_plan(), cache_manager=mgr),
+        ):
+            pass
+        names = [c[0] for c in fake_driver.calls]
+        assert "create_pool" in names
+        assert "destroy_pool" in names
+
 
 class TestStateFileRecord:
     def test_state_dir_removed_after_clean_exit(
