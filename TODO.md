@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (12)
+## Doing (10)
 
 ### CORE
 
@@ -93,16 +93,6 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-### PVE
-
-- [ ] **PVE-57** · `feat` — `examples/pve_node.py`: stand up + leak a live PVE node via `ProxmoxAnswerBuilder` on libvirt (executes BUILD-13)
-
-  > Live-certify the Proxmox *builder* end-to-end. `testrange run --profile libvirt-local examples/pve_node.py` builds a PVE 9.2 node installer-origin (blank `vda` + prepared installer ISO + `PROXMOX-AIS` answer seed + serial build-result), reboots into the installed system, and the run-phase boot comes up host-reachable. Knobs (load-bearing): `firmware="uefi"` (q35 so the installer NIC names `enp1s0` to match `answer.toml` `filter.ID_NET_NAME`, and the installer boots its validated path; defensive `\EFI\BOOT\BOOTX64.EFI` fallback in post-install for the fresh-nvram run boot); run switch `mgmt=True` + `uplink="egress"` + NAT `Sidecar` (host-reachable AND egressing); `CPU(nested=True)` (node runs KVM guests). A `leak()` test retains the running node as the cert target. Closes the FULL-build slice of BUILD-13 (env now has cached `pve-iso` + nested KVM + `libvirt-local`). User: spin up the hypervisor via the new builder and leak it.
-
-- [ ] **PVE-58** · `test` — live-certify the Proxmox driver against the leaked node; file + fix discrepancies (executes REL-12/REL-15)
-
-  > Emit the `pve-live` profile bound to the leaked PVE node (REL-12 deliverable), then loop `testrange run --profile pve-live` over `tests/plans/generic/*.py` + `tests/plans/proxmox/*.py` (REL-15). Record findings in `docs/dev/e2e-findings-proxmox.md`; file a PVE/CORE bug per discrepancy and fix it. Prereq satisfied by PVE-57's post-install widening `local` (dir) storage to `content=images,import` so the driver's dir-storage byte path works (driver-audit RISK-5).
-
 ## Ready (53)
 
 ### CORE
@@ -131,7 +121,9 @@ on 2026-06-06.
 
 - [ ] **BUILD-13** · `test` — nested-PVE build smoke vs libvirt reference
 
-  > PARTIAL 2026-06-01. Runnable slice DONE: tests/integration/test_proxmox_prepare.py exercises the sanctioned xorriso prepare_iso end-to-end (real subprocess: injects /auto-installer-mode.toml + /proxmox-first-boot, preserves source content) — 2 tests green (xorriso present). BLOCKED on environment for the FULL nested-PVE build to green: needs a cached PVE 9 ISO + nested KVM + a bound libvirt-local profile (none in this sandbox). Largely subsumed by the REL host fleet (REL-12/15). Run on a cert host: `python -m testrange.cli run --profile <pve> tests/plans/proxmox/*.py`. _(pruned satisfied BUILD-1d/2e/12 blockers + repointed off `examples/capabilities.py` — REL-40.)_
+  > **FULL build now GREEN 2026-06-09 (PVE-57).** The env block lifted (cached `pve-iso` + nested KVM + `libvirt-local` now present): `testrange run --profile libvirt-local examples/pve_node.py` builds a PVE 9.2.2 node installer-origin and brings the run boot up reachable. The driver was then certified against it (PVE-58, 33/33). _Remaining open only as the formal integration-smoke harness; the live build + cert it gates are done._
+  >
+  > _History:_ PARTIAL 2026-06-01. Runnable slice DONE: tests/integration/test_proxmox_prepare.py exercises the sanctioned xorriso prepare_iso end-to-end (real subprocess: injects /auto-installer-mode.toml + /proxmox-first-boot, preserves source content) — 2 tests green (xorriso present). Was BLOCKED on environment for the FULL nested-PVE build to green: needs a cached PVE 9 ISO + nested KVM + a bound libvirt-local profile. Largely subsumed by the REL host fleet (REL-12/15). _(pruned satisfied BUILD-1d/2e/12 blockers + repointed off `examples/capabilities.py` — REL-40.)_
 
 ### ESXI
 
@@ -459,7 +451,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (311)
+## Done (313)
 
 ### CORE
 
@@ -1230,6 +1222,14 @@ on 2026-06-06.
   > ESXi-on-KVM installer-origin builds (install+reboot+%firstboot) exceed the 600s default build-VM serial-result timeout. Added --build-timeout SECONDS to run, threaded run_tests(build_timeout_s=) -> Orchestrator. DONE 2026-06-02.
 
 ### PVE
+
+- [x] **PVE-57** · `feat` — `examples/pve_node.py`: stand up + leak a live PVE node via `ProxmoxAnswerBuilder` on libvirt _(done: 2026-06-09)_
+
+  > Live-certified the Proxmox *builder* end-to-end on `libvirt-local`: builds PVE 9.2.2 installer-origin (UEFI/q35, blank `vda` + prepared installer ISO + `PROXMOX-AIS` answer seed + serial build-result), reboots into the installed system, run boot comes up reachable at `10.55.0.100` and `leak()`s. Unique resource names + a private `10.55.0.0/24` mgmt subnet keep it robust against other same-day leaked labs. Surfaced + fixed F1 (pmxcfs offline during first-boot → storage config moved to the run phase) and the libvirt **Secure-Boot** fix (F3 — UEFI domains now select a non-SB OVMF so the captured disk's removable-media bootloader runs). Closes the FULL-build slice of **BUILD-13** and stands up the **REL-12** `pve-live` host.
+
+- [x] **PVE-58** · `test` — live-certify the Proxmox driver against the leaked node; file + fix discrepancies _(done: 2026-06-09)_
+
+  > Ran the full corpus `testrange run --profile pve-live tests/plans/{generic,proxmox}/*.py` against the leaked node: **33/33 green** after two fixes. F5 — QGA file-read/exec corrupted binary content (PVE returns the guest's bytes as a latin-1 string; `_to_bytes` re-encoded utf-8, doubling 0x80-0xFF — a 256 KiB read came back 393216 bytes); fixed with latin-1 recovery + a truncated-read guard. F6 — memory-snapshot rollback/delete raced PVE's per-VM config flock (`got timeout`); fixed by retrying the transient lock (the config-`lock` metadata is the wrong signal — the flock is a host file). Findings in `docs/dev/e2e-findings-proxmox.md` (**REL-15**).
 
 - [x] **PVE-CERT** · `EPIC` — Proxmox capabilities certification (driver-only)
   _(blocked by: PVE-32, PVE-34, ORCH-16; done: 2026-06-01)_

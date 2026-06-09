@@ -16,9 +16,11 @@ certified reference implementation** — green end-to-end on `qemu:///system` as
 plain `libvirt`-group user (the `tests/plans/` certification corpus +
 `tests/integration/test_libvirt.py`). `MockDriver` is the in-memory backend the
 unit suite drives through the full lifecycle (it simulates the backend, not a
-real guest). The **Proxmox and ESXi drivers are code-complete** (single-node PVE
-9.x / standalone ESXi 8) with live end-to-end certification in progress (the REL
-1.0.0 validation pass).
+real guest). The **Proxmox driver and builder are certified live end-to-end**
+(single-node PVE 9.x): a PVE node stood up by `examples/pve_node.py` (the builder,
+on libvirt) is driven green by the full `tests/plans/{generic,proxmox}` corpus —
+see `docs/dev/e2e-findings-proxmox.md`. The **ESXi driver is code-complete**
+(standalone ESXi 8) with live certification tracked in the REL 1.0.0 pass.
 
 ## Quickstart
 
@@ -46,8 +48,8 @@ testrange run examples/hello_world.py --profile libvirt-local
 The example plans use the backend-agnostic `Hypervisor` topology type and are
 the authoritative shape for writing your own; a backend is bound at run time via
 `--profile`. `testrange describe` shows a plan's topology with no backend. A live
-`run` needs a real backend — libvirt is certified (see `docs/user/drivers/`),
-Proxmox is in progress. The full bring-up lifecycle is also exercised in-memory
+`run` needs a real backend — libvirt and Proxmox are both certified (see
+`docs/user/drivers/`). The full bring-up lifecycle is also exercised in-memory
 against `MockDriver` by the unit suite.
 
 On an interactive terminal, `run`/`build` render a live dashboard — panes for
