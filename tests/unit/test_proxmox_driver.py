@@ -608,3 +608,47 @@ class TestPreflight:
         client = _FakeClient(content="images,iso,vztmpl")  # no 'import'
         report = self._run(_plan(sw, addr=StaticAddr("10.0.0.10/24")), client=client)
         assert "proxmox-import-content-missing" in {f.code for f in report.findings}
+
+
+class _CapStatusEp:
+    @staticmethod
+    def get() -> dict[str, Any]:
+        # PVE /nodes/<node>/status: memory.total in bytes, cpuinfo.cpus = threads.
+        return {"memory": {"total": 8589934592}, "cpuinfo": {"cpus": 8}}
+
+
+class _CapNodeEp:
+    status = _CapStatusEp()
+
+
+class _CapApi:
+    def nodes(self, _node: str) -> _CapNodeEp:
+        return _CapNodeEp()
+
+
+class _CapClient:
+    node = "ns1001849"
+    api = _CapApi()
+
+
+class _BrokenClient:
+    node = "ns1001849"
+
+    @property
+    def api(self) -> Any:
+        raise RuntimeError("not connected")
+
+
+class TestHostCapacity:
+    """host_capacity() field extraction (CORE-84): bytes->MiB + cpuinfo.cpus."""
+
+    def test_parses_node_status(self) -> None:
+        d = ProxmoxDriver(_conn(), client=_CapClient())  # type: ignore[arg-type]
+        cap = d.host_capacity()
+        assert cap is not None
+        assert cap.memory_mb == 8192  # 8 GiB
+        assert cap.logical_cpus == 8
+
+    def test_none_on_probe_failure(self) -> None:
+        d = ProxmoxDriver(_conn(), client=_BrokenClient())  # type: ignore[arg-type]
+        assert d.host_capacity() is None

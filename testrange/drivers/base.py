@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, NewType
 
 from testrange.exceptions import DriverError
-from testrange.preflight import PreflightReport
+from testrange.preflight import HostCapacity, PreflightReport
 
 if TYPE_CHECKING:  # pragma: no cover
     from testrange.cache.manager import CacheManager
@@ -107,6 +107,22 @@ class HypervisorDriver(ABC):
         build switch is never realized and so is excluded from those checks (use
         :func:`testrange.preflight.preflight_switches` to assemble the sweep).
         """
+
+    def host_capacity(self) -> HostCapacity | None:
+        """Live resource ceiling of the host this driver connects to (CORE-84).
+
+        Optional capability — the default returns ``None`` ("capacity unknown"),
+        so preflight skips the resource gate (:func:`testrange.preflight.resource_check`)
+        rather than blocking. A concrete driver reports the host's total memory,
+        logical CPU count, and (where cheap) backing-store free space so preflight
+        can reject an impossible ask — a VM larger than the whole host, or pools
+        that won't fit the store — before any resource stands up.
+
+        The probe MUST be defensive: any backend/transport error returns ``None``
+        (a failed introspection never turns into a false blocker), mirroring the
+        indeterminate-doesn't-block stance of the nested-KVM check.
+        """
+        return None
 
     @abstractmethod
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str: ...

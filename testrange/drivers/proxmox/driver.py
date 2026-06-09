@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
+from testrange._log import get_logger
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import _guest, _naming, _sdn, _serial, _storage, _vm
@@ -40,10 +41,13 @@ from testrange.exceptions import DriverError
 from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
+    HostCapacity,
+    PreflightCheck,
     PreflightFinding,
     PreflightReport,
     builder_origin_findings,
     preflight_switches,
+    resource_check,
     unknown_uplink_findings,
     unsupported_firmware_findings,
 )
@@ -57,6 +61,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
+
+_log = get_logger(__name__)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -212,16 +218,42 @@ class ProxmoxDriver(HypervisorDriver):
         # build_switch is None for a cache-only run (require_cache) that never
         # realizes it; preflight_switches drops it from the sweep (CORE-65).
         switches = preflight_switches(plan, build_switch)
-        findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
-        findings.extend(builder_origin_findings(plan))
-        findings.extend(
-            unsupported_firmware_findings(
-                plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
-            )
+        return PreflightReport.from_checks(
+            [
+                PreflightCheck.evaluate(
+                    "named-uplink-resolution", unknown_uplink_findings(switches, self._uplinks)
+                ),
+                PreflightCheck.evaluate("os-disk-origin", builder_origin_findings(plan)),
+                PreflightCheck.evaluate(
+                    "supported-firmware",
+                    unsupported_firmware_findings(
+                        plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
+                    ),
+                ),
+                PreflightCheck.evaluate(
+                    "uplink-bridge", self._uplink_bridge_findings(plan, build_switch)
+                ),
+                PreflightCheck.evaluate("import-content", self._import_content_findings()),
+                resource_check(plan, self.host_capacity()),
+            ]
         )
-        findings.extend(self._uplink_bridge_findings(plan, build_switch))
-        findings.extend(self._import_content_findings())
-        return PreflightReport(findings=tuple(findings))
+
+    def host_capacity(self) -> HostCapacity | None:
+        """Total RAM + logical CPUs of the PVE node (CORE-84).
+
+        ``/nodes/<node>/status`` reports ``memory.total`` (bytes) and
+        ``cpuinfo.cpus`` (logical threads). Best-effort: any failure (not
+        connected, transport error) returns ``None`` so a flaky probe never
+        blocks a run.
+        """
+        try:
+            status = self._client.api.nodes(self._client.node).status.get()
+            memory_mb = int(status["memory"]["total"]) // (1024 * 1024)
+            logical_cpus = int(status["cpuinfo"]["cpus"])
+        except Exception as e:  # proxmoxer/requests error / DriverError(not connected)
+            _log.debug("proxmox host_capacity probe failed: %s", e)
+            return None
+        return HostCapacity(memory_mb=memory_mb, logical_cpus=logical_cpus)
 
     def _import_content_findings(self) -> tuple[PreflightFinding, ...]:
         """Require the backing storage to enable the ``import`` content type.

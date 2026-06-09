@@ -31,11 +31,13 @@ from testrange.exceptions import DriverError, GuestAgentError
 from testrange.hypervisor import Hypervisor
 from testrange.networks.sidecar import LEASEFILE
 from testrange.preflight import (
-    PreflightFinding,
+    HostCapacity,
+    PreflightCheck,
     PreflightReport,
     builder_origin_findings,
     mgmt_unsupported_findings,
     preflight_switches,
+    resource_check,
     unknown_uplink_findings,
 )
 
@@ -129,11 +131,15 @@ class MockDriver(HypervisorDriver):
         uri: str = "mock:///",
         pool_root: Path | None = None,
         backing_capacity_gb: int | None = None,
+        backing_memory_mb: int | None = None,
+        backing_cpus: int | None = None,
         uplinks: Mapping[str, str] | None = None,
     ) -> None:
         self.uri = uri
         self.pool_root = pool_root or Path(tempfile.mkdtemp(prefix="testrange-mock-"))
         self.backing_capacity_gb = backing_capacity_gb
+        self.backing_memory_mb = backing_memory_mb
+        self.backing_cpus = backing_cpus
         self.uplinks: dict[str, str] = dict(uplinks or {})
         self.connected = False
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
@@ -192,11 +198,34 @@ class MockDriver(HypervisorDriver):
         # build_switch is None for a cache-only run (require_cache) that never
         # realizes it; preflight_switches drops it from the sweep (CORE-65).
         switches = preflight_switches(plan, build_switch)
-        findings: list[PreflightFinding] = list(mgmt_unsupported_findings(plan))
-        findings.extend(builder_origin_findings(plan))
-        findings.extend(self._pool_capacity_findings(plan))
-        findings.extend(unknown_uplink_findings(switches, self.uplinks))
-        return PreflightReport(findings=tuple(findings))
+        return PreflightReport.from_checks(
+            [
+                PreflightCheck.evaluate("mgmt-switch", mgmt_unsupported_findings(plan)),
+                PreflightCheck.evaluate("os-disk-origin", builder_origin_findings(plan)),
+                PreflightCheck.evaluate(
+                    "named-uplink-resolution", unknown_uplink_findings(switches, self.uplinks)
+                ),
+                resource_check(plan, self.host_capacity()),
+            ]
+        )
+
+    def host_capacity(self) -> HostCapacity | None:
+        # The mock has no real host; its capacity is whatever the profile set.
+        # All-unset => None (capacity unknown, resource gate skipped), preserving
+        # the historical "no backing_capacity_gb => no storage check" behaviour. A
+        # configured dimension flows straight through; an unset one stays None and
+        # is skipped by resource_findings.
+        if (
+            self.backing_memory_mb is None
+            and self.backing_cpus is None
+            and self.backing_capacity_gb is None
+        ):
+            return None
+        return HostCapacity(
+            memory_mb=self.backing_memory_mb,
+            logical_cpus=self.backing_cpus,
+            storage_free_gb=self.backing_capacity_gb,
+        )
 
     def _resolve_uplink(self, name: str) -> str:
         """Resolve a logical uplink name to a host iface (ADR-0016).
@@ -211,25 +240,6 @@ class MockDriver(HypervisorDriver):
                 f"uplink {name!r} is not mapped by this profile (known: {sorted(self.uplinks)})"
             )
         return iface
-
-    def _pool_capacity_findings(self, plan: Plan) -> list[PreflightFinding]:
-        """Verify the single backing store holds at least each pool's ``size_gb``."""
-        if self.backing_capacity_gb is None:
-            return []
-        out: list[PreflightFinding] = []
-        for pool in plan.hypervisor.pools:
-            if pool.size_gb > self.backing_capacity_gb:
-                out.append(
-                    PreflightFinding(
-                        code="pool-capacity",
-                        message=(
-                            f"pool {pool.name!r} needs {pool.size_gb} GiB but the backing "
-                            f"store has only {self.backing_capacity_gb} GiB"
-                        ),
-                        fix_hint="lower the pool size_gb or point the driver at a larger store",
-                    )
-                )
-        return out
 
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str:
         return f"tr_{kind}_{run_id[:8]}_{name}"
@@ -481,17 +491,21 @@ class MockDriver(HypervisorDriver):
 class MockProfile(BackendProfile):
     """Connection profile for the in-memory :class:`MockDriver` (CORE-18).
 
-    The mock backend has no real connection; ``pool_root`` and
-    ``backing_capacity_gb`` are the only meaningful knobs (mirroring
-    :class:`MockHypervisor`), and both default to ``None`` (a per-driver temp
-    dir; unlimited capacity).
+    The mock backend has no real connection; ``pool_root`` and the
+    ``backing_*`` capacity knobs (mirroring :class:`MockHypervisor`) are the only
+    meaningful knobs, and all default to ``None`` (a per-driver temp dir;
+    unconstrained capacity, so the resource preflight is skipped).
     """
 
     scheme: ClassVar[str] = "mock"
-    _FIELDS: ClassVar[frozenset[str]] = frozenset({"pool_root", "backing_capacity_gb"})
+    _FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {"pool_root", "backing_capacity_gb", "backing_memory_mb", "backing_cpus"}
+    )
 
     pool_root: Path | None = None
     backing_capacity_gb: int | None = None
+    backing_memory_mb: int | None = None
+    backing_cpus: int | None = None
     uplinks: Mapping[str, str] = field(default_factory=dict)
     uplink_addrs: Mapping[str, StaticAddr] = field(default_factory=dict)
 
@@ -500,10 +514,14 @@ class MockProfile(BackendProfile):
         cls._validate_keys(table, cls._FIELDS, path)
         pool_root = table.get("pool_root")
         capacity = table.get("backing_capacity_gb")
+        memory = table.get("backing_memory_mb")
+        cpus = table.get("backing_cpus")
         uplinks, uplink_addrs = cls._parse_uplinks(table, path)
         return cls(
             pool_root=Path(pool_root) if pool_root is not None else None,
             backing_capacity_gb=int(capacity) if capacity is not None else None,
+            backing_memory_mb=int(memory) if memory is not None else None,
+            backing_cpus=int(cpus) if cpus is not None else None,
             uplinks=uplinks,
             uplink_addrs=uplink_addrs,
         )
@@ -512,6 +530,8 @@ class MockProfile(BackendProfile):
         return MockDriver(
             pool_root=self.pool_root,
             backing_capacity_gb=self.backing_capacity_gb,
+            backing_memory_mb=self.backing_memory_mb,
+            backing_cpus=self.backing_cpus,
             uplinks=self.uplinks,
         )
 
@@ -520,6 +540,10 @@ class MockProfile(BackendProfile):
             yield ("pool_root", str(self.pool_root))
         if self.backing_capacity_gb is not None:
             yield ("backing_capacity_gb", f"{self.backing_capacity_gb} GiB")
+        if self.backing_memory_mb is not None:
+            yield ("backing_memory_mb", f"{self.backing_memory_mb} MiB")
+        if self.backing_cpus is not None:
+            yield ("backing_cpus", str(self.backing_cpus))
 
 
 register(

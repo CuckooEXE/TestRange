@@ -37,10 +37,13 @@ from testrange.drivers.libvirt._conn import LibvirtClient, LibvirtConn
 from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
+    HostCapacity,
+    PreflightCheck,
     PreflightFinding,
     PreflightReport,
     builder_origin_findings,
     preflight_switches,
+    resource_check,
     unknown_uplink_findings,
     unsupported_firmware_findings,
 )
@@ -191,15 +194,37 @@ class LibvirtDriver(HypervisorDriver):
         # build_switch is None for a cache-only run (require_cache) that never
         # realizes it; preflight_switches drops it from the sweep (CORE-65).
         switches = preflight_switches(plan, build_switch)
-        findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
-        findings.extend(builder_origin_findings(plan))
-        findings.extend(
-            unsupported_firmware_findings(
-                plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
-            )
+        return PreflightReport.from_checks(
+            [
+                PreflightCheck.evaluate(
+                    "named-uplink-resolution", unknown_uplink_findings(switches, self._uplinks)
+                ),
+                PreflightCheck.evaluate("os-disk-origin", builder_origin_findings(plan)),
+                PreflightCheck.evaluate(
+                    "supported-firmware",
+                    unsupported_firmware_findings(
+                        plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
+                    ),
+                ),
+                PreflightCheck.evaluate("nested-kvm", self._nested_kvm_findings(plan)),
+                resource_check(plan, self.host_capacity()),
+            ]
         )
-        findings.extend(self._nested_kvm_findings(plan))
-        return PreflightReport(findings=tuple(findings))
+
+    def host_capacity(self) -> HostCapacity | None:
+        """Total RAM + logical CPUs of the libvirt host (CORE-84).
+
+        ``virConnect.getInfo()`` returns ``[model, memory_MiB, cpus, ...]`` for the
+        daemon's host — the right ceiling for both local ``qemu:///system`` and a
+        remote ``qemu+ssh`` daemon. Best-effort: any failure (not connected,
+        transport error) returns ``None`` so a flaky probe never blocks a run.
+        """
+        try:
+            info = self._client.raw.getInfo()
+        except Exception as e:  # libvirtError / DriverError(not connected) / ...
+            _log.debug("libvirt host_capacity probe failed: %s", e)
+            return None
+        return HostCapacity(memory_mb=int(info[1]), logical_cpus=int(info[2]))
 
     def _nested_kvm_findings(self, plan: Plan) -> tuple[PreflightFinding, ...]:
         """Reject ``CPU(nested=True)`` when the L0 host can't run nested guests (ADR-0021).

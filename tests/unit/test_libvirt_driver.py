@@ -263,3 +263,27 @@ class TestGuestGateway:
         assert gw.username == "admin"
         assert gw.pkey_text == "PRIVKEY-TEXT"
         assert gw.port == 22
+
+
+class _CapRaw:
+    def getInfo(self) -> list[object]:
+        # [model, memory_MiB, cpus, mhz, nodes, sockets, cores, threads]
+        return ["x86_64", 8192, 8, 2400, 1, 1, 4, 2]
+
+
+class _CapRawClient:
+    raw = _CapRaw()
+
+
+class TestHostCapacity:
+    """host_capacity() field extraction (CORE-84): getInfo()[1]=memory_MiB, [2]=cpus."""
+
+    def test_parses_getinfo(self) -> None:
+        cap = LibvirtDriver(LibvirtConn(), client=_CapRawClient()).host_capacity()  # type: ignore[arg-type]
+        assert cap is not None
+        assert cap.memory_mb == 8192
+        assert cap.logical_cpus == 8
+
+    def test_none_when_unconnected(self) -> None:
+        # The real client raises on .raw before connect(); the probe must fail soft.
+        assert LibvirtDriver(LibvirtConn()).host_capacity() is None

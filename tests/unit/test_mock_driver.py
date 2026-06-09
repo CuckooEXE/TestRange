@@ -23,18 +23,30 @@ from testrange.drivers.base import HypervisorDriver
 from testrange.exceptions import DriverError
 from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
-from testrange.preflight import mgmt_unsupported_findings
+from testrange.preflight import PreflightReport, mgmt_unsupported_findings
 from testrange.vms import VMRecipe, VMSpec
 from tests.mock_driver import MockDriver, MockHypervisor
 
 _Addr = DHCPAddr | StaticAddr | None
 
 
-def _vm(name: str = "web", *, addr: _Addr = None, comm: Communicator | None = None) -> VMRecipe:
+def _vm(
+    name: str = "web",
+    *,
+    addr: _Addr = None,
+    comm: Communicator | None = None,
+    memory_mb: int = 512,
+    cpus: int = 1,
+) -> VMRecipe:
     return VMRecipe(
         spec=VMSpec(
             name=name,
-            devices=[CPU(1), Memory(512), OSDrive("pool1", 8), NetworkIface("netA", addr=addr)],
+            devices=[
+                CPU(cpus),
+                Memory(memory_mb),
+                OSDrive("pool1", 8),
+                NetworkIface("netA", addr=addr),
+            ],
         ),
         builder=CloudInitBuilder(
             base=CacheEntry("debian-13"),
@@ -44,7 +56,13 @@ def _vm(name: str = "web", *, addr: _Addr = None, comm: Communicator | None = No
     )
 
 
-def _plan(*, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
+def _plan(
+    *,
+    addr: _Addr = None,
+    comm: Communicator | None = None,
+    memory_mb: int = 512,
+    cpus: int = 1,
+) -> Plan:
     return Plan(
         "t",
         MockHypervisor(
@@ -52,7 +70,7 @@ def _plan(*, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
                 Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
             ],
             pools=[StoragePool("pool1", 32)],
-            vms=[_vm(addr=addr, comm=comm)],
+            vms=[_vm(addr=addr, comm=comm, memory_mb=memory_mb, cpus=cpus)],
         ),
     )
 
@@ -283,10 +301,14 @@ class TestUnknownUplinkGating:
         assert not any(f.code == "unknown-uplink" for f in report.findings)
 
 
-class TestPoolCapacityPreflight:
+class TestHostResourcePreflight:
+    """The mock surfaces its configured ``backing_*`` capacity through
+    ``host_capacity()``; preflight's shared resource gate (CORE-84) turns an
+    impossible ask into a blocker."""
+
     def _preflight(
         self, driver: MockDriver, plan: Plan, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> object:
+    ) -> PreflightReport:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
         return driver.preflight(
             plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)
@@ -300,13 +322,42 @@ class TestPoolCapacityPreflight:
             driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path
         )
         assert not report  # a finding -> falsy report
-        assert any(f.code == "pool-capacity" for f in report.findings)  # type: ignore[attr-defined]
+        assert any(f.code == "insufficient-storage" for f in report.findings)
 
-    def test_pool_within_capacity_clean(
+    def test_vm_exceeding_host_memory_errors(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        driver = MockDriver(backing_capacity_gb=128)
+        driver = MockDriver(backing_memory_mb=512)  # plan VM asks for more than this
+        report = self._preflight(
+            driver, _plan(addr=StaticAddr("10.0.0.100"), memory_mb=5_242_880), monkeypatch, tmp_path
+        )
+        assert not report
+        assert any(f.code == "insufficient-memory" for f in report.findings)
+
+    def test_vm_exceeding_host_cpus_errors(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        driver = MockDriver(backing_cpus=2)  # plan VM asks for 8 vCPUs
+        report = self._preflight(
+            driver, _plan(addr=StaticAddr("10.0.0.100"), cpus=8), monkeypatch, tmp_path
+        )
+        assert not report
+        assert any(f.code == "insufficient-vcpus" for f in report.findings)
+
+    def test_within_capacity_clean(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        driver = MockDriver(backing_capacity_gb=128, backing_memory_mb=65_536, backing_cpus=16)
         report = self._preflight(
             driver, _plan(addr=StaticAddr("10.0.0.100")), monkeypatch, tmp_path
         )
         assert report  # no error-level findings
+
+    def test_unconfigured_capacity_skips_the_gate(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # No backing_* knobs -> host_capacity() is None -> resource gate skipped.
+        driver = MockDriver()
+        assert driver.host_capacity() is None
+        report = self._preflight(
+            driver, _plan(addr=StaticAddr("10.0.0.100"), memory_mb=5_242_880), monkeypatch, tmp_path
+        )
+        assert report  # nothing to compare against -> clean

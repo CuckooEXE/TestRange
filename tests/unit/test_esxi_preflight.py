@@ -84,3 +84,39 @@ def test_none_build_switch_skips_pnic_check() -> None:
     report = d.preflight(_plan(), cache_manager=None, build_switch=None)  # type: ignore[arg-type]
     assert "esxi-uplink-pnic-missing" not in {f.code for f in report.findings}
     assert bool(report), report.render()
+
+
+class _CapCpuInfo:
+    numCpuThreads = 16
+
+
+class _CapHardware:
+    memorySize = 17179869184  # 16 GiB, in bytes
+    cpuInfo = _CapCpuInfo()
+
+
+class _CapHost:
+    hardware = _CapHardware()
+
+
+class _CapEsxiClient:
+    host = _CapHost()
+
+
+def _cap_conn() -> EsxiConn:
+    return EsxiConn(host="10.50.0.5", user="root", password="x", datastore="datastore1")
+
+
+def test_host_capacity_parses_hardware() -> None:
+    # host_capacity() field extraction (CORE-84): memorySize bytes->MiB, numCpuThreads.
+    d = ESXiDriver(_cap_conn(), client=_CapEsxiClient())  # type: ignore[arg-type]
+    cap = d.host_capacity()
+    assert cap is not None
+    assert cap.memory_mb == 16384
+    assert cap.logical_cpus == 16
+
+
+def test_host_capacity_none_on_probe_failure() -> None:
+    # FakeEsxiClient has no .host.hardware → the probe fails soft to None.
+    d = _driver(pnics=["vmnic0"], uplinks={})
+    assert d.host_capacity() is None

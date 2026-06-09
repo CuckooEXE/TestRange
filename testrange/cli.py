@@ -43,10 +43,12 @@ from testrange.exceptions import (
 )
 from testrange.networks.base import Network, Switch
 from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
-from testrange.orchestrator.backend import resolve_backend
+from testrange.orchestrator.backend import compatibility_findings, resolve_backend
+from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
+from testrange.preflight import PreflightCheck, PreflightReport
 from testrange.state.cleanup import (
     cleanup_all,
     cleanup_run,
@@ -306,6 +308,12 @@ def _run(args: argparse.Namespace) -> int:
         if dashboard_active and r.passed:
             continue
         _out(r.report_line())
+    if dashboard_active and results:
+        # The dashboard runs on the alternate screen buffer (CORE-86), so its
+        # final frame is gone once it exits; leave a one-line tally on the
+        # restored screen so the outcome is visible without scrolling back.
+        passed = sum(r.passed for r in results)
+        _out(f"tests: {passed} passed, {len(results) - passed} failed")
     return Exit.OK if all(r.passed for r in results) else Exit.FAILURE
 
 
@@ -392,6 +400,48 @@ def _describe(args: argparse.Namespace) -> int:
     # broken binding instead of proceeding (H13).
     binding_ok = _print_describe(plan, tests, mgr, profile)
     return Exit.OK if binding_ok else Exit.USAGE
+
+
+def _preflight(args: argparse.Namespace) -> int:
+    """Run every read-only preflight check against the bound backend and print
+    each result. Exits non-zero (USAGE) if any check blocks; touches no resources.
+    """
+    plan, _tests = _load_plan_module(args.plan)
+    profile = _load_profile_arg(args)
+    mgr = _build_manager(args)
+    try:
+        resolved = resolve_backend(plan, profile)
+    except DriverError as e:
+        # No --profile, or a concrete/profile scheme mismatch — same usage error
+        # the run/build verbs raise before any backend work.
+        _err(f"error: {e}")
+        return Exit.USAGE
+    driver = resolved.driver
+    # Mirror the orchestrator's sweep: include the resolved build switch so the
+    # build-phase switch checks run too (a standalone preflight always "would
+    # build", so it never passes None — that is the cache-only run's concern).
+    build_switch = resolve_build_switch(plan.hypervisor.build_switch)
+    try:
+        driver.connect()
+        try:
+            report = driver.preflight(plan, cache_manager=mgr, build_switch=build_switch)
+        finally:
+            driver.disconnect()
+    except DriverError as e:
+        _err(f"error: {e}")
+        return Exit.USAGE
+    except KeyboardInterrupt:
+        _err("interrupted")
+        return Exit.INTERRUPTED
+    # Fold in the portability-lint layer the orchestrator merges (CORE-10 layer 2)
+    # as its own named check, so the verb shows exactly what a run/build gates on.
+    report = report.merged(
+        PreflightReport.from_checks(
+            [PreflightCheck.evaluate("portability-lint", compatibility_findings(plan, driver))]
+        )
+    )
+    _out(report.render_full())
+    return Exit.OK if report else Exit.USAGE
 
 
 def _add_binding(tree: Tree, plan: Plan, profile: BackendProfile | None) -> bool:
@@ -704,6 +754,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_describe.add_argument("plan", help="path to the plan file (.py)")
     _add_connect_arg(p_describe)
     p_describe.set_defaults(func=_describe)
+
+    p_preflight = sub.add_parser(
+        "preflight",
+        help="run preflight checks against a backend and print each result",
+        description=(
+            "Connect to the bound backend and run every read-only preflight check "
+            "(named-uplink resolution, OS-disk origin, firmware, host resources, "
+            "and the backend's own live checks), printing each with its result "
+            "(ok / blocked / skipped). Exits non-zero if any check blocks. Creates "
+            "and destroys nothing."
+        ),
+    )
+    p_preflight.add_argument("plan", help="path to the plan file (.py)")
+    _add_connect_arg(p_preflight)
+    p_preflight.set_defaults(func=_preflight)
 
     p_cache = sub.add_parser("cache", help="manage the local cache")
     cache_sub = p_cache.add_subparsers(dest="cache_subcommand", required=True)

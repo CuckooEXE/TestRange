@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
+from testrange._log import get_logger
 from testrange.drivers import _diskconvert
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
@@ -35,10 +36,13 @@ from testrange.exceptions import DriverError
 from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
 from testrange.preflight import (
+    HostCapacity,
+    PreflightCheck,
     PreflightFinding,
     PreflightReport,
     builder_origin_findings,
     preflight_switches,
+    resource_check,
     unknown_uplink_findings,
     unsupported_firmware_findings,
 )
@@ -52,6 +56,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.networks.base import BuildNic, Network, Switch
     from testrange.plan import Plan
     from testrange.vms.spec import VMSpec
+
+_log = get_logger(__name__)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -198,18 +204,45 @@ class ESXiDriver(HypervisorDriver):
         """
         del cache_manager
         switches = preflight_switches(plan, build_switch)
-        findings: list[PreflightFinding] = list(unknown_uplink_findings(switches, self._uplinks))
-        findings.extend(builder_origin_findings(plan))
-        findings.extend(
-            unsupported_firmware_findings(
-                plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
-            )
+        return PreflightReport.from_checks(
+            [
+                PreflightCheck.evaluate(
+                    "named-uplink-resolution", unknown_uplink_findings(switches, self._uplinks)
+                ),
+                PreflightCheck.evaluate("os-disk-origin", builder_origin_findings(plan)),
+                PreflightCheck.evaluate(
+                    "supported-firmware",
+                    unsupported_firmware_findings(
+                        plan, self.SUPPORTED_FIRMWARES, driver_name=self.DRIVER_NAME
+                    ),
+                ),
+                PreflightCheck.evaluate("uplink-pnic", self._uplink_pnic_findings(switches)),
+                PreflightCheck.evaluate(
+                    "datastore-capacity", self._datastore_capacity_findings(plan)
+                ),
+                PreflightCheck.evaluate("cidr-overlap", self._cidr_overlap_findings(switches)),
+                PreflightCheck.evaluate("qemu-img", self._qemu_img_findings(plan)),
+                resource_check(plan, self.host_capacity()),
+            ]
         )
-        findings.extend(self._uplink_pnic_findings(switches))
-        findings.extend(self._datastore_capacity_findings(plan))
-        findings.extend(self._cidr_overlap_findings(switches))
-        findings.extend(self._qemu_img_findings(plan))
-        return PreflightReport(findings=tuple(findings))
+
+    def host_capacity(self) -> HostCapacity | None:
+        """Total RAM + logical CPUs of the ESXi host (CORE-84).
+
+        ``HostSystem.hardware`` reports ``memorySize`` (bytes) and
+        ``cpuInfo.numCpuThreads`` (logical). Storage is left to the dedicated
+        ``datastore-capacity`` check, so this reports memory + CPUs only.
+        Best-effort: any failure (not connected, transport error) returns ``None``
+        so a flaky probe never blocks a run.
+        """
+        try:
+            hardware = self._client.host.hardware
+            memory_mb = int(hardware.memorySize) // (1024 * 1024)
+            logical_cpus = int(hardware.cpuInfo.numCpuThreads)
+        except Exception as e:  # pyVmomi/requests error / DriverError(not connected)
+            _log.debug("esxi host_capacity probe failed: %s", e)
+            return None
+        return HostCapacity(memory_mb=memory_mb, logical_cpus=logical_cpus)
 
     def _uplink_pnic_findings(self, switches: list[Switch]) -> tuple[PreflightFinding, ...]:
         """Each mapped uplink must resolve to a physical NIC present on the host."""
