@@ -227,11 +227,28 @@ def _os_xml(firmware: str, *, installer: bool) -> str:
     order lives per-device (the empty OS disk is order 1 and falls through to the
     installer CDROM at order 2), so ``<os>`` carries no ``<boot dev>``; an
     image-origin domain pins ``<boot dev='hd'/>`` here.
+
+    **Secure Boot is disabled** for UEFI domains (``<feature enabled='no'
+    name='secure-boot'/>`` makes libvirt pick a non-SB OVMF). A TestRange UEFI VM
+    boots a *captured* installer-built disk with *fresh* per-domain EFI vars, so
+    it has no NVRAM boot entry and relies on the removable-media fallback
+    (``\\EFI\\BOOT\\BOOTX64.EFI``) — neither composes with Secure Boot's
+    signed-shim-in-NVRAM model. With SB enabled, OVMF rejects the fallback
+    bootloader ("prohibited by secure boot policy") and the run boot never comes
+    up; with it off, the run boot succeeds and signed images still boot (the
+    cloud-image UEFI path is unaffected). Surfaced certifying the PVE builder
+    (PVE-57).
     """
     machine = "q35" if firmware == "uefi" else "pc"
-    fw = " firmware='efi'" if firmware == "uefi" else ""
     boot = "" if installer else "<boot dev='hd'/>"
-    return f"<os{fw}><type arch='x86_64' machine='{machine}'>hvm</type>{boot}</os>"
+    if firmware == "uefi":
+        return (
+            "<os firmware='efi'>"
+            f"<type arch='x86_64' machine='{machine}'>hvm</type>"
+            "<firmware><feature enabled='no' name='secure-boot'/></firmware>"
+            f"{boot}</os>"
+        )
+    return f"<os><type arch='x86_64' machine='{machine}'>hvm</type>{boot}</os>"
 
 
 def _domain_xml(
