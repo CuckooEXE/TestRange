@@ -214,8 +214,16 @@ def create_vm(
                 _add(vim, _nic_device(vim, -(200 + idx), network_refs[nic.network], mac))
             )
 
-    # Datastore-file serial port — the build-result sink reads this file.
-    serial_ref = f"[{ds}] {backend_name}/serial0.log"
+    # Datastore-file serial port — the build-result sink reads this file. Remove
+    # any stale serial0.log first (ESXI-20): resource names are date-scoped, so a
+    # *failed* prior same-day build can leave its VM home folder behind on the
+    # datastore (Destroy_Task does not always reap the serial file). Reusing that
+    # folder would make read_build_result_sink (which reads from offset 0) replay
+    # the *previous* build's fail/ok record before this build writes anything —
+    # surfacing a phantom failure. Truncate to a fresh, empty log per build.
+    serial_rel = f"{backend_name}/serial0.log"
+    client.folder_delete(serial_rel)  # tolerant of absence (404 -> no-op)
+    serial_ref = f"[{ds}] {serial_rel}"
     devices.append(_add(vim, _serial_device(vim, -400, serial_ref)))
 
     config = vim.vm.ConfigSpec(

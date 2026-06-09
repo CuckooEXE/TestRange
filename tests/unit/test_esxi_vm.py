@@ -222,6 +222,24 @@ def test_installer_origin_boot_order_falls_through_to_cdrom() -> None:
     assert len(order) == 2  # disk then cdrom
 
 
+def test_create_vm_truncates_stale_serial_log() -> None:
+    # ESXI-20: a failed prior same-day build can leave its date-named VM folder +
+    # serial0.log behind; create_vm must drop the stale log so the build-result
+    # sink doesn't replay the previous build's fail/ok record from offset 0.
+    client = FakeEsxiClient()
+    client.files["tr-build-x/serial0.log"] = b'TESTRANGE-RESULT: fail rc=100 cmd="stale"\n'
+    d = _driver(client)
+    d.create_vm(
+        "tr-build-x",
+        _spec("x"),
+        "plan",
+        os_disk_ref=VolumeRef("[datastore1] pool1/x.vmdk"),
+        seed_iso_ref=None,
+        network_refs={},
+    )
+    assert "tr-build-x/serial0.log" not in client.files, "stale serial0.log must be truncated"
+
+
 def test_power_lifecycle() -> None:
     client = FakeEsxiClient()
     d = _driver(client)
