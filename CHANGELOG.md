@@ -2,10 +2,16 @@
 
 All notable changes to this project are documented here.
 
-The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
-This project predates 1.0; expect breaking changes between minor versions.
+The format is loosely based on [Keep a Changelog](https://keepachangelog.com/),
+and this project follows [Semantic Versioning](https://semver.org/) from 1.0.0.
 
 ## [Unreleased]
+
+## [1.0.0] — 2026-06-09
+
+First stable release: the public API is frozen and the driver layer ships
+libvirt, Proxmox VE, and ESXi behind one backend-agnostic plan. Each driver's
+support level is documented under **Support level** in `docs/user/drivers/`.
 
 ### Added
 
@@ -45,6 +51,25 @@ This project predates 1.0; expect breaking changes between minor versions.
   ``DriverError`` when ``mem=True``. See the snapshot recipe in the
   Running tests guide and ``examples/hello_world.py``
   (``snapshot_lifecycle``).
+- ``testrange preflight <plan> --profile <name>`` — a read-only verb that
+  connects to the bound backend, runs every preflight check, and prints each
+  one with its result (ok / blocked / skipped) plus the discovered host
+  capacity. Exits non-zero on a blocker; creates and destroys nothing.
+- **Host-resource preflight gate.** ``HypervisorDriver.host_capacity() ->
+  HostCapacity | None`` (implemented on libvirt, Proxmox, ESXi, and the mock)
+  feeds a shared ``resource_findings`` check that rejects impossible plans
+  before anything stands up — a VM larger than the host's RAM, an aggregate
+  that cannot be co-resident, more vCPUs than the host has logical CPUs, or a
+  pool larger than the backing store. The probe is best-effort: a backend that
+  cannot introspect its host returns ``None`` and the gate is skipped rather
+  than turned into a false blocker.
+- ``PreflightCheck`` + ``PreflightReport.checks`` / ``from_checks`` /
+  ``render_full`` — preflight now groups findings under named checks so the
+  ``preflight`` verb can show what was checked, not just what blocked.
+- **Scrollable dashboard panes.** The live Log and Serial panes scroll back
+  through their ring buffers from the keyboard: Tab (or ←/→) switches the
+  focused pane, ↑/↓ scroll a line, PgUp/PgDn a page, Home/``g`` jumps to the
+  oldest line, End/``G`` snaps back to the live tail.
 
 ### Changed
 
@@ -59,6 +84,11 @@ This project predates 1.0; expect breaking changes between minor versions.
 - **Removed ``Orchestrator(ready_timeout_s=...)``.** The readiness
   ``execute`` call now lives in the builder, which owns its own timeout
   inline — there is no framework-wide knob.
+- **The live dashboard is now full-screen.** It runs on the terminal's
+  alternate screen buffer, and the VMs + Tests top row takes a fifth of the
+  height so the streaming Log and Serial panes get the rest. Because the
+  alt-buffer is torn down on exit, ``run`` prints a one-line pass/fail tally
+  (plus any failures) on the restored screen afterward.
 
 ### Fixed
 
@@ -82,6 +112,9 @@ This project predates 1.0; expect breaking changes between minor versions.
   vmstate save/resume), so a follow-on op failed with ``can't lock file …
   got timeout``. ``restore_snapshot``/``delete_snapshot`` now retry that
   transient lock (same shape as the post-import resize retry) (PVE-58).
+- **The live dashboard no longer flickers on VTE-based terminals** (e.g.
+  Terminator on Debian 13). The in-band cursor-up redraw is replaced by the
+  alternate screen buffer's controlled full-screen repaint (CORE-86).
 
 ## [0.2.0] — 2026-05-14
 

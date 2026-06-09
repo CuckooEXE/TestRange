@@ -358,6 +358,19 @@ report as errors with a `fix_hint`:
 `testrange cache add <…> --name <…>`. `describe` is best-effort —
 missing entries print "⚠ not in cache" but do not error.
 
+Findings are grouped into named **checks** (`PreflightCheck`, status
+ok/blocked/skipped) the report carries alongside the flattened `findings` the
+orchestrator gates on, so the read-only **`testrange preflight`** verb can show
+*what was checked* — not just the blockers — via `PreflightReport.render_full()`
+(CORE-85). One of those checks is the **host-resource gate** (CORE-84): an
+optional `HypervisorDriver.host_capacity() -> HostCapacity | None` (total RAM,
+logical CPUs, backing-store free space) feeds the shared
+`preflight.resource_findings`, which rejects an impossible ask — a VM larger than
+the host, an aggregate that can't be co-resident, more vCPUs than the host has
+logical CPUs, or a pool larger than the store — before anything stands up. The
+probe is best-effort: a backend that can't introspect its host returns `None` and
+the gate is skipped rather than turned into a false blocker.
+
 `preflight` takes `build_switch: Switch | None`. A run that **will not build**
 — a cache-only `require_cache` run, e.g. a nested inner run whose disks were
 warmed on L0 — passes `None`: it never realizes the build switch, so the build
@@ -863,10 +876,19 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
   as the untrusted-guest-output trust boundary, and guest text reaches `rich` as
   `Text` (markup off) so it can never inject markup.
 - **`run`/`build` live dashboard (CORE-49b, done)** — on a TTY, `run`/`build`
-  show a four-pane `rich.live.Live` + `Layout` dashboard: per-VM lifecycle stage
+  show a full-screen four-pane `rich.live.Live` + `Layout` dashboard on the
+  **alternate screen buffer** (`screen=True`, CORE-86 — VTE terminals flicker
+  under the in-band cursor-up redraw; the alt-buffer's controlled repaint does
+  not). The top row (VMs + Tests) takes a fifth of the height and the streaming
+  panes the rest (CORE-88): per-VM lifecycle stage
   (PENDING→PROVISIONING→BUILDING→BOOTING→BINDING→READY/FAILED, colour-coded, with
   elapsed + failure detail), test pass/fail, a log tail, and the build serial
-  console. State lives in a **rich-free** `orchestrator/dashboard_state.py`
+  console. The Log and Serial panes scroll back through their ring buffers from
+  the keyboard (CORE-87): a UI-only `_ScrollState` + an offset-aware tail, driven
+  by a raw-mode (termios) stdin reader `run_dashboard` starts only on a real TTY
+  (Tab/arrows/PgUp/PgDn/Home/End; terminal mode restored on every exit). Because
+  the alt-buffer is torn down on exit, `run` prints a one-line pass/fail tally on
+  the restored screen. State lives in a **rich-free** `orchestrator/dashboard_state.py`
   (`DashboardState`, a frozen-record snapshot behind a dedicated lock) that the
   phases write via explicit `ctx.dashboard.set_vm_stage(...)` calls — so the deep
   phase/driver code never imports the renderer (stovepipe rule). The renderer +
@@ -1041,6 +1063,7 @@ testrange cache rename <hash-or-name> <new-name>
 testrange cache forget-name <name>
 
 testrange describe <plan.py>                       # passive; cache warnings only
+testrange preflight <plan.py> --profile <name>     # read-only checks; print each result
 testrange build <plan.py>                          # warm the cache; run NO tests
 testrange run <plan.py>                            # auto-build on miss + tests + cleanup
 testrange run --require-cache <plan.py>            # fail fast on a cache miss (no build)

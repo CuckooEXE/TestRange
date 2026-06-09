@@ -524,9 +524,29 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (315)
+## Done (322)
 
 ### CORE
+
+- [x] **CORE-84** · `feat` — preflight rejects impossible host-resource asks (memory/cpu/storage) _(done: 2026-06-09)_
+
+  > Added `HostCapacity(memory_mb, logical_cpus, storage_free_gb)` + an optional `HypervisorDriver.host_capacity()` (default None; defensive — any backend error → None, never blocks a run) feeding a shared `resource_findings(plan, capacity)` gate: per-VM memory > host, aggregate memory > host (can't be co-resident), per-VM vCPUs > host logical CPUs, per-pool size_gb > store free. host_capacity implemented on libvirt (`getInfo`), Proxmox (`nodes/status`), ESXi (`host.hardware`), and Mock (new `backing_memory_mb`/`backing_cpus` knobs + MockProfile fields; generalized the old pool-capacity check → `insufficient-storage`). Covered by `tests/plans/generic/preflight.py` + unit tests. Gates green (1184 unit).
+
+- [x] **CORE-85** · `feat` — `testrange preflight <plan> --profile <name>` prints every check + result _(done: 2026-06-09)_
+
+  > New read-only verb: connect → run the full preflight sweep (+ portability-lint) → print each named check ok/blocked/skipped with the discovered host capacity → exit 0 clean / 2 blocked; creates and destroys nothing. Enriched the model with `PreflightCheck` + `PreflightReport.checks`/`from_checks`/`render_full`; all four drivers now assemble named checks. `findings`/`__bool__`/`render`/`merged` stayed back-compatible (orchestrator path unchanged). Unit-tested in `test_cli_preflight.py`.
+
+- [x] **CORE-86** · `bugfix` — live dashboard flickers on Debian 13 / Terminator (VTE) _(done: 2026-06-09)_
+
+  > Switched `rich.Live` to the alternate screen buffer (`screen=True`): the in-band cursor-up redraw that flickers on VTE terminals is replaced by a controlled full-screen repaint. Because the alt-buffer is torn down on exit, `_run` prints a one-line pass/fail tally (+ failures) on the restored screen. Off-TTY / `--no-dashboard` path unchanged.
+
+- [x] **CORE-87** · `feat` — scrollable dashboard Log + Serial panes (view earlier output) _(done: 2026-06-09)_
+
+  > Keyboard scrollback over the ring buffers: UI-only `_ScrollState` (focus + per-pane offset, kept out of the UI-agnostic DashboardState), an offset-aware `_Tail`, a footer with keys + scroll position + focused-pane highlight, and a raw-mode (termios/tty + select) stdin reader started by `run_dashboard` only on a real TTY (terminal mode saved/restored on every exit). Tab/←→ switch pane, ↑↓ a line, PgUp/PgDn a page, Home/`g` top, End/`G` live. Unit-tested (windowing + key dispatch + footer).
+
+- [x] **CORE-88** · `feat` — dashboard top row (VMs + Tests) takes 1/5 of the height _(done: 2026-06-09)_
+
+  > Re-weighted `split_column` to top `ratio=1` / bottom `ratio=4`, so the VMs+Tests row is a fifth of the screen and the streaming Log/Serial panes get the rest.
 
 - [x] **CORE-66** · `bugfix` — run-phase lookup_credential rejects non-CloudInit builders _(done: 2026-06-08)_
 
@@ -543,6 +563,10 @@ on 2026-06-06.
   > DONE 2026-06-08. A Ctrl-C (or the SIGTERM/SIGHUP handler's raised KeyboardInterrupt) during the BUILD phase leaked all partial infra — build pool, network, sidecar, build VM — with no teardown. Two causes, both rooted in KeyboardInterrupt/SystemExit subclassing BaseException, not Exception: (1) __enter__'s teardown-on-failure handlers (runtime.py:236,242) were `except Exception`, so the interrupt slipped past untouched — a normal Exception like BuildTimeoutError WAS caught and tore down, which is why interrupts vs timeouts behaved inconsistently; (2) the interrupt fires inside __enter__, so Python never invokes __exit__ (where the run-phase teardown lives). The signal-handler docstring (runtime.py:273) claimed the handler "unwinds an in-flight bring-up into teardown" — false for the build phase until now. Fix: broaden both __enter__ handlers to `except BaseException` (cleanup-then-reraise; never swallows). Run-phase interrupts already cleaned up via __exit__ and are unchanged. Regression test: test_keyboard_interrupt_during_bringup_triggers_teardown (tests/unit/test_orchestrator.py) injects KeyboardInterrupt into create_vm and asserts create_pool→destroy_pool; RED before the fix (no destroy_pool), green after.
 
 ### REL
+
+- [x] **REL-41** · `chore` — execute the 1.0.0 version bump + CHANGELOG (realizes REL-20) _(done: 2026-06-09)_
+
+  > Cut public 1.0.0: pyproject `version = "1.0.0"` + `major_version_zero = false`, `testrange.__version__ = "1.0.0"`, CHANGELOG `[Unreleased]` → `[1.0.0] — 2026-06-09` (folding in the preflight resource gate, the `preflight` verb, and the dashboard flicker/scroll/layout entries) with a fresh empty `[Unreleased]`, and dropped the pre-1.0 language from the CHANGELOG preamble + the README Status section. `testrange --version` → 1.0.0; gates green.
 
 - [x] **REL-29** · `bugfix` — build-result serial parser: first-marker lock + silent unrecognized-token fail _(done: 2026-06-08)_
 
@@ -2363,6 +2387,10 @@ on 2026-06-06.
   > Live-found 2026-06-02 (nested ESXi bring-up): ESXi weasel's ks=cdrom:/ks.cfg scan on i440fx/BIOS only enumerates an IDE optical unit; a sata(AHCI) installer CD fails 'cannot find kickstart file on cd-rom /ks.cfg' before touching disk (600s build timeout). Proven via direct qemu: same ISO sata=fail, IDE=installs. Fix: drivers/libvirt/_vm.py _cdrom_bus(firmware) -> ide for pc/BIOS, sata for q35/UEFI (q35 has no IDE). Case (lowercase ks.cfg) was a red herring. DONE.
 
 ### DOCS
+
+- [x] **DOCS-23** · `docs` — one consistent per-driver doc shape; certification level lives ONLY in the driver Support-level section _(done: 2026-06-09)_
+
+  > Restructured docs/user/drivers/{libvirt,proxmox,esxi}.md to the same shape — **About** / **Support level** / **Connection profile** / **Egress**, then backend-specific extras (Prerequisites, mgmt semantics, Firmware, …) — with **Support level** the sole place a support/certification tier is stated. Stripped all certification / "reference backend" / "code-complete" claims from README.md (intro + quickstart now point at the per-driver Support-level sections), docs/user/drivers/index.md (the prose "Status" section → "What ships", links to each Support level), and docs/user/install.md. Added the `preflight` verb to the README + running-tests + writing-a-plan verb lists and refreshed the dashboard description (full-screen alt-buffer + scrollback). Sphinx build clean (no new warnings).
 
 - [x] **DOCS-22** · `docs` — integrate project logos into README + Sphinx site _(done: 2026-06-08)_
 
