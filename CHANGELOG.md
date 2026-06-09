@@ -7,6 +7,40 @@ and this project follows [Semantic Versioning](https://semver.org/) from 1.0.0.
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-06-09
+
+### Added
+
+- ``examples/nested_lab.py`` — a ``GuestHypervisor.libvirt`` host carrying its own
+  inner plan (an isolated DHCP/DNS switch + two inner VMs), asserting inner
+  VM-to-VM reachability through ``orch.nested``. The first user-facing
+  nested-virtualization example.
+- ``examples/multi_tier_app.py`` — a NAT'd web tier and an air-gapped backend
+  tier: a multi-homed ``web`` guest plus a ``db`` guest (carrying a ``HardDrive``
+  data disk) on the isolated switch, asserting inter-VM reach and egress
+  isolation.
+- ``ESXiKickstartBuilder(allow_tcp_forwarding=…)`` — also threaded through
+  ``GuestHypervisor.esxi`` — bakes ``AllowTcpForwarding yes`` into the installed
+  ESXi node's sshd so its ``guest_gateway`` can SSH-jump to guests; the easy path
+  for SSH jump-host testing (ESXI-22).
+
+### Changed
+
+- ESXi preflight (``esxi-uplink-pnic-missing``) now requires a free physical NIC
+  only when a switch actually requests NAT egress, so a plan whose VMs need no
+  egress at all no longer fails preflight (ESXI-21).
+- A failed build's base64 log tail is decoded before it is printed: a block
+  corrupted by interleaved chatter on the shared serial console no longer dumps a
+  raw base64 blob to the console (BUILD-23).
+- Driver docs: each backend's **Support level** section now states whether the
+  backend is certified working in prose, replacing the per-capability table; the
+  Proxmox page is corrected to reflect its certified status.
+
+### Removed
+
+- ``examples/pve_node.py`` — the Proxmox builder's live-cert vehicle. The Proxmox
+  backend remains certified via the ``tests/plans/{generic,proxmox}`` corpus.
+
 ## [1.0.0] — 2026-06-09
 
 First stable release: the public API is frozen and the driver layer ships

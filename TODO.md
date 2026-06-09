@@ -524,9 +524,11 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (322)
+## Done (333)
 
 ### CORE
+
+- [x] **CORE-89** · `test` — smoke-test every `examples/*.py` via `describe` (a structural-regression net for the example set) (review fix) _(done: 2026-06-09)_
 
 - [x] **CORE-84** · `feat` — preflight rejects impossible host-resource asks (memory/cpu/storage) _(done: 2026-06-09)_
 
@@ -1666,6 +1668,14 @@ on 2026-06-06.
 
 ### ESXI
 
+- [x] **ESXI-24** · `chore` — trim the public `allow_tcp_forwarding` docstring to consumer altitude; drop the dead `_firstboot` default (review fix) _(done: 2026-06-09)_
+
+- [x] **ESXI-23** · `test` — mixed NAT + non-NAT uplink preflight regression (only the NAT switch demands a pNIC) (review fix) _(done: 2026-06-09)_
+
+- [x] **ESXI-22** · `feat` — `allow_tcp_forwarding` kwarg on `ESXiKickstartBuilder`, threaded through `GuestHypervisor.esxi`, for SSH jump-host setup _(done: 2026-06-09)_
+
+- [x] **ESXI-21** · `bugfix` — `uplink-pnic` preflight only requires a free pNIC when a switch actually requests NAT egress _(done: 2026-06-09)_
+
 - [x] **ESXI-19** · `bugfix` — ESXi builder enabled sshd from credential-key presence, not from SSH transport _(done: 2026-06-08)_
 
   > `ESXiKickstartBuilder` no longer infers sshd-enable from `root.ssh_key` presence; `GuestHypervisor.esxi` derives `enable_ssh=isinstance(communicator, SSHCommunicator)` and passes it to the builder (the Builder ABC forbids the builder seeing a Communicator). `enable_ssh` defaults True. The vmk0 MAC-follow block (ESXI-18) is un-gated — transport-independent. Latent until a non-SSH ESXi communicator (COMM-2) lands; pure hardening, no live cert needed. Code landed + merged 2026-06-08 (unit-gated); touchpoints `builders/esxi.py`, `builders/_esxi_prepare.py`, `vms/nested.py` + unit tests. Swept to Done in the REL-38 board sweep.
@@ -2002,6 +2012,10 @@ on 2026-06-06.
   > **Done 2026-05-22 (ADR-0010).** `build_phase` warms the cache and nothing else; `run_phase` creates pools, gates sidecar readiness, pushes every built disk (OS + data) per VM, runs tests. `testrange build` / `testrange run` (auto-build on miss; `--require-cache`) are distinct CLI verbs. `config_hash` keys the disk set; `create_blank_volume` + `resize_volume` replaced `create_disk_from_base`.
 
 ### BUILD
+
+- [x] **BUILD-24** · `test` — harden the b64 build-log decode tests (distinct-byte truncation, lone-trailing-char `rem==1`) (review fix) _(done: 2026-06-09)_
+
+- [x] **BUILD-23** · `bugfix` — decode the base64 build-log tail before printing; tolerate interleaved serial chatter so a corrupt block never dumps a raw blob _(done: 2026-06-09)_
 
 - [x] **BUILD-16** · `bugfix` — drop gratuitous ESXi-8 version gating (disk floor + prose) _(done: 2026-06-09)_
 
@@ -2387,6 +2401,14 @@ on 2026-06-06.
   > Live-found 2026-06-02 (nested ESXi bring-up): ESXi weasel's ks=cdrom:/ks.cfg scan on i440fx/BIOS only enumerates an IDE optical unit; a sata(AHCI) installer CD fails 'cannot find kickstart file on cd-rom /ks.cfg' before touching disk (600s build timeout). Proven via direct qemu: same ISO sata=fail, IDE=installs. Fix: drivers/libvirt/_vm.py _cdrom_bus(firmware) -> ide for pc/BIOS, sata for q35/UEFI (q35 has no IDE). Case (lowercase ks.cfg) was a red herring. DONE.
 
 ### DOCS
+
+- [x] **DOCS-27** · `docs` — past-tense the `e2e-findings-proxmox.md` method recipe + note `pve_node.py` removal (review fix) _(done: 2026-06-09)_
+
+- [x] **DOCS-26** · `bugfix` — proxmox.md Support level: state Proxmox **certified** (PVE-57/58, 33/33), not "in progress"; drop the stale BUILD-13 block (review fix) _(done: 2026-06-09)_
+
+- [x] **DOCS-25** · `docs` — driver pages: replaced the per-capability certification tables with a plain certified-or-not prose statement _(done: 2026-06-09)_
+
+- [x] **DOCS-24** · `docs` — refreshed `examples/`: added `nested_lab.py` (nested host + inner VMs) + `multi_tier_app.py` (NAT/air-gap tiers + data disk); dropped `pve_node.py` _(done: 2026-06-09)_
 
 - [x] **DOCS-23** · `docs` — one consistent per-driver doc shape; certification level lives ONLY in the driver Support-level section _(done: 2026-06-09)_
 
