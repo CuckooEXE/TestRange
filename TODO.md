@@ -61,6 +61,15 @@ on 2026-06-06.
   >   (`ESXiHardDrive.bus` scsi/sata/nvme/ide) in `esxi/_vm.create_vm`, read off
   >   `spec.data_drives` so the knob stays ESXi-stovepiped (no ABC/orchestrator
   >   change). Unblocks `tests/plans/esxi/devices.py`. Gates green (1137 unit).
+  > - M3 (standup) findings, see `docs/dev/e2e-findings-esxi.md`:
+  >   - FIXED — a modest-disk install left NO datastore (ESX-OSData fills the
+  >     disk). Added `systemMediaSize=min` to the installer kernelopt so the
+  >     install leaves a `datastore1`; folded the kernelopt into `config_hash`.
+  >   - OPEN — ESXI-18 (vmk0 keeps the build MAC) live-DISPROVEN: the shipped
+  >     FollowHardwareMac+reboot fix does NOT take (a reboot restores vmk0's
+  >     pinned MAC; the flag only affects vmk creation). ESXI-18 updated.
+  >     Sidestepped for the cert (reach the node by its DHCP IP over pyVmomi;
+  >     enable sshd host-side). Node spun up + leaked via the diag bring-up.
 
 ### ORCH
 
@@ -168,6 +177,22 @@ on 2026-06-06.
 
 - [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
 
+  > **LIVE-DISPROVEN 2026-06-09 (ESXI-20): the shipped fix does NOT take.** Built +
+  > booted a node end-to-end on libvirt L0. It settles at the DCUI on its lab DHCP
+  > lease, but vmk0 STILL carries the build-NIC MAC (confirmed via the DCUI IPv6
+  > link-local EUI-64 `fe80::…:f177:c0` ⇒ `02:91:5a:f1:77:c0`, and the lab sidecar
+  > lease under that MAC) — so `discover_ip` (polling the run NIC MAC) still misses.
+  > sshd is also off. ROOT CAUSE OF THE FIX'S FAILURE: the "second boot re-inits
+  > vmk0 under the hardware MAC" premise is wrong — `FollowHardwareMac` is consulted
+  > only at vmk *creation*, and a plain `reboot` **restores** vmk0 from `esx.conf`
+  > with its pinned (build) MAC instead of re-creating it, so the flag never moves
+  > an existing vmk0. A real fix must DELETE + re-add vmk0 (`esxcli network ip
+  > interface remove/add` from `local.sh`, after hostd) so it adopts vmnic0's MAC,
+  > or set vmk0's MAC explicitly. SIDESTEPPED for the ESXI-20 cert: reach the node
+  > at its actual DHCP IP via pyVmomi (cert transport is VMware-Tools/pyVmomi, not
+  > SSH lease-discovery) and enable sshd host-side via pyVmomi. See
+  > `docs/dev/e2e-findings-esxi.md`. Still parked for a proper builder fix.
+  >
   > **BUILDER FIX LANDED 2026-06-08 (merged to feature/release-check); live cert
   > still SHELVED post-1.0.0.** `%firstboot` now seeds `local.sh` with a
   > sentinel-guarded one-shot reboot that sets `Net.FollowHardwareMac=1` + persists
