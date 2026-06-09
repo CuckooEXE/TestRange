@@ -33,7 +33,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from testrange.builders._esxi_prepare import prepare_iso, render_kickstart
+from testrange.builders._esxi_prepare import (
+    _KICKSTART_KERNELOPT,
+    prepare_iso,
+    render_kickstart,
+)
 from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
@@ -226,8 +230,11 @@ class ESXiKickstartBuilder(Builder):
         different installed system; CORE-64), the license key (baked at install
         via ``serialnum``), the **rendered kickstart digest** (so a change to the
         ks.cfg *template* itself — not just its inputs — busts a stale cached disk;
-        CORE-64-style), the install disk size, ``spec.firmware``, and ``base_sha``
-        (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
+        CORE-64-style), the install disk size, ``spec.firmware``, the installer
+        **kernelopt** (``_KICKSTART_KERNELOPT`` — e.g. ``systemMediaSize`` lives in
+        the patched BOOT.CFG, *not* the ks.cfg, so a change there must bust the
+        cache too; ESXI-20), and ``base_sha`` (the vanilla ISO sha). Pure: no
+        clocks/run_id/I/O (ADR-0007).
 
         The key is folded by value, NOT just presence: run VMs boot the cached
         disk with no re-seed (``seed_iso_ref=None``), so the baked key is the only
@@ -242,6 +249,7 @@ class ESXiKickstartBuilder(Builder):
             f"root-password:{root.password}\n---\nssh-key:{ssh_key}\n---\n"
             f"license:{self._license}\n---\nkickstart:{ks_digest}\n---\n"
             f"disk:{spec.os_drive.size_gb}\n---\nfirmware:{spec.firmware}\n---\n"
+            f"kernelopt:{_KICKSTART_KERNELOPT}\n---\n"
             f"base:{base_sha}\n---\nsidecar:{sidecar_sha}"
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]

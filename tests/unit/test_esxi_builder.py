@@ -393,6 +393,15 @@ class TestPatchBootcfg:
         assert "kernelopt=runweasel ks=cdrom:/ks.cfg" in out
         assert "cdromBoot" not in out
 
+    def test_kernelopt_caps_system_storage_for_datastore(self, tmp_path: Path) -> None:
+        # ESXI-20: systemMediaSize=min must ride the installer kernelopt so the
+        # install leaves a local VMFS datastore (else ESX-OSData fills the disk and
+        # a nested lab node has nowhere to host VMs).
+        p = tmp_path / "BOOT.CFG"
+        p.write_text("title=x\nkernelopt=cdromBoot runweasel\n")
+        prep._patch_bootcfg(p)
+        assert "systemMediaSize=min" in p.read_text()
+
     def test_idempotent_when_already_patched(self, tmp_path: Path) -> None:
         p = tmp_path / "BOOT.CFG"
         p.write_text("title=x\nkernelopt=runweasel ks=cdrom:/ks.cfg\n")

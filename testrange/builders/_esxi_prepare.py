@@ -61,7 +61,14 @@ _BOOTCFG_UEFI = "/EFI/BOOT/BOOT.CFG"
 # logPort=com1 streams the installer vmkernel log out COM1 so the %post
 # build-result (injected via `vsish -e set /system/log`) reaches the build VM's
 # serial sink; gdbPort=none keeps the kernel debugger off the UARTs.
-_KICKSTART_KERNELOPT = "runweasel ks=cdrom:/ks.cfg logPort=com1 gdbPort=none"
+#
+# systemMediaSize=min caps ESX-OSData at the ~33 GiB minimum so the installer
+# leaves the rest of the disk for a local VMFS datastore (ESXI-20). WITHOUT it,
+# ESX-OSData expands to fill a modest disk and the installer creates NO local
+# datastore — and a nested lab node with no datastore can host nothing (the ESXi
+# driver's create_pool needs a datastore to fold a pool into). With it, a node
+# sized >= ~70 GiB comes up with a usable "datastore1" the driver can target.
+_KICKSTART_KERNELOPT = "runweasel ks=cdrom:/ks.cfg logPort=com1 gdbPort=none systemMediaSize=min"
 _KICKSTART_FILENAME = "ks.cfg"
 
 
