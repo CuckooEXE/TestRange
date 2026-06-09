@@ -84,6 +84,7 @@ testrange describe <plan.py> [--profile <name>]
 testrange build <plan.py> --profile <name>
 testrange run <plan.py> --profile <name> [--fail-fast] [--leak-on-failure] [--require-cache]
 testrange repl <plan.py> --profile <name>
+testrange cleanup --list                           # list runs + status, tear down nothing
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
 ```

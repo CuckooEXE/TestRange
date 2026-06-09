@@ -133,3 +133,47 @@ class TestCleanupCLI:
         rc = cli.main(["cleanup"])
         assert rc == 2
         assert "requires" in capsys.readouterr().err
+
+    def test_cleanup_list_empty(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        del isolated_state
+        rc = cli.main(["cleanup", "--list"])
+        assert rc == 0
+        assert capsys.readouterr().out.strip() == "(no runs)"
+
+    def test_cleanup_list_status_and_metadata(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # r-stopped: owner exited (lock released). r-live: owner still holds the
+        # advisory lock. --list must distinguish them and never touch resources.
+        _populate_run(isolated_state, "r-stopped").release()
+        _populate_run(isolated_state, "r-live")
+        rc = cli.main(["cleanup", "--list"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        lines = {line.split()[0]: line for line in out.splitlines() if line.startswith("r-")}
+        assert "stopped" in lines["r-stopped"]
+        assert "running" in lines["r-live"]
+        # plan name and resource count surface for each run.
+        assert "hello" in lines["r-stopped"]
+        assert lines["r-stopped"].split()[-2] == "2"
+
+    def test_cleanup_list_tolerates_corrupt_state(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _populate_run(isolated_state, "r-ok").release()
+        bad = isolated_state / "r-bad"
+        bad.mkdir(parents=True)
+        (bad / "state.json").write_text("{not json", encoding="utf-8")
+        rc = cli.main(["cleanup", "--list"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "r-ok" in out and "r-bad" in out
+        assert "error:" in out

@@ -482,7 +482,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (271)
+## Done (272)
 
 ### REL
 
@@ -549,6 +549,11 @@ on 2026-06-06.
   > DONE 2026-06-06. PLAN.md section "Bare-metal provisioning via out-of-band controller (ADR-0027)" + ADR-0027 (docs/adr/0027-bare-metal-provisioning.md, indexed) both landed. Records: third verb, NOT a run flag; controller is its OWN ABC, not a HypervisorDriver; nameless ProvisioningPlan; HostRecipe = spec x builder (no communicator, explicit builder injection, no front-door classmethods); HostSpec requirements-contract (Required* devices, discrete 1:1, no count/selector); inventory matcher + don't-touch; installer-origin only v1. Rejected alternatives captured in the ADR: BMC-as-HypervisorDriver, [proxmox.install] TOML block, --controller-on-run, count=/selector on requirements.
 
 ### CORE
+
+- [x] **CORE-66** · `feat` — `cleanup --list` to enumerate existing runs + status
+  _(done: 2026-06-08)_
+
+  > DONE 2026-06-08. `testrange cleanup --list` lists every run dir under the state root without tearing anything down: run id, running/stopped, phase, plan name, resource count, created-at. Status is the advisory-lock probe (not the PID-reuse-prone liveness check) — added `StateStore.is_running()` and refactored `require_dead()` to use it. New `RunInfo` + `list_runs()` + `format_run_list()` in `state/cleanup.py` (tolerant of corrupt/missing state per run, mirrors `cleanup_all`); `--list` flag + branch in `cli._cleanup`. The spawning *file* path is NOT persisted (state.json carries only `plan_name`), so the listing surfaces the plan name; tracking the source path would need a schema bump (separate ticket if wanted). Tests in test_cleanup_cli.py; README + docs/user/running-tests.md updated.
 
 - [x] **CORE-61** · `feat` — libvirt-concrete device types (bus/model) + driver wiring
   _(done: 2026-06-02)_

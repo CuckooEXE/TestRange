@@ -213,25 +213,34 @@ class StateStore:
             return False
         return is_pid_alive(pid)
 
-    def require_dead(self) -> None:
-        """Raise StateLockedError if the run's owner is still alive.
+    def is_running(self) -> bool:
+        """True iff a live process owns this run (holds ``state.lock``).
 
-        Probes the advisory lock without holding it: a live owner holds
-        ``state.lock`` (flock), so a non-blocking acquire fails; a dead/crashed
-        owner's lock was released by the kernel, so the acquire succeeds and we
-        immediately drop it. This closes the PID-reuse window the old
-        liveness check had (ADR-0018, CORE-30).
+        Probes the advisory lock without holding it: a live owner holds it, so a
+        non-blocking acquire fails; a dead/crashed owner's lock was released by
+        the kernel, so the acquire succeeds and we immediately drop it. This is
+        the same ownership signal :meth:`require_dead` gates on, exposed as a
+        non-raising bool for read-only listing. It closes the PID-reuse window
+        the old liveness check had (ADR-0018, CORE-30).
         """
         fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
+        except OSError:
+            return True
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
+
+    def require_dead(self) -> None:
+        """Raise StateLockedError if the run's owner is still alive."""
+        if self.is_running():
             raise StateLockedError(
                 f"run {self.run_dir.name} is owned by a live process "
                 "(state.lock held); kill it or wait for it to exit, then re-run cleanup."
-            ) from e
-        finally:
-            os.close(fd)
+            )
 
     def record_intent(
         self,

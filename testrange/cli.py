@@ -41,7 +41,13 @@ from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
 from testrange.orchestrator.backend import resolve_backend
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
-from testrange.state.cleanup import cleanup_all, cleanup_run, format_cleanup_results
+from testrange.state.cleanup import (
+    cleanup_all,
+    cleanup_run,
+    format_cleanup_results,
+    format_run_list,
+    list_runs,
+)
 from testrange.vms.recipe import VMRecipe
 
 # A subcommand handler: takes the parsed args, returns a process exit code.
@@ -306,6 +312,10 @@ def _repl(args: argparse.Namespace) -> int:
 
 def _cleanup(args: argparse.Namespace) -> int:
     try:
+        if args.list:
+            # Read-only: enumerate runs and their status, tear down nothing.
+            print(format_run_list(list_runs()))
+            return Exit.OK
         if args.all:
             results = list(cleanup_all(dry_run=args.dry_run))
             if not results:
@@ -705,6 +715,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_cleanup = sub.add_parser("cleanup", help="tear down resources from a previous run")
     p_cleanup.add_argument("run_id", nargs="?", default=None, help="run id to clean up")
     p_cleanup.add_argument("--all", action="store_true", help="clean up every run dir")
+    p_cleanup.add_argument(
+        "--list",
+        action="store_true",
+        help="list existing runs and their status; tear down nothing",
+    )
     p_cleanup.add_argument(
         "--dry-run",
         action="store_true",

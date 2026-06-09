@@ -28,6 +28,7 @@ testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --leak-on-failure                     #   skip teardown if any test fails
   --jobs N                              #   cap I/O-phase workers (default 8; 0 or 1 = serial)
 testrange repl <plan.py>                # bring-up, drop into a Python REPL, no TESTS
+testrange cleanup --list                # list runs + status, tear down nothing
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
 testrange cache add <path-or-url>       # cache subcommands:
@@ -165,8 +166,26 @@ orchestrator read over the native guest agent. When done, tear down:
 testrange cleanup <run_id>
 ```
 
+Not sure which runs are still around? `testrange cleanup --list` enumerates
+every retained run with its status (`running` if a live process still owns it,
+`stopped` otherwise), phase, plan name, resource count, and creation time —
+and tears nothing down:
+
+```sh
+testrange cleanup --list
+```
+
+```
+RUN ID                    STATUS    PHASE       PLAN                RES  CREATED
+20260608-141102-9af3c1    running   run         hello                 6  2026-06-08T14:11:02Z
+20260608-093344-1b7e02    stopped   run         nested-esxi           9  2026-06-08T09:33:44Z
+```
+
+(`PLAN` is the plan's name; the source `.py` file that spawned the run is not
+recorded in state.)
+
 `testrange cleanup --all` walks every retained run under
-`$XDG_STATE_HOME/testrange/runs/` and tears each down. PID-gated:
+`$XDG_STATE_HOME/testrange/runs/` and tears each down. Lock-gated:
 refuses to act on a run whose owning process is still alive.
 
 ## What `examples/hello_world.py` shows
