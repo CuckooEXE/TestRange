@@ -140,6 +140,24 @@ class TestConstruction:
         # is covered in test_build_phase.test_installer_origin_with_no_seed.
         assert _builder().boot_media() == CacheEntry("esxi-8-iso")
 
+    def test_prepared_iso_keys_on_kernelopt(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # ESXI-20: the prepared-ISO cache filename must vary with the installer
+        # kernelopt (systemMediaSize etc. ride the patched BOOT.CFG, not the
+        # ks.cfg) — keying on the kickstart alone reused a stale ISO when only the
+        # kernelopt changed, silently installing under the old boot config.
+        monkeypatch.setattr(
+            esxi_mod, "prepare_iso", lambda src, dst, *, kickstart: dst.write_bytes(b"x")
+        )
+        media = tmp_path / "installer.iso"
+        media.write_bytes(b"vanilla")
+        b = _builder()
+        p1 = b.prepare_boot_media(media)
+        monkeypatch.setattr(esxi_mod, "_KICKSTART_KERNELOPT", "runweasel ks=cdrom:/ks.cfg OTHER=1")
+        p2 = b.prepare_boot_media(media)
+        assert p1 != p2, "prepared ISO filename must change when the kernelopt changes"
+
 
 class TestKickstart:
     def test_core_directives(self) -> None:

@@ -187,13 +187,20 @@ class ESXiKickstartBuilder(Builder):
 
     def prepare_boot_media(self, media_path: Path) -> Path:
         """Patch the kickstart into the installer ISO (xorriso two-pass), caching
-        the prepared copy beside the vanilla and keyed by the kickstart digest.
+        the prepared copy beside the vanilla and keyed by its content.
 
-        The kickstart depends only on the builder's credentials (root password +
-        optional SSH key), so the prepared ISO keys on its digest.
+        The prepared ISO embeds TWO injected inputs: the ``ks.cfg`` (from the
+        builder's credentials/license) AND the patched BOOT.CFG ``kernelopt``
+        (:data:`_KICKSTART_KERNELOPT`, where ``systemMediaSize`` etc. live). The
+        cache filename keys on BOTH — keying on the kickstart alone (the original
+        bug) reused a stale ISO when only the kernelopt changed, so a
+        ``systemMediaSize`` edit silently installed under the old boot config
+        (ESXI-20).
         """
         kickstart = self._render_kickstart()
-        digest = hashlib.sha256(kickstart.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(
+            f"{kickstart}\n---KERNELOPT---\n{_KICKSTART_KERNELOPT}".encode()
+        ).hexdigest()[:16]
         prepared = media_path.parent / f"{media_path.stem}-esxi-{digest}.iso"
         if not prepared.exists():
             prepare_iso(media_path, prepared, kickstart=kickstart)
