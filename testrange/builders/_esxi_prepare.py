@@ -78,7 +78,11 @@ class EsxiPrepareError(BuilderError):
 
 
 def render_kickstart(
-    *, root_password: str, ssh_key: str | None = None, license: str | None = None
+    *,
+    root_password: str,
+    ssh_key: str | None = None,
+    license: str | None = None,
+    allow_tcp_forwarding: bool = False,
 ) -> str:
     """Build a ks.cfg that installs ESXi unattended and reports a build result.
 
@@ -127,6 +131,11 @@ def render_kickstart(
         time via the top-level ``serialnum --esx=<key>`` directive, so the node
         boots licensed instead of on the read-only free/evaluation edition.
         ``None`` leaves the default evaluation license in place.
+      allow_tcp_forwarding: when True (and ``ssh_key`` is set), ``%firstboot``
+        appends ``AllowTcpForwarding yes`` to ``/etc/ssh/sshd_config``. ESXi's
+        ``guest_gateway`` SSH-jumps to guests over a ``direct-tcpip`` channel,
+        which sshd refuses without it (ESXI-22); the default leaves sshd's
+        stock policy in place. Inert without a key (no sshd is provisioned).
     """
     if not root_password:
         raise EsxiPrepareError(
@@ -160,10 +169,10 @@ def render_kickstart(
         "sleep 2",
         "poweroff -f",
     ]
-    return "\n".join([*install, *result, *_firstboot(ssh_key)]) + "\n"
+    return "\n".join([*install, *result, *_firstboot(ssh_key, allow_tcp_forwarding)]) + "\n"
 
 
-def _firstboot(ssh_key: str | None) -> list[str]:
+def _firstboot(ssh_key: str | None, allow_tcp_forwarding: bool) -> list[str]:
     """Run-phase ``%firstboot`` provisioning.
 
     Runs once when the *captured* disk is first booted for a run (``%post`` powers
@@ -193,7 +202,9 @@ def _firstboot(ssh_key: str | None) -> list[str]:
     ``fi`` — so on the first boot the MAC block reboots before reaching it, and on
     the post-reboot boot (sentinel present) the block is skipped and sshd comes up.
     When ``ssh_key`` is ``None`` the key write and sshd enable are omitted entirely
-    and the host gets no open sshd.
+    and the host gets no open sshd. ``allow_tcp_forwarding`` (ESXI-22) adds one
+    more key-gated file edit: ``AllowTcpForwarding yes`` appended to
+    ``/etc/ssh/sshd_config`` so the ``guest_gateway`` jump can tunnel to guests.
 
     Flat layout (no indentation): busybox only closes a plain ``cat <<'EOF'``
     heredoc on a column-0 terminator, so an indented body would let the heredoc
@@ -210,6 +221,16 @@ def _firstboot(ssh_key: str | None) -> list[str]:
             "chmod 600 /etc/ssh/keys-root/authorized_keys",
             "chown root:root /etc/ssh/keys-root/authorized_keys",
         ]
+        if allow_tcp_forwarding:
+            # ESXI-22: the guest_gateway tunnels to guests over a direct-tcpip
+            # channel, which sshd refuses unless AllowTcpForwarding is on. Pure
+            # file I/O in %firstboot (before the local.sh block), persisted by the
+            # MAC block's auto-backup.sh the same way the key above is; idempotent
+            # append so a re-run never duplicates the directive.
+            lines.append(
+                "grep -q '^AllowTcpForwarding' /etc/ssh/sshd_config 2>/dev/null || "
+                "echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config"
+            )
     lines += [
         "cat >> /etc/rc.local.d/local.sh <<'RCEOF'",
         "if [ ! -f /etc/vmware/.trfollowhwmac ]; then",

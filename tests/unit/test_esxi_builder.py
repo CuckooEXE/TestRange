@@ -210,6 +210,32 @@ class TestKickstart:
         assert "vim-cmd hostsvc/enable_ssh" in ks
         assert "--ruleset-id sshServer" in ks
 
+    def test_allow_tcp_forwarding_appends_sshd_config_when_requested(self) -> None:
+        # ESXI-22: the guest_gateway SSH-jumps to guests over a direct-tcpip
+        # channel, which ESXi's sshd refuses unless AllowTcpForwarding is on. When
+        # requested (and SSH is the transport) %firstboot appends the directive
+        # idempotently to /etc/ssh/sshd_config (persisted by the MAC block's
+        # auto-backup.sh).
+        ks = _builder(allow_tcp_forwarding=True)._render_kickstart()
+        assert "AllowTcpForwarding yes" in ks
+        assert "/etc/ssh/sshd_config" in ks
+        assert "grep -q" in ks  # idempotent: append only if not already present
+
+    def test_no_tcp_forwarding_by_default(self) -> None:
+        # Opt-in (minimal/secure default): the default builder does not widen sshd.
+        assert "AllowTcpForwarding" not in _builder()._render_kickstart()
+
+    def test_tcp_forwarding_inert_without_ssh_transport(self) -> None:
+        # The directive only makes sense when SSH is the transport; enable_ssh=False
+        # bakes no sshd, so the flag is a no-op (no sshd_config touch).
+        b = ESXiKickstartBuilder(
+            installer_iso=CacheEntry("x"),
+            credentials=[PosixCred("root", password="VMware1!")],
+            enable_ssh=False,
+            allow_tcp_forwarding=True,
+        )
+        assert "AllowTcpForwarding" not in b._render_kickstart()
+
     def test_heredoc_terminators_and_key_at_column_zero(self) -> None:
         # busybox only closes a plain `cat <<'EOF'` heredoc on a line that is
         # *exactly* the terminator (no leading whitespace). An indented %firstboot
@@ -354,6 +380,15 @@ class TestConfigHash:
         spec = _spec()
         on = _config_hash(_builder(enable_ssh=True), spec, base_sha="a")
         off = _config_hash(_builder(enable_ssh=False), spec, base_sha="a")
+        assert on != off
+
+    def test_sensitive_to_allow_tcp_forwarding(self) -> None:
+        # ESXI-22: the flag changes the baked sshd_config, so it MUST key a
+        # different disk (folded via the rendered-kickstart digest) — else a
+        # jump-host plan could cache-hit a disk whose sshd refuses forwarding.
+        spec = _spec()
+        on = _config_hash(_builder(allow_tcp_forwarding=True), spec, base_sha="a")
+        off = _config_hash(_builder(allow_tcp_forwarding=False), spec, base_sha="a")
         assert on != off
 
     def test_sensitive_to_kickstart_template(self, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -227,6 +227,18 @@ class TestEsxiInner:
         assert "vim-cmd hostsvc/enable_ssh" in ks
         assert "/etc/ssh/keys-root/authorized_keys" in ks
 
+    def test_allow_tcp_forwarding_threads_to_builder(self) -> None:
+        # ESXI-22: the front door forwards the jump-host knob so reaching inner
+        # SSHCommunicator guests through the nested host's guest_gateway works.
+        guest = GuestHypervisor.esxi(
+            spec=_esxi_guest().spec,
+            root=PosixCred("root", password="VMware1!", ssh_key=_ESXI_KEY),
+            installer_iso=CacheEntry("esxi-installer"),
+            allow_tcp_forwarding=True,
+        )
+        assert isinstance(guest.builder, ESXiKickstartBuilder)
+        assert "AllowTcpForwarding yes" in guest.builder.build_kickstart()
+
     def test_non_ssh_communicator_leaves_no_open_sshd(self) -> None:
         # ESXI-19: a non-SSH transport -> the builder gets enable_ssh=False, so the
         # image carries no baked key and no sshd enable, but still the MAC fix.

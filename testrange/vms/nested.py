@@ -139,6 +139,7 @@ class GuestHypervisor(VMRecipe):
         installer_iso: CacheEntry,
         license: str | None = None,
         communicator: Communicator | None = None,
+        allow_tcp_forwarding: bool = False,
         networks: Sequence[Switch] = (),
         pools: Sequence[StoragePool] = (),
         vms: Sequence[VMRecipe] = (),
@@ -158,9 +159,12 @@ class GuestHypervisor(VMRecipe):
         ``SSHCommunicator(root.username)``); it is also what decides whether the
         builder provisions sshd — the builder gets ``enable_ssh`` set from whether
         this is an :class:`~testrange.communicators.SSHCommunicator`, so a non-SSH
-        transport leaves no open sshd on the image (ESXI-19). ``networks`` /
-        ``pools`` / ``vms`` / ``build_switch`` are the *inner* (L1) topology run
-        against the nested ESXi.
+        transport leaves no open sshd on the image (ESXI-19). ``allow_tcp_forwarding``
+        bakes ``AllowTcpForwarding yes`` into the host's sshd so its ``guest_gateway``
+        can SSH-jump to inner guests reached over SSH (ESXI-22); leave it ``False``
+        when the inner VMs are reached over VMware Tools. ``networks`` / ``pools`` /
+        ``vms`` / ``build_switch`` are the *inner* (L1) topology run against the
+        nested ESXi.
 
         The guest ``spec`` must declare ESXi-compatible hardware — a
         :class:`~testrange.devices.disk.libvirt.LibvirtOSDrive` on ``sata``/``ide``
@@ -183,6 +187,9 @@ class GuestHypervisor(VMRecipe):
             # the builder never sees a Communicator (Builder ABC); the SSH-enable
             # decision is brokered here, where the transport is chosen (ESXI-19).
             enable_ssh=isinstance(communicator, SSHCommunicator),
+            # Forward the jump-host knob: reaching inner SSHCommunicator guests
+            # runs through this host's guest_gateway, which needs it (ESXI-22).
+            allow_tcp_forwarding=allow_tcp_forwarding,
         )
         inner = ESXiHypervisor(networks=networks, pools=pools, vms=vms, build_switch=build_switch)
         return cls(spec=spec, builder=builder, communicator=communicator, inner=inner)

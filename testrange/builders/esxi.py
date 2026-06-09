@@ -85,6 +85,9 @@ class ESXiKickstartBuilder(Builder):
         stays off, even if the root credential carries a key. Independent of this,
         the vmk0 MAC-follow fix (ESXI-18) is always provisioned — it is a property
         of the image, not of how the host is reached.
+      allow_tcp_forwarding: bake ``AllowTcpForwarding yes`` into the installed
+        node's sshd so the ESXi ``guest_gateway`` can SSH-jump to its guests — set
+        it for SSH jump-host testing. Requires ``enable_ssh``; default ``False``.
     """
 
     def __init__(
@@ -94,11 +97,13 @@ class ESXiKickstartBuilder(Builder):
         credentials: Sequence[Credential] = (),
         license: str | None = None,
         enable_ssh: bool = True,
+        allow_tcp_forwarding: bool = False,
     ) -> None:
         self.installer_iso = installer_iso
         self._credentials = self._validate_credentials(credentials)
         self._license = self._validate_license(license)
         self._enable_ssh = enable_ssh
+        self._allow_tcp_forwarding = allow_tcp_forwarding
         # SSH is ESXi's ONLY run-phase channel — there is no host guest-agent
         # (VMware Tools runs in the guests, not the hypervisor), so the node is
         # reached over the root SSH login the kickstart provisions. When SSH is
@@ -279,9 +284,16 @@ class ESXiKickstartBuilder(Builder):
         root = self._root_credential()
         assert root.password is not None  # construction guarantees a non-empty root password
         # Bake the key + enable sshd only when SSH is the transport (ESXI-19); the
-        # MAC-follow fix is rendered unconditionally by render_kickstart.
+        # MAC-follow fix is rendered unconditionally by render_kickstart. The
+        # AllowTcpForwarding edit is itself key-gated in _firstboot, so a
+        # non-SSH transport (ssh_key=None) leaves it inert.
         ssh_key = root.ssh_key.auth_line if (self._enable_ssh and root.ssh_key) else None
-        return render_kickstart(root_password=root.password, ssh_key=ssh_key, license=self._license)
+        return render_kickstart(
+            root_password=root.password,
+            ssh_key=ssh_key,
+            license=self._license,
+            allow_tcp_forwarding=self._allow_tcp_forwarding,
+        )
 
     def _root_credential(self) -> PosixCred:
         for c in self._credentials:
