@@ -86,6 +86,89 @@ def test_none_build_switch_skips_pnic_check() -> None:
     assert bool(report), report.render()
 
 
+def test_uplink_without_nat_skips_pnic_check() -> None:
+    # ESXI-21: a switch declaring an uplink but no NAT sidecar never enslaves a
+    # pNIC at runtime (`_net.create_switch` only enslaves when `uplink and
+    # sidecar.nat`), so its uplink must not demand a free pNIC at preflight — a
+    # plan whose VMs need no egress at all must pass even on a host with no spare
+    # NIC. The uplink name is still *mapped* (so `named-uplink-resolution` stays
+    # quiet); only the live pNIC requirement is conditional on NAT.
+    d = _driver(pnics=["vmnic0"], uplinks={"egress": "vmnic9"})
+    no_nat_build = Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True),  # nat defaults False
+    )
+    report = d.preflight(_plan(), cache_manager=None, build_switch=no_nat_build)  # type: ignore[arg-type]
+    assert "esxi-uplink-pnic-missing" not in {f.code for f in report.findings}
+
+
+def test_uplink_with_nat_still_requires_pnic() -> None:
+    # The other half of ESXI-21: a NAT switch DOES enslave the pNIC, so a missing
+    # one is still flagged — the check is narrowed, not removed.
+    d = _driver(pnics=["vmnic0"], uplinks={"egress": "vmnic9"})
+    nat_build = Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+    report = d.preflight(_plan(), cache_manager=None, build_switch=nat_build)  # type: ignore[arg-type]
+    assert "esxi-uplink-pnic-missing" in {f.code for f in report.findings}
+
+
+def _two_uplink_plan() -> Plan:
+    # One NAT switch and one non-NAT switch, each on a distinct mapped uplink, in
+    # the same run-phase topology.
+    return Plan(
+        "p",
+        MockHypervisor(
+            networks=[
+                Switch(
+                    "natsw",
+                    Network("nat-net"),
+                    cidr="10.51.0.0/24",
+                    uplink="natlink",
+                    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+                ),
+                Switch(
+                    "plainsw",
+                    Network("plain-net"),
+                    cidr="10.52.0.0/24",
+                    uplink="plainlink",
+                    sidecar=Sidecar(dhcp=True, dns=True),
+                ),
+            ],
+            pools=[StoragePool("pool1", 8)],
+            vms=[
+                VMRecipe(
+                    spec=VMSpec(
+                        name="vm",
+                        firmware="bios",
+                        devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
+                    ),
+                    builder=_InstallerBuilder(),
+                    communicator=SSHCommunicator("u"),
+                )
+            ],
+        ),
+    )
+
+
+def test_mixed_nat_and_non_nat_uplinks_flag_only_nat() -> None:
+    # ESXI-21: a NAT switch and a non-NAT switch, each on a distinct uplink that
+    # maps to a MISSING pNIC, coexisting in one report. Only the NAT switch enslaves
+    # a pNIC at runtime, so only its uplink is flagged; the non-NAT one is exempt.
+    d = _driver(pnics=["vmnic0"], uplinks={"natlink": "vmnic8", "plainlink": "vmnic9"})
+    report = d.preflight(_two_uplink_plan(), cache_manager=None, build_switch=None)  # type: ignore[arg-type]
+    pnic = [f for f in report.findings if f.code == "esxi-uplink-pnic-missing"]
+    assert len(pnic) == 1, [f.message for f in pnic]
+    assert "natlink" in pnic[0].message and "vmnic8" in pnic[0].message
+
+
 class _CapCpuInfo:
     numCpuThreads = 16
 

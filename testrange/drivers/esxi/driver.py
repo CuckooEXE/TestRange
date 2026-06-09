@@ -245,11 +245,25 @@ class ESXiDriver(HypervisorDriver):
         return HostCapacity(memory_mb=memory_mb, logical_cpus=logical_cpus)
 
     def _uplink_pnic_findings(self, switches: list[Switch]) -> tuple[PreflightFinding, ...]:
-        """Each mapped uplink must resolve to a physical NIC present on the host."""
+        """Each *NAT-egress* uplink must resolve to a physical NIC on the host.
+
+        Only switches that actually request NAT egress enslave a pNIC — at
+        runtime ``_net.create_switch`` enslaves the mapped vmnic onto the uplink
+        vSwitch *only* when ``uplink and sidecar and sidecar.nat`` (ESXI-21). A
+        switch declaring an uplink without a NAT sidecar (or a plan whose VMs
+        need no egress at all) touches no pNIC, so requiring a free NIC for it
+        would fail preflight on a host that needs none. The uplink *name* is
+        still validated for every switch by ``named-uplink-resolution`` (an
+        unmapped name is always a user error); this check is the live-host half
+        and is conditional on NAT.
+        """
         wanted = {
             (sw.uplink, self._uplinks[sw.uplink])
             for sw in switches
-            if sw.uplink and sw.uplink in self._uplinks
+            if sw.uplink
+            and sw.uplink in self._uplinks
+            and sw.sidecar is not None
+            and sw.sidecar.nat
         }
         if not wanted:
             return ()
