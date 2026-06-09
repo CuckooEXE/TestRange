@@ -31,7 +31,12 @@ from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.base import BuildNic
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.backend import ResolvedBackend
-from testrange.orchestrator.build_phase import _VMBuildPlan, build_phase
+from testrange.orchestrator.build_phase import (
+    _decode_b64_tolerant,
+    _fallback_log,
+    _VMBuildPlan,
+    build_phase,
+)
 from testrange.orchestrator.context import RunContext
 from testrange.orchestrator.run_phase import run_phase
 from testrange.state.store import StateStore, new_run_id, run_dir_for
@@ -570,6 +575,87 @@ class TestBuildResultSignaling:
         assert "E: package broken" in rendered
         assert "\x1b" not in rendered and "\r" not in rendered
         assert ei.value.log == log  # raw bytes preserved on the attribute
+
+    def test_fail_log_with_console_noise_is_decoded_not_dumped(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        # BUILD-23: the failure log rides the guest's *shared* serial, so kernel
+        # chatter can interleave into the base64 block. A strict decode raises and
+        # the old fallback dumped the raw base64 to the console. The decode must
+        # tolerate the noise and surface readable log text, never the blob.
+        cache, driver = env
+        log = b"E: Unable to fetch http://deb.debian.org/ Connection timed out\n"
+        b64 = base64.b64encode(log)
+        mid = len(b64) // 2
+        noisy = b64[:mid] + b"\n[   12.34] random: crng init done\n" + b64[mid:]
+        driver.build_result_stream = [
+            b'TESTRANGE-RESULT: fail rc=100 cmd="apt-get update"\n'
+            b"TESTRANGE-LOG-BEGIN\n" + noisy + b"\nTESTRANGE-LOG-END\n"
+        ]
+        with pytest.raises(BuildFailedError) as ei:
+            build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        rendered = str(ei.value)
+        assert "Unable to fetch" in rendered  # decoded text (the clean prefix) surfaced
+        assert b64[:mid].decode() not in rendered  # the raw base64 is NOT dumped
+
+    def test_power_off_after_partial_log_frame_decodes(
+        self, env: tuple[CacheManager, MockDriver]
+    ) -> None:
+        # BUILD-23: the guest emitted a LOG-BEGIN block then died (poweroff -f)
+        # before the closing LOG-END and without a parseable RESULT line. The
+        # no-result fallback must decode the partial block, not dump raw base64.
+        cache, driver = env
+        log = b"cloud-init bombed: KeyError 'runcmd'\n"
+        driver.build_result_stream = [
+            b"[ booting ]\nTESTRANGE-LOG-BEGIN\n" + base64.b64encode(log) + b"\n"
+        ]
+        with pytest.raises(BuildFailedError, match="without reporting a build result") as ei:
+            build_phase(_ctx(_plan(data_disks=0), driver, cache))
+        assert "cloud-init bombed" in str(ei.value)
+
+
+class TestSerialLogDecode:
+    """BUILD-23: the serial log block decodes to readable text, never a blob."""
+
+    def test_clean_block_is_exact(self) -> None:
+        log = b"the quick brown fox\n"  # len not a multiple of 3 -> base64 padding
+        assert _decode_b64_tolerant(base64.b64encode(log)) == log
+
+    def test_crlf_wrapping_is_stripped(self) -> None:
+        # coreutils `base64` line-wraps at 76 cols, and the serial adds CR.
+        log = b"x" * 200
+        wrapped = b"\r\n".join(base64.b64encode(log)[i : i + 76] for i in range(0, 272, 76))
+        assert _decode_b64_tolerant(wrapped) == log
+
+    def test_truncated_block_recovers_a_prefix(self) -> None:
+        # Distinct bytes + a non-quantum (rem==2) cut: startswith only holds if the
+        # surviving prefix is byte-aligned, so this catches an alignment regression
+        # that an all-identical payload would hide.
+        log = bytes(range(60)) * 2
+        truncated = base64.b64encode(log)[:62]  # poweroff -f cut it mid-quantum
+        decoded = _decode_b64_tolerant(truncated)
+        assert decoded and log.startswith(decoded)  # clean aligned prefix; no raise, no blob
+
+    def test_lone_trailing_char_is_dropped(self) -> None:
+        # A compacted length of 1 mod 4 cannot form a base64 quantum; the lone
+        # trailing char must be DROPPED (re-padding it would make b64decode raise).
+        log = bytes(range(45))  # 45 % 3 == 0 -> 60 base64 chars, no padding
+        decoded = _decode_b64_tolerant(base64.b64encode(log) + b"Q")  # +1 char => rem==1
+        assert decoded == log  # the stray char is dropped, the clean block recovered
+
+    def test_empty_is_empty(self) -> None:
+        assert _decode_b64_tolerant(b"") == b""
+        assert _decode_b64_tolerant(b"\r\n  \r\n") == b""
+
+    def test_fallback_decodes_unclosed_frame(self) -> None:
+        log = b"provisioning died here\n"
+        buf = b"boot chatter\nTESTRANGE-LOG-BEGIN\n" + base64.b64encode(log) + b"\n"
+        assert _fallback_log(buf) == log
+
+    def test_fallback_without_frame_returns_bounded_raw_tail(self) -> None:
+        buf = b"Z" * 9000  # no framing at all
+        tail = _fallback_log(buf)
+        assert tail == buf[-4096:] and len(tail) == 4096
 
 
 def _nested_plan() -> Plan:

@@ -750,11 +750,49 @@ def parse_build_result(data: bytes, *, final: bool = False) -> BuildResult | Non
     return None
 
 
+# The RFC 4648 base64 alphabet (no padding) — used to salvage a log block that
+# shared the guest's serial console with kernel/boot chatter.
+_B64_ALPHABET = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+# How much raw serial tail to surface when a build dies without any framed
+# result at all — a bounded window so a runaway console can't flood the error.
+_FALLBACK_TAIL_BYTES = 4096
+
+
+def _decode_b64_tolerant(raw: bytes) -> bytes:
+    """Base64-decode a serial-carried log block, tolerating interleaved noise.
+
+    The failure log rides the guest's *shared* serial console: kernel/boot
+    chatter can land mid-block and ``poweroff -f`` can sever it mid-quantum. A
+    strict ``b64decode`` raises on either, and the old fallback then dumped the
+    raw base64 to the operator's console — the blob this fixes (BUILD-23). Keep
+    only base64-alphabet bytes (dropping CR/LF wrapping, ``=`` padding, and any
+    interleaved log lines), re-pad to a 4-byte boundary, and decode, so the
+    operator always gets readable log text rather than a base64 blob. A block
+    with interleaved chatter decodes lossily (garbage past the intrusion), but
+    the common case — clean tail, only line-wrapping/truncation — is exact.
+    """
+    compact = bytes(b for b in raw if b in _B64_ALPHABET)
+    rem = len(compact) % 4
+    if rem == 1:
+        compact = compact[:-1]  # a lone trailing char can't form a quantum
+    elif rem:
+        compact += b"=" * (4 - rem)
+    if not compact:
+        return b""
+    try:
+        return base64.b64decode(compact)
+    except (binascii.Error, ValueError):  # pragma: no cover - alphabet+repad keeps this unreachable
+        return b""
+
+
 def _extract_log(segment: bytes) -> tuple[bytes, bool]:
     """Decode the framed ``TESTRANGE-LOG-BEGIN``/``END`` base64 block.
 
-    Returns ``(decoded_bytes, complete)``. ``complete`` is ``False`` until
-    both markers are present so the caller can wait for the rest.
+    Returns ``(decoded_bytes, complete)``. ``complete`` is ``False`` until both
+    markers are present so the caller can wait for the rest. The decode is
+    tolerant (:func:`_decode_b64_tolerant`) so a block corrupted by chatter on
+    the shared serial yields readable text, never a raw base64 blob (BUILD-23).
     """
     begin = segment.find(_LOG_BEGIN)
     if begin == -1:
@@ -765,11 +803,28 @@ def _extract_log(segment: bytes) -> tuple[bytes, bool]:
     end = segment.find(_LOG_END, content_start)
     if end == -1:
         return b"", False
-    raw = segment[content_start + 1 : end]
-    try:
-        return base64.b64decode(b"".join(raw.split())), True
-    except (binascii.Error, ValueError):
-        return raw.strip(), True  # not valid base64 — hand back the raw tail
+    return _decode_b64_tolerant(segment[content_start + 1 : end]), True
+
+
+def _fallback_log(buffer: bytes) -> bytes:
+    """Best-effort readable log when the guest died without a framed result.
+
+    If a ``TESTRANGE-LOG-BEGIN`` block reached the wire — even without its
+    closing ``…-END`` (a ``poweroff -f`` mid-block) — decode it so the operator
+    sees log text, not a base64 blob (BUILD-23). Otherwise hand back a bounded
+    raw tail of the console.
+    """
+    begin = buffer.find(_LOG_BEGIN)
+    if begin != -1:
+        content_start = buffer.find(b"\n", begin)
+        if content_start != -1:
+            end = buffer.find(_LOG_END, content_start)
+            decoded = _decode_b64_tolerant(
+                buffer[content_start + 1 : end if end != -1 else len(buffer)]
+            )
+            if decoded:
+                return decoded
+    return buffer[-_FALLBACK_TAIL_BYTES:]
 
 
 class _ConsoleStreamer:
@@ -875,7 +930,7 @@ def wait_for_build_result(
         vm_name,
         rc=final.rc if final else None,
         cmd=final.cmd if final else None,
-        log=final.log if final else bytes(buffer[-4096:]),
+        log=final.log if final else _fallback_log(bytes(buffer)),
         detail=None if final else "powered off without reporting a build result",
     )
 
