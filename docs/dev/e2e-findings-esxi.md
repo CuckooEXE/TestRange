@@ -93,3 +93,54 @@ against the leaked node (10.50.0.85, datastore1).
   (`…/plugins/common/libvix.so`), so the plan now installs just `open-vm-tools`.
   The plan was authored for the (shelved) ESXi cert and never run live, so the
   bad name was latent. (`tests/plans/esxi/devices.py`)
+- **NOTED — `tools/build-sidecar-image/build.sh` lists the same dead package.**
+  The Alpine sidecar image's `apk add` list includes `open-vm-tools-plugins-all`,
+  which also does not exist in Alpine (the real packages are `open-vm-tools` +
+  `open-vm-tools-guestinfo`). The *cached* sidecar image works (it predates the
+  bad line or apk tolerated it), so a fresh `build.sh` run is needed to confirm —
+  left as a fix-when-rebuilding note rather than a blind, unverifiable change.
+
+## The remaining blocker — nested-ESXi environmental limitation (M4)
+
+The `esxi/devices.py` cert cannot reach its test assertions on a **nested** ESXi
+node because the on-node Debian build never gets network. Root-caused
+exhaustively (the chain of red herrings is itself the finding):
+
+1. apt fails with `Temporary failure resolving 'deb.debian.org'` — looks like DNS.
+2. The build **sidecar** resolves `deb.debian.org` perfectly (verified via
+   guest-ops: `127.0.0.1`, its own eth0 `10.97.99.1`, and the upstream chain all
+   answer; NAT masquerade + the L0 egress chain all work). So egress is **not**
+   the problem.
+3. The build **VM** has only `lo` — `ip addr` shows no `ens160` address,
+   `ping 10.97.99.1` is "Network is unreachable". So it is not DNS, it is **no
+   network at all**.
+4. `networkd` *matched* `ens160` (correct MAC, DNS `10.97.99.1` configured) but
+   the link never activated (`Current Scopes: none`, no carrier).
+5. pyVmomi shows the build VM's **virtual NIC is `connected=False,
+   status=unrecoverableError`** — ESXi could not connect it.
+6. It is **not** a MAC duplicate (all MACs distinct) and **not** the NIC model
+   (vmxnet3 *and* e1000e both fail). The discriminator: every NIC on an
+   **uplink-less standard vSwitch** (`trs-*`, the isolated guest/build segment,
+   `uplinks=NONE`) gets `unrecoverableError`, while NICs on an **uplinked**
+   vSwitch (`tru-*`, enslaving `vmnic1`) connect `status=ok`.
+
+**Conclusion: on ESXi-nested-on-libvirt, a VM NIC cannot connect to a standard
+vSwitch that has no physical uplink.** TestRange's `_net` realizes each isolated
+guest segment as exactly such an uplink-less vSwitch (the per-Switch sidecar
+bridges it to the real uplink via NAT — ADR-0013/0025), so the build VM's NIC on
+that segment never comes up and the on-node build has no network.
+
+This is a property of the nested environment, **not** a TestRange code defect —
+on real ESXi hardware an uplink-less vSwitch is a standard, working internal-only
+switch. It is exactly the "ESXi-as-a-guest build phase is finicky" reason ESXI-16
+was shelved and why the ESXi backend is certified on a **raw ESXi host** (REL-11),
+not nested. A nested-only workaround (a dead-end dummy uplink per isolated
+vSwitch, needing an extra vmnic) would pollute the driver for real hosts and is
+out of scope.
+
+**What WAS proven live on the nested node** (everything up to that NIC connect):
+pyVmomi control plane, preflight, vSwitch + uplink-vSwitch (`vmnic1`) + portgroup
+creation, datastore pool, qcow2→vmdk conversion + datastore upload, VM +
+sidecar `CreateVM_Task`, the datastore-file serial sink, the build sidecar's full
+DHCP/DNS/NAT stack, and guest-ops to the sidecar. The ESXi *driver* pipeline is
+sound; only the nested vSwitch L2 falls short.

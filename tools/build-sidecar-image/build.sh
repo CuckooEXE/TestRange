@@ -33,7 +33,11 @@ ALPINE_BRANCH="v3.21"
 # native channel on ESXi (VMware Tools guest-ops). Both ship so one sidecar image
 # is portable across backends — each backend uses its own and the other's service
 # is condition-skipped where its transport is absent (ESXI-12).
-PACKAGES="dnsmasq nftables qemu-guest-agent open-vm-tools open-vm-tools-plugins-all openrc blkid"
+# open-vm-tools is the base (ships the guest-ops vix plugin); open-vm-tools-guestinfo
+# adds IP/hostname reporting. (Alpine has NO `open-vm-tools-plugins-all` — that name
+# fails `apk add` with "unable to select packages"; ESXI-20. Verify on the next
+# `sudo tools/build-sidecar-image/build.sh`.)
+PACKAGES="dnsmasq nftables qemu-guest-agent open-vm-tools open-vm-tools-guestinfo openrc blkid"
 # Guest login VMware Tools guest-ops authenticate as on ESXi (CORE-60). QGA
 # backends never use it. Kept in sync with networks._addressing_consts.SIDECAR_CRED.
 SIDECAR_ROOT_PW="testrange-sidecar"

@@ -70,6 +70,18 @@ on 2026-06-06.
   >     pinned MAC; the flag only affects vmk creation). ESXI-18 updated.
   >     Sidestepped for the cert (reach the node by its DHCP IP over pyVmomi;
   >     enable sshd host-side). Node spun up + leaked via the diag bring-up.
+  > - M4 (cert) ran `tests/plans/esxi/devices.py` against the leaked node. The
+  >   ESXi DRIVER pipeline is proven live end to end EXCEPT the final L2 hop:
+  >   pyVmomi, preflight, vSwitch+uplink(vmnic1)+portgroup, datastore pool,
+  >   qcow2→vmdk + datastore upload, VM/sidecar CreateVM, serial sink, the
+  >   sidecar's DHCP/DNS/NAT, guest-ops — all green. Fixed: the dead package name
+  >   and the stale-serial0.log replay (both bugs surfaced here). BLOCKED by a
+  >   nested-ESXi environmental limit: a VM NIC cannot connect to an UPLINK-LESS
+  >   vSwitch (status=unrecoverableError) on ESXi-on-libvirt, and `_net` realizes
+  >   every isolated guest segment as exactly that — so the on-node build VM gets
+  >   no network. NOT a code defect (works on real ESXi); this is the documented
+  >   ESXI-16 "nested build phase is finicky" reason ESXi certifies on a RAW host
+  >   (REL-11), not nested. Full chain in `docs/dev/e2e-findings-esxi.md`.
 
 ### ORCH
 
@@ -154,6 +166,18 @@ on 2026-06-06.
 
 - [ ] **ESXI-16** · `test` — examples/capabilities-nested-esxi.py portable nested-ESXi plan + TESTS + live cert
 
+  > **ESXI-20 (2026-06-09) sharpened the nested blocker.** Beyond ESXI-18 (vmk0
+  > MAC, also live-disproven there), the deeper wall is an L2 one: on
+  > ESXi-nested-on-libvirt a VM NIC cannot connect to an UPLINK-LESS standard
+  > vSwitch (`status=unrecoverableError`). `_net` realizes every isolated guest
+  > segment as exactly such a vSwitch (the sidecar bridges it to the real uplink
+  > via NAT), so a build/run VM on that segment never gets carrier and the on-node
+  > build has no network. This is environmental (uplink-less vSwitches work on real
+  > ESXi), and is the concrete reason the nested cert can't go green — vindicating
+  > certifying ESXi on a RAW host (REL-11). Full root-cause chain:
+  > `docs/dev/e2e-findings-esxi.md`. A nested-only fix (dummy dead-end uplink per
+  > isolated vSwitch + an extra vmnic) was scoped but rejected as driver pollution.
+  >
   > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** Build phase is
   > certified end-to-end on libvirt L0; the run-phase nested cert is blocked only by
   > ESXI-18 (vmk0 keeps the build-NIC MAC), whose fix is known but parked. The ESXi
