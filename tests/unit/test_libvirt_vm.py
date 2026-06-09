@@ -270,6 +270,30 @@ class TestLibvirtDeviceVariants:
         assert "<target dev='hda' bus='ide'/>" in xml  # ide OS disk
         assert "dev='hdb' bus='ide'" in xml  # installer CDROM, next hd slot
 
+    def test_uefi_os_uses_q35_efi_with_secure_boot_disabled(self) -> None:
+        # A UEFI VM boots a captured installer-built disk with fresh per-domain
+        # EFI vars via the removable-media fallback, which can't use Secure Boot.
+        # The <os> must select firmware='efi' on q35 with secure-boot explicitly
+        # off, else OVMF rejects the fallback ("prohibited by secure boot policy")
+        # and the run boot never comes up (PVE-57).
+        spec = VMSpec(
+            name="pve",
+            firmware="uefi",
+            devices=[CPU(2), Memory(2048), OSDrive("pool1", 16)],
+        )
+        xml = _vm._domain_xml(
+            "tr-vm-x-pve",
+            spec,
+            os_path="/p/os.qcow2",
+            data_paths=[],
+            seed_path=None,
+            nics=[],
+            serial_sock=None,
+        )
+        assert "<os firmware='efi'>" in xml
+        assert "machine='q35'" in xml
+        assert "<firmware><feature enabled='no' name='secure-boot'/></firmware>" in xml
+
     def test_libvirt_data_drive_bus_honored(self) -> None:
         spec = VMSpec(
             name="vm",

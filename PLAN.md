@@ -1145,6 +1145,17 @@ end of this file under **Status snapshots**; current state is `TODO.md` + git.
 
 ### Proxmox backend (certified)
 
+**Re-certified live end-to-end 2026-06-09 (PVE-57/58).** The Proxmox *builder*
+(`ProxmoxAnswerBuilder`) and *driver* were proven together against a real PVE
+9.2.2 node stood up by `examples/pve_node.py` (installer-origin on `libvirt-local`,
+UEFI/q35, leaked) and certified by the full `tests/plans/{generic,proxmox}` corpus
+(**33/33 green**). Two driver bugs the cert surfaced are fixed: QGA file-read/exec
+decoded binary content as utf-8 (doubling 0x80-0xFF bytes) → latin-1 recovery; and
+memory-snapshot rollback/delete raced PVE's per-VM config flock → retry the
+transient lock. A libvirt-driver fix was also needed (UEFI domains selected a
+Secure-Boot OVMF that rejected the captured installer disk's removable-media
+bootloader → SB now disabled). Findings: `docs/dev/e2e-findings-proxmox.md`.
+
 **Certified 2026-06-01 (PVE-CERT).** The Proxmox driver runs full-green against a
 live single-node PVE host, bound through a connect.toml `proxmox` profile. The
 certification of record is the `tests/plans/` corpus (`tests/plans/proxmox/` plus

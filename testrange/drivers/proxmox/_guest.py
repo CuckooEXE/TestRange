@@ -60,7 +60,12 @@ def _to_bytes(value: Any) -> bytes:
         return b""
     if isinstance(value, bytes):
         return value
-    return str(value).encode("utf-8", "surrogateescape")
+    # QGA payloads (exec out/err-data, file-read content) arrive as latin-1
+    # strings — PVE base64-decodes the guest bytes and the JSON transport surfaces
+    # each raw byte 0x00-0xFF as one U+0000..U+00FF codepoint — so recover the
+    # exact bytes with a latin-1 encode. A utf-8 encode doubled every 0x80-0xFF
+    # byte (PVE-58 cert: a 256 KiB binary file-read came back 393216 bytes).
+    return str(value).encode("latin-1", "surrogateescape")
 
 
 def _run_exec(
@@ -114,6 +119,13 @@ def make_read_file(client: ProxmoxClient, backend_name: str) -> GuestReadFile:
                 result = agent("file-read").get(file=path)
         except Exception as e:
             raise GuestAgentError(f"QGA file-read {path!r} failed on {backend_name!r}: {e}") from e
+        if result.get("truncated"):
+            # PVE's agent/file-read caps a single read (~16 MiB). Returning the
+            # head silently would corrupt a large readback, so fail loud.
+            raise GuestAgentError(
+                f"QGA file-read {path!r} on {backend_name!r} was truncated "
+                "(file exceeds PVE's single-read cap)"
+            )
         return _to_bytes(result.get("content"))
 
     return _read_file

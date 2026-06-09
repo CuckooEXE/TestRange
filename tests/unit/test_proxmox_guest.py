@@ -37,6 +37,7 @@ class _FakeApi:
     def __init__(self) -> None:
         self.exec_status: dict[str, Any] = {"exited": 1, "exitcode": 0, "out-data": "hi\n"}
         self.file_content = "lease-data"
+        self.file_truncated = 0
         self.written: dict[str, Any] = {}
         self.writes: list[dict[str, Any]] = []
         self.exec_raises = False
@@ -64,7 +65,7 @@ class _FakeApi:
         if path.endswith("/agent/exec-status") and method == "get":
             return self._exec_by_pid.get(kwargs["pid"], self.exec_status)
         if path.endswith("/agent/file-read") and method == "get":
-            return {"content": self.file_content, "truncated": 0}
+            return {"content": self.file_content, "truncated": self.file_truncated}
         if path.endswith("/agent/file-write") and method == "post":
             self.written = kwargs
             self.writes.append(kwargs)
@@ -134,6 +135,23 @@ class TestFiles:
         c = _client()
         c.api.file_content = "100 02:aa ip host *"
         assert _guest.make_read_file(c, "tr-vm-x-web")("/leases") == b"100 02:aa ip host *"
+
+    def test_read_file_recovers_binary_bytes(self) -> None:
+        # PVE's agent/file-read surfaces the file's raw bytes as a latin-1 string
+        # (each byte 0x00-0xFF -> one U+0000..U+00FF codepoint). The read must
+        # recover the exact bytes; a utf-8 decode doubled every 0x80-0xFF byte
+        # (PVE-58 cert: a 256 KiB binary read came back 393216 bytes).
+        c = _client()
+        blob = bytes(range(256))  # every value, incl. invalid-utf-8 high bytes
+        c.api.file_content = blob.decode("latin-1")  # how PVE hands binary back
+        assert _guest.make_read_file(c, "tr-vm-x-web")("/bin") == blob
+
+    def test_read_file_truncated_raises(self) -> None:
+        # A read PVE flags as truncated must fail loud, not silently return a head.
+        c = _client()
+        c.api.file_truncated = 1
+        with pytest.raises(GuestAgentError, match="truncated"):
+            _guest.make_read_file(c, "tr-vm-x-web")("/huge")
 
     def test_write_file_is_binary_safe_base64(self) -> None:
         c = _client()

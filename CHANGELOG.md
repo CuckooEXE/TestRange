@@ -9,6 +9,12 @@ This project predates 1.0; expect breaking changes between minor versions.
 
 ### Added
 
+- ``examples/pve_node.py`` — stands up a Proxmox VE node as a libvirt guest
+  via ``ProxmoxAnswerBuilder`` (installer-origin, UEFI/q35) and ``leak()``s
+  it, the live-certification vehicle for the Proxmox builder *and* the host
+  the Proxmox driver is certified against. The driver is now certified live
+  end-to-end against such a node (``tests/plans/{generic,proxmox}`` green);
+  findings in ``docs/dev/e2e-findings-proxmox.md``.
 - ``testrange/guest_io.py`` — a neutral module of callable-shape
   ``Protocol``s (``GuestExec`` / ``GuestReadFile`` / ``GuestWriteFile``)
   plus a re-export of ``ExecResult``. These are exactly the shapes of
@@ -53,6 +59,29 @@ This project predates 1.0; expect breaking changes between minor versions.
 - **Removed ``Orchestrator(ready_timeout_s=...)``.** The readiness
   ``execute`` call now lives in the builder, which owns its own timeout
   inline — there is no framework-wide knob.
+
+### Fixed
+
+- **libvirt: UEFI domains no longer enable Secure Boot.** ``_os_xml`` now
+  emits ``<firmware><feature enabled='no' name='secure-boot'/></firmware>``
+  for ``firmware="uefi"`` VMs. A TestRange UEFI VM boots a *captured*
+  installer-built disk with *fresh* per-domain EFI vars via the
+  removable-media fallback (``\EFI\BOOT\BOOTX64.EFI``), which a Secure-Boot
+  OVMF rejects ("prohibited by secure boot policy") — so the run-phase boot
+  never came up. Signed images still boot. Surfaced certifying the Proxmox
+  builder (PVE-57).
+- **Proxmox: QGA file-read/exec no longer corrupt binary content.** PVE's
+  ``agent/file-read`` (and exec out/err-data) surface the guest's raw bytes
+  as a latin-1 string; the driver re-encoded that with utf-8, doubling every
+  ``0x80``–``0xFF`` byte (a 256 KiB binary read came back 393216 bytes). It now
+  recovers bytes with a latin-1 encode, and fails loud on a ``truncated``
+  ``file-read`` instead of silently returning a head (PVE-58).
+- **Proxmox: memory-snapshot rollback/delete retry the transient config
+  flock.** A ``mem=True`` snapshot rollback/delete holds
+  ``/var/lock/qemu-server/lock-<vmid>.conf`` past the API task (the QEMU
+  vmstate save/resume), so a follow-on op failed with ``can't lock file …
+  got timeout``. ``restore_snapshot``/``delete_snapshot`` now retry that
+  transient lock (same shape as the post-import resize retry) (PVE-58).
 
 ## [0.2.0] — 2026-05-14
 
