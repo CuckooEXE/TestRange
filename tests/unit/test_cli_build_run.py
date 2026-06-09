@@ -243,6 +243,41 @@ class TestDataDiskLifecycle:
         assert len(run_data_uploads) == 1
 
 
+class TestResultReporting:
+    """`[PASS]`/`[FAIL]` report lines are gated on the dashboard being inactive
+    (CORE-83): the live dashboard already shows pass/fail, so a redundant dump
+    below the final frame is suppressed when it was active — but failures (which
+    the tests panel renders without their error) still print."""
+
+    def test_no_dashboard_prints_pass_lines(
+        self, env: tuple[MockDriver, str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _driver, plan_path = env
+        # Non-tty under pytest capture, so the dashboard is inactive regardless;
+        # --no-dashboard makes the intent explicit. The PASS line is the output.
+        assert cli.main(["--no-dashboard", "run", plan_path]) == 0
+        assert "[PASS] test_ok" in capsys.readouterr().out
+
+    def test_active_dashboard_suppresses_pass_lines(
+        self,
+        env: tuple[MockDriver, str],
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import io
+
+        from rich.console import Console
+
+        _driver, plan_path = env
+        # Force the dashboard active by giving cli a tty- like stderr console.
+        term = Console(file=io.StringIO(), force_terminal=True)
+        monkeypatch.setattr(cli, "err_console", lambda: term)
+        assert cli.main(["run", plan_path]) == 0
+        # The passing test's report line is suppressed on stdout (the dashboard,
+        # on stderr, already showed it).
+        assert "[PASS]" not in capsys.readouterr().out
+
+
 class TestBuildParser:
     def test_build_requires_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit):

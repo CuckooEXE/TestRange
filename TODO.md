@@ -10,13 +10,17 @@ on 2026-06-06.
 
 > Migrated 294 tickets — Doing 13, Ready 26, Done 242, Archive 13.
 
-## Doing (15)
+## Doing (16)
 
 ### CORE
 
 - [ ] **CORE-41** · `chore` — per-driver preflight capability rejection (firmware/installer-origin)
 
   > Code-review remediation (feature/builders, 2026-06-01). The Builder ABC says the driver MUST reproduce firmware/installer-origin, but nothing rejects a plan requesting firmware=uefi or installer-origin against a backend that cannot honor it (drivers/base.py:317-324). Latent today (only libvirt ships it). Add a per-driver preflight finding for unsupported firmware/origin, mirroring mgmt_unsupported_findings. User: drivers should offer their own pre-flight that rejects findings like this.
+
+- [ ] **CORE-83** · `bugfix` — `run` dumps `[PASS]` report lines after the dashboard (ADR-0029)
+
+  > After the live dashboard exits, `_run` (cli.py:300-301) unconditionally prints `r.report_line()` for every result, so even with the dashboard active the terminal gets a redundant `[PASS] …` block below the final frame — the dashboard already showed pass/fail. Gate the dump on dashboard-inactive (`--no-dashboard` or non-TTY), where those stdout lines ARE the machine-readable output. Keep printing FAILED lines when active, since the tests panel shows only glyph+duration, not the error/traceback. Found 2026-06-08.
 
 ### ESXI
 

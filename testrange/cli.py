@@ -297,7 +297,14 @@ def _run(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         _err("interrupted; teardown attempted")
         return Exit.INTERRUPTED
+    # The live dashboard already showed each test's pass/fail; only dump the
+    # report lines when it wasn't active (--no-dashboard or non-TTY), where they
+    # ARE the machine-readable output. When it was active, still surface failures
+    # — the tests panel renders only glyph+duration, not the error/traceback.
+    dashboard_active = not args.no_dashboard and err_console().is_terminal
     for r in results:
+        if dashboard_active and r.passed:
+            continue
         _out(r.report_line())
     return Exit.OK if all(r.passed for r in results) else Exit.FAILURE
 
