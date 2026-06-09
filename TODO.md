@@ -10,7 +10,7 @@ on 2026-06-06.
 
 > Migrated 294 tickets — Doing 13, Ready 26, Done 242, Archive 13.
 
-## Doing (14)
+## Doing (13)
 
 ### CORE
 
@@ -505,7 +505,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (248)
+## Done (258)
 
 ### REL
 
@@ -520,6 +520,54 @@ on 2026-06-06.
   > DONE 2026-06-06. PLAN.md section "Bare-metal provisioning via out-of-band controller (ADR-0027)" + ADR-0027 (docs/adr/0027-bare-metal-provisioning.md, indexed) both landed. Records: third verb, NOT a run flag; controller is its OWN ABC, not a HypervisorDriver; nameless ProvisioningPlan; HostRecipe = spec x builder (no communicator, explicit builder injection, no front-door classmethods); HostSpec requirements-contract (Required* devices, discrete 1:1, no count/selector); inventory matcher + don't-touch; installer-origin only v1. Rejected alternatives captured in the ADR: BMC-as-HypervisorDriver, [proxmox.install] TOML block, --controller-on-run, count=/selector on requirements.
 
 ### CORE
+
+- [x] **CORE-80** · `bugfix` — `_LineLogWriter.flush()` infinite recursion via a RichHandler on the tree _(done: 2026-06-08)_
+
+  > Found via `pytest -m "not proxmox and not esxi and not libvirt" -v` hanging on test_tui.py::test_capture_flushes_trailing_partial_line (ordering-dependent: a prior CLI test's cli.main→configure() leaves a RichHandler on the `testrange` logger). ROOT CAUSE: capture_test_output redirects stderr into _LineLogWriter; a no-newline print is flushed on context exit → _emit → TESTOUT_LOGGER.info → propagates to the leaked RichHandler → rich renders to the redirected stderr and calls writer.flush() MID-EMIT → flush() (no re-entrancy guard, and it cleared _buf only AFTER _emit) re-emits the still-buffered partial line → infinite recursion/hang. write() had the guard; flush() didn't. Also reachable in a real `run --verbose` where a test prints a partial line. FIX: flush() now bails while `_emitting` and clears the buffer BEFORE emitting (testrange/_tui.py). Regression test test_tui.py::test_partial_line_flush_with_richhandler_on_tree_does_not_recurse reproduces it directly (RichHandler on tree + TESTOUT at INFO + no-newline print). Gates green: ruff, format, mypy --strict; test_tui 4/4; the cli+tui combo that hung now passes in 0.37s.
+
+- [x] **CORE-49b** · `EPIC` — re-migrate all terminal output to rich + live run dashboard _(done: 2026-06-08)_
+
+  > DONE 2026-06-08. Re-do of the reverted EPIC CORE-49, this time as a committed core `rich` dependency (user decision 2026-06-08). All 10 children landed: CORE-70 (rich dep + ADR-0029 + shared Console), 71 (RichHandler logging), 72 (describe→Tree + cache→Table + print()→Console), 73 (rich.progress + non-TTY INFO kept), 74 (rich-free DashboardState), 75 (events wired through phases + FAILED attribution), 76 (4-pane renderer + DashboardLogHandler), 77 (run_dashboard CM + CLI + --no-dashboard), 78 (retired LiveTail/live_output), 79 (docs). One rich.console.Console owns the terminal; bespoke ANSI deleted; _ansi.scrub_terminal_control (trust boundary) kept; non-TTY stays plain/greppable; examples/capabilities.py untouched (output is not a driver contract). Live `run` smoke on real libvirt: EXIT=0, 3/3 PASS. Plan: .claude/plans/fluffy-swinging-peach.md.
+
+- [x] **CORE-79** · `docs` — PLAN.md + user docs for the rich stack + dashboard _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. PLAN.md output section rewritten: replaced the CORE-6 LiveTail/live_output bullet with two ADR-0029 bullets (rich Console split + the four-pane run/build dashboard, rich-free dashboard_state, run_dashboard TTY/non-TTY split); updated the ORCH-6 firehose reference (live tail → dashboard Serial pane). docs/user/running-tests.md: added --no-dashboard + --verbose to the CLI surface and a new "The live dashboard" section (the four panes, TTY-only activation, --no-dashboard/pipe fallback, --verbose firehose). Closes EPIC CORE-49b.
+
+- [x] **CORE-78** · `chore` — retire/reconcile _tui.py::live_output _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. The dashboard's Serial pane supersedes the BuildKit collapsing tail, so deleted _tui.py::LiveTail + live_output + their SIGWINCH/term-size/region helpers. KEPT the test-output tee (capture_test_output + _LineLogWriter) and the CONSOLE_LOGGER/TESTOUT_LOGGER constants (still imported by runner/_log/_dashboard). --verbose's residual meaning: surface the firehose as plain logs when there's no dashboard (off-TTY/--no-dashboard) — owned by run_dashboard now. Updated _log.py docstring (live_output→run_dashboard ref), PLAN.md output section, and the test_cli_build_run comment. Rewrote test_tui.py to cover only the tee (3 tests: scrub+step-tag, trailing-flush, closed-stream reentrancy). Gates green: ruff, format, mypy --strict (220); full suite exit 0 (two runs).
+
+- [x] **CORE-77** · `feat` — run_dashboard context manager + CLI wiring + --no-dashboard _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. run_dashboard(state, *, enabled, console, verbose) in _dashboard.py: inactive (off-TTY via console.is_terminal, or --no-dashboard) → yield None, logging stays on the RichHandler; verbose still lowers the firehose so a piped run sees serial/test output as plain logs. Active (TTY+enabled) → save+remove root handlers (so they can't fight Live), install DashboardLogHandler (DEBUG, %(message)s), lower CONSOLE_LOGGER/TESTOUT_LOGGER to DEBUG to fill the Serial pane, enter Live(get_renderable=render∘snapshot, refresh=8, screen=False), and restore handlers+firehose on exit INCLUDING the exception path (try/finally). Threaded a dashboard kwarg cli→run_tests/build_range→Orchestrator→RunContext (None→fresh). _run/_build create a DashboardState + wrap in run_dashboard, replacing `with live_output`. Added global --no-dashboard flag; reworded --verbose. test_dashboard.py +4 (inactive/verbose/active-swap-restore/restore-on-exception). LIVE SMOKE: `run examples/hello_world.py --profile libvirt-local` on real libvirt → EXIT=0, 3/3 PASS, teardown 9/9 ok, RichHandler logs render cleanly. Gates green: ruff, format, mypy --strict (220), 1089 unit.
+
+- [x] **CORE-76** · `feat` — dashboard renderer + log/serial handler _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. New testrange/_dashboard.py (the ONLY module importing both rich + dashboard state). render(snapshot) builds a 2×2 rich.layout.Layout (VMs Table | Tests Table / Log | Serial), each pane a Panel. VM rows colour by stage (READY green, FAILED red, in-flight cyan/yellow, PENDING dim) + elapsed + FAILED detail inline; Tests rows show ✓/✗/… glyph + duration + a passed/failed title count. A _Tail renderable reads options.height so the Log/Serial panes show the MOST RECENT lines (a plain Text would top-crop and hide the latest). All guest-influenced text via rich.text.Text (markup=False) so a serial line like [red] renders literally — defence-in-depth on the upstream _ansi scrub. DashboardLogHandler routes CONSOLE_LOGGER records (fixed ("[%s] %s", vm, line)) → serial_ring, TESTOUT dropped, rest → log_ring. test_dashboard.py: 9 tests (force-terminal capture of panes/markup-safety/tail-recency + handler routing). Gates green: ruff, format, mypy --strict (220), 1085 unit. FOLLOW-UP (user feedback 2026-06-08): the Log pane renders records with the RichHandler fields — "LEVEL [run_id] short-name: message" — and colourises the level by severity (DEBUG dim / INFO blue / WARNING yellow / ERROR+CRITICAL red), so it reads like the CI rich logs (DashboardLogHandler._log_line + _styled_log_line; _Tail gained a per-line styler; +2 tests).
+
+- [x] **CORE-75** · `feat` — hang dashboard off RunContext + emit explicit stage/test events _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. RunContext gained `dashboard: DashboardState` (default_factory, compare/repr=False, mirroring ledger_lock). Orchestrator.__init__ takes a dashboard kwarg (CLI owns it; None → fresh) and seed_vms(PENDING) in plan order; _inner_build_ctx forwards ctx.dashboard so nested inner builds share the panes. Explicit set_vm_stage at the lifecycle sites: PROVISIONING (_bring_up_vm entry) → BOOTING (after start_vm) → BINDING (_bind_one_communicator) → READY (_await_one_guest_readiness success); BUILDING in build_one_vm. FAILED attribution via _guard_vm / _guard_build wrappers at the parallel_map call sites (fail-fast re-raises one worker's exc → tag that VM FAILED+detail, re-raise); orchestrator bring-up except calls dashboard.abort_unfinished() to sweep non-terminal siblings. runner._execute_tests takes dashboard, calls start_test/finish_test (serial, main thread). Tests: test_orchestrator dashboard_tracks_vm_to_ready (e2e MockDriver PENDING→READY) + guard attribution unit; fixed test_communicator_ready fake ctx (added DashboardState). Gates green: ruff, format, mypy --strict (218), 1079 unit.
+
+- [x] **CORE-74** · `feat` — dashboard state model (rich-free) _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. New testrange/orchestrator/dashboard_state.py (NO rich import — deep phase/driver code reports state without dragging in the renderer, stovepipe rule). DashboardState holds vms/tests dicts + log_ring/serial_ring (deque maxlen 200/500) behind a DEDICATED threading.RLock (NOT ledger_lock — keeps the render thread off backend bookkeeping). All records frozen (VMRecord/TestRecord/VMView), mutators replace-on-write under the lock (set_vm_stage/abort_unfinished/start_test/finish_test/append_log/append_serial), snapshot()→frozen DashboardSnapshot with elapsed precomputed under the lock so render is lock-free + deterministic to test. VMStage StrEnum PENDING→PROVISIONING→BUILDING→BOOTING→BINDING→READY/FAILED (.is_terminal; overwrite, no ordering asserts). abort_unfinished sweeps non-terminal VMs to FAILED (keeps the real culprit's detail). finish_test takes primitives (no runner import → no cycle). test_dashboard_state.py: 11 tests incl. a 64-task ThreadPoolExecutor concurrency hammer + snapshot isolation + ring eviction. Gates green: ruff, format, mypy --strict, 11 unit.
+
+- [x] **CORE-73** · `feat` — progress → rich.progress.Progress _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. Rewrote _progress.py::ProgressReporter internals while keeping its public surface byte-identical (drivers/{proxmox,esxi}/_client.py use ProgressReporter(total,label,log=), .update(), .finish(), AND .elapsed()/.avg_rate_mib() in proxmox _client.py:420's failure message). TTY path now drives a rich.progress.Progress (Text/Bar/Download/TransferSpeed/TimeElapsed columns) with auto_refresh=False → redraw-on-update (no background thread, deterministic, same redraw-on-data cadence as the hand-rolled \\r bar). NON-TTY path (selected via console.is_terminal) kept verbatim: the periodic-INFO line CORE-18 mandated for CI visibility ("label: 50.0/100.0 MiB (50%) X MiB/s"). Console injection replaced stream/tty params. Rewrote test_progress.py: non-TTY tests inject a non-terminal Console; new test_tty_draws_a_bar_and_does_not_log uses force_terminal capture. Gates green: ruff, format, mypy --strict (216), 1066 unit (incl. test_proxmox_driver sftp-callback paths).
+
+- [x] **CORE-72** · `feat` — describe → rich.Tree, cache list → rich.Table, cli.py print()→Console _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. Added _out()/_err() helpers wrapping out_console()/err_console() with markup=False (dynamic content like CIDR `[mgmt]` attrs + repr strings never parsed as markup) + soft_wrap=True (each message stays one logical line like print, not hard-wrapped at console width — keeps error lines + test tracebacks greppable and substring-stable). Converted ~40 print() sites to _out/_err. Rebuilt _print_describe as a rich.tree.Tree (Plan→backend→Switches→pools→VMs→Tests→cache-refs, all labels rich.text.Text to dodge markup); _print_binding→_add_binding adds the backend subtree (binding ERROR still to stderr, returns False). _print_list → rich.table.Table (box=None). Live-found: rich soft-wrapped a long error at 80 cols mid-phrase ("must be a \\nlist") — soft_wrap=True fixed it. All existing cli/cache/cleanup substring assertions pass unchanged. Gates green: ruff, format, mypy --strict (216), 1066 unit. Live `run` smoke batched for CORE-77 (run-path output unchanged until then).
+
+- [x] **CORE-71** · `feat` — logging stack → RichHandler _(done: 2026-06-08)_
+
+  > EPIC CORE-49b. Recovered the _log.py RichHandler stack from dangling commit 15e7894 (ADR ref 0024→0029): configure() now installs a single rich.logging.RichHandler on the shared err_console() (markup=False so literal [run_id] brackets + raw guest output on the fail path aren't parsed as markup; rich_tracebacks; show_path=False), formatter carries only "[run_id] name: message" (rich owns time/level columns). PRESERVED: _RunIdAdapter run_id injection + CORE-50 firehose isolation (_quiesce_firehose pins CONSOLE_LOGGER/TESTOUT_LOGGER to WARNING). cli.py already aliases configure as configure_logging — no call-site change. test_log.py: StreamHandler→RichHandler assertions + new test_rich_handler_renders_run_id_and_message via err_console().capture(); kept test_firehose_isolated_from_root_log_level. Gates green: ruff, format, mypy --strict (216), 1066 unit.
+
+- [x] **CORE-70** · `chore` — rich core dep + ADR-0029 + shared Console _(done: 2026-06-08)_
+
+  > First of EPIC CORE-49b. Added rich>=13 to [project].dependencies + uv.lock (rich v15). Recovered testrange/_console.py (out_console=stdout data / err_console=stderr diagnostics, lazily-constructed shared singletons — the sole terminal owners) and the ADR from dangling commit 15e7894, renumbered 0024→0029 (old 0024 was recycled for qemu-img), dated today, +index.md toctree entry + a History section recording the CORE-49 revert→readopt. Recovered tests/unit/test_console.py (4 tests). Gates green: ruff, format, mypy --strict (216 files), 1065 unit. Blocks CORE-71..79.
 
 - [x] **CORE-61** · `feat` — libvirt-concrete device types (bus/model) + driver wiring
   _(done: 2026-06-02)_

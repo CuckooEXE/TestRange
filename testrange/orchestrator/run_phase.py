@@ -9,6 +9,7 @@ and the orchestrator.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
@@ -30,11 +31,26 @@ from testrange.networks.sidecar import LEASEFILE, SIDECAR_DNSMASQ_CONF, parse_dn
 from testrange.orchestrator._parallel import parallel_map
 from testrange.orchestrator.artifacts import data_disk_role
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.dashboard_state import VMStage
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.state.schema import PHASE_RUN
 from testrange.vms.recipe import VMRecipe
 
 _log = get_logger(__name__)
+
+
+def _guard_vm(ctx: RunContext, vm: VMRecipe, step: Callable[[RunContext, VMRecipe], None]) -> None:
+    """Run a per-VM bring-up ``step``; tag the VM FAILED in the dashboard on error.
+
+    ``parallel_map`` is fail-fast and re-raises one worker's exception; marking
+    the VM here gives the dashboard the actual culprit (with the message) before
+    the run unwinds. The exception still propagates, so teardown runs unchanged.
+    """
+    try:
+        step(ctx, vm)
+    except Exception as e:
+        ctx.dashboard.set_vm_stage(vm.name, VMStage.FAILED, detail=str(e))
+        raise
 
 
 def run_phase(ctx: RunContext) -> None:
@@ -57,7 +73,7 @@ def run_phase(ctx: RunContext) -> None:
         lambda switch: _provision_switch_with_sidecar(ctx, switch), hyp.networks, jobs=ctx.jobs
     )
     wait_sidecars_ready(ctx)
-    parallel_map(lambda vm: _bring_up_vm(ctx, vm), hyp.vms, jobs=ctx.jobs)
+    parallel_map(lambda vm: _guard_vm(ctx, vm, _bring_up_vm), hyp.vms, jobs=ctx.jobs)
 
 
 def _create_pool(ctx: RunContext, pool: StoragePool) -> None:
@@ -78,6 +94,7 @@ def _provision_switch_with_sidecar(ctx: RunContext, switch: Switch) -> None:
 
 
 def _bring_up_vm(ctx: RunContext, vm: VMRecipe) -> None:
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.PROVISIONING)
     drv = ctx.driver
     pool_backend = ctx.pool_backends[vm.spec.os_drive.pool]
     built = ctx.built_disk_paths[vm.name]  # {role: cached path}
@@ -125,6 +142,7 @@ def _bring_up_vm(ctx: RunContext, vm: VMRecipe) -> None:
     )
     ctx.store.confirm(vm_backend)
     drv.start_vm(vm_backend)
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.BOOTING)
 
 
 def bind_communicators(ctx: RunContext) -> None:
@@ -140,10 +158,15 @@ def bind_communicators(ctx: RunContext) -> None:
     # discover_ip, overlapped across VMs (ADR-0023). Each VM binds its own
     # communicator object — no shared mutable state — and native lease reads are
     # serialized at the driver's call lock.
-    parallel_map(lambda vm: _bind_one_communicator(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs)
+    parallel_map(
+        lambda vm: _guard_vm(ctx, vm, _bind_one_communicator),
+        ctx.plan.hypervisor.vms,
+        jobs=ctx.jobs,
+    )
 
 
 def _bind_one_communicator(ctx: RunContext, vm: VMRecipe) -> None:
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.BINDING)
     comm = vm.communicator
     if isinstance(comm, SSHCommunicator):
         ip = discover_ip(ctx, vm, comm.nic_idx)
@@ -229,7 +252,9 @@ def wait_communicators_ready(ctx: RunContext) -> None:
     answers, then hand off. A VM whose communicator never answers fails loud.
     """
     parallel_map(
-        lambda vm: _wait_one_communicator_ready(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs
+        lambda vm: _guard_vm(ctx, vm, _wait_one_communicator_ready),
+        ctx.plan.hypervisor.vms,
+        jobs=ctx.jobs,
     )
 
 
@@ -265,16 +290,19 @@ def await_guest_readiness(ctx: RunContext) -> None:
     brokers the callable and tags failures with the VM name.
     """
     parallel_map(
-        lambda vm: _await_one_guest_readiness(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs
+        lambda vm: _guard_vm(ctx, vm, _await_one_guest_readiness),
+        ctx.plan.hypervisor.vms,
+        jobs=ctx.jobs,
     )
 
 
 def _await_one_guest_readiness(ctx: RunContext, vm: VMRecipe) -> None:
-    del ctx  # symmetry with the other per-VM helpers
     try:
         vm.builder.wait_ready(vm.spec, vm, vm.communicator.execute)
     except BuildNotReadyError as e:
         raise BuildNotReadyError(f"vm {vm.name!r}: {e}") from e
+    # Final gate cleared: the guest is up and answering its readiness probe.
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.READY)
 
 
 def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> str:

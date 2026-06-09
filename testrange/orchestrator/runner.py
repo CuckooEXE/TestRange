@@ -12,6 +12,7 @@ from testrange._log import get_logger
 from testrange._tui import capture_test_output
 from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile
+from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
 from testrange.plan import Plan
 
@@ -42,6 +43,7 @@ def build_range(
     profile: BackendProfile | None = None,
     jobs: int | None = None,
     build_timeout_s: float = 600.0,
+    dashboard: DashboardState | None = None,
 ) -> str:
     """Warm the cache for ``plan`` (``testrange build``); run no tests.
 
@@ -59,6 +61,7 @@ def build_range(
         profile=profile,
         jobs=jobs,
         build_timeout_s=build_timeout_s,
+        dashboard=dashboard,
     )
     o.build()
     return o.run_id
@@ -77,6 +80,7 @@ def run_tests(
     jobs: int | None = None,
     build_timeout_s: float = 600.0,
     lease_timeout_s: float = 120.0,
+    dashboard: DashboardState | None = None,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
@@ -103,9 +107,12 @@ def run_tests(
         jobs=jobs,
         build_timeout_s=build_timeout_s,
         lease_timeout_s=lease_timeout_s,
+        dashboard=dashboard,
     )
     with o as orch:
-        _execute_tests(orch, tests, results, fail_fast=fail_fast, verbose=verbose)
+        _execute_tests(
+            orch, tests, results, fail_fast=fail_fast, verbose=verbose, dashboard=o.ctx.dashboard
+        )
         if leak_on_failure and any(not r.passed for r in results):
             _log.warning("--leak-on-failure: skipping teardown; run_id=%s", o.run_id)
             o.leak()
@@ -119,33 +126,37 @@ def _execute_tests(
     *,
     fail_fast: bool,
     verbose: bool = False,
+    dashboard: DashboardState | None = None,
 ) -> None:
     """Run tests sequentially, capture failures, append to ``results``.
 
     Under ``verbose`` each test's ``stdout``/``stderr`` is teed into the live
-    tail (CORE-6); otherwise prints pass straight through as before.
+    tail (CORE-6); otherwise prints pass straight through as before. Each test's
+    running/pass/fail state is mirrored into ``dashboard`` for the live view.
     """
     for t in tests:
         name = getattr(t, "__name__", repr(t))
+        if dashboard is not None:
+            dashboard.start_test(name)
         start = time.monotonic()
         try:
             with capture_test_output(name) if verbose else nullcontext():
                 t(orch)
         except Exception as e:
             tb = traceback.format_exc()
-            results.append(
-                TestResult(
-                    name=name,
-                    passed=False,
-                    error=tb if tb.strip() else str(e),
-                    duration=time.monotonic() - start,
-                )
-            )
+            duration = time.monotonic() - start
+            error = tb if tb.strip() else str(e)
+            results.append(TestResult(name=name, passed=False, error=error, duration=duration))
+            if dashboard is not None:
+                dashboard.finish_test(name, passed=False, duration=duration, error=error)
             if fail_fast:
                 _log.warning("--fail-fast: stopping on %s", name)
                 return
             continue
-        results.append(TestResult(name=name, passed=True, duration=time.monotonic() - start))
+        duration = time.monotonic() - start
+        results.append(TestResult(name=name, passed=True, duration=duration))
+        if dashboard is not None:
+            dashboard.finish_test(name, passed=True, duration=duration)
 
 
 __all__ = ["TestResult", "build_range", "run_tests"]

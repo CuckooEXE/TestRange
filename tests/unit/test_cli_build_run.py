@@ -174,8 +174,8 @@ class TestBuildVerb:
 class TestVerboseFlag:
     def test_run_verbose_end_to_end(self, env: tuple[MockDriver, str]) -> None:
         # --verbose is a global flag (before the subcommand). On a non-tty
-        # (pytest capture) live_output takes its plain-logging path; the run
-        # still completes normally (CORE-6).
+        # (pytest capture) run_dashboard takes its plain-logging path; the run
+        # still completes normally (CORE-6, ADR-0029).
         driver, plan_path = env
         rc = cli.main(["--verbose", "run", plan_path])
         assert rc == 0

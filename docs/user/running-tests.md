@@ -27,6 +27,8 @@ testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
   --leak-on-failure                     #   skip teardown if any test fails
   --jobs N                              #   cap I/O-phase workers (default 8; 0 or 1 = serial)
+  --no-dashboard                        #   disable the live dashboard; emit plain log lines
+  --verbose                             #   (global) surface the build serial console / test output
 testrange repl <plan.py>                # bring-up, drop into a Python REPL, no TESTS
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
@@ -62,6 +64,29 @@ multi-VM range comes up in roughly the time of its slowest VM instead of the
 sum. `--jobs N` caps that pool (default 8); `--jobs 0` or `--jobs 1` forces it
 serial, which is handy when a backend misbehaves under concurrency or you want
 deterministic single-threaded logs while debugging.
+
+## The live dashboard
+
+On an interactive terminal, `run` and `build` render a live dashboard while the
+range comes up — four panes that update in place:
+
+- **VMs** — each VM and its current lifecycle stage
+  (`pending → provisioning → building → booting → binding → ready`, or `failed`
+  with the error), colour-coded, with elapsed time.
+- **Tests** — each test as it runs, then `✓`/`✗` with its duration.
+- **Log** — a tail of the orchestrator's progress log.
+- **Serial (build)** — the build VM's serial console as it streams, so a slow or
+  stuck install is visible instead of silent.
+
+The dashboard owns the terminal only while the range is up; the final frame is
+left in scrollback and the test report (`[PASS]/[FAIL]` lines) prints after.
+
+It activates only on a real TTY. When output is piped or redirected (CI, a log
+file), or when you pass `--no-dashboard`, there is no live region — logging falls
+back to plain, greppable lines. `--verbose` additionally surfaces the build
+serial console and per-test stdout/stderr (in the Serial pane on a TTY, or as
+plain log lines off one); without it those high-volume firehoses stay quiet
+regardless of `--log-level`.
 
 ## What `OrchestratorHandle` exposes
 

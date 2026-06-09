@@ -55,6 +55,7 @@ from testrange.orchestrator.artifacts import (
 )
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.dashboard_state import VMStage
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.plan import Plan
 from testrange.state.schema import PHASE_BUILD
@@ -198,7 +199,7 @@ def build_phase(ctx: RunContext) -> None:
     # deterministic build IP (_build_ip_offset) so they coexist on the one build
     # switch stood up above.
     parallel_map(
-        lambda bp: build_one_vm(ctx, bp, build_pool_backend, build_net_backend),
+        lambda bp: _guard_build(ctx, bp, build_pool_backend, build_net_backend),
         misses,
         jobs=ctx.jobs,
     )
@@ -256,6 +257,9 @@ def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
             for s in inner_plan.hypervisor.all_switches
             for n in s.networks
         },
+        # Share the outer dashboard so a nested host's inner-VM builds report
+        # their serial/stage into the same panes (ADR-0029).
+        dashboard=ctx.dashboard,
     )
 
 
@@ -398,6 +402,21 @@ def _create_build_pool(ctx: RunContext, misses: list[_VMBuildPlan]) -> str:
     return backend
 
 
+def _guard_build(
+    ctx: RunContext, bp: _VMBuildPlan, build_pool_backend: str, build_net_backend: str
+) -> None:
+    """Run one VM's build; tag it FAILED in the dashboard on error, then re-raise.
+
+    ``parallel_map`` is fail-fast — this attributes the failure to the right VM
+    (with the message) for the dashboard before the build phase unwinds.
+    """
+    try:
+        build_one_vm(ctx, bp, build_pool_backend, build_net_backend)
+    except Exception as e:
+        ctx.dashboard.set_vm_stage(bp.vm.name, VMStage.FAILED, detail=str(e))
+        raise
+
+
 def build_one_vm(
     ctx: RunContext,
     bp: _VMBuildPlan,
@@ -418,6 +437,7 @@ def build_one_vm(
     drv = ctx.driver
     vm = bp.vm
     spec = vm.spec
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.BUILDING)
     build_vm_backend = drv.compose_resource_name(ctx.run_id, "build_vm", vm.name)
 
     # --- OS disk. Image-origin: push base bytes onto this VM's own ref, then
