@@ -23,6 +23,7 @@ for the same table.
 
 ```
 testrange describe <plan.py>            # passive structure summary, no backend writes
+testrange preflight <plan.py>           # read-only backend checks; print each result
 testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
   --leak-on-failure                     #   skip teardown if any test fails
@@ -68,8 +69,10 @@ deterministic single-threaded logs while debugging.
 
 ## The live dashboard
 
-On an interactive terminal, `run` and `build` render a live dashboard while the
-range comes up — four panes that update in place:
+On an interactive terminal, `run` and `build` render a live full-screen dashboard
+while the range comes up — four panes that update in place. The top row (VMs +
+Tests) takes a fifth of the height; the streaming Log + Serial panes take the
+rest:
 
 - **VMs** — each VM and its current lifecycle stage
   (`pending → provisioning → building → booting → binding → ready`, or `failed`
@@ -79,8 +82,15 @@ range comes up — four panes that update in place:
 - **Serial (build)** — the build VM's serial console as it streams, so a slow or
   stuck install is visible instead of silent.
 
-The dashboard owns the terminal only while the range is up; the final frame is
-left in scrollback and the test report (`[PASS]/[FAIL]` lines) prints after.
+The Log and Serial panes scroll back through their ring buffers so you can read
+output that has already streamed past: **Tab** (or ←/→) switches the focused
+pane, **↑/↓** scroll a line, **PgUp/PgDn** a page, **Home** (or `g`) jumps to the
+oldest line and **End** (or `G`) snaps back to the live tail.
+
+The dashboard runs on the alternate screen buffer (so it never flickers and
+leaves your scrollback untouched), which means its final frame is gone once it
+exits; a one-line pass/fail tally and the test report (`[PASS]/[FAIL]` lines)
+print on the restored screen afterwards.
 
 It activates only on a real TTY. When output is piped or redirected (CI, a log
 file), or when you pass `--no-dashboard`, there is no live region — logging falls

@@ -6,12 +6,10 @@ for the backend matrix and per-backend prerequisites.
 ## Requirements
 
 - Python 3.11 or later.
-- A hypervisor backend. The in-memory `MockDriver` reference backend needs
-  nothing and is what the test suite drives the full lifecycle against; a clean
-  live `run` of a plan needs a real backend (libvirt is the certified reference
-  on local `qemu:///system`; the Proxmox and ESXi drivers are code-complete with
-  live end-to-end certification in progress; Hyper-V is on the roadmap), each
-  with its own prereqs — see
+- A hypervisor backend. The in-memory `MockDriver` needs nothing and is what
+  the unit suite drives the full lifecycle against; a clean live `run` of a plan
+  needs a real backend (libvirt, Proxmox VE, or ESXi; Hyper-V is on the
+  roadmap), each with its own prereqs and support level — see
   [driver setup](drivers/index.md).
 
 ## Install the package
@@ -44,8 +42,8 @@ The available extras:
   `websocket-client` + `pycdlib` — required for the Proxmox driver.
 
 `libvirt`
-: `libvirt-python` — required for the libvirt driver (the certified reference
-  backend). Imports lazily on connect, so the package registers without it.
+: `libvirt-python` — required for the libvirt driver. Imports lazily on connect,
+  so the package registers without it.
 
 `esxi`
 : `pyvmomi` + `requests` — required for the ESXi driver. (`qemu-img`, a host

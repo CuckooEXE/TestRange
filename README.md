@@ -11,16 +11,11 @@ hypervisor backend; declare test functions; run them. Use case: CI/CD
 against specific OS versions and varied network topologies; authorized
 pentest test-ranges.
 
-The driver layer is multi-backend (ADR-0008). The **libvirt driver is the
-certified reference implementation** — green end-to-end on `qemu:///system` as a
-plain `libvirt`-group user (the `tests/plans/` certification corpus +
-`tests/integration/test_libvirt.py`). `MockDriver` is the in-memory backend the
-unit suite drives through the full lifecycle (it simulates the backend, not a
-real guest). The **Proxmox driver and builder are certified live end-to-end**
-(single-node PVE 9.x): a PVE node stood up by `examples/pve_node.py` (the builder,
-on libvirt) is driven green by the full `tests/plans/{generic,proxmox}` corpus —
-see `docs/dev/e2e-findings-proxmox.md`. The **ESXi driver is code-complete**
-(standalone ESXi 8) with live certification tracked in the REL 1.0.0 pass.
+The driver layer is multi-backend (ADR-0008). It ships drivers for **libvirt**,
+**Proxmox VE**, and **ESXi**, plus an in-memory `MockDriver` the unit suite
+drives through the full lifecycle (it simulates the backend, not a real guest).
+Each driver's support level — how far it is validated on real hardware — is
+stated on its own page under **Support level** (see `docs/user/drivers/`).
 
 ## Quickstart
 
@@ -47,15 +42,18 @@ testrange run examples/hello_world.py --profile libvirt-local
 
 The example plans use the backend-agnostic `Hypervisor` topology type and are
 the authoritative shape for writing your own; a backend is bound at run time via
-`--profile`. `testrange describe` shows a plan's topology with no backend. A live
-`run` needs a real backend — libvirt and Proxmox are both certified (see
-`docs/user/drivers/`). The full bring-up lifecycle is also exercised in-memory
-against `MockDriver` by the unit suite.
+`--profile`. `testrange describe` shows a plan's topology with no backend, and
+`testrange preflight` runs the read-only checks against the bound backend. A live
+`run` needs a real backend — see `docs/user/drivers/` for each driver's setup and
+support level. The full bring-up lifecycle is also exercised in-memory against
+`MockDriver` by the unit suite.
 
-On an interactive terminal, `run`/`build` render a live dashboard — panes for
-per-VM lifecycle state, test pass/fail, a log tail, and the build serial console.
-Piped or in CI (no TTY), or with `--no-dashboard`, output degrades to plain
-`rich`-rendered log lines. See [docs/user/running-tests.md](docs/user/running-tests.md#the-live-dashboard).
+On an interactive terminal, `run`/`build` render a live full-screen dashboard —
+panes for per-VM lifecycle state, test pass/fail, a log tail, and the build
+serial console; the Log and Serial panes scroll back with the ↑/↓ and PgUp /
+PgDn keys (Tab switches panes, End jumps back to the live tail). Piped or in CI
+(no TTY), or with `--no-dashboard`, output degrades to plain `rich`-rendered log
+lines. See [docs/user/running-tests.md](docs/user/running-tests.md#the-live-dashboard).
 
 ## Plan shape
 
@@ -90,6 +88,7 @@ testrange cache list / del / rename / forget-name
 testrange cache purge --yes                        # delete every local entry
 testrange cache push / pull <sha-or-name> --cache <url>
 testrange describe <plan.py> [--profile <name>]
+testrange preflight <plan.py> --profile <name>     # read-only checks; print each result + exit non-zero on a blocker
 testrange build <plan.py> --profile <name>
 testrange run <plan.py> --profile <name> [--fail-fast] [--leak-on-failure] [--require-cache]
 testrange repl <plan.py> --profile <name>
@@ -124,6 +123,7 @@ The doc tree:
 
 ## Status
 
-Pre-1.0. See `docs/dev/architecture.md` (or the built HTML) for the
-component overview; in-flight and long-term work lives in `TODO.md` at the repo
-root (the repo tracks both the code and the board, which version together).
+1.0.0 — the public API is stable and follows SemVer. See
+`docs/dev/architecture.md` (or the built HTML) for the component overview;
+in-flight and long-term work lives in `TODO.md` at the repo root (the repo
+tracks both the code and the board, which version together).

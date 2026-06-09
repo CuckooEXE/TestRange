@@ -331,6 +331,7 @@ testrange cache list
 testrange cache push <sha-or-name> --cache <url>   # publish to an HTTP cache
 testrange cache pull <sha-or-name> --cache <url>   # fetch from an HTTP cache
 testrange describe plan.py
+testrange preflight plan.py --profile <name>       # read-only backend checks
 testrange build plan.py                            # warm the cache only; no tests
 testrange run plan.py [--fail-fast] [--leak-on-failure] [--require-cache]
 testrange repl plan.py

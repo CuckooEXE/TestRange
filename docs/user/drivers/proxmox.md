@@ -1,10 +1,9 @@
 # Proxmox VE
 
-The Proxmox driver runs a portable testrange plan against a Proxmox VE host. Its
-driver primitives — connect, SDN switches, streamed volume I/O, VM lifecycle,
-snapshots, and QGA exec — are live-proven against a single-node PVE 9.x host; the
-full `tests/plans/` certification sweep (the same corpus libvirt clears as the
-reference backend) is tracked under the 1.0.0 validation epic (REL).
+## About
+
+The Proxmox driver runs a portable testrange plan against a single-node Proxmox
+VE host.
 
 Install the extra:
 
@@ -19,7 +18,41 @@ endpoint 501s on large images), and the serial build-result sink is read over
 `termproxy`→`vncwebsocket` ([ADR-0012](../../adr/0012-serial-build-result.md)).
 No `subprocess`/`qemu-img` — disk sizing is REST-native.
 
-## Connecting
+## Support level
+
+Driver primitives — connect, SDN switches, streamed volume I/O, VM lifecycle,
+snapshots, and QGA exec — are live-proven against a single-node PVE 9.x host. The
+full `tests/plans/` end-to-end sweep is tracked under the 1.0.0 validation epic
+(REL).
+
+| Capability | Status |
+| --- | --- |
+| `tests/plans/` generic + `proxmox/` sweep (live, single-node) | in progress (REL) |
+| Integration wiring | `pytest -m proxmox` → driver-primitive tests in `test_proxmox.py` (connect/SDN/storage/VM/QGA) |
+| Block-storage StoragePools (lvm/zfs/ceph) | not supported (PVE-33) |
+| Multi-node clusters | not supported — single-node only (PVE-31) |
+| QGA chunked guest-file-write (>~45 KB single write) | deferred (PVE-45) |
+| Nested-PVE installer-origin build smoke | environment-blocked (BUILD-13) |
+
+Run the live driver-primitive suite against a host by exporting its coordinates
+(it drives the driver directly, so it takes host env vars rather than a profile):
+
+```sh
+export TESTRANGE_PVE_HOST=10.0.0.5
+export TESTRANGE_PVE_PASSWORD='Target123!'
+export TESTRANGE_PVE_BASE_QCOW2=/path/to/debian-13.qcow2   # disk/VM tests only
+pytest -m proxmox tests/integration/test_proxmox.py
+```
+
+Run the portable corpus end-to-end against the profile:
+
+```sh
+for p in tests/plans/generic/*.py tests/plans/proxmox/*.py; do
+    testrange run --profile pve "$p" || break
+done
+```
+
+## Connection profile
 
 A portable plan binds to a host at run time via a connection profile
 ([ADR-0015](../../adr/0015-backend-binding.md)). Copy the example, drop in your
@@ -54,24 +87,7 @@ backing_storage = "local"   # optional; the dir/nfs storage volumes land in
 defaults to `local`, and SSH reuses the API credentials. So
 `host` + `password` is the whole common case.
 
-## Prerequisites
-
-- **Storage with the `import` content type.** The driver imports OS disks and
-  stages volumes through a `dir`/`nfs` storage's content directory, which must
-  have the `import` content type enabled. Missing it surfaces at preflight as
-  `proxmox-import-content-missing`. Enable it under *Datacenter → Storage →
-  &lt;storage&gt; → Content*.
-- **`dir`/`nfs` storage only.** Volume bytes ride SFTP into the storage content
-  directory, so the backing storage must expose one. Block stores (lvm/zfs/ceph)
-  have no content dir and are **not yet supported** (PVE-33) — the driver fails
-  loud rather than silently mis-importing.
-- **`xorriso` on the orchestrator host**, *only* for installer-origin builders
-  (`ProxmoxAnswerBuilder`): it prepares the answer-seeded installer ISO
-  ([ADR-0022](../../adr/0022-xorriso-installer-iso-prep.md)). `apt install
-  xorriso` / `dnf install xorriso` / `brew install xorriso`. Not needed for
-  cloud-init / image-origin builds.
-
-## Named uplinks
+## Egress
 
 A plan's `Switch(uplink="<name>")` resolves through the profile's
 `[pve.uplinks]` map to a host bridge ([ADR-0016](../../adr/0016-named-uplinks-out-of-band-egress.md)).
@@ -89,6 +105,23 @@ no DHCP/DNS server. See [Out-of-band egress](out-of-band-egress.md) for the
 host-NAT bridge recipe and [Networking modes](networking-modes.md) for the full
 `Switch` flag surface.
 
+## Prerequisites
+
+- **Storage with the `import` content type.** The driver imports OS disks and
+  stages volumes through a `dir`/`nfs` storage's content directory, which must
+  have the `import` content type enabled. Missing it surfaces at preflight as
+  `proxmox-import-content-missing`. Enable it under *Datacenter → Storage →
+  &lt;storage&gt; → Content*.
+- **`dir`/`nfs` storage only.** Volume bytes ride SFTP into the storage content
+  directory, so the backing storage must expose one. Block stores (lvm/zfs/ceph)
+  have no content dir and are **not yet supported** (PVE-33) — the driver fails
+  loud rather than silently mis-importing.
+- **`xorriso` on the orchestrator host**, *only* for installer-origin builders
+  (`ProxmoxAnswerBuilder`): it prepares the answer-seeded installer ISO
+  ([ADR-0022](../../adr/0022-xorriso-installer-iso-prep.md)). `apt install
+  xorriso` / `dnf install xorriso` / `brew install xorriso`. Not needed for
+  cloud-init / image-origin builds.
+
 ## `mgmt` semantics (option B)
 
 `Switch(mgmt=True)` gives the **hypervisor host** an L2 presence at `.2` on the
@@ -97,33 +130,3 @@ ratified as option B): guests reach the host and vice-versa. On PVE this is a
 per-switch SDN vnet whose subnet gateway is the host's `.2`. `.2` is a
 **hypervisor-local** reachability guarantee — it is *not* promised reachable
 from a remote test runner.
-
-## Certification status
-
-| Capability | Status |
-| --- | --- |
-| `tests/plans/` generic + `proxmox/` sweep (live, single-node) | in progress (REL) |
-| Integration wiring | `pytest -m proxmox` → driver-primitive tests in `test_proxmox.py` (connect/SDN/storage/VM/QGA) |
-| Block-storage StoragePools (lvm/zfs/ceph) | not supported (PVE-33) |
-| Multi-node clusters | not supported — single-node only (PVE-31) |
-| QGA chunked guest-file-write (>~45 KB single write) | deferred (PVE-45) |
-| Nested-PVE installer-origin build smoke | environment-blocked (BUILD-13) |
-
-Run the live driver-primitive suite against a host by exporting its coordinates
-(it drives the driver directly, so it takes host env vars rather than a profile):
-
-```sh
-export TESTRANGE_PVE_HOST=10.0.0.5
-export TESTRANGE_PVE_PASSWORD='Target123!'
-export TESTRANGE_PVE_BASE_QCOW2=/path/to/debian-13.qcow2   # disk/VM tests only
-pytest -m proxmox tests/integration/test_proxmox.py
-```
-
-Certify the backend end-to-end by running the portable corpus against the
-profile:
-
-```sh
-for p in tests/plans/generic/*.py tests/plans/proxmox/*.py; do
-    testrange run --profile pve "$p" || break
-done
-```
