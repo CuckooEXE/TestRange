@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (10)
+## Doing (12)
 
 ### CORE
 
@@ -92,6 +92,16 @@ on 2026-06-06.
   > Three pillars: (1) a certification & regression corpus in `tests/plans/{generic,libvirt,proxmox,esxi}/` — one portable PLAN + a few TESTS per file (docstring states WHAT it stresses + WHY), run via `testrange run --profile <name> tests/plans/<tier>/<plan>.py` and NOT collected/executed by pytest (named without a `test_` prefix, no `__init__.py`); generic tier runs on every backend, per-driver tiers pin the driver Hypervisor + that backend's concrete device types. This IS the new backend certification (it supersedes examples/capabilities.py, which is slated for deletion). (2) Unmanaged, scripted nested host fleet in `tools/hypervisor-hosts/` — each hypervisor stood up as a RAW libvirt VM (virt-install + kickstart/answer), independent of TestRange (no GuestHypervisor — validating TestRange with TestRange is circular); tr-egress NAT gives build VMs egress, SUPERSEDING the env-block on ESXI-11/12/13 + BUILD-13. (3) 1.0.0 = all three backends green on the full e2e suite (hard gate) + public-API freeze (flip major_version_zero=false, /api-diff baseline).
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
+
+### PVE
+
+- [ ] **PVE-57** · `feat` — `examples/pve_node.py`: stand up + leak a live PVE node via `ProxmoxAnswerBuilder` on libvirt (executes BUILD-13)
+
+  > Live-certify the Proxmox *builder* end-to-end. `testrange run --profile libvirt-local examples/pve_node.py` builds a PVE 9.2 node installer-origin (blank `vda` + prepared installer ISO + `PROXMOX-AIS` answer seed + serial build-result), reboots into the installed system, and the run-phase boot comes up host-reachable. Knobs (load-bearing): `firmware="uefi"` (q35 so the installer NIC names `enp1s0` to match `answer.toml` `filter.ID_NET_NAME`, and the installer boots its validated path; defensive `\EFI\BOOT\BOOTX64.EFI` fallback in post-install for the fresh-nvram run boot); run switch `mgmt=True` + `uplink="egress"` + NAT `Sidecar` (host-reachable AND egressing); `CPU(nested=True)` (node runs KVM guests). A `leak()` test retains the running node as the cert target. Closes the FULL-build slice of BUILD-13 (env now has cached `pve-iso` + nested KVM + `libvirt-local`). User: spin up the hypervisor via the new builder and leak it.
+
+- [ ] **PVE-58** · `test` — live-certify the Proxmox driver against the leaked node; file + fix discrepancies (executes REL-12/REL-15)
+
+  > Emit the `pve-live` profile bound to the leaked PVE node (REL-12 deliverable), then loop `testrange run --profile pve-live` over `tests/plans/generic/*.py` + `tests/plans/proxmox/*.py` (REL-15). Record findings in `docs/dev/e2e-findings-proxmox.md`; file a PVE/CORE bug per discrepancy and fix it. Prereq satisfied by PVE-57's post-install widening `local` (dir) storage to `content=images,import` so the driver's dir-storage byte path works (driver-audit RISK-5).
 
 ## Ready (53)
 
