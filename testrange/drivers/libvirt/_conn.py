@@ -51,7 +51,41 @@ def _import_libvirt() -> Any:
         raise DriverError(
             "libvirt-python is not installed; install with `pip install -e .[libvirt]`"
         ) from e
+    _route_libvirt_errors_to_log(libvirt)
     return libvirt
+
+
+_error_handler_registered = False
+
+
+def _route_libvirt_errors_to_log(libvirt: Any) -> None:
+    """Stop libvirt printing errors to stderr; route them through Python logging.
+
+    libvirt's C layer prints every error to fd 2 by default (e.g.
+    ``libvirt: QEMU Driver error : …``). That bypasses Python ``logging`` — and
+    therefore the rich handler and the live dashboard's ``Live`` region — and
+    writes straight to the terminal, corrupting the display (the flicker /
+    ``libvirt: …`` glimpses). Registering any handler replaces that default
+    stderr printer. The message is already carried by the raised
+    ``libvirtError`` the driver surfaces explicitly, and many of these fire on
+    benign, expected conditions during polling/teardown, so we log at DEBUG
+    (visible under ``--log-level debug``) and keep them off the raw terminal.
+
+    Registered once, process-globally (libvirt's handler registry is global);
+    re-imports are no-ops. ``registerErrorHandler`` writes to fd 2 from the C
+    layer, so this cannot be done from Python's ``sys.stderr`` redirection.
+    """
+    global _error_handler_registered
+    if _error_handler_registered:
+        return
+
+    def _handler(_ctx: object, error: tuple[Any, ...]) -> None:
+        # Called as f(ctx, error); error = (code, domain, message, level, …).
+        _log.debug("libvirt: %s", error[2] if len(error) > 2 else error)
+
+    # registerErrorHandler(f, ctx) — the callback is the FIRST arg.
+    libvirt.registerErrorHandler(_handler, None)
+    _error_handler_registered = True
 
 
 def _import_libvirt_qemu() -> Any:

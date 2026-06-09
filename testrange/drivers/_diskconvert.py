@@ -59,7 +59,7 @@ def require_qemu_img() -> str:
 
 def _run(argv: list[str]) -> None:
     try:
-        subprocess.run(argv, check=True, capture_output=True, text=True)
+        result = subprocess.run(argv, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
         raise DriverError(
@@ -67,6 +67,14 @@ def _run(argv: list[str]) -> None:
         ) from exc
     except FileNotFoundError as exc:  # pragma: no cover - racy with which()
         raise DriverError(f"qemu-img disappeared between which() and exec(): {exc}") from exc
+    # ``capture_output`` already keeps qemu-img off the raw terminal (fd 2), so it
+    # never corrupts the live dashboard; route any chatter (progress/warnings) it
+    # wrote through logging at DEBUG rather than discarding it — every byte of
+    # output goes through the rich logging stack (ADR-0029), nothing to fd 2.
+    for label, stream in (("stderr", result.stderr), ("stdout", result.stdout)):
+        text = (stream or "").strip()
+        if text:
+            _log.debug("qemu-img %s: %s", label, text)
 
 
 def convert(
