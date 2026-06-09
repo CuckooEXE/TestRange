@@ -9,11 +9,25 @@ from __future__ import annotations
 
 import io
 import logging
+import os
+import termios
+import time
+from threading import Event, Thread
 
 import pytest
 from rich.console import Console
 
-from testrange._dashboard import DashboardLogHandler, render, run_dashboard
+from testrange._dashboard import (
+    _MAX_SCROLL,
+    DashboardLogHandler,
+    _dispatch_key,
+    _footer,
+    _key_reader,
+    _ScrollState,
+    _Tail,
+    render,
+    run_dashboard,
+)
 from testrange._tui import CONSOLE_LOGGER, TESTOUT_LOGGER
 from testrange.orchestrator.dashboard_state import DashboardState, VMStage
 
@@ -23,6 +37,18 @@ def _capture(renderable: object, *, width: int = 120, height: int = 40) -> str:
     console = Console(file=buf, force_terminal=True, width=width, height=height)
     console.print(renderable)
     return buf.getvalue()
+
+
+def _tail_window(lines: list[str], *, offset: int, height: int) -> list[str]:
+    """The text rows a ``_Tail`` yields for a region of ``height`` rows.
+
+    ``_Tail`` reads its height from the ``Layout`` region's ConsoleOptions, so the
+    windowing logic is driven here with an explicit-height options object.
+    """
+    console = Console(width=40, height=height)
+    options = console.options.update(height=height)
+    rows = console.render_lines(_Tail(lines, offset=offset), options, pad=False)
+    return ["".join(seg.text for seg in row).rstrip() for row in rows]
 
 
 def _populated() -> DashboardState:
@@ -193,3 +219,157 @@ def test_run_dashboard_restores_on_exception() -> None:
     finally:
         root.handlers[:] = saved_handlers
         cl.setLevel(saved_cl)
+
+
+_LINES100 = [f"L{i}" for i in range(100)]
+
+
+class TestScrollback:
+    """Keyboard scrollback over the streaming panes (CORE-87)."""
+
+    def test_offset_zero_shows_the_live_tail(self) -> None:
+        assert _tail_window(_LINES100, offset=0, height=10) == [f"L{i}" for i in range(90, 100)]
+
+    def test_positive_offset_scrolls_up(self) -> None:
+        # Scrolled up 5 lines: the window ends 5 lines from the bottom.
+        assert _tail_window(_LINES100, offset=5, height=10) == [f"L{i}" for i in range(85, 95)]
+
+    def test_offset_clamps_at_the_top(self) -> None:
+        # A huge offset (e.g. "jump to top") never runs off the top.
+        assert _tail_window(_LINES100, offset=_MAX_SCROLL, height=10) == [
+            f"L{i}" for i in range(10)
+        ]
+
+    def test_scroll_state_follows_tail_by_default(self) -> None:
+        s = _ScrollState()
+        assert s.focus == "log"
+        assert s.offset("log") == 0 and s.offset("serial") == 0
+
+    def test_arrow_keys_scroll_the_focused_pane(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"\x1b[A", s)  # up
+        assert s.offset("log") == 1
+        _dispatch_key(b"\x1b[A", s)
+        assert s.offset("log") == 2
+        _dispatch_key(b"\x1b[B", s)  # down
+        assert s.offset("log") == 1
+
+    def test_down_does_not_pass_the_live_tail(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"\x1b[B", s)  # down at the tail stays put
+        assert s.offset("log") == 0
+
+    def test_tab_and_arrows_cycle_focus(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"\t", s)
+        assert s.focus == "serial"
+        _dispatch_key(b"\x1b[C", s)  # right also cycles
+        assert s.focus == "log"
+        _dispatch_key(b"\x0c", s)  # Ctrl-L cycles
+        assert s.focus == "serial"
+        _dispatch_key(b"\x1b[D", s)  # left also cycles
+        assert s.focus == "log"
+
+    def test_jump_to_top_shows_top_not_the_sentinel(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"g", s)  # parks the offset at the jump-to-top sentinel
+        assert s.offset("log") == _MAX_SCROLL
+        footer = _footer(s).plain
+        assert "Log: TOP" in footer  # shown as TOP, never "↑1000"
+        assert "↑1000" not in footer
+
+    def test_page_keys_move_a_page(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"\x1b[5~", s)  # PgUp
+        assert s.offset("log") == 10
+        _dispatch_key(b"\x1b[6~", s)  # PgDn
+        assert s.offset("log") == 0
+
+    def test_home_jumps_to_top_end_returns_to_live(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"g", s)  # top
+        assert s.offset("log") == _MAX_SCROLL
+        _dispatch_key(b"G", s)  # live
+        assert s.offset("log") == 0
+        _dispatch_key(b"\x1b[H", s)  # Home escape sequence → top
+        assert s.offset("log") == _MAX_SCROLL
+        _dispatch_key(b"\x1b[F", s)  # End escape sequence → live
+        assert s.offset("log") == 0
+
+    def test_unknown_keys_are_ignored(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"x", s)
+        _dispatch_key(b"\x1b[Z", s)  # shift-tab, unmapped
+        assert s.offset("log") == 0 and s.focus == "log"
+
+    def test_footer_shows_keys_and_per_pane_status(self) -> None:
+        s = _ScrollState()
+        _dispatch_key(b"\t", s)  # focus serial
+        _dispatch_key(b"\x1b[5~", s)  # scroll serial a page
+        footer = _footer(s).plain
+        assert "Tab" in footer
+        assert "Log: LIVE" in footer
+        assert "Serial: ↑10" in footer
+
+    def test_scrolled_pane_title_shows_position(self) -> None:
+        s = DashboardState()
+        for i in range(200):
+            s.append_log(f"log line {i}")
+        scroll = _ScrollState()
+        _dispatch_key(b"g", scroll)  # jump the focused (log) pane to the top
+        out = _capture(render(s.snapshot(), scroll))
+        assert "log line 0" in out  # the oldest line is now visible
+        assert "↑" in out  # the title/footer marks a scrolled-back position
+
+
+class _PtyStdin:
+    """A stdin stand-in pointing ``_key_reader`` at a pty slave fd."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _icanon(fd: int) -> bool:
+    return bool(termios.tcgetattr(fd)[3] & termios.ICANON)
+
+
+def test_key_reader_cbreak_roundtrip_dispatches_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The raw-mode reader enters cbreak, dispatches a key, and restores the
+    terminal on stop — exercised over a real pseudo-terminal (CORE-87)."""
+    master, slave = os.openpty()
+    try:
+        saved = termios.tcgetattr(slave)  # cooked mode to begin with
+        monkeypatch.setattr("sys.stdin", _PtyStdin(slave))
+        scroll = _ScrollState()
+        stop = Event()
+        reader = Thread(target=_key_reader, args=(stop, scroll))
+        reader.start()
+        try:
+            # Wait until cbreak is engaged (ICANON cleared) so the escape
+            # sequence isn't line-buffered away before the reader sees it.
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and _icanon(slave):
+                time.sleep(0.01)
+            assert not _icanon(slave), "reader never put the terminal into cbreak"
+
+            os.write(master, b"\x1b[A")  # Up → scroll the focused (log) pane up one
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and scroll.offset("log") == 0:
+                time.sleep(0.01)
+            assert scroll.offset("log") == 1, "key was not dispatched"
+        finally:
+            stop.set()
+            reader.join(timeout=3.0)
+        assert not reader.is_alive(), "reader thread did not stop"
+        assert termios.tcgetattr(slave) == saved, "terminal not restored to cooked mode"
+    finally:
+        os.close(master)
+        os.close(slave)

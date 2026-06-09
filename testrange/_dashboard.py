@@ -10,6 +10,19 @@ the renderer dependency never reaches the orchestrator's phase/driver code (whic
 imports just the rich-free state). The context-manager that owns the ``Live`` and
 swaps handlers lives in CORE-77; this module is pure rendering + the handler.
 
+The ``Live`` runs on the **alternate screen buffer** (``screen=True``, CORE-86):
+VTE-based terminals (Terminator on Debian 13) flicker badly under the in-band
+cursor-up redraw ``screen=False`` does, whereas the alt-buffer's controlled
+full-screen repaint is flicker-free (the ``htop`` model). Because the alt-buffer
+is torn down on exit (the final frame disappears), the caller prints a plain
+summary afterwards.
+
+The Log and Serial panes are **scrollable** (CORE-87): the panes normally follow
+the tail, but a keyboard reader (:func:`_key_reader`, active only on a real TTY)
+lets the user page back through the ring buffers. The scroll position is pure UI
+state (:class:`_ScrollState`) and is deliberately kept *out* of the UI-agnostic
+``DashboardState``.
+
 Guest-influenced text (serial lines, test names) is rendered as
 :class:`rich.text.Text` with markup disabled, so a guest line like ``[red]`` is
 shown literally and can never inject rich markup — defence-in-depth on top of the
@@ -18,9 +31,16 @@ shown literally and can never inject rich markup — defence-in-depth on top of 
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import select
+import sys
+import termios
+import tty
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from threading import Event, Lock, Thread
 
 from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
 from rich.layout import Layout
@@ -63,6 +83,59 @@ _LEVEL_STYLE: dict[str, str] = {
     "CRITICAL": "bold red",
 }
 
+# The two streaming panes the user can scroll back through, in Tab-cycle order.
+_SCROLLABLE: tuple[str, ...] = ("log", "serial")
+# Upper bound on a pane's stored scroll offset. The renderer re-clamps to the
+# actual line count for the pane's height, so this only needs to exceed the
+# largest ring (serial = 500); "jump to top" parks the offset here and the
+# renderer resolves it to the true top.
+_MAX_SCROLL = 1000
+# Border colour for the pane that currently has scroll focus.
+_FOCUS_STYLE = "bold cyan"
+
+
+class _ScrollState:
+    """Thread-safe scrollback position for the two streaming panes (CORE-87).
+
+    Pure UI state shared between the key-reader thread (writer) and the ``Live``
+    refresh thread (reader). An offset is "lines scrolled up from the bottom";
+    ``0`` means *follow the live tail*. Offsets are stored loosely bounded and
+    re-clamped against the real line count at render time.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._focus = _SCROLLABLE[0]
+        self._offsets: dict[str, int] = dict.fromkeys(_SCROLLABLE, 0)
+
+    @property
+    def focus(self) -> str:
+        with self._lock:
+            return self._focus
+
+    def offset(self, pane: str) -> int:
+        with self._lock:
+            return self._offsets[pane]
+
+    def cycle_focus(self) -> None:
+        with self._lock:
+            nxt = (_SCROLLABLE.index(self._focus) + 1) % len(_SCROLLABLE)
+            self._focus = _SCROLLABLE[nxt]
+
+    def scroll(self, delta: int) -> None:
+        """Scroll the focused pane by ``delta`` lines (+up / -down)."""
+        with self._lock:
+            cur = self._offsets[self._focus]
+            self._offsets[self._focus] = max(0, min(cur + delta, _MAX_SCROLL))
+
+    def to_top(self) -> None:
+        with self._lock:
+            self._offsets[self._focus] = _MAX_SCROLL
+
+    def to_live(self) -> None:
+        with self._lock:
+            self._offsets[self._focus] = 0
+
 
 def _plain_line(line: str) -> Text:
     # markup=False via Text(): never interpret guest output as markup.
@@ -87,24 +160,39 @@ def _styled_log_line(line: str) -> Text:
 
 
 class _Tail:
-    """Render the *last* lines of a buffer that fit the available region height.
+    """Render a height-sized window of a buffer, offset up from the most recent.
 
-    A ``Layout`` region hands its height to the renderable via ``options``, so
-    slicing to the last ``height`` lines keeps the **most recent** output visible
-    (a plain ``Text`` would be top-cropped, hiding the latest line). ``styler``
-    turns each raw line into a ``Text`` (default: plain, markup-safe).
+    A ``Layout`` region hands its height to the renderable via ``options``. With
+    ``offset == 0`` the window is the last ``height`` lines, so the **most recent**
+    output stays visible (a plain ``Text`` would be top-cropped). A positive
+    ``offset`` scrolls the window up by that many lines (clamped so it never runs
+    off the top), which is how the scrollable panes show earlier output (CORE-87).
+    ``styler`` turns each raw line into a ``Text`` (default: plain, markup-safe).
     """
 
     def __init__(
-        self, lines: Sequence[str], *, styler: Callable[[str], Text] = _plain_line
+        self,
+        lines: Sequence[str],
+        *,
+        styler: Callable[[str], Text] = _plain_line,
+        offset: int = 0,
     ) -> None:
         self._lines = lines
         self._styler = styler
+        self._offset = offset
 
     def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
         height = options.height if options.height is not None else options.max_height
-        visible = self._lines[-height:] if height else self._lines
-        for line in visible:
+        if not height:
+            for line in self._lines:
+                yield self._styler(line)
+            return
+        n = len(self._lines)
+        max_off = max(0, n - height)
+        eff = min(max(self._offset, 0), max_off)
+        end = n - eff
+        start = max(0, end - height)
+        for line in self._lines[start:end]:
             yield self._styler(line)
 
 
@@ -144,28 +232,75 @@ def _tests_panel(snapshot: DashboardSnapshot) -> Panel:
     return Panel(table, title=title, border_style="blue")
 
 
-def _log_panel(snapshot: DashboardSnapshot) -> Panel:
+def _scroll_status(offset: int) -> str:
+    """Compact scroll-position label: ``LIVE`` at the tail, ``TOP`` at the cap,
+    else ``↑N``. (At the cap the stored offset is the jump-to-top sentinel, not a
+    real line distance, so it is shown as ``TOP`` rather than ``↑1000``.)"""
+    if offset <= 0:
+        return "LIVE"
+    if offset >= _MAX_SCROLL:
+        return "TOP"
+    return f"↑{offset}"
+
+
+def _pane_title(name: str, offset: int) -> str:
+    """A pane title that shows the scroll position when scrolled off the tail."""
+    return name if offset <= 0 else f"{name}  {_scroll_status(offset)}"
+
+
+def _stream_panel(
+    name: str, lines: Sequence[str], scroll: _ScrollState, *, styler: Callable[[str], Text]
+) -> Panel:
+    pane = name.lower()
+    offset = scroll.offset(pane)
+    focused = scroll.focus == pane
     return Panel(
-        _Tail(snapshot.log_lines, styler=_styled_log_line), title="Log", border_style="blue"
+        _Tail(lines, styler=styler, offset=offset),
+        title=_pane_title(name, offset),
+        border_style=_FOCUS_STYLE if focused else "blue",
     )
 
 
-def _serial_panel(snapshot: DashboardSnapshot) -> Panel:
-    lines = [f"{vm}  {line}" for vm, line in snapshot.serial_lines]
-    return Panel(_Tail(lines), title="Serial (build)", border_style="blue")
+def _footer(scroll: _ScrollState) -> Text:
+    """One-line key hint + per-pane scroll position."""
+    text = Text(no_wrap=True, overflow="ellipsis", style="dim")
+    text.append("[Tab] pane  [↑↓] line  [PgUp/PgDn] page  [Home/End] top/live")
+    for pane in _SCROLLABLE:
+        style = _FOCUS_STYLE if scroll.focus == pane else "dim"
+        text.append(f"   {pane.capitalize()}: {_scroll_status(scroll.offset(pane))}", style=style)
+    return text
 
 
-def render(snapshot: DashboardSnapshot) -> RenderableType:
-    """Build the four-pane dashboard layout from a snapshot."""
+def render(snapshot: DashboardSnapshot, scroll: _ScrollState | None = None) -> RenderableType:
+    """Build the dashboard layout from a snapshot (+ optional scroll state).
+
+    The top row (VMs + Tests) takes 1/5 of the height and the streaming panes
+    (Log + Serial) take 4/5 (CORE-88), with a one-line key/scroll footer beneath.
+    """
+    scroll = scroll if scroll is not None else _ScrollState()
     layout = Layout()
-    layout.split_column(Layout(name="top", ratio=1), Layout(name="bottom", ratio=1))
+    layout.split_column(
+        Layout(name="top", ratio=1),
+        Layout(name="bottom", ratio=4),
+        Layout(_footer(scroll), name="footer", size=1),
+    )
     layout["top"].split_row(
         Layout(_vm_panel(snapshot), name="vms"),
         Layout(_tests_panel(snapshot), name="tests"),
     )
     layout["bottom"].split_row(
-        Layout(_log_panel(snapshot), name="log"),
-        Layout(_serial_panel(snapshot), name="serial"),
+        Layout(
+            _stream_panel("Log", snapshot.log_lines, scroll, styler=_styled_log_line), name="log"
+        ),
+        Layout(
+            _stream_panel(
+                "Serial",
+                [f"{vm}  {line}" for vm, line in snapshot.serial_lines],
+                scroll,
+                styler=_plain_line,
+            ),
+            name="serial",
+        ),
     )
     return layout
 
@@ -215,6 +350,91 @@ class DashboardLogHandler(logging.Handler):
         return "-", record.getMessage()
 
 
+# Arrow / navigation escape sequences (the bytes after the leading ESC), mapped
+# to a logical key. Terminals differ on Home/End, so several spellings map to one.
+_NAV_KEYS: dict[bytes, str] = {
+    b"[A": "up",
+    b"[B": "down",
+    b"[C": "right",
+    b"[D": "left",
+    b"[5~": "pgup",
+    b"[6~": "pgdn",
+    b"[H": "home",
+    b"[F": "end",
+    b"[1~": "home",
+    b"[4~": "end",
+    b"OH": "home",
+    b"OF": "end",
+}
+
+
+def _dispatch_key(chunk: bytes, scroll: _ScrollState) -> None:
+    """Apply one read of stdin to the scroll state."""
+    if chunk in (b"\t", b"\x0c"):  # Tab / Ctrl-L → next pane
+        scroll.cycle_focus()
+        return
+    if chunk == b"g":
+        scroll.to_top()
+        return
+    if chunk == b"G":
+        scroll.to_live()
+        return
+    if chunk[:1] != b"\x1b":
+        return
+    key = _NAV_KEYS.get(chunk[1:])
+    if key == "up":
+        scroll.scroll(1)
+    elif key == "down":
+        scroll.scroll(-1)
+    elif key == "pgup":
+        scroll.scroll(10)  # a "page" is ~10 lines
+    elif key == "pgdn":
+        scroll.scroll(-10)
+    elif key == "home":
+        scroll.to_top()
+    elif key == "end":
+        scroll.to_live()
+    elif key in ("left", "right"):
+        scroll.cycle_focus()
+
+
+def _stdin_is_tty() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (OSError, ValueError):  # pragma: no cover - stdin detached
+        return False
+
+
+def _key_reader(stop: Event, scroll: _ScrollState) -> None:
+    """Read scroll keys from stdin in cbreak mode until ``stop`` is set.
+
+    Runs on a daemon thread only when stdin is a real TTY. The terminal mode is
+    saved on entry and restored on every exit path; any failure to grab the
+    terminal disables scrolling silently (the dashboard still renders).
+    """
+    try:
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+    except (OSError, ValueError, termios.error):  # pragma: no cover - no usable tty
+        return
+    try:
+        tty.setcbreak(fd)
+        while not stop.is_set():
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 8)
+            except OSError:  # pragma: no cover - tty went away mid-run
+                break
+            if not chunk:
+                break
+            _dispatch_key(chunk, scroll)
+    finally:
+        with contextlib.suppress(OSError, termios.error):  # pragma: no cover
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
 @contextmanager
 def run_dashboard(
     state: DashboardState,
@@ -229,8 +449,10 @@ def run_dashboard(
     terminal. When active it takes over the ``testrange`` logger — removing the
     existing handler (so it can't fight the ``Live`` for the screen, the same
     reason the old live tail did), installing a :class:`DashboardLogHandler` that
-    feeds the panes, lowering the serial firehose so the Serial pane fills — and
-    restores everything on the way out, **including the exception path**.
+    feeds the panes, lowering the serial firehose so the Serial pane fills — runs
+    on the alternate screen buffer (flicker-free, CORE-86), and starts a key
+    reader for scrollback when stdin is a TTY (CORE-87) — and restores
+    everything on the way out, **including the exception path**.
 
     When inactive (no TTY, piped, or ``--no-dashboard``), it yields ``None`` and
     logging keeps flowing through the already-installed ``RichHandler`` unchanged;
@@ -257,22 +479,35 @@ def run_dashboard(
     saved = root.handlers[:]
     handler = DashboardLogHandler(state)
     handler.setLevel(logging.DEBUG)
-    for h in saved:
-        root.removeHandler(h)
-    root.addHandler(handler)
-    for lg in firehose:
-        lg.setLevel(logging.DEBUG)  # let the serial firehose reach the pane
-
-    live = Live(
-        console=console,
-        screen=False,
-        refresh_per_second=8,
-        get_renderable=lambda: render(state.snapshot()),
-    )
+    scroll = _ScrollState()
+    stop = Event()
+    reader: Thread | None = None
+    # Everything that mutates global state — the handler swap, the firehose
+    # levels, the cbreak key-reader thread, and the Live (whose construction
+    # eagerly renders once) — runs inside the try so the finally restores it all
+    # on *any* failure, including a render error during Live construction. A
+    # leaked reader thread would otherwise strand the terminal in cbreak.
     try:
+        for h in saved:
+            root.removeHandler(h)
+        root.addHandler(handler)
+        for lg in firehose:
+            lg.setLevel(logging.DEBUG)  # let the serial firehose reach the pane
+        if _stdin_is_tty():
+            reader = Thread(target=_key_reader, args=(stop, scroll), daemon=True)
+            reader.start()
+        live = Live(
+            console=console,
+            screen=True,
+            refresh_per_second=8,
+            get_renderable=lambda: render(state.snapshot(), scroll),
+        )
         with live:
             yield state
     finally:
+        stop.set()
+        if reader is not None:
+            reader.join(timeout=1.0)
         root.removeHandler(handler)
         for h in saved:
             root.addHandler(h)
