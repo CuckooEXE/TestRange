@@ -37,13 +37,18 @@ failure), `node-ready.py` (post-boot IP discovery + datastore/sshd readiness).
 
 - **FIXED — a modest-disk install leaves NO datastore.** ESXi 8 on a 48 GiB disk
   gave `OSDATA = 39.75 GiB` and **no local VMFS datastore** (`host.datastore ==
-  []`), so the ESXi driver's `create_pool` (which folds a pool into an existing
-  datastore) has nowhere to go. Root cause: ESX-OSData expands to fill the disk;
-  the installer only makes a datastore on the leftover, and there is none. Fix:
-  add `systemMediaSize=min` to the installer kernelopt (caps system storage at
-  ~33 GiB) and size the node disk ≥ ~70 GiB, so the install yields a
-  `datastore1`. The kernelopt lives in the patched BOOT.CFG (not the ks.cfg), so
-  it is now also folded into `config_hash`. (`builders/_esxi_prepare.py`,
+  []`); on a 96 GiB disk OSDATA ballooned to 87.75 GiB — ESX-OSData expands to
+  fill the disk, so the installer's leftover-space VMFS is never created and the
+  ESXi driver's `create_pool` (which folds a pool into an existing datastore) has
+  nowhere to go. Fix: add `systemMediaSize=min` to the installer kernelopt (caps
+  ESX-OSData) and size the node disk with headroom. **Two bugs had to be fixed
+  for this to take:** (a) the kernelopt rides the patched BOOT.CFG, not the
+  ks.cfg, so it was folded into `config_hash`; (b) `prepare_boot_media` keyed the
+  prepared-ISO cache *only* on the kickstart digest, so the kernelopt edit reused
+  a stale ISO and `systemMediaSize` never reached the installer (the extracted
+  BOOT.CFG proved it absent) — fixed to key on the kernelopt too. **Verified
+  live:** an 80 GiB node now installs `OSDATA = 23.75 GiB` + `datastore1 = 47.75
+  GiB` (46.3 GiB free > the cert's 32 GiB pool). (`builders/_esxi_prepare.py`,
   `builders/esxi.py`)
 
 - **OPEN (sidestepped) — ESXI-18: vmk0 keeps the install-time build-NIC MAC.**
@@ -66,4 +71,25 @@ failure), `node-ready.py` (post-boot IP discovery + datastore/sshd readiness).
 
 ## Cert findings (M4)
 
-_(appended as the `tests/plans/` sweep runs against the leaked node)_
+Run via `testrange --no-dashboard run --profile connect.toml:esxi-nested <plan>`
+against the leaked node (10.50.0.85, datastore1).
+
+- **The full ESXi build pipeline works on the nested node.** `esxi/devices.py`
+  drove it end to end: pyVmomi connect → preflight → create the isolated build
+  vSwitch + the **uplink vSwitch enslaving vmnic1** → datastore pool → qcow2→vmdk
+  convert (`_diskconvert`) → upload to datastore1 → create + boot the build VM +
+  sidecar. The disk-bus controllers wire correctly: the run VM enumerated `sda`
+  on the LsiLogic controller and `sdb`/`sdc` on the AHCI controller (`sd 2:0:0:0`
+  vs `sd 32:0:*` in the guest serial), plus the nvme disk — the M1 disk-bus
+  feature, live.
+- **Nested NAT egress works (triple-NAT).** The build VM's `apt-get update`
+  succeeded through build-VM → on-node NAT sidecar → vmnic1 → L0 egress-uplink
+  segment → L0 NAT sidecar → `tr-egress` → internet. This is what env-blocked
+  ESXI-11 — the local `tr-egress` path clears it.
+- **FIXED — `esxi/devices.py` named a non-existent package.** The build failed
+  with `apt-get install -y open-vm-tools-plugins-all exited 100`. That package
+  does **not** exist in Debian trixie ("No such package"); the base
+  `open-vm-tools` already ships the guest-ops vix plugin
+  (`…/plugins/common/libvix.so`), so the plan now installs just `open-vm-tools`.
+  The plan was authored for the (shelved) ESXi cert and never run live, so the
+  bad name was latent. (`tests/plans/esxi/devices.py`)
