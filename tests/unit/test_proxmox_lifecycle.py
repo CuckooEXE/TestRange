@@ -45,6 +45,11 @@ class _FakeApi:
         self.resized: dict[str, Any] = {}
         self.snapshots: list[dict[str, Any]] = []
         self.lock_remaining = 0  # config reports a 'lock' for this many polls, then clears
+        # PVE-58: a snapshot rollback/delete task hits the transient per-VM config
+        # flock this many times (UPID -> wait_task raises "got timeout" lock), then
+        # succeeds; snapshot_hard_fail models a genuine, non-retryable failure.
+        self.snapshot_lock_fails = 0
+        self.snapshot_hard_fail = False
         self.resize_fails = 0  # resize task fails transiently this many times, then succeeds
         # H3: resize.put() raises SYNCHRONOUSLY (no UPID) this many times, with
         # this exception — models a raw proxmoxer error the old retry missed.
@@ -98,14 +103,26 @@ class _FakeApi:
             self.snapshots.append({"name": kwargs["snapname"], "snaptime": len(self.snapshots)})
             return None
         if path.endswith("/rollback") and method == "post":
-            return None
+            return self._snapshot_task_outcome()
         if "/snapshot/" in path and method == "delete":
-            name = path.split("/snapshot/", 1)[1]
-            self.snapshots = [s for s in self.snapshots if s["name"] != name]
-            return None
+            outcome = self._snapshot_task_outcome()
+            if outcome is None:  # success: actually remove it
+                name = path.split("/snapshot/", 1)[1]
+                self.snapshots = [s for s in self.snapshots if s["name"] != name]
+            return outcome
         if "/qemu/" in path and method == "delete":
             return None
         raise AssertionError(f"unexpected API call: {method} {path} {kwargs}")
+
+    def _snapshot_task_outcome(self) -> str | None:
+        """A snapshot rollback/delete returns a UPID that wait_task fails (a
+        transient flock or a hard error), or ``None`` on success."""
+        if self.snapshot_hard_fail:
+            return "UPID:snap-hard-doomed"
+        if self.snapshot_lock_fails > 0:
+            self.snapshot_lock_fails -= 1
+            return "UPID:snap-lock-doomed"
+        return None
 
 
 class _FakeClient:
@@ -119,6 +136,13 @@ class _FakeClient:
         self.waited.append(upid)
         if upid == "UPID:resize-doomed":
             raise DriverError("resize task failed: got timeout")
+        if upid == "UPID:snap-lock-doomed":
+            raise DriverError(
+                "PVE task failed: exitstatus=\"can't lock file "
+                "'/var/lock/qemu-server/lock-100.conf' - got timeout\""
+            )
+        if upid == "UPID:snap-hard-doomed":
+            raise DriverError('PVE task failed: exitstatus="internal error"')
 
 
 def _client() -> Any:
@@ -418,3 +442,41 @@ class TestSnapshots:
         c.api.snapshots = [{"name": "s1", "snaptime": 1}]
         _vm.restore_snapshot(c, "tr-vm-x-web", "s1")
         assert any(p.endswith("/snapshot/s1/rollback") and m == "post" for m, p, _ in c.api.calls)
+
+    # PVE-58: a mem-snapshot rollback/delete holds the per-VM config flock
+    # (/var/lock/qemu-server/lock-<vmid>.conf) past the API task's completion (the
+    # QEMU vmstate save/resume), so a follow-on op fails "can't lock file ... got
+    # timeout". That flock is a host file, invisible to the config-lock metadata,
+    # so the op must RETRY. Live cert surfaced this on memory snapshots (disk snaps
+    # are fast enough to dodge it).
+    def test_delete_snapshot_retries_transient_config_flock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("time.sleep", lambda _s: None)  # skip backoff
+        c = self._vm()
+        c.api.snapshots = [{"name": "s1", "snaptime": 1}]
+        c.api.snapshot_lock_fails = 2  # two transient flock failures, then success
+        _vm.delete_snapshot(c, "tr-vm-x-web", "s1")
+        assert c.api.snapshot_lock_fails == 0  # retried past the flock
+        assert c.api.snapshots == []  # eventually deleted
+
+    def test_restore_snapshot_retries_transient_config_flock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        c = self._vm()
+        c.api.snapshots = [{"name": "s1", "snaptime": 1}]
+        c.api.snapshot_lock_fails = 2
+        _vm.restore_snapshot(c, "tr-vm-x-web", "s1")
+        assert c.api.snapshot_lock_fails == 0
+
+    def test_snapshot_op_does_not_retry_non_lock_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A genuine (non-flock) task failure propagates immediately, no retry.
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        c = self._vm()
+        c.api.snapshots = [{"name": "s1", "snaptime": 1}]
+        c.api.snapshot_hard_fail = True
+        with pytest.raises(DriverError, match="internal error"):
+            _vm.delete_snapshot(c, "tr-vm-x-web", "s1")

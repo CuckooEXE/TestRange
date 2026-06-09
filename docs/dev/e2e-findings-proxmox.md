@@ -106,4 +106,63 @@ Each finding: symptom → root cause → fix → ticket. Severity: **blocker**
   footer restore a run-appropriate `resolv.conf` (or `rm` it so the run boot
   regenerates it) before `sync`.
 
-<!-- Driver discrepancies from the cert-corpus sweep get appended below. -->
+## Cert sweep — Proxmox driver (against the leaked PVE 9.2.2 node)
+
+`testrange run --profile pve-live` over the corpus. 30 / 32 green on the first
+pass; the 2 failures (below) are fixed and re-verified.
+
+| Plan | Result |
+|------|--------|
+| `proxmox/devices.py` | 2/2 ✅ (image-origin build in PVE, SDN egress, scsi/virtio bus, QGA) |
+| `generic/users_credentials.py` | 6/6 ✅ |
+| `generic/networking.py` | 7/7 ✅ (air-gap matrix, NAT egress, cross-label DNS — chained-NAT egress works) |
+| `generic/build_cache.py` | 5/5 ✅ (multi-data-disk integrity, apt+pip, post-install order) |
+| `generic/concurrency.py` | 3/3 ✅ (4-node fan-out) |
+| `generic/lifecycle.py` | 6/7 → **F5** (native chunked/binary write-read) → fixed |
+| `generic/snapshots.py` | 1/3 → **F6** (memory snapshots) → fixed |
+
+(Note: I'd predicted `build_cache` would fail on Proxmox's scsi data-disk names —
+it didn't; the generic `HardDrive` presents as `/dev/vd*` on the PVE guest, so the
+plan stays portable as written. No change needed.)
+
+### F5 — QGA file-read corrupts binary content (utf-8 re-encode) — **bug (proxmox driver)** — FIXED
+
+- **Symptom.** `generic/lifecycle.py::native_write_handles_payload_over_the_agent_cap`
+  failed: a 256 KiB binary blob (every byte value) written over QGA read back as
+  **393216 bytes** (`AssertionError: wrote 262144, read 393216`).
+- **Root cause.** `393216 = 128K(ASCII) + 128K×2(high bytes)`. PVE's `agent/file-read`
+  (and exec out/err-data) surfaces the guest's raw bytes as a **latin-1** string
+  (each byte 0x00-0xFF → one U+0000..U+00FF codepoint); `_guest._to_bytes`
+  re-encoded that with **utf-8**, doubling every 0x80-0xFF byte. (The chunked
+  *write* was correct — the on-disk file was the exact 262144 bytes; only the
+  read mis-decoded.)
+- **Fix.** `_to_bytes` recovers bytes with a **latin-1** encode (correct for both
+  binary and ASCII/text payloads). Added a `truncated`-flag guard on `file-read`
+  so a >16 MiB read fails loud instead of silently returning a head. New unit
+  tests `test_read_file_recovers_binary_bytes`, `test_read_file_truncated_raises`.
+- **Ticket.** PVE-58 (closes the build_cache-adjacent edge of PVE-45).
+
+### F6 — memory-snapshot ops leave the VM config-locked → next op races "got timeout" — **bug (proxmox driver)** — FIXED
+
+- **Symptom.** `generic/snapshots.py` disk-snapshot lifecycle passed, but both
+  memory-snapshot tests failed: `delete_snapshot` (after a mem rollback) and the
+  next test's `shutdown_vm` raised `DriverError: PVE task ... failed:
+  exitstatus="can't lock file '/var/lock/qemu-server/lock-101.conf' - got timeout"`.
+- **Root cause.** A `mem=True` snapshot create/rollback writes/restores RAM state
+  and PVE holds the config lock **past the task's completion** (the resume). The
+  driver's `create_snapshot`/`restore_snapshot`/`delete_snapshot` returned the
+  moment `_await` saw the task finish, so the immediately-following op took the
+  lock before PVE released it. Disk snapshots are fast enough to dodge it.
+- **Fix.** A first attempt — `_wait_unlocked` (poll the config `lock` metadata)
+  after each op — did **not** work: the failing lock is a *host file*
+  (`/var/lock/qemu-server/lock-<vmid>.conf`), invisible to the config-`lock`
+  field, which clears at task end while the flock lingers. The working fix is to
+  **retry** the rollback/delete on the transient `… got timeout` lock (same shape
+  as `_resize_os_disk`'s post-import image-lock retry, `_await_lock_retry`).
+  Verified live: `[PASS] memory_snapshot_restores_running_state (37.98s)` after
+  *"hit a transient config flock (attempt 1/2); retrying"*. New unit tests
+  `test_{restore,delete}_snapshot_retries_transient_config_flock` +
+  `test_snapshot_op_does_not_retry_non_lock_failure`.
+- **Ticket.** PVE-58.
+
+<!-- end findings -->

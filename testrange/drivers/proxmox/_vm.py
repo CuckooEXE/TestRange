@@ -32,7 +32,7 @@ from testrange.drivers.proxmox.devices import ProxmoxHardDrive
 from testrange.exceptions import DriverError
 
 if TYPE_CHECKING:  # pragma: no cover
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from testrange.drivers.base import VolumeRef
     from testrange.drivers.proxmox._client import ProxmoxClient
@@ -405,6 +405,36 @@ def _snapshot_names(client: ProxmoxClient, vmid: int) -> list[str]:
     return [s["name"] for s in snaps]
 
 
+_LOCK_RETRY_ATTEMPTS = 10
+_LOCK_RETRY_BACKOFF_S = 3.0
+
+
+def _await_lock_retry(client: ProxmoxClient, issue: Callable[[], Any], *, what: str) -> None:
+    """Issue a PVE task via ``issue`` and await it, retrying the transient per-VM
+    config flock (``/var/lock/qemu-server/lock-<vmid>.conf``).
+
+    A ``mem=True`` snapshot create/rollback writes/restores the RAM state and
+    holds that flock **past** the API task's completion (the QEMU vmstate
+    save/resume), so a follow-on op (delete after a rollback, the next test's
+    shutdown) fails with ``can't lock file ... got timeout``. That lock is a host
+    file, invisible to the config ``lock`` metadata :func:`_wait_unlocked` polls,
+    so the only way to ride it out is to retry — same shape as
+    :func:`_resize_os_disk`'s post-import image-lock retry. Any non-lock failure
+    re-raises immediately.
+    """
+    for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
+        try:
+            _await(client, issue())
+            return
+        except Exception as e:
+            msg = str(e).lower()
+            transient = "got timeout" in msg and "lock" in msg
+            if attempt == _LOCK_RETRY_ATTEMPTS or not transient:
+                raise
+            _log.info("%s hit a transient config flock (attempt %d); retrying", what, attempt)
+            time.sleep(_LOCK_RETRY_BACKOFF_S)
+
+
 def create_snapshot(
     client: ProxmoxClient,
     vm_backend_name: str,
@@ -428,6 +458,9 @@ def create_snapshot(
         )
     if name in _snapshot_names(client, vmid):
         raise DriverError(f"snapshot {name!r} already exists on vm {vm_backend_name!r}")
+    # create is the first op of a snapshot sequence (preceded only by reads), so
+    # it never races a prior op's flock — no lock-retry needed here, unlike the
+    # rollback/delete that follow a mem snapshot.
     _await(
         client,
         client.api.nodes(client.node)
@@ -446,7 +479,11 @@ def delete_snapshot(client: ProxmoxClient, vm_backend_name: str, name: str) -> N
     vmid = resolve_vmid(client, vm_backend_name)
     if name not in _snapshot_names(client, vmid):
         return
-    _await(client, client.api.nodes(client.node).qemu(vmid).snapshot(name).delete())
+    _await_lock_retry(
+        client,
+        lambda: client.api.nodes(client.node).qemu(vmid).snapshot(name).delete(),
+        what=f"delete of snapshot {name!r} on vm {vm_backend_name!r}",
+    )
     _log.info("deleted snapshot %s on vm %s", name, vm_backend_name)
 
 
@@ -455,5 +492,9 @@ def restore_snapshot(client: ProxmoxClient, vm_backend_name: str, name: str) -> 
     vmid = resolve_vmid(client, vm_backend_name)
     if name not in _snapshot_names(client, vmid):
         raise DriverError(f"snapshot {name!r} not found on vm {vm_backend_name!r}")
-    _await(client, client.api.nodes(client.node).qemu(vmid).snapshot(name).rollback.post())
+    _await_lock_retry(
+        client,
+        lambda: client.api.nodes(client.node).qemu(vmid).snapshot(name).rollback.post(),
+        what=f"rollback of vm {vm_backend_name!r} to {name!r}",
+    )
     _log.info("rolled vm %s back to snapshot %s", vm_backend_name, name)
