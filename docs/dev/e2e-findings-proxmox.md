@@ -4,12 +4,14 @@ Live certification of the Proxmox **builder** (`ProxmoxAnswerBuilder`) and
 **driver** (`testrange.drivers.proxmox`) against a real PVE node, per REL-12 /
 REL-15 / BUILD-13 (tracked as PVE-57 / PVE-58).
 
-**Method.** The node is stood up by `examples/pve_node.py` —
-`testrange run --profile libvirt-local examples/pve_node.py` — which installs PVE
-9.x as a libvirt guest (installer-origin, UEFI/q35), brings the run boot up on a
-host-reachable static management address (`10.50.0.100`), and `leak()`s it so it
-survives as the driver's certification target. The driver is then certified by
-looping the corpus against it:
+**Method.** At cert time the node was stood up by a `ProxmoxAnswerBuilder` standup
+plan run as `testrange run --profile libvirt-local <plan>.py`, which installed PVE
+9.x as a libvirt guest (installer-origin, UEFI/q35), brought the run boot up on a
+host-reachable static management address (`10.50.0.100`), and `leak()`d it so it
+survived as the driver's certification target. (That standup plan shipped as
+`examples/pve_node.py`, removed post-1.0.0 per DOCS-24; the steps it performed are
+the ones recorded below.) The driver was then certified by looping the corpus
+against it:
 
 ```sh
 for p in tests/plans/generic/*.py tests/plans/proxmox/*.py; do
@@ -43,8 +45,8 @@ Each finding: symptom → root cause → fix → ticket. Severity: **blocker**
   any `pvesm`/`pvesh` storage-config write (which takes a cfs lock) fails. This
   is intrinsic to *any* PVE config write from the first-boot oneshot, not
   specific to storage.
-- **Fix.** Don't configure PVE cluster state from first-boot. `examples/pve_node.py`
-  moves the `local`-storage widening to the **run phase** over SSH (a TEST step
+- **Fix.** Don't configure PVE cluster state from first-boot. The standup plan
+  moved the `local`-storage widening to the **run phase** over SSH (a TEST step
   that waits for `pvesm status` to answer, then sets), where PVE is fully booted
   and pmxcfs is online. First-boot keeps only pmxcfs-independent work (the UEFI
   removable-media fallback).
@@ -65,7 +67,7 @@ Each finding: symptom → root cause → fix → ticket. Severity: **blocker**
   `mgmt=True` switches fight for the host `.2` adapter. This is the ADR-0018
   single-instance boundary (one run per profile is supported); the collisions
   only appear when that's violated by concurrent leaked labs.
-- **Fix.** `examples/pve_node.py` uses unique resource names (`pvebuild`,
+- **Fix.** The standup plan used unique resource names (`pvebuild`,
   `pvemgmt`, `pvepool`) and a private mgmt subnet (`10.55.0.0/24`) so the lab is
   robust against other same-day leaked runs sharing the host. Not a driver bug —
   date-scoping is the intended single-instance design; noted for lab authors who

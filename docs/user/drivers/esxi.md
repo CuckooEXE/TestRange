@@ -23,24 +23,23 @@ vmdk projection is derived.
 
 ## Support level
 
-The driver and the full build→cache→run→test pipeline are proven live on a
-standalone ESXi 8.0.3 host (connect, L2, the qcow2↔vmdk↔VMFS storage round-trip,
-VM lifecycle, snapshots, VMware Tools guest-ops, the serial build-result sink,
-and end-to-end `hello_world` orchestration through to the build phase).
+**Certification in progress.** The driver and the full build→cache→run→test
+pipeline are proven live on a standalone ESXi 8.0.3 host: connect + inventory +
+`/folder` byte I/O, L2 (vSwitch / portgroup / mgmt vmk / uplink), the
+qcow2↔vmdk↔VMFS storage round-trip, VM lifecycle + snapshots, VMware Tools
+guest-ops, the serial build-result sink + SSH `guest_gateway`, and end-to-end
+`hello_world` orchestration through the build phase. `bios` firmware is certified;
+`uefi` is accepted-but-unvalidated (BUILD-1b).
 
-| Capability | Status |
-| --- | --- |
-| ESXi driver (ESXI-1…10) | **code-complete**, unit-tested (pyVmomi fakes), gate-green |
-| connect + inventory + `/folder` byte I/O | **live-certified** |
-| L2 (vSwitch / portgroup / mgmt vmk / uplink) | **live-certified** |
-| Datastore storage + qcow2↔vmdk inflate/export round-trip (S2) | **live-certified** (content-verified) |
-| VM lifecycle + snapshots | **live-certified** |
-| VMware Tools guest-ops (with `open-vm-tools-plugins-all`) | **live-certified** |
-| Serial build-result sink + SSH `guest_gateway` | **live-proven** in the end-to-end run |
-| Firmware | `bios` certified; `uefi` accepted-but-unvalidated (BUILD-1b) |
-| Full `tests/plans/` certification sweep on the **physical** host | **blocked: environment egress** — a build VM needs internet for `apt`, but a single-public-IP ESXi host with no internet-connected pNIC and no host-NAT provides no VM-egress path (unlike a Linux/PVE host's NAT bridge). Not a driver defect; needs an egress path provisioned. |
-| Full `tests/plans/` sweep on a **nested ESXi** | **lab path, shelved post-1.0.0** — a `GuestHypervisor.esxi` plan stands up an ESXi node on the libvirt L0 (ADR-0021 amendment) and certifies against it, sidestepping the egress block: inner VM disks build on the L0 (NAT egress) and the nested ESXi only boots pre-built disks. **Live status (2026-06-02):** the ESXi 8.0U3b install runs unattended to a bootable DCUI on the L0 once the installer CD is on IDE (BACKEND-13) and the kickstart heredoc is flat (BUILD-22), but `%firstboot` does not take effect on the installed guest (ESXI-17). Per the REL epic the standing ESXi cert instead runs on a raw-kickstart host (REL-11); this nested path is shelved. |
-| vCenter / DVS / dvportgroup | out of scope ([ADR-0025](../../adr/0025-esxi-standalone-driver.md)) |
+The **full `tests/plans/` certification sweep** is not yet green. On the physical
+host it is blocked by environment egress — a build VM needs internet for `apt`,
+and a single-public-IP host with no internet-connected pNIC and no host-NAT
+provides no VM-egress path (not a driver defect; it needs an egress path
+provisioned). On a **nested** ESXi it is a lab path shelved post-1.0.0: the
+unattended install runs to a bootable DCUI on the libvirt L0, but `%firstboot`
+does not take effect on the installed guest (ESXI-17), so the standing ESXi cert
+instead runs on a raw-kickstart host per the REL epic (REL-11). vCenter / DVS /
+dvportgroup are out of scope ([ADR-0025](../../adr/0025-esxi-standalone-driver.md)).
 
 A **non-free vSphere license is required** (see Prerequisites): the free
 *vSphere Hypervisor* edition makes the API read-only, so every write fails.
@@ -97,10 +96,13 @@ vSwitch. An unmapped name fails at preflight. See
   vmdk ingest conversion). Preflight fails loud (`esxi-qemu-img-missing`) if it
   is absent. `apt install qemu-utils` / `dnf install qemu-img` / `brew install
   qemu`. Not needed for installer-origin builds (which land a blank VMFS disk).
-- **A free physical NIC for NAT egress.** A `Switch(uplink=…)` with a NAT
-  sidecar enslaves the mapped `vmnic` onto a driver-owned uplink vSwitch; that
-  NIC must exist and carry upstream connectivity (preflight checks existence as
-  `esxi-uplink-pnic-missing`). Isolated switches need no uplink.
+- **A free physical NIC — only for NAT egress.** A `Switch(uplink=…)` *with a
+  NAT sidecar* enslaves the mapped `vmnic` onto a driver-owned uplink vSwitch;
+  that NIC must exist and carry upstream connectivity (preflight checks
+  existence as `esxi-uplink-pnic-missing`). A plan whose VMs need no egress at
+  all — isolated switches, or an uplink declared without a NAT sidecar —
+  enslaves no pNIC, so preflight requires a free NIC *only* when some switch
+  actually requests NAT.
 - **VMware Tools in the guest, for `NativeCommunicator` VMs.** ESXi's native
   guest agent is VMware Tools, which authenticates against the **guest OS** on
   every call — so a `NativeCommunicator` VM must (a) ship `open-vm-tools` and
@@ -129,6 +131,12 @@ yes`** in `/etc/ssh/sshd_config`. The host must also carry an L2 presence on the
 guest's segment (a `Switch(mgmt=True)` puts a VMkernel NIC at `.2`) for the jump
 to reach the guest. `NativeCommunicator` VMs need none of this — VMware Tools
 guest-ops ride the SOAP control plane.
+
+When the node is itself built by TestRange, you don't edit `sshd_config` by
+hand: pass `allow_tcp_forwarding=True` to `ESXiKickstartBuilder` (or to
+`GuestHypervisor.esxi(...)` for a nested host) and the unattended install bakes
+that line for you — the easy path for SSH jump-host testing. On a pre-existing
+host you set it manually.
 
 VMware Tools VMs (sidecar + `NativeCommunicator` guests) require the guest-ops
 plugin: on Alpine that is `open-vm-tools` **plus `open-vm-tools-plugins-all`**

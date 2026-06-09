@@ -20,19 +20,14 @@ No `subprocess`/`qemu-img` — disk sizing is REST-native.
 
 ## Support level
 
-Driver primitives — connect, SDN switches, streamed volume I/O, VM lifecycle,
-snapshots, and QGA exec — are live-proven against a single-node PVE 9.x host. The
-full `tests/plans/` end-to-end sweep is tracked under the 1.0.0 validation epic
-(REL).
-
-| Capability | Status |
-| --- | --- |
-| `tests/plans/` generic + `proxmox/` sweep (live, single-node) | in progress (REL) |
-| Integration wiring | `pytest -m proxmox` → driver-primitive tests in `test_proxmox.py` (connect/SDN/storage/VM/QGA) |
-| Block-storage StoragePools (lvm/zfs/ceph) | not supported (PVE-33) |
-| Multi-node clusters | not supported — single-node only (PVE-31) |
-| QGA chunked guest-file-write (>~45 KB single write) | deferred (PVE-45) |
-| Nested-PVE installer-origin build smoke | environment-blocked (BUILD-13) |
+**Certified working** (PVE-57/58). The Proxmox driver and builder
+(`ProxmoxAnswerBuilder`) are certified live end-to-end against a single-node PVE
+9.x host: the full `tests/plans/{generic,proxmox}` corpus runs green (33/33), and
+the driver primitives — connect, SDN switches, streamed volume I/O, VM lifecycle,
+snapshots, and QGA exec — are additionally exercised by `pytest -m proxmox`. Scope
+limits: block-storage `StoragePool`s (lvm/zfs/ceph) are not supported (PVE-33),
+clusters are single-node only (PVE-31), and a single QGA guest-file-write above
+~45 KB is deferred (PVE-45).
 
 Run the live driver-primitive suite against a host by exporting its coordinates
 (it drives the driver directly, so it takes host env vars rather than a profile):

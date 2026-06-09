@@ -21,16 +21,14 @@ chains), and L2 fabric is built by the **libvirt daemon** via the network API
 
 ## Support level
 
-Reference backend ([ADR-0019](../../adr/0019-libvirt-reference-backend.md)): the
-backend the `tests/plans/` corpus and the `pytest -m libvirt` integration suite
-are held against.
-
-| Capability | Status |
-| --- | --- |
-| `tests/plans/` generic + `libvirt/` sweep (local `qemu:///system`) | **certified** — reference backend (ADR-0019) |
-| Integration suite | `pytest -m libvirt` → `tests/integration/test_libvirt.py` (live, local `qemu:///system`) |
-| Remote `qemu+ssh://` | the **remote** daemon builds the bridge + `dnsmasq`/NAT (BACKEND-5); off-box guest reachability via an `SSHJumpGateway` ([ADR-0020](../../adr/0020-guest-gateway-abstraction.md)) is in progress (BACKEND-11) |
-| UEFI firmware (OVMF) | certified |
+**Certified working — the reference backend**
+([ADR-0019](../../adr/0019-libvirt-reference-backend.md)). The full `tests/plans/`
+corpus (generic + `libvirt/`) and the `pytest -m libvirt` integration suite run
+green against a local `qemu:///system`, and UEFI/OVMF firmware is certified.
+Remote `qemu+ssh://` builds the bridge + `dnsmasq`/NAT on the remote daemon
+(BACKEND-5); off-box guest reachability via an `SSHJumpGateway`
+([ADR-0020](../../adr/0020-guest-gateway-abstraction.md)) is still in progress
+(BACKEND-11).
 
 Run the live integration suite against the local host (no root — just `libvirt`
 group):

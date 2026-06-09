@@ -43,6 +43,21 @@ class TestDescribe:
         assert "(!) not in cache" in out  # cache resolution attempted, miss surfaced
         assert "nginx_is_installed" in out
 
+    @pytest.mark.parametrize("example", sorted(EXAMPLES.glob("*.py")), ids=lambda p: p.name)
+    def test_describe_every_example(
+        self,
+        example: Path,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Every shipped example must import, construct its PLAN, and describe
+        # cleanly (exit 0): a structural regression in an example is otherwise
+        # invisible to the unit suite, since examples need a live backend to *run*.
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        rc = cli.main(["describe", str(example)])
+        assert rc == 0, capsys.readouterr().out
+
     def test_describe_missing_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit) as exc:
             cli.main(["describe", "/nonexistent/plan.py"])
