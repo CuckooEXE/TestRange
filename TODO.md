@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (11)
+## Doing (9)
 
 ### CORE
 
@@ -91,19 +91,6 @@ on 2026-06-06.
   > - ISO9660 ids /ANSWER.TOM;1, /BOOT.EFI.CFG deviate from .;1 convention.
   > - Dedup _OriginlessBuilder/_Weird test doubles across files.
   > - _vm.py:100 drop dead _cdrom_xml(dev='sda') default (seed/boot-media collision risk); make dev required.
-
-- [ ] **BUILD-16** · `bugfix` — drop gratuitous ESXi-8 version gating (disk floor + prose)
-
-  > Code-review remediation (feature/builders, 2026-06-01). Unnecessary-limitation cleanup.
-  > - Drop _MIN_OS_DISK_GB=33 hard ValueError floor (esxi.py:44,149-153): the installer fails loud on undersized disk; the builder floor needlessly rejects ESXi 7 and pre-empts ESXi 9. Drop the floor and its test (test_undersized_disk_rejected).
-  > - Drop the 'ESXi 8'-specific assertions/prose in esxi.py module + class docstrings (esxi.py:11-15): directives are ESXi 5-8 generic. Soften to 'ESXi (validated on 8)'.
-
-- [ ] **BUILD-15** · `bugfix` — installer-builder footguns (ESXi pw chars, apt_insecure persistence, NIC-flip hardcode)
-
-  > Code-review remediation (feature/builders, 2026-06-01).
-  > 1. ESXiKickstartBuilder rootpw injection footgun (_esxi_prepare.py:82): reject root passwords containing newlines/control chars at construction (lab env, not a security boundary, but a malformed-ks footgun). Same for ssh_key.
-  > 2. apt_insecure persists TLS-off into the run image (proxmox.py:463-470): rm /etc/apt/apt.conf.d/99-testrange-insecure in the first-boot footer so it does not survive the build.
-  > 3. _NETWORK_FLIP hardcodes NIC=enp1s0 (proxmox.py:437-448) while network_interface is configurable and feeds answer.toml filter.ID_NET_NAME. Parameterize the flip on self.network_interface (template/helper called from _first_boot_script) — also makes the prepared-ISO script digest vary with network_interface so a changed NIC re-preps.
 
 ### BACKEND
 
@@ -505,7 +492,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (311)
+## Done (313)
 
 ### CORE
 
@@ -1951,6 +1938,20 @@ on 2026-06-06.
   > **Done 2026-05-22 (ADR-0010).** `build_phase` warms the cache and nothing else; `run_phase` creates pools, gates sidecar readiness, pushes every built disk (OS + data) per VM, runs tests. `testrange build` / `testrange run` (auto-build on miss; `--require-cache`) are distinct CLI verbs. `config_hash` keys the disk set; `create_blank_volume` + `resize_volume` replaced `create_disk_from_base`.
 
 ### BUILD
+
+- [x] **BUILD-16** · `bugfix` — drop gratuitous ESXi-8 version gating (disk floor + prose) _(done: 2026-06-09)_
+
+  > Already in-code, confirmed stale during the ESXI-20 builder audit: `_MIN_OS_DISK_GB`
+  > and `test_undersized_disk_rejected` are gone, and the module/class docstrings already
+  > read "validated on 8". Closed without further change.
+
+- [x] **BUILD-15** · `bugfix` — installer-builder footguns (ESXi pw chars, apt_insecure persistence, NIC-flip hardcode) _(done: 2026-06-09)_
+
+  > Already in-code, confirmed stale during the ESXI-20 builder audit: (1) `_reject_control_chars`
+  > rejects newline/control chars in the ESXi root password + every SSH key auth_line; (2)
+  > `proxmox.py` `rm -f {_APT_INSECURE_CONF}` strips the insecure apt conf before capture; (3)
+  > `_network_flip(self.network_interface)` is parameterized off the configurable
+  > `network_interface` (default `enp1s0`). Closed without further change.
 
 - [x] **BUILD-10** · `chore` — feature/builders worktree (venv + .claude hooks) _(done: 2026-06-08)_
 
