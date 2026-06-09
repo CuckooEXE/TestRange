@@ -18,8 +18,10 @@ Pinned to ESXi (firmware defaults to ``bios``, the certified path)::
 
     testrange run --profile <esxi> tests/plans/esxi/devices.py
 
-The guest needs the VMware Tools vix plugin for guest-ops exec, so the build
-installs ``open-vm-tools-plugins-all`` (the base ``open-vm-tools`` omits it).
+The guest needs the VMware Tools vix plugin for guest-ops exec; on Debian the base
+``open-vm-tools`` package already ships it (``…/plugins/common/libvix.so``), so
+that one package is enough. (An earlier ``open-vm-tools-plugins-all`` does NOT
+exist in Debian and made the build's ``apt-get install`` exit 100 — ESXI-20.)
 """
 
 from __future__ import annotations
@@ -69,7 +71,7 @@ PLAN = Plan(
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     credentials=[PosixCred("admin", password="TestRangeEsxi2026!", admin=True)],
-                    packages=[Apt("open-vm-tools-plugins-all")],
+                    packages=[Apt("open-vm-tools")],
                     post_install_commands=("systemctl enable --now open-vm-tools",),
                 ),
                 communicator=NativeCommunicator(),

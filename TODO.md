@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (10)
+## Doing (9)
 
 ### CORE
 
@@ -30,6 +30,64 @@ on 2026-06-06.
   > Module layout mirrors drivers/proxmox/: _client/_profile/_naming/_net/_storage/_vm/devices/_guest/_serial/driver.
   >
   > Children: CORE-60 (credential kwarg prereq), spikes ESXI-S1/S2/S3, core ESXI-1..9, ADR + cert tail ESXI-10..15. Pairs with COMM-2 (VMware Tools communicator) and PROXY-1 (console proxy = guest_gateway). Created 2026-06-01.
+
+- [ ] **ESXI-20** · `test` — finish ESXiKickstartBuilder + stand up/leak a nested ESXi node on libvirt + certify `tests/plans/` against it
+
+  > `feature/VMBuild`. Un-shelves ESXI-16/18 locally and advances ESXI-12/13/15:
+  > drive the full ESXi vertical end-to-end on this box (nested KVM, `tr-egress`
+  > NAT, ESXi 8.0U3b installer cached).
+  >
+  > 1. **Builder audit/finish** — confirm `ESXiKickstartBuilder` is complete and
+  >    correct against the Builder ABC + build-result contract; close any real gap
+  >    surfaced by review (the stale BUILD-15/16 nits are mostly already in-code —
+  >    verify). Keep every ESXi-specificism stove-piped in the builder/driver.
+  > 2. **Stand up + leak** — a standup plan (`GuestHypervisor.esxi`, the
+  >    `esxi-followhwmac.py` shape) installs one nested ESXi node on
+  >    `libvirt-local` and leaks it (`testrange repl` → `orch.leak()`). Exercises
+  >    the builder install + the ESXI-18 vmk0 MAC-follow fix live.
+  > 3. **Certify** — point an `esxi-leaked` profile at the node; run
+  >    `tests/plans/generic/*` + `tests/plans/esxi/*` via `testrange run --profile
+  >    esxi-leaked` (the ESXi *driver* path). Author any missing ESXi cert coverage.
+  > 4. **File + fix** every bug the cert surfaces (own swimlane per finding);
+  >    record discrepancies à la REL-14. Squash + push as milestones land.
+  >    Created 2026-06-09.
+  >
+  > Progress (2026-06-09):
+  > - M1 DONE — builder audit: `ESXiKickstartBuilder` is complete; BUILD-15/16
+  >   confirmed already-addressed in-code (stale, → Done). Hardened the one real
+  >   footgun: keyless root + `enable_ssh=True` now fails loud at construction
+  >   (SSH is ESXi's only run-phase channel; a keyless image hangs `wait_ready`).
+  >   Implemented the driver gap the ESXi cert needs: per-disk controller bus
+  >   (`ESXiHardDrive.bus` scsi/sata/nvme/ide) in `esxi/_vm.create_vm`, read off
+  >   `spec.data_drives` so the knob stays ESXi-stovepiped (no ABC/orchestrator
+  >   change). Unblocks `tests/plans/esxi/devices.py`. Gates green (1137 unit).
+  > - M3 (standup) findings, see `docs/dev/e2e-findings-esxi.md`:
+  >   - FIXED — a modest-disk install left NO datastore (ESX-OSData fills the
+  >     disk). Added `systemMediaSize=min` to the installer kernelopt so the
+  >     install leaves a `datastore1`; folded the kernelopt into `config_hash`.
+  >   - OPEN — ESXI-18 (vmk0 keeps the build MAC) live-DISPROVEN: the shipped
+  >     FollowHardwareMac+reboot fix does NOT take (a reboot restores vmk0's
+  >     pinned MAC; the flag only affects vmk creation). ESXI-18 updated.
+  >     Sidestepped for the cert (reach the node by its DHCP IP over pyVmomi;
+  >     enable sshd host-side). Node spun up + leaked via the diag bring-up.
+  > - M4 (cert) ran `tests/plans/esxi/devices.py` against the leaked node. The
+  >   ESXi DRIVER pipeline is proven live end to end EXCEPT the final L2 hop:
+  >   pyVmomi, preflight, vSwitch+uplink(vmnic1)+portgroup, datastore pool,
+  >   qcow2→vmdk + datastore upload, VM/sidecar CreateVM, serial sink, the
+  >   sidecar's DHCP/DNS/NAT, guest-ops — all green. Fixed: the dead package name
+  >   and the stale-serial0.log replay (both bugs surfaced here). BLOCKED by a
+  >   nested-ESXi environmental limit: a VM NIC cannot connect to an UPLINK-LESS
+  >   vSwitch (status=unrecoverableError) on ESXi-on-libvirt, and `_net` realizes
+  >   every isolated guest segment as exactly that — so the on-node build VM gets
+  >   no network. NOT a code defect (works on real ESXi); this is the documented
+  >   ESXI-16 "nested build phase is finicky" reason ESXi certifies on a RAW host
+  >   (REL-11), not nested. Full chain in `docs/dev/e2e-findings-esxi.md`.
+  > - M1 disk-bus feature LIVE-VERIFIED on the leaked node, side-stepping the
+  >   build (the cert's `buses` VM has no NIC, so its disk-bus assert is
+  >   NIC-independent): drove the driver to boot the pre-built sidecar image + 3
+  >   `ESXiHardDrive`s and read `/sys/block` over guest-ops → `sda`/`sdb`/`sdc` on
+  >   `/dev/sd*` (OS-scsi + scsi + sata) and `nvme0n1` on `/dev/nvme*` — exactly
+  >   `esxi/devices.py`'s two asserts. PASS, on real ESXi managed objects.
 
 ### ORCH
 
@@ -51,19 +109,6 @@ on 2026-06-06.
   > - ISO9660 ids /ANSWER.TOM;1, /BOOT.EFI.CFG deviate from .;1 convention.
   > - Dedup _OriginlessBuilder/_Weird test doubles across files.
   > - _vm.py:100 drop dead _cdrom_xml(dev='sda') default (seed/boot-media collision risk); make dev required.
-
-- [ ] **BUILD-16** · `bugfix` — drop gratuitous ESXi-8 version gating (disk floor + prose)
-
-  > Code-review remediation (feature/builders, 2026-06-01). Unnecessary-limitation cleanup.
-  > - Drop _MIN_OS_DISK_GB=33 hard ValueError floor (esxi.py:44,149-153): the installer fails loud on undersized disk; the builder floor needlessly rejects ESXi 7 and pre-empts ESXi 9. Drop the floor and its test (test_undersized_disk_rejected).
-  > - Drop the 'ESXi 8'-specific assertions/prose in esxi.py module + class docstrings (esxi.py:11-15): directives are ESXi 5-8 generic. Soften to 'ESXi (validated on 8)'.
-
-- [ ] **BUILD-15** · `bugfix` — installer-builder footguns (ESXi pw chars, apt_insecure persistence, NIC-flip hardcode)
-
-  > Code-review remediation (feature/builders, 2026-06-01).
-  > 1. ESXiKickstartBuilder rootpw injection footgun (_esxi_prepare.py:82): reject root passwords containing newlines/control chars at construction (lab env, not a security boundary, but a malformed-ks footgun). Same for ssh_key.
-  > 2. apt_insecure persists TLS-off into the run image (proxmox.py:463-470): rm /etc/apt/apt.conf.d/99-testrange-insecure in the first-boot footer so it does not survive the build.
-  > 3. _NETWORK_FLIP hardcodes NIC=enp1s0 (proxmox.py:437-448) while network_interface is configurable and feeds answer.toml filter.ID_NET_NAME. Parameterize the flip on self.network_interface (template/helper called from _first_boot_script) — also makes the prepared-ISO script digest vary with network_interface so a changed NIC re-preps.
 
 ### BACKEND
 
@@ -129,6 +174,18 @@ on 2026-06-06.
 
 - [ ] **ESXI-16** · `test` — examples/capabilities-nested-esxi.py portable nested-ESXi plan + TESTS + live cert
 
+  > **ESXI-20 (2026-06-09) sharpened the nested blocker.** Beyond ESXI-18 (vmk0
+  > MAC, also live-disproven there), the deeper wall is an L2 one: on
+  > ESXi-nested-on-libvirt a VM NIC cannot connect to an UPLINK-LESS standard
+  > vSwitch (`status=unrecoverableError`). `_net` realizes every isolated guest
+  > segment as exactly such a vSwitch (the sidecar bridges it to the real uplink
+  > via NAT), so a build/run VM on that segment never gets carrier and the on-node
+  > build has no network. This is environmental (uplink-less vSwitches work on real
+  > ESXi), and is the concrete reason the nested cert can't go green — vindicating
+  > certifying ESXi on a RAW host (REL-11). Full root-cause chain:
+  > `docs/dev/e2e-findings-esxi.md`. A nested-only fix (dummy dead-end uplink per
+  > isolated vSwitch + an extra vmnic) was scoped but rejected as driver pollution.
+  >
   > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** Build phase is
   > certified end-to-end on libvirt L0; the run-phase nested cert is blocked only by
   > ESXI-18 (vmk0 keeps the build-NIC MAC), whose fix is known but parked. The ESXi
@@ -139,6 +196,22 @@ on 2026-06-06.
 
 - [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
 
+  > **LIVE-DISPROVEN 2026-06-09 (ESXI-20): the shipped fix does NOT take.** Built +
+  > booted a node end-to-end on libvirt L0. It settles at the DCUI on its lab DHCP
+  > lease, but vmk0 STILL carries the build-NIC MAC (confirmed via the DCUI IPv6
+  > link-local EUI-64 `fe80::…:f177:c0` ⇒ `02:91:5a:f1:77:c0`, and the lab sidecar
+  > lease under that MAC) — so `discover_ip` (polling the run NIC MAC) still misses.
+  > sshd is also off. ROOT CAUSE OF THE FIX'S FAILURE: the "second boot re-inits
+  > vmk0 under the hardware MAC" premise is wrong — `FollowHardwareMac` is consulted
+  > only at vmk *creation*, and a plain `reboot` **restores** vmk0 from `esx.conf`
+  > with its pinned (build) MAC instead of re-creating it, so the flag never moves
+  > an existing vmk0. A real fix must DELETE + re-add vmk0 (`esxcli network ip
+  > interface remove/add` from `local.sh`, after hostd) so it adopts vmnic0's MAC,
+  > or set vmk0's MAC explicitly. SIDESTEPPED for the ESXI-20 cert: reach the node
+  > at its actual DHCP IP via pyVmomi (cert transport is VMware-Tools/pyVmomi, not
+  > SSH lease-discovery) and enable sshd host-side via pyVmomi. See
+  > `docs/dev/e2e-findings-esxi.md`. Still parked for a proper builder fix.
+  >
   > **BUILDER FIX LANDED 2026-06-08 (merged to feature/release-check); live cert
   > still SHELVED post-1.0.0.** `%firstboot` now seeds `local.sh` with a
   > sentinel-guarded one-shot reboot that sets `Net.FollowHardwareMac=1` + persists
@@ -451,7 +524,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (313)
+## Done (315)
 
 ### CORE
 
@@ -1905,6 +1978,20 @@ on 2026-06-06.
   > **Done 2026-05-22 (ADR-0010).** `build_phase` warms the cache and nothing else; `run_phase` creates pools, gates sidecar readiness, pushes every built disk (OS + data) per VM, runs tests. `testrange build` / `testrange run` (auto-build on miss; `--require-cache`) are distinct CLI verbs. `config_hash` keys the disk set; `create_blank_volume` + `resize_volume` replaced `create_disk_from_base`.
 
 ### BUILD
+
+- [x] **BUILD-16** · `bugfix` — drop gratuitous ESXi-8 version gating (disk floor + prose) _(done: 2026-06-09)_
+
+  > Already in-code, confirmed stale during the ESXI-20 builder audit: `_MIN_OS_DISK_GB`
+  > and `test_undersized_disk_rejected` are gone, and the module/class docstrings already
+  > read "validated on 8". Closed without further change.
+
+- [x] **BUILD-15** · `bugfix` — installer-builder footguns (ESXi pw chars, apt_insecure persistence, NIC-flip hardcode) _(done: 2026-06-09)_
+
+  > Already in-code, confirmed stale during the ESXI-20 builder audit: (1) `_reject_control_chars`
+  > rejects newline/control chars in the ESXi root password + every SSH key auth_line; (2)
+  > `proxmox.py` `rm -f {_APT_INSECURE_CONF}` strips the insecure apt conf before capture; (3)
+  > `_network_flip(self.network_interface)` is parameterized off the configurable
+  > `network_interface` (default `enp1s0`). Closed without further change.
 
 - [x] **BUILD-10** · `chore` — feature/builders worktree (venv + .claude hooks) _(done: 2026-06-08)_
 

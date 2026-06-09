@@ -33,7 +33,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from testrange.builders._esxi_prepare import prepare_iso, render_kickstart
+from testrange.builders._esxi_prepare import (
+    _KICKSTART_KERNELOPT,
+    prepare_iso,
+    render_kickstart,
+)
 from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
@@ -95,6 +99,22 @@ class ESXiKickstartBuilder(Builder):
         self._credentials = self._validate_credentials(credentials)
         self._license = self._validate_license(license)
         self._enable_ssh = enable_ssh
+        # SSH is ESXi's ONLY run-phase channel — there is no host guest-agent
+        # (VMware Tools runs in the guests, not the hypervisor), so the node is
+        # reached over the root SSH login the kickstart provisions. When SSH is
+        # the transport, a missing root key bakes an image with no authorized_keys
+        # AND no sshd (`_firstboot` gates both on the key, esxi.py:252), yet
+        # `wait_ready` still probes SSH and only fails after a 300s timeout. Fail
+        # loud at construction with a fix instead of hanging mysteriously later
+        # (ESXI-20). `enable_ssh=False` (a non-SSH transport) needs no key.
+        if self._enable_ssh and self._root_credential().ssh_key is None:
+            raise ValueError(
+                "ESXiKickstartBuilder(enable_ssh=True) requires the root PosixCred to carry an "
+                "ssh_key: SSH is ESXi's only run-phase channel (no host guest-agent), so without "
+                "a baked key the installed node is unreachable and wait_ready hangs the full "
+                "timeout. Pass a root key (e.g. testrange.utils.EcdsaKey.generate()) — RSA/ECDSA, "
+                "not Ed25519 — or set enable_ssh=False for a non-SSH transport."
+            )
 
     @staticmethod
     def _validate_credentials(credentials: Sequence[Credential]) -> tuple[Credential, ...]:
@@ -167,13 +187,20 @@ class ESXiKickstartBuilder(Builder):
 
     def prepare_boot_media(self, media_path: Path) -> Path:
         """Patch the kickstart into the installer ISO (xorriso two-pass), caching
-        the prepared copy beside the vanilla and keyed by the kickstart digest.
+        the prepared copy beside the vanilla and keyed by its content.
 
-        The kickstart depends only on the builder's credentials (root password +
-        optional SSH key), so the prepared ISO keys on its digest.
+        The prepared ISO embeds TWO injected inputs: the ``ks.cfg`` (from the
+        builder's credentials/license) AND the patched BOOT.CFG ``kernelopt``
+        (:data:`_KICKSTART_KERNELOPT`, where ``systemMediaSize`` etc. live). The
+        cache filename keys on BOTH — keying on the kickstart alone (the original
+        bug) reused a stale ISO when only the kernelopt changed, so a
+        ``systemMediaSize`` edit silently installed under the old boot config
+        (ESXI-20).
         """
         kickstart = self._render_kickstart()
-        digest = hashlib.sha256(kickstart.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(
+            f"{kickstart}\n---KERNELOPT---\n{_KICKSTART_KERNELOPT}".encode()
+        ).hexdigest()[:16]
         prepared = media_path.parent / f"{media_path.stem}-esxi-{digest}.iso"
         if not prepared.exists():
             prepare_iso(media_path, prepared, kickstart=kickstart)
@@ -210,8 +237,11 @@ class ESXiKickstartBuilder(Builder):
         different installed system; CORE-64), the license key (baked at install
         via ``serialnum``), the **rendered kickstart digest** (so a change to the
         ks.cfg *template* itself — not just its inputs — busts a stale cached disk;
-        CORE-64-style), the install disk size, ``spec.firmware``, and ``base_sha``
-        (the vanilla ISO sha). Pure: no clocks/run_id/I/O (ADR-0007).
+        CORE-64-style), the install disk size, ``spec.firmware``, the installer
+        **kernelopt** (``_KICKSTART_KERNELOPT`` — e.g. ``systemMediaSize`` lives in
+        the patched BOOT.CFG, *not* the ks.cfg, so a change there must bust the
+        cache too; ESXI-20), and ``base_sha`` (the vanilla ISO sha). Pure: no
+        clocks/run_id/I/O (ADR-0007).
 
         The key is folded by value, NOT just presence: run VMs boot the cached
         disk with no re-seed (``seed_iso_ref=None``), so the baked key is the only
@@ -226,6 +256,7 @@ class ESXiKickstartBuilder(Builder):
             f"root-password:{root.password}\n---\nssh-key:{ssh_key}\n---\n"
             f"license:{self._license}\n---\nkickstart:{ks_digest}\n---\n"
             f"disk:{spec.os_drive.size_gb}\n---\nfirmware:{spec.firmware}\n---\n"
+            f"kernelopt:{_KICKSTART_KERNELOPT}\n---\n"
             f"base:{base_sha}\n---\nsidecar:{sidecar_sha}"
         )
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]

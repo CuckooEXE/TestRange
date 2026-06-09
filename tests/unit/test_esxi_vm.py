@@ -107,6 +107,101 @@ def test_data_disks_in_spec_order() -> None:
     assert units == [0, 1, 2]
 
 
+def _disks_by_controller(vm: Any) -> dict[int, list[int]]:
+    """Map controllerKey -> sorted unit numbers of the VirtualDisks attached to it."""
+    out: dict[int, list[int]] = {}
+    for ch in vm.config_spec.deviceChange:
+        if ch.device._vimtype == "vm.device.VirtualDisk":
+            out.setdefault(ch.device.controllerKey, []).append(ch.device.unitNumber)
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def test_data_disk_bus_selects_per_controller() -> None:
+    # ESXI-20: ESXiHardDrive.bus picks the controller. OS (scsi) + a scsi/sata/nvme
+    # data disk -> the OS+scsi share the LsiLogic controller (key 1000), sata gets
+    # an AHCI controller, nvme gets an NVMe controller. Mirrors tests/plans/esxi.
+    from testrange.drivers.esxi import _vm
+    from testrange.drivers.esxi.devices import ESXiHardDrive
+
+    client = FakeEsxiClient()
+    d = _driver(client)
+    spec = _spec(
+        "buses",
+        ESXiHardDrive("pool1", 1, bus="scsi"),
+        ESXiHardDrive("pool1", 1, bus="sata"),
+        ESXiHardDrive("pool1", 1, bus="nvme"),
+    )
+    d.create_vm(
+        "tr-vm-buses",
+        spec,
+        "plan",
+        os_disk_ref=VolumeRef("[datastore1] pool1/buses.vmdk"),
+        seed_iso_ref=None,
+        network_refs={},
+        data_disk_refs=[
+            VolumeRef("[datastore1] pool1/buses-data0.vmdk"),
+            VolumeRef("[datastore1] pool1/buses-data1.vmdk"),
+            VolumeRef("[datastore1] pool1/buses-data2.vmdk"),
+        ],
+    )
+    vm = client.find_vm("tr-vm-buses")
+    types = _devtypes(vm.config_spec)
+    # exactly one of each add-on controller, materialized on first use.
+    assert types.count("vm.device.VirtualAHCIController") == 1
+    assert types.count("vm.device.VirtualNVMEController") == 1
+    by_ctrl = _disks_by_controller(vm)
+    assert by_ctrl[_vm._SCSI_KEY] == [0, 1]  # OS at unit 0 + the scsi data disk at 1
+    assert by_ctrl[_vm._SATA_KEY] == [0]  # the sata data disk
+    assert by_ctrl[_vm._NVME_KEY] == [0]  # the nvme data disk
+
+
+def test_scsi_data_disks_skip_reserved_unit_7() -> None:
+    # Seven scsi data disks land on the LsiLogic controller after the OS disk at 0,
+    # so the eighth would be unit 7 (the controller's own id) and must skip to 8.
+    from testrange.drivers.esxi import _vm
+    from testrange.drivers.esxi.devices import ESXiHardDrive
+
+    client = FakeEsxiClient()
+    d = _driver(client)
+    data = [ESXiHardDrive("pool1", 1, bus="scsi") for _ in range(7)]
+    refs = [VolumeRef(f"[datastore1] pool1/d{i}.vmdk") for i in range(7)]
+    d.create_vm(
+        "tr-vm-many",
+        _spec("many", *data),
+        "plan",
+        os_disk_ref=VolumeRef("[datastore1] pool1/many.vmdk"),
+        seed_iso_ref=None,
+        network_refs={},
+        data_disk_refs=refs,
+    )
+    vm = client.find_vm("tr-vm-many")
+    units = _disks_by_controller(vm)[_vm._SCSI_KEY]
+    assert units == [0, 1, 2, 3, 4, 5, 6, 8], f"unit 7 must be skipped, got {units}"
+
+
+def test_plain_hard_drive_defaults_to_scsi() -> None:
+    # A portable HardDrive (no bus) keeps the historical behavior: all on SCSI.
+    from testrange.drivers.esxi import _vm
+
+    client = FakeEsxiClient()
+    d = _driver(client)
+    d.create_vm(
+        "tr-vm-plain",
+        _spec("plain", HardDrive("pool1", 2), HardDrive("pool1", 2)),
+        "plan",
+        os_disk_ref=VolumeRef("[datastore1] pool1/plain.vmdk"),
+        seed_iso_ref=None,
+        network_refs={},
+        data_disk_refs=[
+            VolumeRef("[datastore1] pool1/plain-d0.vmdk"),
+            VolumeRef("[datastore1] pool1/plain-d1.vmdk"),
+        ],
+    )
+    vm = client.find_vm("tr-vm-plain")
+    assert _devtypes(vm.config_spec).count("vm.device.VirtualAHCIController") == 0
+    assert _disks_by_controller(vm) == {_vm._SCSI_KEY: [0, 1, 2]}
+
+
 def test_installer_origin_boot_order_falls_through_to_cdrom() -> None:
     client = FakeEsxiClient()
     d = _driver(client)
@@ -125,6 +220,24 @@ def test_installer_origin_boot_order_falls_through_to_cdrom() -> None:
     assert vm.config_spec.firmware == "efi"
     order = vm.config_spec.bootOptions.bootOrder
     assert len(order) == 2  # disk then cdrom
+
+
+def test_create_vm_truncates_stale_serial_log() -> None:
+    # ESXI-20: a failed prior same-day build can leave its date-named VM folder +
+    # serial0.log behind; create_vm must drop the stale log so the build-result
+    # sink doesn't replay the previous build's fail/ok record from offset 0.
+    client = FakeEsxiClient()
+    client.files["tr-build-x/serial0.log"] = b'TESTRANGE-RESULT: fail rc=100 cmd="stale"\n'
+    d = _driver(client)
+    d.create_vm(
+        "tr-build-x",
+        _spec("x"),
+        "plan",
+        os_disk_ref=VolumeRef("[datastore1] pool1/x.vmdk"),
+        seed_iso_ref=None,
+        network_refs={},
+    )
+    assert "tr-build-x/serial0.log" not in client.files, "stale serial0.log must be truncated"
 
 
 def test_power_lifecycle() -> None:

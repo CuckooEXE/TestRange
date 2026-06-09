@@ -965,7 +965,14 @@ Key shape invariants this demonstrates:
   `testrange.devices.disk.libvirt` (`LibvirtOSDrive`/`LibvirtDataDrive`, `bus=`)
   and `testrange.devices.network.libvirt` (`LibvirtNetworkIface`, `model=`), plus
   the `Proxmox*`/`ESXi*` disk variants under `testrange/drivers/<backend>/`
-  (ADR-0026).
+  (ADR-0026). `ESXiHardDrive(bus=...)` (`scsi`/`sata`/`nvme`/`ide`) is realized in
+  `drivers/esxi/_vm.create_vm`, which reads each data disk's bus off
+  `spec.data_drives` and attaches it to a per-bus controller (LsiLogic SCSI for
+  `scsi`, a VirtualAHCIController for `sata`, a VirtualNVMEController for `nvme`,
+  the auto IDE-201 for `ide`) — keeping the bus knob ESXi-internal: the
+  `HypervisorDriver.create_vm` ABC carries no bus, so the orchestrator stays
+  backend-agnostic (ESXI-20). `scsi`/`sata`/`ide` present to the guest as
+  `/dev/sd*`, `nvme` as `/dev/nvme*`.
 
 ## v0 phases
 
@@ -1617,7 +1624,14 @@ Two concretes ship on this seam:
   `ks.cfg` lookup resolves). The build-result contract lives in the kickstart
   `%firstboot` block. An optional `license=` kwarg (BUILD-21) emits the top-level
   `serialnum --esx=<key>` directive so the node installs licensed (folds into
-  `config_hash`); used by the nested-ESXi certification path (ORCH-32).
+  `config_hash`); used by the nested-ESXi certification path (ORCH-32). The
+  installer kernelopt carries `systemMediaSize=min` (ESXI-20) so ESX-OSData is
+  capped (~33 GiB) and the install leaves a local VMFS `datastore1` on the rest of
+  the disk — without it a modest-disk node comes up with **no** datastore and the
+  ESXi driver's `create_pool` has nowhere to land. A keyless root + the default
+  `enable_ssh=True` is rejected at construction (SSH is ESXi's only run-phase
+  channel; a keyless image is unreachable). The kernelopt folds into `config_hash`
+  (it rides the patched BOOT.CFG, not the ks.cfg).
 
 That no-separate-seed shape forced a contract refinement: the **serial sink keys
 on `build_nic OR boot_media`** — a build VM or an installer-origin boot — not

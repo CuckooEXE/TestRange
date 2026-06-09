@@ -10,6 +10,15 @@ attached **in place** (existing-file backing, ``fileOperation`` unset) — the V
 folder holds only the .vmx/nvram/serial log. So a stable ref always denotes the
 same file across upload -> create_vm -> download -> delete; no re-resolution.
 
+Controller bus (ESXI-20): the OS disk and any ``scsi`` data disk share one
+LsiLogic SCSI controller; a ``sata`` disk gets a VirtualAHCIController and an
+``nvme`` disk a VirtualNVMEController (materialized on first use); an ``ide`` disk
+rides ESXi's second auto-created IDE controller (201, since the CDROMs hold 200).
+The per-disk bus is :class:`~testrange.drivers.esxi.devices.ESXiHardDrive.bus`,
+read off ``spec.data_drives`` — the ABC's ``create_vm`` carries no bus, so the
+knob stays ESXi-internal. ``scsi``/``sata``/``ide`` present to the guest as
+``/dev/sd*``; ``nvme`` presents as ``/dev/nvme*``.
+
 Firmware (BUILD-1b): ``spec.firmware`` -> ``ConfigSpec.firmware`` (``bios``/``efi``).
 The run-phase create MUST reproduce the build firmware or a UEFI-installed disk
 won't boot under BIOS.
@@ -39,25 +48,81 @@ _log = get_logger(__name__)
 # heuristics, not correctness; the actual guest is whatever the disk installs.
 _GUEST_ID = "otherLinux64Guest"
 
+# Controller keys. The OS disk + scsi data disks share one LsiLogic SCSI
+# controller; sata/nvme data disks get their own controller (materialized on
+# first use); ide data disks ride ESXi's second auto-created IDE controller (201,
+# since the CDROMs occupy 200). The sata/nvme keys are VMware's conventional
+# controller keys, kept stable so a from_uri teardown / re-create matches.
 _SCSI_KEY = 1000
-_IDE0_KEY = 200  # ESXi auto-creates IDE controllers 200/201 on CreateVM
+_SATA_KEY = 15000  # VirtualAHCIController (SATA AHCI)
+_NVME_KEY = 31000  # VirtualNVMEController
+_IDE0_KEY = 200  # ESXi auto-creates IDE controllers 200/201 on CreateVM (CDROMs ride 200)
+_IDE1_KEY = 201  # the second auto IDE controller — ide data disks ride it
 _SCSI_RESERVED_UNIT = 7  # the controller's own SCSI id; disks skip it
 _SHUTDOWN_POLL_S = 2.0
 
+# ESXiHardDrive.bus -> the controller key its disks attach to. A plain HardDrive
+# carries no bus and defaults to scsi (the historical behavior). scsi/sata/ide
+# present to the guest as /dev/sd*; nvme presents as /dev/nvme* (devices.py).
+_BUS_CONTROLLER_KEY = {
+    "scsi": _SCSI_KEY,
+    "sata": _SATA_KEY,
+    "nvme": _NVME_KEY,
+    "ide": _IDE1_KEY,
+}
 
-def _scsi_unit(index: int) -> int:
-    """SCSI unit number for the ``index``-th disk (0=OS), skipping the reserved 7."""
-    return index if index < _SCSI_RESERVED_UNIT else index + 1
+
+def _make_controller(vim: Any, bus: str) -> Any:
+    """Build the add-on controller a ``sata``/``nvme`` data disk needs.
+
+    scsi rides the always-present LsiLogic controller and ide rides ESXi's
+    auto-created IDE 201, so only sata (AHCI) and nvme need an explicit device.
+    """
+    if bus == "sata":
+        return vim.vm.device.VirtualAHCIController(key=_SATA_KEY, busNumber=0)
+    if bus == "nvme":
+        return vim.vm.device.VirtualNVMEController(key=_NVME_KEY, busNumber=0)
+    raise AssertionError(f"bus {bus!r} needs no add-on controller")  # pragma: no cover
 
 
-def _disk_device(vim: Any, key: int, ref: str, unit: int) -> Any:
-    """A VirtualDisk attaching an existing pool-folder vmdk in place."""
+def _disk_device(vim: Any, key: int, controller_key: int, ref: str, unit: int) -> Any:
+    """A VirtualDisk attaching an existing pool-folder vmdk in place on a controller."""
     backing = vim.vm.device.VirtualDisk.FlatVer2BackingInfo(
         fileName=ref, diskMode="persistent", thinProvisioned=True
     )
     return vim.vm.device.VirtualDisk(
-        key=key, controllerKey=_SCSI_KEY, unitNumber=unit, backing=backing
+        key=key, controllerKey=controller_key, unitNumber=unit, backing=backing
     )
+
+
+def _data_disk_devices(vim: Any, spec: VMSpec, data_disk_refs: Sequence[VolumeRef]) -> list[Any]:
+    """Device-add specs for the data disks, honoring each disk's ESXi controller bus.
+
+    ``data_disk_refs`` is parallel to ``spec.data_drives`` (the orchestrator builds
+    it in that order, run_phase.py), so the bus is read off the matching
+    :class:`~testrange.drivers.esxi.devices.ESXiHardDrive` — keeping the per-disk
+    bus knob ESXi-internal (the ABC's ``create_vm`` carries no bus; ESXI-20). Each
+    bus has its own controller and unit-number space: scsi continues after the OS
+    disk on the shared LsiLogic controller (skipping the reserved unit 7), sata and
+    nvme get a controller materialized on first use, ide rides the auto IDE 201.
+    """
+    out: list[Any] = []
+    added: set[str] = set()
+    # scsi starts at 1 because the OS disk occupies unit 0 on the shared controller.
+    next_unit = {"scsi": 1, "sata": 0, "nvme": 0, "ide": 0}
+    for i, ref in enumerate(data_disk_refs):
+        bus = getattr(spec.data_drives[i], "bus", "scsi")
+        if bus in ("sata", "nvme") and bus not in added:
+            out.append(_add(vim, _make_controller(vim, bus)))
+            added.add(bus)
+        unit = next_unit[bus]
+        if bus == "scsi" and unit == _SCSI_RESERVED_UNIT:
+            unit += 1  # the LsiLogic controller reserves SCSI id 7 for itself
+        next_unit[bus] = unit + 1
+        out.append(
+            _add(vim, _disk_device(vim, -(110 + i), _BUS_CONTROLLER_KEY[bus], str(ref), unit))
+        )
+    return out
 
 
 def _add(vim: Any, device: Any) -> Any:
@@ -124,9 +189,8 @@ def create_vm(
     devices: list[Any] = [_add(vim, scsi)]
 
     os_key = -101
-    devices.append(_add(vim, _disk_device(vim, os_key, str(os_disk_ref), unit=0)))
-    for i, ref in enumerate(data_disk_refs):
-        devices.append(_add(vim, _disk_device(vim, -(110 + i), str(ref), unit=_scsi_unit(i + 1))))
+    devices.append(_add(vim, _disk_device(vim, os_key, _SCSI_KEY, str(os_disk_ref), unit=0)))
+    devices.extend(_data_disk_devices(vim, spec, data_disk_refs))
 
     # CDROMs on IDE0. ESXi requires the IDE master (unit 0) be filled before the
     # slave (unit 1) — a slave with no master fails power-on. So pack from unit 0:
@@ -150,8 +214,16 @@ def create_vm(
                 _add(vim, _nic_device(vim, -(200 + idx), network_refs[nic.network], mac))
             )
 
-    # Datastore-file serial port — the build-result sink reads this file.
-    serial_ref = f"[{ds}] {backend_name}/serial0.log"
+    # Datastore-file serial port — the build-result sink reads this file. Remove
+    # any stale serial0.log first (ESXI-20): resource names are date-scoped, so a
+    # *failed* prior same-day build can leave its VM home folder behind on the
+    # datastore (Destroy_Task does not always reap the serial file). Reusing that
+    # folder would make read_build_result_sink (which reads from offset 0) replay
+    # the *previous* build's fail/ok record before this build writes anything —
+    # surfacing a phantom failure. Truncate to a fresh, empty log per build.
+    serial_rel = f"{backend_name}/serial0.log"
+    client.folder_delete(serial_rel)  # tolerant of absence (404 -> no-op)
+    serial_ref = f"[{ds}] {serial_rel}"
     devices.append(_add(vim, _serial_device(vim, -400, serial_ref)))
 
     config = vim.vm.ConfigSpec(
