@@ -399,7 +399,8 @@ class TestGrubSerialConsole:
         from testrange.builders._proxmox_prepare import _AUTO_INSTALLER_GRUB_TOKEN
 
         return next(
-            ln for ln in cfg.splitlines()
+            ln
+            for ln in cfg.splitlines()
             if _AUTO_INSTALLER_GRUB_TOKEN in ln and ln.lstrip().startswith("linux")
         )
 
@@ -423,7 +424,8 @@ class TestGrubSerialConsole:
         # The graphical entry has no auto-installer token, so it keeps its console
         # (no ttyS0) and its quiet/splash=silent — only the automated line changed.
         graphical = next(
-            ln for ln in out.splitlines()
+            ln
+            for ln in out.splitlines()
             if ln.lstrip().startswith("linux") and "proxmox-start-auto-installer" not in ln
         )
         assert "console=ttyS0" not in graphical

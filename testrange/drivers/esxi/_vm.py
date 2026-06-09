@@ -249,9 +249,6 @@ def get_vm_power_state(client: EsxiClient, backend_name: str) -> str:
     return str(state)
 
 
-# -- snapshots (ESXI-6) ---------------------------------------------------
-
-
 def _walk_snapshots(tree: Any) -> list[Any]:
     """Flatten a snapshot tree, oldest-first (pre-order by creation)."""
     out: list[Any] = []
@@ -286,9 +283,15 @@ def create_snapshot(
 
     Raises :class:`DriverError` if ``name`` already exists, per the ABC. Disk-only
     snapshots quiesce nothing (the VM may be off); a memory snapshot requires the
-    VM running (ESXi enforces this).
+    VM running — a powered-off ``mem=True`` request is rejected up front with a
+    uniform message (rather than relying on ESXi's downstream error).
     """
     vm = client.require_vm(vm_backend_name)
+    if mem and vm.runtime.powerState != client.vim.VirtualMachine.PowerState.poweredOn:
+        raise DriverError(
+            f"mem=True snapshot requires vm {vm_backend_name!r} to be running "
+            "(no RAM state to capture while powered off)"
+        )
     if _find_snapshot(client, vm, name) is not None:
         raise DriverError(f"snapshot {name!r} already exists on vm {vm_backend_name!r}")
     task = vm.CreateSnapshot_Task(name=name, description=description, memory=mem, quiesce=False)

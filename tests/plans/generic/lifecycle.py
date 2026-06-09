@@ -117,6 +117,19 @@ def oversized_os_drive_grew_on_first_boot(orch: OrchestratorHandle) -> None:
     assert size_gb >= 14, f"rootfs did not grow to the 16G OSDrive: {size_gb}G"
 
 
+def native_write_handles_payload_over_the_agent_cap(orch: OrchestratorHandle) -> None:
+    # A payload larger than any single guest-agent write (PVE caps a write at
+    # ~45 KB; QGA caps a single command too) must round-trip intact over the
+    # native channel — exercises the driver's chunked write (REL-33).
+    com = orch.vms["churn"].communicator
+    blob = bytes(i % 256 for i in range(256 * 1024))  # 256 KiB, every byte value
+    com.write_file("/root/big.bin", blob)
+    readback = com.read_file("/root/big.bin")
+    assert readback == blob, (
+        f"large native write corrupted: wrote {len(blob)} bytes, read {len(readback)}"
+    )
+
+
 def headless_reachable_over_native_agent(orch: OrchestratorHandle) -> None:
     assert orch.vms["headless"].communicator.execute(["true"]).ok, "NIC-less guest unreachable"
 
@@ -142,6 +155,7 @@ TESTS: list[Callable[[OrchestratorHandle], None]] = [
     churn_survives_repeated_power_cycles,
     reboot_persists_on_disk_state,
     oversized_os_drive_grew_on_first_boot,
+    native_write_handles_payload_over_the_agent_cap,
     headless_reachable_over_native_agent,
     headless_has_no_ethernet,
     headless_survives_power_cycle,

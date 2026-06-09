@@ -42,6 +42,9 @@ _ACCEPT_TIMEOUT_S = 60.0
 # while waiting for QEMU to connect, so the connect-wait heartbeats too.
 _RECV_TIMEOUT_S = 1.0
 
+# Per-recv size draining the serial console socket. 64 KiB keeps the syscall
+# count low on a chatty build boot; the per-read timeout above bounds latency, so
+# a larger buffer costs nothing when the guest is quiet.
 _CHUNK = 1 << 16
 
 

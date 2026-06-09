@@ -48,6 +48,9 @@ _TASK_POLL_S = 1.0
 # transfers, a short connect.
 _HTTP_CONNECT_TIMEOUT_S = 30.0
 _HTTP_READ_TIMEOUT_S = 1800.0
+# Streaming chunk for the /folder byte channel. 4 MiB keeps the per-iteration
+# HTTP/syscall overhead negligible on a multi-GB vmdk transfer without buffering
+# the whole disk in memory (mirrors the libvirt storage pump).
 _CHUNK = 4 * 1024 * 1024
 
 
@@ -154,8 +157,6 @@ class EsxiClient:
         # Held per-op, never across a task wait, so slow transfers still overlap.
         self.call_lock = threading.RLock()
 
-    # -- properties --------------------------------------------------------
-
     @property
     def conn(self) -> EsxiConn:
         return self._conn
@@ -214,8 +215,6 @@ class EsxiClient:
     def network_system(self) -> Any:
         """The host's ``HostNetworkSystem`` — vSwitch/portgroup reconfigure."""
         return self.host.configManager.networkSystem
-
-    # -- connection --------------------------------------------------------
 
     def connect(self) -> None:
         vim_connect, vim = _import_pyvmomi()
@@ -302,8 +301,6 @@ class EsxiClient:
         self._si = None
         self._content = None
 
-    # -- inventory lookups -------------------------------------------------
-
     def find_vm(self, name: str) -> Any | None:
         """The VirtualMachine whose inventory ``name`` is ``name``, or ``None``.
 
@@ -359,8 +356,6 @@ class EsxiClient:
             if time.monotonic() > deadline:
                 raise DriverError(f"ESXi task did not finish within {timeout:.0f}s (state={state})")
             time.sleep(_TASK_POLL_S)
-
-    # -- datastore /folder byte I/O ---------------------------------------
 
     def _folder_url(self, ds_path: str) -> str:
         """HTTPS URL of a datastore file under the ``/folder`` file service.
@@ -436,8 +431,6 @@ class EsxiClient:
             raise DriverError(
                 f"datastore download of {Path(ds_path).name} from {self._conn.host} failed: {e}"
             ) from e
-
-    # -- guest-ops file transfer (ESXI-5) ---------------------------------
 
     def _fix_transfer_host(self, url: str) -> str:
         """Rewrite a guest-ops transfer URL's host to the connection host.

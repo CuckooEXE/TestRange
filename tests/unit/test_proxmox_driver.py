@@ -31,9 +31,6 @@ from testrange.vms import VMRecipe, VMSpec
 _Addr = DHCPAddr | StaticAddr | None
 
 
-# --- fakes ----------------------------------------------------------------
-
-
 class _FakeApi:
     """A proxmoxer-style chained API modelling just the SDN endpoints used.
 
@@ -218,9 +215,6 @@ def _plan(switch: Switch, *, addr: _Addr = None, comm: Communicator | None = Non
     )
 
 
-# --- construction & registry ---------------------------------------------
-
-
 class TestConstruction:
     def test_satisfies_abc(self) -> None:
         assert isinstance(_driver(), HypervisorDriver)
@@ -397,9 +391,6 @@ class TestNaming:
         assert _driver().volume_suffix("build_seed") == ".iso"
 
 
-# --- L2 (delegates to _sdn) ----------------------------------------------
-
-
 class TestL2:
     def test_create_switch_makes_zone_and_vnet_then_applies(self) -> None:
         c = _FakeClient()
@@ -552,9 +543,6 @@ class TestL2:
         )
         assert captured["network_refs"]["a"] == vnet  # composed name → vnet id
         assert captured["network_refs"]["__uplink__sw1"] == "vmbr0"  # uplink passthrough
-
-
-# --- preflight ------------------------------------------------------------
 
 
 class TestPreflight:

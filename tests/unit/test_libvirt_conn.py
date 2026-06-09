@@ -70,3 +70,22 @@ def test_registration_is_idempotent() -> None:
     _conn._route_libvirt_errors_to_log(fake)
     _conn._route_libvirt_errors_to_log(fake)
     assert len(calls) == 1  # registered once; re-imports are no-ops
+
+
+class TestTeardownUri:
+    """``to_uri``/``from_uri`` is the state.json round-trip that `testrange
+    cleanup` reaches a torn-down run by — a regression silently breaks cleanup."""
+
+    def test_round_trips_default_uri(self) -> None:
+        c = _conn.LibvirtConn()
+        assert _conn.LibvirtConn.from_uri(c.to_uri()) == c
+
+    def test_round_trips_custom_uri(self) -> None:
+        c = _conn.LibvirtConn(libvirt_uri="qemu+ssh://root@host:22/system")
+        assert _conn.LibvirtConn.from_uri(c.to_uri()) == c
+
+    def test_wrong_scheme_raises(self) -> None:
+        from testrange.exceptions import DriverError
+
+        with pytest.raises(DriverError, match="teardown URI"):
+            _conn.LibvirtConn.from_uri("qemu:///system")

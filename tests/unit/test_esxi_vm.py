@@ -11,6 +11,7 @@ from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.esxi._client import EsxiConn
 from testrange.drivers.esxi.driver import ESXiDriver
+from testrange.exceptions import DriverError
 from testrange.networks import Network, Switch
 from testrange.networks.base import BuildNic, NetworkAddressing
 from testrange.vms import VMSpec
@@ -213,6 +214,7 @@ class TestSnapshots:
             return _FakeTask()
 
         vm.CreateSnapshot_Task = create
+        vm.PowerOnVM_Task()  # mem=True snapshots require a running VM (ABC contract)
 
     def test_create_list_delete_restore(self) -> None:
         client = FakeEsxiClient()
@@ -225,6 +227,15 @@ class TestSnapshots:
         assert d.list_snapshots("tr-vm-snap") == ["s2"]
         d.restore_snapshot("tr-vm-snap", "s2")  # no raise
         d.delete_snapshot("tr-vm-snap", "absent")  # no-op
+
+    def test_memory_snapshot_on_powered_off_vm_raises(self) -> None:
+        # ABC contract: mem=True requires a running VM (no RAM to capture off).
+        client = FakeEsxiClient()
+        self._vm_with_snaps(client)
+        client.find_vm("tr-vm-snap").PowerOffVM_Task()
+        d = _driver(client)
+        with pytest.raises(DriverError, match="to be running"):
+            d.create_snapshot("tr-vm-snap", "s1", mem=True)
 
     def test_duplicate_snapshot_raises(self) -> None:
         from testrange.exceptions import DriverError

@@ -16,9 +16,8 @@ mirroring the Proxmox split:
   ``libvirt_qemu.qemuAgentCommand``;
 - ``_serial`` — the build-result sink (the ``<serial type='unix'>`` socket).
 
-The slices land incrementally (BACKEND-1.A…1.D); a concern not yet implemented
-raises a clear, phase-tagged :class:`DriverError`, so the class is instantiable
-and ``testrange describe`` works against a libvirt Plan today.
+Every concern is implemented and delegated; the driver is the certified
+reference backend (ADR-0019).
 """
 
 from __future__ import annotations

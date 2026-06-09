@@ -93,7 +93,8 @@ def test_prepare_iso_adds_serial_console_to_automated_entry(tmp_path: Path) -> N
 
     grub = _read_iso_file(out, "/boot/grub/grub.cfg").decode("utf-8")
     auto = next(
-        ln for ln in grub.splitlines()
+        ln
+        for ln in grub.splitlines()
         if "proxmox-start-auto-installer" in ln and ln.lstrip().startswith("linux")
     )
     assert "console=ttyS0,115200" in auto, f"serial console not grafted: {auto!r}"

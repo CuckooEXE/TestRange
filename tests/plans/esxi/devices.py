@@ -85,13 +85,19 @@ def _disk_names(orch: OrchestratorHandle) -> list[str]:
 
 
 def scsi_and_sata_disks_present_as_sd(orch: OrchestratorHandle) -> None:
+    # Exactly three: OS (scsi) + scsi data + sata data. An exact count is what
+    # certifies the bus split — `>= 3` would still pass if the nvme disk wrongly
+    # enumerated as /dev/sd*, defeating the very distinction this plan stresses.
     sd = [n for n in _disk_names(orch) if n.startswith("sd")]
-    assert len(sd) >= 3, f"expected the OS + scsi + sata disks on /dev/sd*, got {sd!r}"
+    assert len(sd) == 3, f"expected exactly OS + scsi + sata disks on /dev/sd*, got {sd!r}"
 
 
 def nvme_disk_presents_as_nvme(orch: OrchestratorHandle) -> None:
     nvme = [n for n in _disk_names(orch) if n.startswith("nvme")]
-    assert nvme, f"expected the nvme data disk on /dev/nvme*, got disks {_disk_names(orch)!r}"
+    assert len(nvme) == 1, (
+        f"expected exactly the one nvme data disk on /dev/nvme*, got {nvme!r} "
+        f"(all disks {_disk_names(orch)!r})"
+    )
 
 
 TESTS: list[Callable[[OrchestratorHandle], None]] = [

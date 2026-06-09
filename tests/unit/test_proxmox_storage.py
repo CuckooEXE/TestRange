@@ -17,8 +17,6 @@ from testrange.drivers.base import VolumeRef
 from testrange.drivers.proxmox import _naming, _storage
 from testrange.exceptions import DriverError
 
-# --- chained fake ---------------------------------------------------------
-
 
 class _Endpoint:
     def __init__(self, api: _FakeApi, path: str) -> None:
@@ -88,9 +86,6 @@ def _client() -> Any:
     return _FakeClient()
 
 
-# --- upload / write -------------------------------------------------------
-
-
 class TestStaging:
     def test_upload_sftps_import_into_storage_dir(self) -> None:
         # PVE-23: disk images go up via SFTP into <storage>/import/, not the REST
@@ -116,9 +111,6 @@ class TestStaging:
         _storage.write_to_pool(c, ref, b"ISO-BYTES")
         # Staged bytes land at the iso content path, where dir storage scans them.
         assert c.put == [("/var/lib/vz/template/iso/tr-pool-x-p1__seed.iso", b"ISO-BYTES")]
-
-
-# --- download (Option-2 re-resolution) ------------------------------------
 
 
 class TestDownload:
@@ -174,9 +166,6 @@ class TestDownload:
         with pytest.raises(DriverError, match="no disk at slot 2"):
             _storage.download_from_pool(c, ref, Path("/tmp/out.qcow2"))
         assert c.got == []  # nothing was downloaded
-
-
-# --- delete / pools / deferred sizing -------------------------------------
 
 
 class TestDeleteAndPools:

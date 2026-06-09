@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import socket
 import threading
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from testrange.exceptions import GatewayError
-from testrange.gateways import GuestGateway, SSHJumpGateway
+from testrange.gateways import GuestGateway, SSHJumpGateway, ssh_jump
 
 
 class _FakeTransport:
@@ -144,3 +145,46 @@ def test_local_forward_pumps_bytes_end_to_end(monkeypatch: pytest.MonkeyPatch) -
     finally:
         gw.close()
         echo_srv.close()
+
+
+class _FakeSSHException(Exception):
+    pass
+
+
+class _UnparseableKey:
+    @classmethod
+    def from_private_key(cls, _f: Any) -> Any:
+        raise _FakeSSHException("not this key type")
+
+
+class _ParseableKey:
+    @classmethod
+    def from_private_key(cls, _f: Any) -> Any:
+        return "PARSED-KEY"
+
+
+def _fake_paramiko(**key_classes: Any) -> Any:
+    return SimpleNamespace(SSHException=_FakeSSHException, **key_classes)
+
+
+class TestLoadPrivateKey:
+    def test_unparseable_key_raises_gateway_error(self) -> None:
+        fake = _fake_paramiko(
+            Ed25519Key=_UnparseableKey,
+            RSAKey=_UnparseableKey,
+            ECDSAKey=_UnparseableKey,
+            DSSKey=_UnparseableKey,
+        )
+        with pytest.raises(GatewayError, match="could not parse jump private key"):
+            ssh_jump._load_private_key("garbage", fake)
+
+    def test_falls_through_to_a_later_key_type(self) -> None:
+        # Ed25519 rejects it, RSA parses it — the loop must try the next type,
+        # not bail on the first SSHException.
+        fake = _fake_paramiko(
+            Ed25519Key=_UnparseableKey,
+            RSAKey=_ParseableKey,
+            ECDSAKey=_UnparseableKey,
+            DSSKey=_UnparseableKey,
+        )
+        assert ssh_jump._load_private_key("pem-text", fake) == "PARSED-KEY"

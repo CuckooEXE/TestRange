@@ -498,16 +498,19 @@ def create_snapshot(
 
     libvirt's internal snapshots are full system checkpoints: a snapshot of a
     *running* domain always captures RAM (a revert resumes the running state),
-    and a snapshot of a *shut-off* domain is disk-only. libvirt **rejects** an
-    internal disk-only snapshot of a running domain outright ("internal snapshot
-    of a running VM must include the memory state"), so ``mem`` cannot toggle that
-    on this backend — it is accepted for ABC parity, and a ``mem=True`` request is
-    always satisfiable here (memory snapshots are supported, so we never raise on
-    it). Either way the disk state is captured and reverts correctly. Raises if
+    and a snapshot of a *shut-off* domain is disk-only. libvirt decides
+    memory-vs-disk-only purely by the domain's run state, so ``mem`` doesn't
+    toggle anything here — but the ABC contract is uniform across backends, so a
+    ``mem=True`` request against a *shut-off* domain must raise rather than
+    silently produce a disk-only snapshot (there is no RAM to capture). Raises if
     ``name`` already exists.
     """
-    del mem  # libvirt decides memory-vs-disk-only by the domain's run state
     dom = _resolve_domain(client, vm_backend_name)
+    if mem and not dom.isActive():
+        raise DriverError(
+            f"mem=True snapshot requires vm {vm_backend_name!r} to be running "
+            "(no RAM state to capture while powered off)"
+        )
     if _lookup_snapshot(client, dom, name) is not None:
         raise DriverError(f"snapshot {name!r} already exists on vm {vm_backend_name!r}")
     dom.snapshotCreateXML(_snapshot_xml(name, description), 0)

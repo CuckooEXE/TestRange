@@ -13,8 +13,6 @@ import pytest
 from testrange.drivers.proxmox import _naming, _vm
 from testrange.exceptions import DriverError
 
-# --- fake (just the qemu-list surface _vm touches) ------------------------
-
 
 class _FakeNodes:
     def __init__(self, vms: list[dict[str, Any]]) -> None:
@@ -50,9 +48,6 @@ def _disk_ref(vol_name: str, pool: str = "tr-pool-ab12cd-p1") -> str:
     return _naming.compose_volume_ref("local", pool, vol_name)
 
 
-# --- pure naming ----------------------------------------------------------
-
-
 class TestNamingParsers:
     def test_parse_disk_ref_roundtrips_compose(self) -> None:
         ref = _naming.compose_volume_ref("local", "pool1", "tr-vm-ab12cd-web.qcow2")
@@ -67,9 +62,6 @@ class TestNamingParsers:
 
     def test_disk_scsi_index_none_for_other_vm(self) -> None:
         assert _naming.disk_scsi_index("tr-vm-x-web.qcow2", "tr-vm-x-db") is None
-
-
-# --- live resolution ------------------------------------------------------
 
 
 class TestResolveVmid:

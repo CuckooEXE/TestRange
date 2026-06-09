@@ -415,10 +415,17 @@ def create_snapshot(
 ) -> None:
     """Snapshot the VM. ``mem=True`` includes RAM state (``vmstate=1``).
 
-    A memory snapshot requires the VM to be running (PVE enforces this). Raises
-    :class:`DriverError` if ``name`` already exists, per the ABC contract.
+    A memory snapshot requires the VM to be running; we reject a powered-off
+    ``mem=True`` request up front with a uniform message (rather than relying on
+    PVE's downstream error), per the ABC contract. Raises :class:`DriverError`
+    if ``name`` already exists.
     """
     vmid = resolve_vmid(client, vm_backend_name)
+    if mem and get_vm_power_state(client, vm_backend_name) != "running":
+        raise DriverError(
+            f"mem=True snapshot requires vm {vm_backend_name!r} to be running "
+            "(no RAM state to capture while powered off)"
+        )
     if name in _snapshot_names(client, vmid):
         raise DriverError(f"snapshot {name!r} already exists on vm {vm_backend_name!r}")
     _await(

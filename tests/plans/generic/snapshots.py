@@ -30,6 +30,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
+from testrange.exceptions import DriverError
 from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
@@ -126,9 +127,30 @@ def memory_snapshot_restores_running_state(orch: OrchestratorHandle) -> None:
     driver.delete_snapshot(vm.backend_name, "mem-snap")
 
 
+def memory_snapshot_on_shutoff_vm_is_rejected(orch: OrchestratorHandle) -> None:
+    # ABC contract (REL-34): mem=True on a powered-off VM has no RAM to capture,
+    # so it must raise rather than silently degrade to a disk-only snapshot.
+    vm = orch.vms["snapbox"]
+    driver = orch.driver
+    driver.shutdown_vm(vm.backend_name, timeout=120.0)
+    assert driver.get_vm_power_state(vm.backend_name) == "shutoff", "VM did not power off"
+    try:
+        raised = False
+        try:
+            driver.create_snapshot(vm.backend_name, "mem-on-off", mem=True)
+        except DriverError:
+            raised = True
+    finally:
+        driver.start_vm(vm.backend_name)
+        vm.communicator.close()
+    assert raised, "mem=True on a shut-off VM must raise, not silently disk-only"
+    assert "mem-on-off" not in driver.list_snapshots(vm.backend_name), "rejected snapshot persisted"
+
+
 TESTS: list[Callable[[OrchestratorHandle], None]] = [
     disk_snapshot_lifecycle,
     memory_snapshot_restores_running_state,
+    memory_snapshot_on_shutoff_vm_is_rejected,
 ]
 
 
