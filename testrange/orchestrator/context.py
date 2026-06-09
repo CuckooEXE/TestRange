@@ -18,6 +18,7 @@ from testrange.cache.manager import CacheManager
 from testrange.drivers.base import HypervisorDriver
 from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import ResolvedBackend
+from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.plan import Plan
 from testrange.state.store import StateStore
 
@@ -75,6 +76,13 @@ class RunContext:
     # thread-safe driver connection. The cross-process state.json is serialized
     # separately inside StateStore.
     ledger_lock: threading.Lock = field(default_factory=threading.Lock, compare=False, repr=False)
+
+    # Live-dashboard state (ADR-0029): the phases report VM lifecycle stages and
+    # test outcomes into this; the CLI's renderer reads its snapshots. It carries
+    # its own lock (distinct from ledger_lock), so dashboard writes never contend
+    # with resource bookkeeping. A run with no dashboard wired still gets a fresh
+    # one here — the set_vm_stage calls are then cheap no-ops nobody renders.
+    dashboard: DashboardState = field(default_factory=DashboardState, compare=False, repr=False)
 
     @property
     def driver(self) -> HypervisorDriver:

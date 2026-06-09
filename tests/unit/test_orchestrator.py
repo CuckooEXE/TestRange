@@ -30,6 +30,7 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.networks.sidecar import LEASEFILE
 from testrange.orchestrator import Orchestrator
 from testrange.orchestrator.backend import ResolvedBackend
+from testrange.orchestrator.dashboard_state import VMStage
 from testrange.packages import Apt
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms import VMRecipe, VMSpec
@@ -190,6 +191,44 @@ class TestEnterAndExit:
         assert "destroy_pool" in names
         # The libvirt-shaped bridge API is gone — nothing names a bridge.
         assert not any("bridge" in n for n in names)
+
+    def test_dashboard_tracks_vm_to_ready(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        """The run dashboard seeds VMs PENDING and walks them to READY (ADR-0029)."""
+        del fake_driver
+        mgr, _ = populated_cache
+        o = Orchestrator(_plan(), cache_manager=mgr)
+        seeded = {v.name: v.stage for v in o.ctx.dashboard.snapshot().vms}
+        assert seeded == {"web": VMStage.PENDING}
+        with o:
+            pass
+        final = {v.name: v.stage for v in o.ctx.dashboard.snapshot().vms}
+        assert final["web"] is VMStage.READY
+
+    def test_dashboard_guard_attributes_a_step_failure_to_its_vm(self) -> None:
+        """``_guard_vm`` tags the failing VM FAILED with the error, then re-raises (ADR-0029)."""
+        from types import SimpleNamespace
+
+        from testrange.orchestrator import run_phase
+        from testrange.orchestrator.dashboard_state import DashboardState
+
+        dash = DashboardState()
+        dash.seed_vms(["web"])
+        ctx = SimpleNamespace(dashboard=dash)
+        vm = SimpleNamespace(name="web")
+
+        def _boom(_ctx: object, _vm: object) -> None:
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            run_phase._guard_vm(ctx, vm, _boom)  # type: ignore[arg-type]
+
+        web = {v.name: v for v in dash.snapshot().vms}["web"]
+        assert web.stage is VMStage.FAILED
+        assert web.detail is not None and "boom" in web.detail
 
     def test_build_vm_brought_up_and_torn_down(
         self,

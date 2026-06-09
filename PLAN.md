@@ -842,11 +842,11 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
   surfaced by the CLI on stderr; `BuildTimeoutError` stays as the wedge
   watchdog. The orchestrator no longer polls `get_vm_power_state` during build.
   Console output is mirrored line-by-line to a dedicated `…build_phase.console`
-  logger at DEBUG as it streams (framing suppressed), watchable live via
-  `--verbose` (the live tail). That firehose logger is pinned above the operator
-  log level (CORE-50), so a plain `--log-level debug` run does **not** dump the
-  raw-guest-output firehose through the stderr handler — only `--verbose` lowers
-  it.
+  logger at DEBUG as it streams (framing suppressed), watchable in the
+  dashboard's Serial pane (or via `--verbose` off a TTY). That firehose logger is
+  pinned above the operator log level (CORE-50), so a plain `--log-level debug`
+  run does **not** dump the raw-guest-output firehose through the stderr handler
+  — only the dashboard / `--verbose` lowers it.
 - **CORE-6 (prerequisite, done)** — guest serial output is raw terminal output
   (ANSI/CSI colour + cursor escapes, OSC titles, embedded `\r`, C0 control
   bytes). `testrange/_ansi.py::scrub_terminal_control` strips it (keeping only
@@ -854,22 +854,35 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
   mirror (`_ConsoleStreamer`) and the decoded `BuildFailedError` log. Without
   this the raw escapes hijack the operator's terminal (clear-screen/overwrite
   seen in live PVE runs) and garble the captured fail-log.
-- **CORE-6 (`--verbose` live tail, done)** — `testrange/_tui.py::LiveTail` is a
-  `logging.Handler` that renders streaming output as a Docker-BuildKit-style
-  collapsing tail: a fixed-height ring-buffer region redrawn in place, with
-  per-step collapse to a `=> build web  DONE 47s` summary; SIGWINCH-aware;
-  cursor restored on teardown. Sources just *log* — the sink decides rendering:
-  the `…console` (build serial) and `…runner.testout` (per-test stdout/stderr,
-  teed via `capture_test_output`) loggers are the transient firehose, everything
-  else on the `testrange` tree commits as a permanent line above the region.
-  `_tui.live_output(verbose=…)` (entered by the CLI around `run`/`build`) is the
-  TTY/non-TTY split: on a TTY it makes `LiveTail` the sole `testrange` handler
-  for the run (so it and the plain stderr handler can't fight); off a TTY it
-  bumps the console/testout loggers to DEBUG for plain per-line logging. The
-  `--verbose` global flag is the *only* path that surfaces the firehose:
-  `--log-level` governs the orchestrator's own progress lines, while the
-  console/testout firehose loggers are pinned above it (CORE-50) and lowered to
-  DEBUG only for the duration of `live_output`.
+- **Terminal output → `rich` (CORE-49b, ADR-0029, done)** — all operator-facing
+  output is rendered by `rich` on one of two shared Consoles
+  (`testrange/_console.py`): stdout for *data* (the `describe` `rich.tree.Tree`,
+  cache `rich.table.Table`), stderr for *diagnostics* (logging via
+  `rich.logging.RichHandler`, transfer `rich.progress.Progress`, errors). The
+  hand-rolled ANSI renderers were deleted; `_ansi.scrub_terminal_control` stays
+  as the untrusted-guest-output trust boundary, and guest text reaches `rich` as
+  `Text` (markup off) so it can never inject markup.
+- **`run`/`build` live dashboard (CORE-49b, done)** — on a TTY, `run`/`build`
+  show a four-pane `rich.live.Live` + `Layout` dashboard: per-VM lifecycle stage
+  (PENDING→PROVISIONING→BUILDING→BOOTING→BINDING→READY/FAILED, colour-coded, with
+  elapsed + failure detail), test pass/fail, a log tail, and the build serial
+  console. State lives in a **rich-free** `orchestrator/dashboard_state.py`
+  (`DashboardState`, a frozen-record snapshot behind a dedicated lock) that the
+  phases write via explicit `ctx.dashboard.set_vm_stage(...)` calls — so the deep
+  phase/driver code never imports the renderer (stovepipe rule). The renderer +
+  the `DashboardLogHandler` (which feeds the Log/Serial panes from the logging
+  tree) + the `run_dashboard` context manager live in `testrange/_dashboard.py`,
+  the sole module importing both `rich` and the state. `run_dashboard` (entered
+  by the CLI around `run`/`build`) owns the TTY/non-TTY split: on a TTY it
+  removes the `RichHandler` for its duration (so it and `Live` can't fight),
+  installs the `DashboardLogHandler`, and lowers the `…console`/`…runner.testout`
+  firehose to DEBUG to fill the Serial pane; off a TTY (or `--no-dashboard`) it
+  yields nothing and logging keeps flowing through the `RichHandler`. `--verbose`
+  still lowers the firehose so a piped/CI run sees serial/test output as plain
+  log lines. The per-test stdout/stderr tee (`capture_test_output` →
+  `…runner.testout`) survives in `testrange/_tui.py`. `--log-level` governs the
+  orchestrator's own progress lines, while the firehose loggers are pinned above
+  it (CORE-50) and lowered only for the dashboard's / `--verbose`'s duration.
 
 ## v0 example (target shape)
 

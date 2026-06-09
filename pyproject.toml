@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = []
 dependencies = [
     "cryptography>=42",
+    "rich>=13",
 ]
 
 [project.optional-dependencies]

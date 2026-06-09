@@ -6,6 +6,7 @@ import logging
 from collections.abc import Iterator
 
 import pytest
+from rich.logging import RichHandler
 
 from testrange._log import configure, get_logger
 from testrange._tui import CONSOLE_LOGGER, TESTOUT_LOGGER
@@ -35,10 +36,10 @@ def _reset_testrange_logger() -> Iterator[None]:
 
 
 class TestConfigure:
-    def test_installs_a_single_stream_handler(self) -> None:
+    def test_installs_a_single_rich_handler(self) -> None:
         configure()
         root = logging.getLogger("testrange")
-        assert sum(isinstance(h, logging.StreamHandler) for h in root.handlers) == 1
+        assert sum(isinstance(h, RichHandler) for h in root.handlers) == 1
         assert root.propagate is False
 
     def test_idempotent_no_duplicate_handlers(self) -> None:
@@ -46,7 +47,7 @@ class TestConfigure:
         configure()
         configure()
         root = logging.getLogger("testrange")
-        assert sum(isinstance(h, logging.StreamHandler) for h in root.handlers) == 1
+        assert sum(isinstance(h, RichHandler) for h in root.handlers) == 1
 
     def test_recall_updates_level(self) -> None:
         configure(level="INFO")
@@ -83,3 +84,14 @@ class TestRunIdInjection:
         with caplog.at_level(logging.INFO, logger="testrange.sample"):
             log.info("hello")
         assert caplog.records[0].run_id == "-"  # type: ignore[attr-defined]
+
+    def test_rich_handler_renders_run_id_and_message(self) -> None:
+        from testrange._console import err_console
+
+        configure(level="INFO")
+        log = get_logger("testrange.sample", run_id="run-7")
+        with err_console().capture() as cap:
+            log.info("provisioning web")
+        text = cap.get()
+        assert "run-7" in text
+        assert "provisioning web" in text

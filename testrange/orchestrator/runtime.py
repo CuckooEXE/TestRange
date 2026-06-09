@@ -32,6 +32,7 @@ from testrange.orchestrator.backend import (
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.nested_phase import (
     NestedHandle,
     NestedRun,
@@ -99,6 +100,7 @@ class Orchestrator:
         require_cache: bool = False,
         profile: BackendProfile | None = None,
         jobs: int | None = None,
+        dashboard: DashboardState | None = None,
     ) -> None:
         self.plan = plan
         self._require_cache = require_cache
@@ -123,7 +125,13 @@ class Orchestrator:
                 for n in s.networks
             },
             jobs=jobs,
+            # The CLI owns the dashboard so it can render the same state the
+            # phases write; a library call with no dashboard gets a fresh one.
+            dashboard=dashboard if dashboard is not None else DashboardState(),
         )
+        # Register every run VM up front so the dashboard shows them PENDING
+        # before bring-up touches them (in plan order).
+        self.ctx.dashboard.seed_vms(vm.name for vm in plan.hypervisor.vms)
         self._handle: OrchestratorHandle | None = None
         self._leak = False
         # Entered inner orchestrators (one per GuestHypervisor), torn down LIFO
@@ -235,6 +243,10 @@ class Orchestrator:
                 self._handle = self._build_handle(nested)
             except Exception:
                 _log.exception("bring-up failed; tearing down")
+                # parallel_map is fail-fast: the worker that raised tagged its
+                # own VM FAILED; sweep any sibling left mid-stage so the final
+                # dashboard frame is truthful rather than frozen at e.g. booting.
+                self.ctx.dashboard.abort_unfinished()
                 teardown_nested(self._nested_runs)
                 teardown(self.ctx)
                 raise

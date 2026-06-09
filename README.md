@@ -48,6 +48,11 @@ the authoritative shape for writing your own; a backend is bound at run time via
 Proxmox is in progress. The full bring-up lifecycle is also exercised in-memory
 against `MockDriver` by the unit suite.
 
+On an interactive terminal, `run`/`build` render a live dashboard — panes for
+per-VM lifecycle state, test pass/fail, a log tail, and the build serial console.
+Piped or in CI (no TTY), or with `--no-dashboard`, output degrades to plain
+`rich`-rendered log lines. See [docs/user/running-tests.md](docs/user/running-tests.md#the-live-dashboard).
+
 ## Plan shape
 
 ```python
@@ -87,6 +92,11 @@ testrange repl <plan.py> --profile <name>
 testrange cleanup --list                           # list runs + status, tear down nothing
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
+
+# Global flags (before the subcommand):
+#   --log-level DEBUG|INFO|WARNING|ERROR   set log verbosity (default INFO)
+#   --no-dashboard                         disable the live run/build dashboard; plain logs instead
+#   --verbose                              surface the build serial console / test output
 ```
 
 ## Docs

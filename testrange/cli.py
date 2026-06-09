@@ -13,9 +13,14 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any
 
+from rich.table import Table
+from rich.text import Text
+from rich.tree import Tree
+
 from testrange import __version__
+from testrange._console import err_console, out_console
+from testrange._dashboard import run_dashboard
 from testrange._log import configure as configure_logging
-from testrange._tui import live_output
 from testrange.cache.entry import CacheEntry
 from testrange.cache.http import HttpCache
 from testrange.cache.local import CacheEntryInfo
@@ -39,6 +44,7 @@ from testrange.exceptions import (
 from testrange.networks.base import Network, Switch
 from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
 from testrange.orchestrator.backend import resolve_backend
+from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
 from testrange.state.cleanup import (
@@ -62,6 +68,27 @@ class Exit(IntEnum):
     USAGE = 2  # bad invocation: missing/invalid plan, preflight reject, cache miss
     CLEANUP_ERRORS = 3  # cleanup ran but some resources would not tear down
     INTERRUPTED = 130  # SIGINT (Ctrl-C) during a phase
+
+
+def _out(msg: str = "") -> None:
+    """Print user-facing data to the shared stdout Console (ADR-0029).
+
+    ``markup``/``highlight`` are off so dynamic content (CIDRs, ``repr`` strings,
+    paths) renders literally and a stray ``[..]`` is never parsed as rich markup.
+    ``soft_wrap`` keeps each message on one logical line (like ``print``) instead
+    of hard-wrapping at the console width — so a status line or a test traceback
+    stays greppable and substring-stable regardless of terminal width.
+    """
+    out_console().print(msg, markup=False, highlight=False, soft_wrap=True)
+
+
+def _err(msg: str) -> None:
+    """Print a diagnostic/error to the shared stderr Console (ADR-0029).
+
+    ``soft_wrap`` keeps the message un-wrapped (see :func:`_out`) so an error
+    line is never split mid-phrase by the console width.
+    """
+    err_console().print(msg, markup=False, highlight=False, soft_wrap=True)
 
 
 def _build_manager(args: argparse.Namespace) -> CacheManager:
@@ -97,21 +124,17 @@ def _validate_tests(raw: object, path: str) -> list[Any]:
     bug we surface up front rather than at execution time.
     """
     if not isinstance(raw, list):
-        print(
-            f"error: {path}: TESTS must be a list of test functions, got {type(raw).__name__}",
-            file=sys.stderr,
-        )
+        _err(f"error: {path}: TESTS must be a list of test functions, got {type(raw).__name__}")
         sys.exit(Exit.USAGE)
     for t in raw:
         if not callable(t):
-            print(f"error: {path}: TESTS entry {t!r} is not callable", file=sys.stderr)
+            _err(f"error: {path}: TESTS entry {t!r} is not callable")
             sys.exit(Exit.USAGE)
         if not _accepts_one_arg(t):
             name = getattr(t, "__name__", repr(t))
-            print(
+            _err(
                 f"error: {path}: test {name!r} must take exactly one argument "
-                "(the orchestrator handle)",
-                file=sys.stderr,
+                "(the orchestrator handle)"
             )
             sys.exit(Exit.USAGE)
     return raw
@@ -120,11 +143,11 @@ def _validate_tests(raw: object, path: str) -> list[Any]:
 def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     p = Path(path).resolve()
     if not p.exists():
-        print(f"error: plan file not found: {path}", file=sys.stderr)
+        _err(f"error: plan file not found: {path}")
         sys.exit(Exit.USAGE)
     spec = importlib.util.spec_from_file_location(f"_userplan_{p.stem}", p)
     if spec is None or spec.loader is None:
-        print(f"error: cannot load plan module: {path}", file=sys.stderr)
+        _err(f"error: cannot load plan module: {path}")
         sys.exit(Exit.USAGE)
     module = importlib.util.module_from_spec(spec)
     try:
@@ -132,18 +155,18 @@ def _load_plan_module(path: str) -> tuple[Plan, list[Any]]:
     except TestRangeError as e:
         # The plan built a topology testrange rejected (e.g. Hypervisor/Switch
         # validation). A plan-authoring error, not a crash — exit USAGE.
-        print(f"error: invalid plan {path}: {e}", file=sys.stderr)
+        _err(f"error: invalid plan {path}: {e}")
         sys.exit(Exit.USAGE)
     except Exception as e:
         # A plan is arbitrary user .py executed at import; anything it raises
         # (incl. the bare ValueError topology validation throws) must surface as
         # a usage error naming the plan, not a raw testrange traceback. repr
         # keeps the type+message debuggable.
-        print(f"error: failed to load plan {path}: {e!r}", file=sys.stderr)
+        _err(f"error: failed to load plan {path}: {e!r}")
         sys.exit(Exit.USAGE)
     plan = getattr(module, "PLAN", None)
     if not isinstance(plan, Plan):
-        print(f"error: {path} does not define a top-level PLAN: Plan(...)", file=sys.stderr)
+        _err(f"error: {path} does not define a top-level PLAN: Plan(...)")
         sys.exit(Exit.USAGE)
     return plan, _validate_tests(getattr(module, "TESTS", []), path)
 
@@ -180,7 +203,7 @@ def _load_profile_arg(args: argparse.Namespace) -> BackendProfile | None:
     try:
         return load_profile(path, name)
     except ProfileError as e:
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         sys.exit(Exit.USAGE)
 
 
@@ -188,38 +211,42 @@ def _build(args: argparse.Namespace) -> int:
     plan, _tests = _load_plan_module(args.plan)
     profile = _load_profile_arg(args)
     mgr = _build_manager(args)
+    dashboard = DashboardState()
     try:
-        with live_output(verbose=args.verbose):
+        with run_dashboard(
+            dashboard, enabled=not args.no_dashboard, console=err_console(), verbose=args.verbose
+        ):
             run_id = build_range(
                 plan,
                 cache_manager=mgr,
                 profile=profile,
                 jobs=args.jobs,
                 build_timeout_s=args.build_timeout,
+                dashboard=dashboard,
             )
     except DriverError as e:
         # Binding/pin mismatch or a backend-agnostic plan with no --profile.
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         return Exit.USAGE
     except PreflightError as e:
-        print(f"preflight failed:\n{e}", file=sys.stderr)
+        _err(f"preflight failed:\n{e}")
         return Exit.USAGE
     except CacheMissError as e:
-        print(f"cache miss: {e}", file=sys.stderr)
+        _err(f"cache miss: {e}")
         return Exit.USAGE
     except CacheError as e:
-        print(f"cache error: {e}", file=sys.stderr)
+        _err(f"cache error: {e}")
         return Exit.FAILURE
     except BuildFailedError as e:
-        print(f"build failed: {e}", file=sys.stderr)
+        _err(f"build failed: {e}")
         return Exit.FAILURE
     except OrchestratorError as e:
-        print(f"build failed: {e}", file=sys.stderr)
+        _err(f"build failed: {e}")
         return Exit.FAILURE
     except KeyboardInterrupt:
-        print("interrupted; teardown attempted", file=sys.stderr)
+        _err("interrupted; teardown attempted")
         return Exit.INTERRUPTED
-    print(f"build complete; cache warmed (run_id={run_id})")
+    _out(f"build complete; cache warmed (run_id={run_id})")
     return Exit.OK
 
 
@@ -227,8 +254,11 @@ def _run(args: argparse.Namespace) -> int:
     plan, tests = _load_plan_module(args.plan)
     profile = _load_profile_arg(args)
     mgr = _build_manager(args)
+    dashboard = DashboardState()
     try:
-        with live_output(verbose=args.verbose):
+        with run_dashboard(
+            dashboard, enabled=not args.no_dashboard, console=err_console(), verbose=args.verbose
+        ):
             results = run_tests(
                 tests,
                 plan,
@@ -241,33 +271,34 @@ def _run(args: argparse.Namespace) -> int:
                 jobs=args.jobs,
                 build_timeout_s=args.build_timeout,
                 lease_timeout_s=args.lease_timeout,
+                dashboard=dashboard,
             )
     except DriverError as e:
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         return Exit.USAGE
     except BuildRequiredError as e:
-        print(f"cache miss: {e}", file=sys.stderr)
+        _err(f"cache miss: {e}")
         return Exit.USAGE
     except PreflightError as e:
-        print(f"preflight failed:\n{e}", file=sys.stderr)
+        _err(f"preflight failed:\n{e}")
         return Exit.USAGE
     except CacheMissError as e:
-        print(f"cache miss: {e}", file=sys.stderr)
+        _err(f"cache miss: {e}")
         return Exit.USAGE
     except CacheError as e:
-        print(f"cache error: {e}", file=sys.stderr)
+        _err(f"cache error: {e}")
         return Exit.FAILURE
     except BuildFailedError as e:
-        print(f"build failed: {e}", file=sys.stderr)
+        _err(f"build failed: {e}")
         return Exit.FAILURE
     except OrchestratorError as e:
-        print(f"orchestrator failed: {e}", file=sys.stderr)
+        _err(f"orchestrator failed: {e}")
         return Exit.FAILURE
     except KeyboardInterrupt:
-        print("interrupted; teardown attempted", file=sys.stderr)
+        _err("interrupted; teardown attempted")
         return Exit.INTERRUPTED
     for r in results:
-        print(r.report_line())
+        _out(r.report_line())
     return Exit.OK if all(r.passed for r in results) else Exit.FAILURE
 
 
@@ -276,14 +307,14 @@ def _repl(args: argparse.Namespace) -> int:
     profile = _load_profile_arg(args)
     mgr = _build_manager(args)
     _print_describe(plan, tests, mgr, profile)
-    print()
+    _out()
 
     from testrange.orchestrator.runtime import Orchestrator
 
     try:
         o = Orchestrator(plan, cache_manager=mgr, profile=profile)
     except DriverError as e:
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         return Exit.USAGE
     try:
         with o as orch:
@@ -299,13 +330,13 @@ def _repl(args: argparse.Namespace) -> int:
                 exitmsg="",
             )
     except PreflightError as e:
-        print(f"preflight failed:\n{e}", file=sys.stderr)
+        _err(f"preflight failed:\n{e}")
         return Exit.USAGE
     except OrchestratorError as e:
-        print(f"orchestrator failed: {e}", file=sys.stderr)
+        _err(f"orchestrator failed: {e}")
         return Exit.FAILURE
     except KeyboardInterrupt:
-        print("interrupted; teardown attempted", file=sys.stderr)
+        _err("interrupted; teardown attempted")
         return Exit.INTERRUPTED
     return Exit.OK
 
@@ -314,34 +345,34 @@ def _cleanup(args: argparse.Namespace) -> int:
     try:
         if args.list:
             # Read-only: enumerate runs and their status, tear down nothing.
-            print(format_run_list(list_runs()))
+            _out(format_run_list(list_runs()))
             return Exit.OK
         if args.all:
             results = list(cleanup_all(dry_run=args.dry_run))
             if not results:
-                print("(no runs)")
+                _out("(no runs)")
                 return Exit.OK
-            print(format_cleanup_results(results))
+            _out(format_cleanup_results(results))
             return Exit.CLEANUP_ERRORS if any(r.errors for r in results) else Exit.OK
         if not args.run_id:
-            print("error: cleanup requires <run-id> or --all", file=sys.stderr)
+            _err("error: cleanup requires <run-id> or --all")
             return Exit.USAGE
         r = cleanup_run(args.run_id, dry_run=args.dry_run)
-        print(format_cleanup_results([r]))
+        _out(format_cleanup_results([r]))
         return Exit.CLEANUP_ERRORS if r.errors else Exit.OK
     except StateLockedError as e:
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         return Exit.FAILURE
     except StateError as e:
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         return Exit.USAGE
     except KeyboardInterrupt:
-        print("interrupted", file=sys.stderr)
+        _err("interrupted")
         return Exit.INTERRUPTED
     except TestRangeError as e:
         # cleanup is the recovery path; a driver error mid-teardown (e.g. a
         # failed connect()) must not surface as a raw traceback.
-        print(f"error: {e}", file=sys.stderr)
+        _err(f"error: {e}")
         return Exit.CLEANUP_ERRORS
 
 
@@ -356,8 +387,8 @@ def _describe(args: argparse.Namespace) -> int:
     return Exit.OK if binding_ok else Exit.USAGE
 
 
-def _print_binding(plan: Plan, profile: BackendProfile | None) -> bool:
-    """Print the resolved backend binding; return whether it is usable.
+def _add_binding(tree: Tree, plan: Plan, profile: BackendProfile | None) -> bool:
+    """Add the resolved backend binding to ``tree``; return whether it is usable.
 
     Returns ``False`` only when a profile was given but the binding failed to
     resolve — that error goes to **stderr** and the caller exits non-zero, so a
@@ -368,33 +399,34 @@ def _print_binding(plan: Plan, profile: BackendProfile | None) -> bool:
     if profile is None:
         scheme = scheme_for_hypervisor(hyp)
         if scheme is not None:
-            print(f"  backend: UNBOUND (pinned to {scheme!r}; pass --profile <{scheme}-profile>)")
+            tree.add(
+                Text(f"backend: UNBOUND (pinned to {scheme!r}; pass --profile <{scheme}-profile>)")
+            )
         else:
-            print("  backend: UNBOUND (pass --profile <name> to run)")
-        print()
+            tree.add(Text("backend: UNBOUND (pass --profile <name> to run)"))
         return True
     try:
         resolved = resolve_backend(plan, profile)
     except DriverError as e:
-        print(f"  backend: ERROR — {e}", file=sys.stderr)
-        print()
+        # Surface the failed binding on stderr (not in the stdout tree) so the
+        # caller can exit non-zero and a `describe && run` chain stops.
+        _err(f"backend: ERROR — {e}")
         return False
 
-    print("  backend:")
-    print(f"    driver: {profile.scheme} ({resolved.driver.DRIVER_NAME})")
+    node = tree.add(Text("backend"))
+    node.add(Text(f"driver: {profile.scheme} ({resolved.driver.DRIVER_NAME})"))
     for label, value in profile.describe_fields():
-        print(f"    {label}: {value}")
+        node.add(Text(f"{label}: {value}"))
     if profile.uplinks:
         rendered = ", ".join(f"{k} -> {v}" for k, v in sorted(profile.uplinks.items()))
-        print(f"    uplinks: {rendered}")
+        node.add(Text(f"uplinks: {rendered}"))
     else:
-        print("    uplinks: none")
+        node.add(Text("uplinks: none"))
     bs = getattr(hyp, "build_switch", None)
     if bs is None:
-        print("    build egress: none (isolated build network)")
+        node.add(Text("build egress: none (isolated build network)"))
     else:
-        print(f"    build egress: switch {bs.name!r} (uplink={bs.uplink or 'none'})")
-    print()
+        node.add(Text(f"build egress: switch {bs.name!r} (uplink={bs.uplink or 'none'})"))
     return True
 
 
@@ -406,11 +438,11 @@ def _print_describe(
     Shared by `describe` and `repl`.
     """
     hyp = plan.hypervisor
-    print(f"Plan ({type(hyp).__name__})")
-    binding_ok = _print_binding(plan, profile)
+    tree = Tree(Text(f"Plan ({type(hyp).__name__})"))
+    binding_ok = _add_binding(tree, plan, profile)
 
     if switches := getattr(hyp, "networks", ()):
-        print("Switches:")
+        sw_node = tree.add(Text("Switches"))
         for sw in switches:
             assert isinstance(sw, Switch)
             attrs = []
@@ -430,32 +462,32 @@ def _print_describe(
                 ]
                 attrs.append(f"sidecar={'+'.join(services)}")
             attr_str = f" [{', '.join(attrs)}]" if attrs else ""
-            print(f"  {sw.name}: {sw.cidr}{attr_str}")
+            switch = sw_node.add(Text(f"{sw.name}: {sw.cidr}{attr_str}"))
             for n in sw.networks:
                 assert isinstance(n, Network)
-                print(f"    - {n.name}")
-        print()
+                switch.add(Text(n.name))
 
     if pools := getattr(hyp, "pools", ()):
-        print("Storage pools:")
+        pool_node = tree.add(Text("Storage pools"))
         for pool in pools:
-            print(f"  {pool.name}: {pool.size_gb} GB")
-        print()
+            pool_node.add(Text(f"{pool.name}: {pool.size_gb} GB"))
 
     cache_refs: list[CacheEntry] = []
     if vms := getattr(hyp, "vms", ()):
-        print("VMs:")
+        vm_node = tree.add(Text("VMs"))
         for vm in vms:
             assert isinstance(vm, VMRecipe)
-            print(f"  {vm.name}")
-            print(f"    cpu:    {vm.spec.cpu.count} vCPU")
-            print(f"    memory: {vm.spec.memory.size_mb} MB")
-            print(
-                f"    os:     {type(vm.spec.os_drive).__name__}({vm.spec.os_drive.pool!r}, "
-                f"{vm.spec.os_drive.size_gb} GB)"
+            node = vm_node.add(Text(vm.name))
+            node.add(Text(f"cpu:    {vm.spec.cpu.count} vCPU"))
+            node.add(Text(f"memory: {vm.spec.memory.size_mb} MB"))
+            node.add(
+                Text(
+                    f"os:     {type(vm.spec.os_drive).__name__}({vm.spec.os_drive.pool!r}, "
+                    f"{vm.spec.os_drive.size_gb} GB)"
+                )
             )
             for d in vm.spec.data_drives:
-                print(f"    disk:   {d.pool!r}, {d.size_gb} GB")
+                node.add(Text(f"disk:   {d.pool!r}, {d.size_gb} GB"))
             for nic in vm.spec.nics:
                 extra = []
                 if isinstance(nic.addr, StaticAddr):
@@ -467,7 +499,7 @@ def _print_describe(
                 if drv := getattr(nic, "driver", None):
                     extra.append(f"driver={drv}")
                 extra_str = f" ({', '.join(extra)})" if extra else ""
-                print(f"    nic:    {nic.network}{extra_str}")
+                node.add(Text(f"nic:    {nic.network}{extra_str}"))
             builder = vm.builder
             # OS-disk origin via the Builder ABC seams (not a concrete attr):
             # image-based builders return os_disk_base(), installer-based ones
@@ -485,30 +517,31 @@ def _print_describe(
                     # just to print one line. fetch=False is the rule for
                     # any non-install-phase resolve.
                     info = mgr.resolve(entry, fetch=False)
-                    print(
-                        f"    {label}:   {entry!r}  -> {info.short_sha} ({_format_size(info.size)})"
+                    node.add(
+                        Text(
+                            f"{label}:   {entry!r}  -> {info.short_sha} ({_format_size(info.size)})"
+                        )
                     )
                 except CacheMissError:
-                    print(f"    {label}:   {entry!r}  (!) not in cache")
+                    node.add(Text(f"{label}:   {entry!r}  (!) not in cache"))
             if creds := getattr(builder, "credentials", ()):
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
-                print(f"    creds:  {names}")
+                node.add(Text(f"creds:  {names}"))
             comm = vm.communicator
             username = getattr(comm, "username", None)
             arg = repr(username) if username is not None else ""
-            print(f"    comm:   {type(comm).__name__}({arg})")
-        print()
+            node.add(Text(f"comm:   {type(comm).__name__}({arg})"))
 
     if tests:
-        print(f"Tests: {len(tests)}")
+        test_node = tree.add(Text(f"Tests: {len(tests)}"))
         for t in tests:
-            print(f"  - {getattr(t, '__name__', repr(t))}")
-        print()
+            test_node.add(Text(getattr(t, "__name__", repr(t))))
 
     if cache_refs:
         unique = {e.identifier for e in cache_refs}
-        print(f"CacheEntry references: {len(unique)} unique")
+        tree.add(Text(f"CacheEntry references: {len(unique)} unique"))
 
+    out_console().print(tree)
     return binding_ok
 
 
@@ -520,13 +553,13 @@ def _cache_errors(fn: Handler) -> Handler:
         try:
             return fn(args)
         except CacheMissError as e:
-            print(f"error: {e}", file=sys.stderr)
+            _err(f"error: {e}")
             return Exit.USAGE
         except CacheError as e:
-            print(f"error: {e}", file=sys.stderr)
+            _err(f"error: {e}")
             return Exit.FAILURE
         except TestRangeError as e:  # pragma: no cover (broad safety net)
-            print(f"error: {e}", file=sys.stderr)
+            _err(f"error: {e}")
             return Exit.FAILURE
 
     return wrapper
@@ -536,7 +569,7 @@ def _cache_errors(fn: Handler) -> Handler:
 def _cache_add(args: argparse.Namespace) -> int:
     # Goes through the broker so the HTTP tier gets a mirror.
     info = _build_manager(args).add(args.source, name=args.name, description=args.description)
-    print(info.sha256)
+    _out(info.sha256)
     return Exit.OK
 
 
@@ -550,28 +583,28 @@ def _cache_list(args: argparse.Namespace) -> int:
 @_cache_errors
 def _cache_del(args: argparse.Namespace) -> int:
     info = _build_manager(args).delete(args.identifier)
-    print(f"deleted {info.short_sha}")
+    _out(f"deleted {info.short_sha}")
     return Exit.OK
 
 
 @_cache_errors
 def _cache_rename(args: argparse.Namespace) -> int:
     info = _build_manager(args).add_name(args.identifier, args.new_name)
-    print(f"{info.short_sha}: names now {list(info.names)}")
+    _out(f"{info.short_sha}: names now {list(info.names)}")
     return Exit.OK
 
 
 @_cache_errors
 def _cache_forget_name(args: argparse.Namespace) -> int:
     info = _build_manager(args).forget_name(args.name)
-    print(f"{info.short_sha}: names now {list(info.names)}")
+    _out(f"{info.short_sha}: names now {list(info.names)}")
     return Exit.OK
 
 
 @_cache_errors
 def _cache_push(args: argparse.Namespace) -> int:
     info = _build_manager(args).push(args.identifier)
-    print(f"pushed {info.short_sha} -> http cache")
+    _out(f"pushed {info.short_sha} -> http cache")
     return Exit.OK
 
 
@@ -580,40 +613,43 @@ def _cache_purge(args: argparse.Namespace) -> int:
     mgr = _build_manager(args)
     entries = mgr.local.list_entries()
     if not entries:
-        print("cache is empty; nothing to purge")
+        _out("cache is empty; nothing to purge")
         return Exit.OK
     total = _format_size(sum(e.size for e in entries))
     if args.dry_run or not args.yes:
-        print(f"would purge {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} ({total}):")
+        _out(f"would purge {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} ({total}):")
         _print_list(entries)
         if not args.dry_run:
-            print("\nre-run with --yes to delete them")
+            _out("\nre-run with --yes to delete them")
         return Exit.OK
     removed = mgr.purge()
-    print(f"purged {len(removed)} entr{'y' if len(removed) == 1 else 'ies'} ({total})")
+    _out(f"purged {len(removed)} entr{'y' if len(removed) == 1 else 'ies'} ({total})")
     return Exit.OK
 
 
 @_cache_errors
 def _cache_pull(args: argparse.Namespace) -> int:
     info = _build_manager(args).pull(args.identifier)
-    print(f"pulled {info.short_sha} <- http cache")
+    _out(f"pulled {info.short_sha} <- http cache")
     return Exit.OK
 
 
 def _print_list(entries: Iterable[CacheEntryInfo]) -> None:
     rows = list(entries)
     if not rows:
-        print("(empty)")
+        _out("(empty)")
         return
-    width_sha = 18
-    width_size = 12
-    print(f"{'SHA':<{width_sha}}  {'SIZE':>{width_size}}  NAMES / ORIGIN")
+    table = Table(box=None, pad_edge=False)
+    table.add_column("SHA", no_wrap=True)
+    table.add_column("SIZE", justify="right")
+    table.add_column("NAMES / ORIGIN")
     for info in rows:
         names = ", ".join(info.names) if info.names else "-"
-        print(f"{info.short_sha:<{width_sha}}  {_format_size(info.size):>{width_size}}  {names}")
-        if info.origin:
-            print(f"{'':<{width_sha}}  {'':>{width_size}}  origin: {info.origin}")
+        # The origin (if any) rides under the names on a second wrapped line,
+        # keeping each entry to a single table row.
+        cell = names if not info.origin else f"{names}\norigin: {info.origin}"
+        table.add_row(Text(info.short_sha), Text(_format_size(info.size)), Text(cell))
+    out_console().print(table)
 
 
 def _format_size(n: int) -> str:
@@ -637,10 +673,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--verbose",
         action="store_true",
-        help=(
-            "render streaming build/test output as a BuildKit-style collapsing "
-            "live tail (TTY only; falls back to plain per-line logging elsewhere)"
-        ),
+        help="show the build serial console / test output (live dashboard, or plain logs off a TTY)",
+    )
+    parser.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="disable the live run/build dashboard; emit plain log lines instead",
     )
     parser.add_argument(
         "--cache",
