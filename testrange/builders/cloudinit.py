@@ -45,8 +45,6 @@ import io
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
 from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
@@ -73,6 +71,17 @@ def _import_pycdlib() -> Any:
             "pycdlib is not installed; install with `pip install -e .[cloudinit]`"
         ) from e
     return pycdlib
+
+
+def _import_yaml() -> Any:
+    """Lazy import. Raises BuilderError with a useful hint if pyyaml is missing."""
+    try:
+        import yaml
+    except ImportError as e:
+        raise BuilderError(
+            "pyyaml is not installed; install with `pip install -e .[cloudinit]`"
+        ) from e
+    return yaml
 
 
 class CloudInitBuilder(Builder):
@@ -201,7 +210,7 @@ class CloudInitBuilder(Builder):
             ["bash", "-c", _render_provision_script(apt_pkgs, pips, self.post_install_commands)]
         ]
 
-        yaml_text = yaml.safe_dump(
+        yaml_text: str = _import_yaml().safe_dump(
             body,
             default_flow_style=False,
             sort_keys=True,
@@ -218,7 +227,8 @@ class CloudInitBuilder(Builder):
             "instance-id": f"iid-{spec.name}",
             "local-hostname": spec.name,
         }
-        return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
+        meta: str = _import_yaml().safe_dump(body, default_flow_style=False, sort_keys=True)
+        return meta
 
     def render_network_config(
         self,
@@ -276,7 +286,8 @@ class CloudInitBuilder(Builder):
             )
             first_static_seen = first_static_seen or is_static
         body = {"version": 2, "ethernets": ethernets}
-        return yaml.safe_dump(body, default_flow_style=False, sort_keys=True)
+        netcfg: str = _import_yaml().safe_dump(body, default_flow_style=False, sort_keys=True)
+        return netcfg
 
     def config_hash(
         self,

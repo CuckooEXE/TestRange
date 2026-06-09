@@ -264,8 +264,6 @@ class FakeEsxiClient:
     def wait_for_task(self, task: _FakeTask, *, timeout: float = 0.0) -> Any:
         return task.result
 
-    # -- datastore /folder byte channel (in-memory) -----------------------
-
     def folder_put(self, source_path: Path, ds_path: str) -> None:
         self.files[ds_path] = Path(source_path).read_bytes()
 

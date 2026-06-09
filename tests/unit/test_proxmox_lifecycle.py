@@ -381,6 +381,13 @@ class TestSnapshots:
         post = next(kw for m, p, kw in c.api.calls if p.endswith("/snapshot") and m == "post")
         assert post["vmstate"] == 0
 
+    def test_memory_snapshot_on_stopped_vm_raises(self) -> None:
+        # ABC contract: mem=True requires a running VM (no RAM to capture off).
+        c = self._vm()
+        c.api.status = "stopped"
+        with pytest.raises(DriverError, match="to be running"):
+            _vm.create_snapshot(c, "tr-vm-x-web", "s1", mem=True)
+
     def test_duplicate_snapshot_raises(self) -> None:
         c = self._vm()
         c.api.snapshots = [{"name": "s1", "snaptime": 1}]

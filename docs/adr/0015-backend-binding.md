@@ -145,3 +145,11 @@ that the orchestrator merges with the driver's preflight; the driver still
 declares its `supports_managed_build_egress` flag. `examples/px_hello.py` is
 now topology-only and runs via `--connect`; `connecting-to-a-backend.md` and
 `PLAN.md §22` are updated to match.
+
+> **Addendum (2026-06-08, DOCS-16/19):** the `examples/px_hello.py` references
+> above (and `supports_managed_build_egress`) are historical. `px_hello.py` was
+> retired with the `examples/capabilities*.py` survey (ADR-0028); the pinned-
+> Proxmox example is now `tests/plans/proxmox/devices.py`. `supports_managed_build_egress`
+> / `managed_build_egress_findings` were removed when ADR-0016 superseded
+> ADR-0014 (egress is out-of-band). `--connect` is the masthead-noted old spelling
+> of `--profile [<file>:]<name>`.

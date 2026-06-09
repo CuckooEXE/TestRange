@@ -1,15 +1,13 @@
 """PVE-7: integration suite against a live Proxmox VE host.
 
-Exercises the real :class:`ProxmoxDriver` (no fakes) end-to-end. Two layers:
+Exercises the real :class:`ProxmoxDriver` (no fakes) end-to-end with
+driver-primitive tests (connect/SDN/storage/VM/QGA) that drive the driver
+directly, gated on ``TESTRANGE_PVE_HOST`` (+ ``TESTRANGE_PVE_BASE_QCOW2`` for the
+disk/VM tests).
 
-- driver-primitive tests (connect/SDN/storage/VM/QGA) that drive the driver
-  directly, gated on ``TESTRANGE_PVE_HOST`` (+ ``TESTRANGE_PVE_BASE_QCOW2`` for
-  the disk/VM tests);
-- the **capabilities certification** (PVE-32): the shipped portable
-  ``examples/capabilities.py`` run full-green against the live host, bound via a
-  connect.toml ``proxmox`` profile — the Proxmox analog of the libvirt
-  BACKEND-1.D capabilities cert (see ``test_nested.py`` for the example-as-test
-  shape). Gated on ``TESTRANGE_PVE_PROFILE``.
+Backend certification no longer lives here: it moved to the ``tests/plans/``
+corpus (run via ``testrange run --profile <proxmox> tests/plans/...``), which
+supersedes the old ``examples/capabilities.py`` example-as-pytest gate.
 
 The whole module is marked ``proxmox`` and excluded from the default gate
 (``pytest -m "not proxmox"``).
@@ -22,8 +20,6 @@ Environment:
     TESTRANGE_PVE_BRIDGE     existing bridge for VM NICs (default: vmbr0)
     TESTRANGE_PVE_BASE_QCOW2 local qcow2 to import for disk/VM tests
     TESTRANGE_PVE_SSH_PASSWORD  root SSH password (only the download test needs it)
-    TESTRANGE_PVE_PROFILE    path to a connect.toml (the capabilities cert)
-    TESTRANGE_PVE_PROFILE_NAME  profile table name within it (default: proxmox)
 
 Every test cleans up its own resources in a ``finally`` so a failure mid-way
 does not leak VMs/volumes/SDN objects onto the host.
@@ -31,22 +27,18 @@ does not leak VMs/volumes/SDN objects onto the host.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from testrange.connect import BackendProfile, load_profile
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network import NetworkIface
 from testrange.drivers.proxmox import ProxmoxDriver
 from testrange.drivers.proxmox._client import ProxmoxConn
 from testrange.networks import Network, Switch
-from testrange.orchestrator.runner import run_tests
 from testrange.vms import VMSpec
 
 pytestmark = pytest.mark.proxmox
@@ -194,47 +186,3 @@ def test_qga_exec_against_running_agent(driver: ProxmoxDriver) -> None:
     result = driver.native_guest_execute(name)(["echo", "tr-ok"])
     assert result.exit_code == 0
     assert b"tr-ok" in result.stdout
-
-
-_CAPABILITIES = Path(__file__).resolve().parents[2] / "examples" / "capabilities.py"
-
-
-def _load_capabilities() -> tuple[Any, list[Any]]:
-    """Import the portable example without running its ``__main__`` block.
-
-    Returns its ``PLAN`` (a backend-agnostic :class:`~testrange.Plan`) and
-    ``TESTS`` list — the profile binds the plan to the live PVE host at run time.
-    """
-    spec = importlib.util.spec_from_file_location("_pve_capabilities", _CAPABILITIES)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.PLAN, module.TESTS
-
-
-@pytest.fixture
-def capabilities_profile() -> BackendProfile:
-    path = os.environ.get("TESTRANGE_PVE_PROFILE")
-    if not path:
-        pytest.skip(
-            "TESTRANGE_PVE_PROFILE not set (path to a connect.toml binding the proxmox profile)"
-        )
-    name = os.environ.get("TESTRANGE_PVE_PROFILE_NAME", "proxmox")
-    return load_profile(Path(path), name)
-
-
-def test_capabilities_example_certifies(capabilities_profile: BackendProfile) -> None:
-    """PVE-32: the portable ``capabilities.py`` example, full green on live PVE.
-
-    The Proxmox analog of the libvirt BACKEND-1.D capabilities certification:
-    bind the backend-agnostic example plan to the live host through the
-    connect.toml ``proxmox`` profile, auto-build any cache miss, run every
-    ``TESTS`` entry, and require a clean sweep. This is THE certification gate —
-    a passing run here is what "Proxmox is certified" means.
-    """
-    plan, tests = _load_capabilities()
-    results = run_tests(tests, plan, profile=capabilities_profile)
-    failed = [r for r in results if not r.passed]
-    assert not failed, "capabilities certification failed:\n" + "\n".join(
-        r.report_line() for r in failed
-    )

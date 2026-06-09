@@ -37,7 +37,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from testrange.builders._proxmox_prepare import prepare_iso
+from testrange.builders._proxmox_prepare import PREPARE_ISO_RECIPE, prepare_iso
 from testrange.builders.base import Builder
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
@@ -203,10 +203,19 @@ class ProxmoxAnswerBuilder(Builder):
         separately by :meth:`render_seed`.
         """
         script = self._first_boot_script()
-        # Key the prepared ISO on both baked-in inputs: the first-boot script and
-        # the partition_label (which lands in /auto-installer-mode.toml).
+        # Key the prepared ISO on its baked-in inputs: the first-boot script and
+        # the partition_label (which lands in /auto-installer-mode.toml), plus the
+        # prep-recipe version so a behavior change in prepare_iso (e.g. the grub
+        # serial-console rewrite) busts a stale cached copy made by an older
+        # recipe. The *installed* disk is unaffected, so config_hash omits this.
         digest = hashlib.sha256(
-            (self._first_boot_digest() + "\x00" + self.partition_label).encode("utf-8")
+            (
+                self._first_boot_digest()
+                + "\x00"
+                + self.partition_label
+                + "\x00"
+                + PREPARE_ISO_RECIPE
+            ).encode("utf-8")
         ).hexdigest()[:16]
         prepared = media_path.parent / f"{media_path.stem}-prepared-{digest}.iso"
         if not prepared.exists():

@@ -3,7 +3,7 @@
 A driver wraps a backend SDK (proxmoxer, libvirt-python, pyvmomi, WMI, ...) and
 implements `testrange.drivers.base.HypervisorDriver`. The reference
 implementation is the **libvirt** driver (`testrange/drivers/libvirt/`) — a real
-backend, certified against the full capabilities survey
+backend, certified against the `tests/plans/` corpus
 ([ADR-0019](../../adr/0019-libvirt-reference-backend.md)); read it for a worked
 example of every contract below. The in-memory `MockDriver`
 (`tests/mock_driver.py`) is the hermetic test substrate, not a shipped backend.
@@ -71,8 +71,13 @@ The deviation analysis behind the ABC's shape is
      your backend supports (each defaults to raising `DriverError`). These back
      `NativeCommunicator` and the sidecar lease reads. (A backend whose guest
      channel needs per-call guest credentials — VMware Tools, Hyper-V
-     PowerShell Direct — adds an optional `credential` keyword to these
-     accessors when it lands; see ADR-0008.)
+     PowerShell Direct — passes them through the optional `credential` keyword
+     these accessors carry; see ADR-0008.)
+   - Guest gateway (optional): override `guest_gateway()` to return a
+     `GuestGateway` (e.g. an `SSHJumpGateway`) when guests sit on a network the
+     orchestrator can't reach directly — an `SSHCommunicator` routes through it.
+     Defaults to `None` (guests directly reachable), as on local
+     `qemu:///system`.
    - Snapshots: `create_snapshot`, `list_snapshots`, `delete_snapshot`,
      `restore_snapshot`. Raise `DriverError` for `mem=True` if unsupported.
 
@@ -140,4 +145,5 @@ is registered for the suite via `tests/conftest.py`, not by the package, so
 `--profile mock` resolves under test but a production install doesn't list it. A
 real driver adds integration tests under `tests/integration/`, gated by SDK
 import availability — see `tests/integration/test_libvirt.py` (`pytest -m
-libvirt`), the certification suite for the reference backend.
+libvirt`), the live integration suite for the reference backend. End-to-end
+backend certification lives separately in the `tests/plans/` corpus.

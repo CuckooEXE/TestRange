@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/_static/testrange-logo-horizontal.png" alt="testrange" width="520">
+</p>
+
 # testrange
 
 Declarative Python plans → VM test-ranges → user test functions.
@@ -9,10 +13,12 @@ pentest test-ranges.
 
 The driver layer is multi-backend (ADR-0008). The **libvirt driver is the
 certified reference implementation** — green end-to-end on `qemu:///system` as a
-plain `libvirt`-group user (`examples/capabilities.py` +
+plain `libvirt`-group user (the `tests/plans/` certification corpus +
 `tests/integration/test_libvirt.py`). `MockDriver` is the in-memory backend the
 unit suite drives through the full lifecycle (it simulates the backend, not a
-real guest). The **Proxmox driver is in progress** (single-node PVE 9.x).
+real guest). The **Proxmox and ESXi drivers are code-complete** (single-node PVE
+9.x / standalone ESXi 8) with live end-to-end certification in progress (the REL
+1.0.0 validation pass).
 
 ## Quickstart
 
@@ -43,6 +49,11 @@ the authoritative shape for writing your own; a backend is bound at run time via
 `run` needs a real backend — libvirt is certified (see `docs/user/drivers/`),
 Proxmox is in progress. The full bring-up lifecycle is also exercised in-memory
 against `MockDriver` by the unit suite.
+
+On an interactive terminal, `run`/`build` render a live dashboard — panes for
+per-VM lifecycle state, test pass/fail, a log tail, and the build serial console.
+Piped or in CI (no TTY), or with `--no-dashboard`, output degrades to plain
+`rich`-rendered log lines. See [docs/user/running-tests.md](docs/user/running-tests.md#the-live-dashboard).
 
 ## Plan shape
 
@@ -80,8 +91,15 @@ testrange describe <plan.py> [--profile <name>]
 testrange build <plan.py> --profile <name>
 testrange run <plan.py> --profile <name> [--fail-fast] [--leak-on-failure] [--require-cache]
 testrange repl <plan.py> --profile <name>
+testrange cleanup --list                           # list runs + status, tear down nothing
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
+
+# Global flags (before the subcommand):
+#   --log-level DEBUG|INFO|WARNING|ERROR   set log verbosity (default INFO)
+#   --no-dashboard                         disable the live run/build dashboard; plain logs instead
+#   --verbose                              surface the build serial console / test output
+#   --cache URL                            shared HTTP cache base URL (e.g. https://cache.local:8443)
 ```
 
 ## Docs
@@ -105,5 +123,5 @@ The doc tree:
 ## Status
 
 Pre-1.0. See `docs/dev/architecture.md` (or the built HTML) for the
-component overview; in-flight and long-term work lives on the `ktui` TestRange
-board (the repo tracks code, the board tracks status).
+component overview; in-flight and long-term work lives in `TODO.md` at the repo
+root (the repo tracks both the code and the board, which version together).

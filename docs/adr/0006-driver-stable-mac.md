@@ -25,8 +25,13 @@ the plan + VM + NIC index, so install and run VM get the same MAC.
 - LibvirtDriver hashes ``"{plan_name}/{vm_name}/{nic_idx}"`` with
   SHA-256 and uses the first 3 bytes after the OUI prefix.
 
-The ``CloudInitBuilder`` network-config render also matches by
+The ``CloudInitBuilder`` network-config render originally also matched by
 interface name (``match: name: en*``) as belt-and-suspenders.
+
+> **Addendum (2026-06-08, DOCS-20):** the ``match: name: en*`` fallback was
+> later removed — the render now matches by **MAC only**
+> (``builders/cloudinit.py``). The stable-MAC decision above is what makes that
+> single match reliable.
 
 ## Consequences
 

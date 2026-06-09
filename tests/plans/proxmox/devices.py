@@ -1,20 +1,24 @@
-"""capabilities-px: Proxmox-specific capabilities, standalone.
+"""proxmox/devices: Proxmox-only device concrete — per-disk controller bus.
 
-``examples/capabilities.py`` is THE portable certification — backend-agnostic.
-This file is **not** a superset of it: it stands alone and exercises features
-that exist only on Proxmox, pinned to the Proxmox backend (``ProxmoxHypervisor``).
-The first is per-disk controller-bus selection: a :class:`ProxmoxHardDrive` lets
-a plan attach a data disk on ``scsi`` (``/dev/sd*``) or ``virtio`` (``/dev/vd*``)
-and prove the guest sees it there.
+WHAT: a Proxmox-pinned plan (``ProxmoxHypervisor``) whose guest attaches data
+disks on explicit controller buses via :class:`ProxmoxHardDrive`. The tests prove
+the guest-visible result: a ``scsi`` disk lands on ``/dev/sd*`` (alongside the
+default-scsi OS disk) while a ``virtio`` disk lands on ``/dev/vd*``.
 
-Run it binding a Proxmox profile::
+WHY: PVE's ``qmcreate`` disk wiring maps a plan's bus choice onto a specific
+controller line (``scsi0``, ``virtio0``, …), and the import-from path that seeds
+the OS disk is where bus assignments have regressed before. Certifying the
+guest device node proves the bus the plan asked for is the bus the guest got.
 
-    testrange run --profile <proxmox> examples/capabilities-px.py
+Pinned to Proxmox::
+
+    testrange run --profile <proxmox> tests/plans/proxmox/devices.py
 """
 
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 from testrange import OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
@@ -27,7 +31,7 @@ from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
-    "capabilities-px",
+    "proxmox-devices",
     ProxmoxHypervisor(
         build_switch=Switch(
             "build",
@@ -40,11 +44,13 @@ PLAN = Plan(
         vms=[
             VMRecipe(
                 spec=VMSpec(
-                    name="multibus",
+                    name="buses",
                     devices=[
                         CPU(1),
                         Memory(512),
+                        # OS disk on the PVE default (scsi) -> /dev/sda.
                         OSDrive("pool1", 8),
+                        # scsi data disk -> /dev/sdb; virtio data disk -> /dev/vda.
                         ProxmoxHardDrive("pool1", 1, bus="scsi"),
                         ProxmoxHardDrive("pool1", 1, bus="virtio"),
                     ],
@@ -62,21 +68,24 @@ PLAN = Plan(
 
 
 def _disk_names(orch: OrchestratorHandle) -> list[str]:
-    out = orch.vms["multibus"].communicator.execute(["lsblk", "-dno", "NAME"]).stdout.decode()
+    out = orch.vms["buses"].communicator.execute(["lsblk", "-dno", "NAME"]).stdout.decode()
     return out.split()
 
 
-def scsi_data_disk_presents_as_sd(orch: OrchestratorHandle) -> None:
+def scsi_disks_present_as_sd(orch: OrchestratorHandle) -> None:
     sd = [n for n in _disk_names(orch) if n.startswith("sd")]
     assert len(sd) >= 2, f"expected the OS + scsi data disk on /dev/sd*, got {sd!r}"
 
 
-def virtio_data_disk_presents_as_vd(orch: OrchestratorHandle) -> None:
+def virtio_disk_presents_as_vd(orch: OrchestratorHandle) -> None:
     vd = [n for n in _disk_names(orch) if n.startswith("vd")]
     assert len(vd) == 1, f"expected exactly the virtio data disk on /dev/vd*, got {vd!r}"
 
 
-TESTS = [scsi_data_disk_presents_as_sd, virtio_data_disk_presents_as_vd]
+TESTS: list[Callable[[OrchestratorHandle], None]] = [
+    scsi_disks_present_as_sd,
+    virtio_disk_presents_as_vd,
+]
 
 
 if __name__ == "__main__":

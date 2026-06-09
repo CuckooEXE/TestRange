@@ -61,25 +61,28 @@ the codebase *is* and what's being worked on. They must always reflect reality:
 - A change that alters design or scope is incomplete until PLAN and TODO are
   updated to match.
 
-### 4. New capabilities land in `examples/capabilities.py`
+### 4. New capabilities land in the `tests/plans/` corpus
 
-`examples/capabilities.py` is the canonical "everything a driver must
-support" survey — the broad-coverage portable plan plus its `TESTS` list.
-It's how a backend gets *certified working*.
+`tests/plans/` is the canonical "everything a driver must support" certification
+& regression corpus — a tree of one-PLAN-plus-a-few-`TESTS` files, run via
+`testrange run` (never collected by pytest). It's how a backend gets *certified
+working* and how that certification is held against regressions. See
+`tests/plans/README.md` for the layout and authoring conventions. (This
+supersedes the retired `examples/capabilities.py` survey.)
 
 - Any new feature / knob / capability that touches a driver-facing contract
   (devices, networks, communicators, builders, packages, credentials,
-  snapshots, power state, pools, sidecar behavior, etc.) must be added to
-  `examples/capabilities.py` **in the same change**: extend the plan (new
-  VM, NIC, device, or builder setting) and add a corresponding entry to
-  `TESTS` that verifies the capability end-to-end.
-- The example stays *portable* — backend-agnostic `Hypervisor`, no host /
-  credentials / build switch in the file. Backend binding happens at run
-  time via `--connect`.
-- Driver-specific capabilities examples (`examples/capabilities-<driver>.py`)
-  will be added once a backend is *certified working* against the portable
-  example. Until then, backend-specific behavior is exercised by binding
-  the portable plan with `--connect <profile>`.
+  snapshots, power state, pools, sidecar behavior, etc.) must be covered in
+  `tests/plans/` **in the same change**: extend the relevant plan (or add a new
+  one) and add a corresponding `TESTS` entry that verifies the capability
+  end-to-end.
+- **Portable capabilities** belong in `tests/plans/generic/` — backend-agnostic
+  `Hypervisor`, logical `uplink`, no host / credentials in the file. Backend
+  binding happens at run time via `--profile`. A generic plan must run on every
+  backend.
+- **Backend-specific** capabilities belong in `tests/plans/<driver>/` — pin the
+  driver `Hypervisor` subclass and use that backend's concrete device types
+  (e.g. `LibvirtDataDrive`, `ProxmoxHardDrive`, `ESXiHardDrive`).
 
 ## Project state (orientation)
 

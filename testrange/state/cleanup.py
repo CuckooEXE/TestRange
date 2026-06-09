@@ -52,6 +52,80 @@ def find_run_dirs(root: Path | None = None) -> list[Path]:
     return sorted(p for p in base.iterdir() if p.is_dir())
 
 
+@dataclass(frozen=True)
+class RunInfo:
+    """A read-only snapshot of one run for listing — never tears anything down.
+
+    ``running`` is the advisory-lock signal (a live owner holds ``state.lock``),
+    not the PID-liveness check, so a recycled PID can't make a dead run look
+    alive. ``plan_name`` is the Plan's name; the source *file* that spawned the
+    run is not persisted in state.json. ``error`` is set when the run dir exists
+    but its state can't be read (missing/corrupt) — the row still lists so the
+    operator sees a run that needs attention rather than a silent gap.
+    """
+
+    run_id: str
+    running: bool
+    phase: str
+    plan_name: str
+    created_at: str
+    resource_count: int
+    error: str | None = None
+
+
+def list_runs(*, root: Path | None = None) -> list[RunInfo]:
+    """Snapshot every run dir under the state root for ``cleanup --list``.
+
+    Read-only: probes ownership and reads state.json, but acquires no lock and
+    touches no backend. Tolerant of unreadable runs (mirrors ``cleanup_all``):
+    a missing or corrupt state.json yields a row with ``error`` set rather than
+    aborting the whole listing.
+    """
+    infos: list[RunInfo] = []
+    for d in find_run_dirs(root):
+        store = StateStore(d)
+        running = store.is_running()
+        if not store.exists():
+            infos.append(
+                RunInfo(
+                    run_id=d.name,
+                    running=running,
+                    phase="",
+                    plan_name="",
+                    created_at="",
+                    resource_count=0,
+                    error="no state.json",
+                )
+            )
+            continue
+        try:
+            state = store.read()
+        except StateError as e:
+            infos.append(
+                RunInfo(
+                    run_id=d.name,
+                    running=running,
+                    phase="",
+                    plan_name="",
+                    created_at="",
+                    resource_count=0,
+                    error=str(e),
+                )
+            )
+            continue
+        infos.append(
+            RunInfo(
+                run_id=d.name,
+                running=running,
+                phase=state.phase,
+                plan_name=state.plan_name,
+                created_at=state.created_at,
+                resource_count=len(state.resources),
+            )
+        )
+    return infos
+
+
 def _instantiate_driver(state_driver_class: str, state_driver_uri: str) -> HypervisorDriver:
     """Re-instantiate the driver named in state.json via the driver registry."""
     return driver_for_name(state_driver_class, state_driver_uri)
@@ -182,3 +256,28 @@ def format_cleanup_results(results: Iterable[CleanupResult]) -> str:
         if not (r.destroyed or r.skipped or r.errors):
             lines.append("  (nothing to do)")
     return "\n".join(lines) if lines else "(no runs)"
+
+
+def format_run_list(runs: Iterable[RunInfo]) -> str:
+    """Render ``cleanup --list`` as an aligned table (mirrors ``cache list``)."""
+    rows = list(runs)
+    if not rows:
+        return "(no runs)"
+    width_id = 24
+    width_status = 8
+    width_phase = 10
+    width_plan = 18
+    header = (
+        f"{'RUN ID':<{width_id}}  {'STATUS':<{width_status}}  {'PHASE':<{width_phase}}  "
+        f"{'PLAN':<{width_plan}}  {'RES':>3}  CREATED"
+    )
+    lines = [header]
+    for r in rows:
+        status = "running" if r.running else "stopped"
+        lines.append(
+            f"{r.run_id:<{width_id}}  {status:<{width_status}}  {r.phase or '-':<{width_phase}}  "
+            f"{r.plan_name or '-':<{width_plan}}  {r.resource_count:>3}  {r.created_at or '-'}"
+        )
+        if r.error:
+            lines.append(f"{'':<{width_id}}  error: {r.error}")
+    return "\n".join(lines)

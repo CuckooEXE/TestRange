@@ -9,6 +9,7 @@ and the orchestrator.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from testrange._log import get_logger
 from testrange.builders.cloudinit import CloudInitBuilder
@@ -16,7 +17,7 @@ from testrange.communicators.native import NativeCommunicator
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
-from testrange.devices.network import StaticAddr
+from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.devices.pool.base import StoragePool
 from testrange.exceptions import (
     BuildNotReadyError,
@@ -30,11 +31,26 @@ from testrange.networks.sidecar import LEASEFILE, SIDECAR_DNSMASQ_CONF, parse_dn
 from testrange.orchestrator._parallel import parallel_map
 from testrange.orchestrator.artifacts import data_disk_role
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.dashboard_state import VMStage
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.state.schema import PHASE_RUN
 from testrange.vms.recipe import VMRecipe
 
 _log = get_logger(__name__)
+
+
+def _guard_vm(ctx: RunContext, vm: VMRecipe, step: Callable[[RunContext, VMRecipe], None]) -> None:
+    """Run a per-VM bring-up ``step``; tag the VM FAILED in the dashboard on error.
+
+    ``parallel_map`` is fail-fast and re-raises one worker's exception; marking
+    the VM here gives the dashboard the actual culprit (with the message) before
+    the run unwinds. The exception still propagates, so teardown runs unchanged.
+    """
+    try:
+        step(ctx, vm)
+    except Exception as e:
+        ctx.dashboard.set_vm_stage(vm.name, VMStage.FAILED, detail=str(e))
+        raise
 
 
 def run_phase(ctx: RunContext) -> None:
@@ -57,7 +73,7 @@ def run_phase(ctx: RunContext) -> None:
         lambda switch: _provision_switch_with_sidecar(ctx, switch), hyp.networks, jobs=ctx.jobs
     )
     wait_sidecars_ready(ctx)
-    parallel_map(lambda vm: _bring_up_vm(ctx, vm), hyp.vms, jobs=ctx.jobs)
+    parallel_map(lambda vm: _guard_vm(ctx, vm, _bring_up_vm), hyp.vms, jobs=ctx.jobs)
 
 
 def _create_pool(ctx: RunContext, pool: StoragePool) -> None:
@@ -78,6 +94,7 @@ def _provision_switch_with_sidecar(ctx: RunContext, switch: Switch) -> None:
 
 
 def _bring_up_vm(ctx: RunContext, vm: VMRecipe) -> None:
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.PROVISIONING)
     drv = ctx.driver
     pool_backend = ctx.pool_backends[vm.spec.os_drive.pool]
     built = ctx.built_disk_paths[vm.name]  # {role: cached path}
@@ -125,6 +142,7 @@ def _bring_up_vm(ctx: RunContext, vm: VMRecipe) -> None:
     )
     ctx.store.confirm(vm_backend)
     drv.start_vm(vm_backend)
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.BOOTING)
 
 
 def bind_communicators(ctx: RunContext) -> None:
@@ -140,10 +158,15 @@ def bind_communicators(ctx: RunContext) -> None:
     # discover_ip, overlapped across VMs (ADR-0023). Each VM binds its own
     # communicator object — no shared mutable state — and native lease reads are
     # serialized at the driver's call lock.
-    parallel_map(lambda vm: _bind_one_communicator(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs)
+    parallel_map(
+        lambda vm: _guard_vm(ctx, vm, _bind_one_communicator),
+        ctx.plan.hypervisor.vms,
+        jobs=ctx.jobs,
+    )
 
 
 def _bind_one_communicator(ctx: RunContext, vm: VMRecipe) -> None:
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.BINDING)
     comm = vm.communicator
     if isinstance(comm, SSHCommunicator):
         ip = discover_ip(ctx, vm, comm.nic_idx)
@@ -229,7 +252,9 @@ def wait_communicators_ready(ctx: RunContext) -> None:
     answers, then hand off. A VM whose communicator never answers fails loud.
     """
     parallel_map(
-        lambda vm: _wait_one_communicator_ready(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs
+        lambda vm: _guard_vm(ctx, vm, _wait_one_communicator_ready),
+        ctx.plan.hypervisor.vms,
+        jobs=ctx.jobs,
     )
 
 
@@ -265,16 +290,19 @@ def await_guest_readiness(ctx: RunContext) -> None:
     brokers the callable and tags failures with the VM name.
     """
     parallel_map(
-        lambda vm: _await_one_guest_readiness(ctx, vm), ctx.plan.hypervisor.vms, jobs=ctx.jobs
+        lambda vm: _guard_vm(ctx, vm, _await_one_guest_readiness),
+        ctx.plan.hypervisor.vms,
+        jobs=ctx.jobs,
     )
 
 
 def _await_one_guest_readiness(ctx: RunContext, vm: VMRecipe) -> None:
-    del ctx  # symmetry with the other per-VM helpers
     try:
         vm.builder.wait_ready(vm.spec, vm, vm.communicator.execute)
     except BuildNotReadyError as e:
         raise BuildNotReadyError(f"vm {vm.name!r}: {e}") from e
+    # Final gate cleared: the guest is up and answering its readiness probe.
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.READY)
 
 
 def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> str:
@@ -322,15 +350,25 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
         nic_idx, nic = addressed[0]
     if isinstance(nic.addr, StaticAddr):
         return nic.addr.host
+    return _wait_for_dhcp_lease(ctx, vm.name, nic.network, nic_idx)
 
-    switch = _switch_for_network(ctx, nic.network)
+
+def _wait_for_dhcp_lease(ctx: RunContext, vm_name: str, network: str, nic_idx: int) -> str:
+    """Poll the per-Switch sidecar's dnsmasq lease file until the NIC's MAC leases.
+
+    The lease lives in the sidecar (not the hypervisor), keyed on the stable MAC
+    derived from ``(plan_name, vm_name, nic_idx)``. The orchestrator brokers the
+    driver's guest-file read of the sidecar against the dnsmasq lease path +
+    parser. Raises :class:`OrchestratorError` on a sidecar-less switch or timeout.
+    """
+    switch = _switch_for_network(ctx, network)
     sidecar_backend = ctx.sidecar_backends.get(switch.name)
     if sidecar_backend is None:
         raise OrchestratorError(
-            f"vm {vm.name!r}: DHCP NIC on {nic.network!r} but switch "
+            f"vm {vm_name!r}: DHCP NIC on {network!r} but switch "
             f"{switch.name!r} has no sidecar lease file to poll"
         )
-    mac = ctx.driver.compose_mac(ctx.plan_name, vm.name, nic_idx).lower()
+    mac = ctx.driver.compose_mac(ctx.plan_name, vm_name, nic_idx).lower()
     read_leasefile = ctx.driver.native_guest_read_file(sidecar_backend, credential=SIDECAR_CRED)
     deadline = time.monotonic() + ctx.lease_timeout_s
     while time.monotonic() < deadline:
@@ -343,9 +381,29 @@ def discover_ip(ctx: RunContext, vm: VMRecipe, nic_idx: int | None = None) -> st
             return ip
         time.sleep(2.0)
     raise OrchestratorError(
-        f"vm {vm.name!r} did not acquire a DHCP lease on "
-        f"{nic.network!r} within {ctx.lease_timeout_s:.0f}s"
+        f"vm {vm_name!r} did not acquire a DHCP lease on "
+        f"{network!r} within {ctx.lease_timeout_s:.0f}s"
     )
+
+
+def wait_dhcp_leases(ctx: RunContext) -> None:
+    """Gate the run phase until every DHCP NIC on every VM has leased.
+
+    The SSH bind path already blocks on its target NIC's lease (``discover_ip``),
+    but a :class:`NativeCommunicator` VM binds the instant its guest agent
+    answers — seconds *before* the guest's DHCP client finishes — while a static
+    NIC on the same guest comes up at boot. Without this gate a plan can read
+    ``ip addr`` and see the static address but no lease yet (REL-24). Waiting here
+    closes that race for every communicator type. Backend-agnostic: it polls the
+    per-switch sidecar dnsmasq lease file, never the guest.
+    """
+
+    def _wait_one(vm: VMRecipe) -> None:
+        for idx, nic in enumerate(vm.spec.nics):
+            if isinstance(nic.addr, DHCPAddr):
+                _wait_for_dhcp_lease(ctx, vm.name, nic.network, idx)
+
+    parallel_map(_wait_one, ctx.plan.hypervisor.vms, jobs=ctx.jobs)
 
 
 def _switch_for_network(ctx: RunContext, network_name: str) -> Switch:
@@ -360,7 +418,10 @@ def _switch_for_network(ctx: RunContext, network_name: str) -> Switch:
 def lookup_credential(vm: VMRecipe) -> PosixCred:
     """The PosixCred an SSHCommunicator authenticates with, from the builder's
     baked credentials. Builder-agnostic: every Builder exposes the same
-    ``credentials`` contract via :meth:`Builder.find_credential` (CORE-66)."""
+    ``credentials`` contract via :meth:`Builder.find_credential`, so the run
+    phase resolves an SSH login without knowing the builder type (CloudInit,
+    Proxmox, ESXi). The installer-origin builders need this — they reach the run
+    phase the same way cloud-init does (CORE-66)."""
     builder = vm.builder
     if not isinstance(vm.communicator, SSHCommunicator):
         raise OrchestratorError(f"vm {vm.name!r}: communicator is not SSHCommunicator")
@@ -409,5 +470,6 @@ __all__ = [
     "native_guest_credential",
     "run_phase",
     "wait_communicators_ready",
+    "wait_dhcp_leases",
     "wait_sidecars_ready",
 ]

@@ -65,7 +65,8 @@ class Builder(ABC):
         Concrete over the abstract :attr:`credentials` property — credential
         lookup is the same for every dialect, so the orchestrator resolves an
         SSHCommunicator's login through this seam without knowing the builder
-        type (the run phase is builder-agnostic; CORE-66).
+        type. The run phase is builder-agnostic; this is not CloudInit-specific
+        (CORE-66).
         """
         for c in self.credentials:
             if c.username == username:

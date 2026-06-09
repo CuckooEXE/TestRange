@@ -1,0 +1,35 @@
+<svg width="600" height="200" viewBox="0 0 600 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="TestRange">
+<style>@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@600&amp;display=swap');
+text{font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;}</style>
+
+<rect x="0" y="0" width="600" height="200" rx="16" fill="#0D1117" stroke="#30363D" stroke-width="1"/>
+
+<rect x="98" y="56" width="88" height="58" rx="6" fill="none" stroke="#D29922" stroke-width="1.5" stroke-dasharray="4 5" opacity="0.55"/>
+<circle cx="109" cy="68" r="2.4" fill="#D29922" opacity="0.45"/>
+<circle cx="118" cy="68" r="2.4" fill="#D29922" opacity="0.45"/>
+<circle cx="127" cy="68" r="2.4" fill="#D29922" opacity="0.45"/>
+
+<rect x="190" y="44" width="7" height="7" rx="1" fill="#D29922" opacity="0.5"/>
+<rect x="202" y="34" width="6" height="6" rx="1" fill="#D29922" opacity="0.42"/>
+<rect x="196" y="58" width="5" height="5" rx="1" fill="#D29922" opacity="0.4"/>
+<rect x="214" y="28" width="5" height="5" rx="1" fill="#D29922" opacity="0.32"/>
+<rect x="208" y="50" width="4" height="4" rx="1" fill="#D29922" opacity="0.34"/>
+<rect x="224" y="40" width="4" height="4" rx="1" fill="#D29922" opacity="0.26"/>
+<rect x="187" y="30" width="5" height="5" rx="1" fill="#D29922" opacity="0.46"/>
+<rect x="230" y="30" width="3" height="3" rx="1" fill="#D29922" opacity="0.2"/>
+
+<rect x="74" y="80" width="88" height="58" rx="6" fill="#58A6FF" fill-opacity="0.04" stroke="#58A6FF" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.8"/>
+<circle cx="85" cy="92" r="2.4" fill="#58A6FF" opacity="0.6"/>
+<circle cx="94" cy="92" r="2.4" fill="#58A6FF" opacity="0.6"/>
+<circle cx="103" cy="92" r="2.4" fill="#58A6FF" opacity="0.6"/>
+
+<rect x="50" y="104" width="88" height="58" rx="6" fill="#161B22" stroke="#3FB950" stroke-width="1.5"/>
+<circle cx="61" cy="116" r="2.6" fill="#3FB950"/>
+<circle cx="70" cy="116" r="2.6" fill="#58A6FF"/>
+<circle cx="79" cy="116" r="2.6" fill="#D29922"/>
+<line x1="50" y1="126" x2="138" y2="126" stroke="#30363D" stroke-width="1"/>
+<text x="59" y="147" style="font-size:13px;font-weight:800;fill:#3FB950;">&gt;_</text>
+<rect x="76" y="139" width="7" height="9" fill="#3FB950" opacity="0.75"/>
+
+<text x="265" y="116" style="font-size:48px;font-weight:600;fill:#E6EDF3;">Test<tspan fill="#3FB950">Range</tspan></text>
+</svg>

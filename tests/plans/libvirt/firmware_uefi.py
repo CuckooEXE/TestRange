@@ -1,0 +1,97 @@
+"""libvirt/firmware_uefi: UEFI/OVMF firmware boot.
+
+WHAT: a libvirt-pinned guest declared with ``VMSpec(firmware="uefi")``, booted on
+OVMF rather than the default SeaBIOS. The tests assert the guest came up in UEFI
+mode — ``/sys/firmware/efi`` is present only when the kernel booted via EFI, and
+the efivars filesystem is populated.
+
+WHY: the firmware seam drives a different libvirt domain shape (an OVMF loader +
+an NVRAM template, a q35 machine type) and a different installer/boot path. It is
+exercised rarely and regresses quietly — a guest that silently falls back to BIOS
+still boots, so only an in-guest assertion catches it.
+
+Pinned to libvirt::
+
+    testrange run --profile <libvirt> tests/plans/libvirt/firmware_uefi.py
+"""
+
+from __future__ import annotations
+
+import sys
+from collections.abc import Callable
+
+from testrange import OrchestratorHandle, Plan, run_tests
+from testrange.builders import CloudInitBuilder
+from testrange.cache import CacheEntry
+from testrange.communicators import NativeCommunicator
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import DHCPAddr, NetworkIface
+from testrange.drivers.libvirt import LibvirtHypervisor
+from testrange.networks import Network, Sidecar, Switch
+from testrange.packages import Apt
+from testrange.vms import VMRecipe, VMSpec
+
+PLAN = Plan(
+    "libvirt-firmware-uefi",
+    LibvirtHypervisor(
+        build_switch=Switch(
+            "build",
+            Network("build-net"),
+            cidr="10.97.99.0/24",
+            uplink="egress",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        ),
+        networks=[
+            Switch(
+                "lab",
+                Network("lab-net"),
+                cidr="10.40.0.0/24",
+                uplink="egress",
+                mgmt=True,
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+            ),
+        ],
+        pools=[StoragePool("pool1", 32)],
+        vms=[
+            VMRecipe(
+                spec=VMSpec(
+                    name="uefi",
+                    firmware="uefi",
+                    devices=[
+                        CPU(1),
+                        Memory(1024),
+                        OSDrive("pool1", 8),
+                        NetworkIface("lab-net", addr=DHCPAddr()),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    packages=[Apt("qemu-guest-agent")],
+                    post_install_commands=("systemctl enable --now qemu-guest-agent",),
+                ),
+                communicator=NativeCommunicator(),
+            ),
+        ],
+    ),
+)
+
+
+def booted_in_uefi_mode(orch: OrchestratorHandle) -> None:
+    r = orch.vms["uefi"].communicator.execute(["test", "-d", "/sys/firmware/efi"])
+    assert r.ok, "guest did not boot via UEFI (/sys/firmware/efi absent — fell back to BIOS?)"
+
+
+def efivars_are_populated(orch: OrchestratorHandle) -> None:
+    r = orch.vms["uefi"].communicator.execute(["ls", "/sys/firmware/efi/efivars"])
+    assert r.ok and r.stdout.strip(), f"efivars filesystem empty or absent: {r.stdout!r}"
+
+
+TESTS: list[Callable[[OrchestratorHandle], None]] = [
+    booted_in_uefi_mode,
+    efivars_are_populated,
+]
+
+
+if __name__ == "__main__":
+    results = run_tests(TESTS, PLAN)
+    sys.exit(0 if all(r.passed for r in results) else 1)

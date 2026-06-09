@@ -218,6 +218,30 @@ class TestEsxiInner:
         assert guest.communicator.username == "root"
         assert "serialnum --esx=HG00K-03H8K-48929-8K1NP-3LUJ4" in guest.builder.build_kickstart()
 
+    def test_default_ssh_communicator_enables_sshd(self) -> None:
+        # ESXI-19: the default SSHCommunicator transport -> the builder bakes the
+        # root key + enables sshd.
+        builder = _esxi_guest().builder
+        assert isinstance(builder, ESXiKickstartBuilder)
+        ks = builder.build_kickstart()
+        assert "vim-cmd hostsvc/enable_ssh" in ks
+        assert "/etc/ssh/keys-root/authorized_keys" in ks
+
+    def test_non_ssh_communicator_leaves_no_open_sshd(self) -> None:
+        # ESXI-19: a non-SSH transport -> the builder gets enable_ssh=False, so the
+        # image carries no baked key and no sshd enable, but still the MAC fix.
+        guest = GuestHypervisor.esxi(
+            spec=_esxi_guest().spec,
+            root=PosixCred("root", password="VMware1!", ssh_key=_ESXI_KEY),
+            installer_iso=CacheEntry("esxi-installer"),
+            communicator=NativeCommunicator(),
+        )
+        assert isinstance(guest.builder, ESXiKickstartBuilder)
+        ks = guest.builder.build_kickstart()
+        assert "enable_ssh" not in ks
+        assert "/etc/ssh/keys-root/authorized_keys" not in ks
+        assert "/Net/FollowHardwareMac" in ks  # MAC fix is transport-independent
+
     def test_synthesize_binding_picks_esxi_profile_no_keyfile(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

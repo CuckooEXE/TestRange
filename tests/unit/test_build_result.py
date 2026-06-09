@@ -105,14 +105,51 @@ class TestParseTokenStrictness:
     def test_ok_prefixed_token_is_not_success(self) -> None:
         # "okay" / "ok_pending" must NOT parse as success — they are unrecognized
         # tokens on a complete line, so they fail rather than green a bad build.
-        assert parse_build_result(b"TESTRANGE-RESULT: okay\n") == BuildResult(ok=False)
-        assert parse_build_result(b"TESTRANGE-RESULT: ok_pending\n") == BuildResult(ok=False)
+        # The raw line is captured in the log for triage (REL-29).
+        for tok in (b"okay", b"ok_pending"):
+            result = parse_build_result(b"TESTRANGE-RESULT: " + tok + b"\n")
+            assert result is not None and result.ok is False
+            assert tok.decode() in result.log.decode()
 
     def test_fail_prefixed_token_is_not_a_fail_record(self) -> None:
         # Only the bare ``fail`` token triggers the rc/cmd/log fail path; an
-        # unrecognized ``fail``-prefixed token is a generic failure.
-        assert parse_build_result(b"TESTRANGE-RESULT: failure\n") == BuildResult(ok=False)
+        # unrecognized ``fail``-prefixed token is a generic failure that still
+        # carries the offending line for triage.
+        result = parse_build_result(b"TESTRANGE-RESULT: failure\n")
+        assert result is not None and result.ok is False
+        assert "failure" in result.log.decode()
 
     def test_ok_with_trailing_field_still_succeeds(self) -> None:
         # First-token match: trailing chatter on the same line doesn't break ok.
         assert parse_build_result(b"TESTRANGE-RESULT: ok extra\n") == BuildResult(ok=True)
+
+
+class TestParseMultipleMarkers:
+    """Boot chatter can print the literal marker before the real record; an
+    earlier broken/unrecognized marker must not mask a later complete one
+    (REL-29 — otherwise the build hangs to the watchdog)."""
+
+    def test_chatter_marker_then_real_ok(self) -> None:
+        # A complete unrecognized line, then the real ok further down.
+        data = b"TESTRANGE-RESULT: starting provisioning\nTESTRANGE-RESULT: ok\n"
+        assert parse_build_result(data) == BuildResult(ok=True)
+
+    def test_broken_fail_frame_then_real_ok(self) -> None:
+        # An earlier fail whose log frame never closed (chatter echoing the
+        # script), then the genuine ok — the unfinished frame must be skipped.
+        data = (
+            b'TESTRANGE-RESULT: fail rc=1 cmd="echo"\nTESTRANGE-LOG-BEGIN\nTESTRANGE-RESULT: ok\n'
+        )
+        assert parse_build_result(data) == BuildResult(ok=True)
+
+    def test_chatter_marker_then_real_fail(self) -> None:
+        data = b"TESTRANGE-RESULT: noise\n" + _fail_bytes(9, "make", b"boom")
+        result = parse_build_result(data)
+        assert result is not None and result.ok is False and result.rc == 9
+        assert result.cmd == "make" and result.log == b"boom"
+
+    def test_unrecognized_then_incomplete_tail_waits(self) -> None:
+        # Chatter marker (complete) followed by a real marker still mid-line:
+        # not actionable yet — keep reading rather than failing on the chatter.
+        data = b"TESTRANGE-RESULT: noise\nTESTRANGE-RESULT: o"
+        assert parse_build_result(data) is None

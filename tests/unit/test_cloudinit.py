@@ -9,6 +9,7 @@ staging. ``render_user_data`` no longer renders any netplan; the only network
 from __future__ import annotations
 
 import io
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -21,7 +22,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StaticAddr
 from testrange.devices.network import NetworkIface
-from testrange.exceptions import BuildNotReadyError
+from testrange.exceptions import BuilderError, BuildNotReadyError
 from testrange.guest_io import ExecResult
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.base import BuildNic
@@ -718,3 +719,18 @@ class TestPackageNameValidation:
                 Apt(bad)
             with pytest.raises(ValueError, match="valid package name"):
                 Pip(bad)
+
+
+class TestLazyYamlImport:
+    def test_missing_pyyaml_raises_typed_builder_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # pyyaml ships in the [cloudinit] extra. Rendering without it must raise
+        # the typed BuilderError with an install hint, not a bare ImportError —
+        # mirrors the _import_pycdlib seam (a None in sys.modules makes the
+        # lazy `import yaml` fail like an absent package).
+        monkeypatch.setitem(sys.modules, "yaml", None)
+        b = _basic_builder()
+        spec = _spec()
+        with pytest.raises(BuilderError, match=r"\[cloudinit\]"):
+            b.render_meta_data(spec, _recipe(b, spec))

@@ -184,14 +184,52 @@ class TestKickstart:
         assert "RCEOF" in lines
         assert _KEY.auth_line in lines  # key written without leading whitespace
 
-    def test_no_firstboot_block_without_key(self) -> None:
+    def test_no_ssh_block_without_key(self) -> None:
+        # No key -> no SSH provisioning, but %firstboot still carries the vmk0
+        # MAC-follow fix (ESXI-18/19): that rides the image, not the transport.
         b = _builder(credentials=[PosixCred("root", password="VMware1!")])
         ks = b._render_kickstart()
-        assert "%firstboot" not in ks  # no run-phase provisioning to do
+        assert "%firstboot --interpreter=busybox" in ks
+        assert "/Net/FollowHardwareMac" in ks
         assert "enable_ssh" not in ks
+        assert "/etc/ssh/keys-root/authorized_keys" not in ks
         # the build-result emission lives in %post and is independent of the key.
         assert "vsish -e set /system/log" in ks
         assert "poweroff -f" in ks
+
+    def test_enable_ssh_false_omits_ssh_but_keeps_mac_fix(self) -> None:
+        # ESXI-19: SSH is provisioned per *transport*, not credential shape. With a
+        # keyed root cred but enable_ssh=False (non-SSH communicator), the key is
+        # NOT baked and sshd stays off — but the MAC-follow fix is still emitted.
+        ks = _builder(enable_ssh=False)._render_kickstart()
+        assert "%firstboot --interpreter=busybox" in ks
+        assert "/Net/FollowHardwareMac" in ks
+        assert _KEY.auth_line not in ks
+        assert "/etc/ssh/keys-root/authorized_keys" not in ks
+        assert "enable_ssh" not in ks
+
+    def test_follow_hardware_mac_one_shot_reboot_in_local_sh(self) -> None:
+        # ESXI-18: vmk0 follows the run NIC's hardware MAC on the second boot.
+        # FollowHardwareMac is read at vmk0 creation and a live down/up won't move
+        # it, so local.sh sets the flag, persists (auto-backup.sh), and reboots —
+        # guarded by a sentinel so it fires exactly once. Ordering is load-bearing.
+        ks = _builder()._render_kickstart()
+        lines = ks.splitlines()
+        i = lines.index
+        assert "if [ ! -f /etc/vmware/.trfollowhwmac ]; then" in lines
+        set_i = i("esxcli system settings advanced set -o /Net/FollowHardwareMac -i 1")
+        touch_i = i("touch /etc/vmware/.trfollowhwmac")
+        backup_i = i("/sbin/auto-backup.sh")
+        # the *local.sh* reboot — the first one after the flag set, NOT the
+        # top-level install-directive `reboot` near the top of the ks.cfg.
+        reboot_i = set_i + 1 + lines[set_i + 1 :].index("reboot")
+        # set the flag -> drop the sentinel -> persist -> reboot, in that order.
+        assert set_i < touch_i < backup_i < reboot_i < i("fi")
+        # the guarded reboot precedes the sshd enable: boot 1 reboots before it,
+        # boot 2 (sentinel present) skips the block and enables sshd.
+        assert reboot_i < i("vim-cmd hostsvc/enable_ssh")
+        # whole thing rides local.sh inside %firstboot, never the %post build result.
+        assert ks.index("%post") < ks.index("FollowHardwareMac")
 
 
 class TestLicense:
@@ -264,6 +302,25 @@ class TestConfigHash:
             _builder(credentials=[PosixCred("root", password="VMware1!")]), spec, base_sha="a"
         )
         assert with_key != without
+
+    def test_sensitive_to_enable_ssh(self) -> None:
+        # enable_ssh changes the baked image (key + sshd), so it MUST key a
+        # different disk — else a non-SSH plan could cache-hit an ssh-open disk.
+        spec = _spec()
+        on = _config_hash(_builder(enable_ssh=True), spec, base_sha="a")
+        off = _config_hash(_builder(enable_ssh=False), spec, base_sha="a")
+        assert on != off
+
+    def test_sensitive_to_kickstart_template(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A change to the ks.cfg *template* (not its inputs) must bust a stale
+        # cached disk — config_hash folds the rendered kickstart digest, so the
+        # same credentials rendering a different ks.cfg keys a different disk.
+        # Simulates exactly the ESXI-18 template edit landing against a warm cache.
+        b, spec = _builder(), _spec()
+        before = _config_hash(b, spec, base_sha="a")
+        real = b._render_kickstart()
+        monkeypatch.setattr(b, "_render_kickstart", lambda: real + "\n# template changed\n")
+        assert _config_hash(b, spec, base_sha="a") != before
 
 
 class TestPrepareBootMedia:

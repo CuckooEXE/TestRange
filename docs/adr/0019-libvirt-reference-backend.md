@@ -78,3 +78,11 @@ DOCS-5).
 - The mock's value as a *fast, hermetic* substrate is preserved — the unit
   suite still exercises the full build/run lifecycle against it with faked
   communicators, with no live hypervisor required.
+
+> **Addendum (2026-06-08, DOCS-16):** the certification gate's
+> `examples/capabilities.py` clause was superseded by **ADR-0028** (REL-2): the
+> portable survey became the `tests/plans/` corpus, run via `testrange run
+> --profile libvirt-local tests/plans/<tier>/<plan>.py` (generic + `libvirt/`
+> sweeps), and `examples/capabilities.py` was retired. The gate is otherwise
+> unchanged — that corpus green **plus** `pytest -m libvirt` green, both as a
+> plain `libvirt`-group user — and remains the bar every backend is held to.

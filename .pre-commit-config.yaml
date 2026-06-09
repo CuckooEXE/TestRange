@@ -86,10 +86,3 @@ repos:
         language: system
         types: [python]
         pass_filenames: false
-
-      - id: uv-lock-check
-        name: uv lock (in sync with pyproject)
-        entry: uv lock --check
-        language: system
-        files: ^(pyproject\.toml|uv\.lock)$
-        pass_filenames: false

@@ -8,10 +8,10 @@ for the backend matrix and per-backend prerequisites.
 - Python 3.11 or later.
 - A hypervisor backend. The in-memory `MockDriver` reference backend needs
   nothing and is what the test suite drives the full lifecycle against; a clean
-  live `run` of a plan needs a real backend (Proxmox runs green end-to-end on
-  single-node PVE; the libvirt driver has been rebuilt against the ABC and runs
-  against local `qemu:///system`; ESXi/Hyper-V are on the roadmap), each with
-  its own prereqs — see
+  live `run` of a plan needs a real backend (libvirt is the certified reference
+  on local `qemu:///system`; the Proxmox and ESXi drivers are code-complete with
+  live end-to-end certification in progress; Hyper-V is on the roadmap), each
+  with its own prereqs — see
   [driver setup](drivers/index.md).
 
 ## Install the package
@@ -40,8 +40,16 @@ The available extras:
 : `requests` — required for the shared HTTP cache tier (`--cache`).
 
 `proxmox`
-: `proxmoxer` + `requests` + `paramiko` — required for the Proxmox driver
-  (in progress).
+: `proxmoxer` + `requests` + `paramiko` + `requests-toolbelt` +
+  `websocket-client` + `pycdlib` — required for the Proxmox driver.
+
+`libvirt`
+: `libvirt-python` — required for the libvirt driver (the certified reference
+  backend). Imports lazily on connect, so the package registers without it.
+
+`esxi`
+: `pyvmomi` + `requests` — required for the ESXi driver. (`qemu-img`, a host
+  binary, converts qcow2↔vmdk at the datastore boundary — not a wheel.)
 
 `docs`
 : `sphinx` + `furo` + `myst-parser` + `sphinx-copybutton` — to rebuild this
@@ -51,7 +59,7 @@ The available extras:
 : dev-only tools (pytest, ruff, mypy, type stubs).
 
 `all`
-: shorthand for `ssh,cloudinit,http,proxmox`.
+: shorthand for `ssh,cloudinit,http,proxmox,libvirt,esxi`.
 
 For a typical install you'll want `'.[all,dev]'`.
 

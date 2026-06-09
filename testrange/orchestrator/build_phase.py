@@ -55,6 +55,7 @@ from testrange.orchestrator.artifacts import (
 )
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.dashboard_state import VMStage
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
 from testrange.plan import Plan
 from testrange.state.schema import PHASE_BUILD
@@ -198,7 +199,7 @@ def build_phase(ctx: RunContext) -> None:
     # deterministic build IP (_build_ip_offset) so they coexist on the one build
     # switch stood up above.
     parallel_map(
-        lambda bp: build_one_vm(ctx, bp, build_pool_backend, build_net_backend),
+        lambda bp: _guard_build(ctx, bp, build_pool_backend, build_net_backend),
         misses,
         jobs=ctx.jobs,
     )
@@ -256,6 +257,9 @@ def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
             for s in inner_plan.hypervisor.all_switches
             for n in s.networks
         },
+        # Share the outer dashboard so a nested host's inner-VM builds report
+        # their serial/stage into the same panes (ADR-0029).
+        dashboard=ctx.dashboard,
     )
 
 
@@ -398,6 +402,21 @@ def _create_build_pool(ctx: RunContext, misses: list[_VMBuildPlan]) -> str:
     return backend
 
 
+def _guard_build(
+    ctx: RunContext, bp: _VMBuildPlan, build_pool_backend: str, build_net_backend: str
+) -> None:
+    """Run one VM's build; tag it FAILED in the dashboard on error, then re-raise.
+
+    ``parallel_map`` is fail-fast — this attributes the failure to the right VM
+    (with the message) for the dashboard before the build phase unwinds.
+    """
+    try:
+        build_one_vm(ctx, bp, build_pool_backend, build_net_backend)
+    except Exception as e:
+        ctx.dashboard.set_vm_stage(bp.vm.name, VMStage.FAILED, detail=str(e))
+        raise
+
+
 def build_one_vm(
     ctx: RunContext,
     bp: _VMBuildPlan,
@@ -418,6 +437,7 @@ def build_one_vm(
     drv = ctx.driver
     vm = bp.vm
     spec = vm.spec
+    ctx.dashboard.set_vm_stage(vm.name, VMStage.BUILDING)
     build_vm_backend = drv.compose_resource_name(ctx.run_id, "build_vm", vm.name)
 
     # --- OS disk. Image-origin: push base bytes onto this VM's own ref, then
@@ -663,39 +683,71 @@ def parse_build_result(data: bytes, *, final: bool = False) -> BuildResult | Non
     line whose log block never finished is still returned with whatever log
     was captured, rather than discarded, so a guest that died after announcing
     the failure still yields a diagnostic.
-    """
-    idx = data.find(_RESULT_MARKER)
-    if idx == -1:
-        return None
-    rest = data[idx + len(_RESULT_MARKER) :]
-    nl = rest.find(b"\n")
-    if nl == -1:
-        if not final:
-            return None  # the result line itself is not fully arrived yet
-        line = rest
-    else:
-        line = rest[:nl]
-    text = line.decode("utf-8", "replace").strip()
-    tag = text.split(maxsplit=1)[0] if text else ""
 
-    if tag == "ok":
-        return BuildResult(ok=True)
-    if tag == "fail":
-        rc_m = _RC_RE.search(text)
-        cmd_m = _CMD_RE.search(text)
-        log, complete = _extract_log(data[idx:])
-        if not complete and not final:
-            return None  # wait for the framed log to finish arriving
-        return BuildResult(
-            ok=False,
-            rc=int(rc_m.group(1)) if rc_m else None,
-            cmd=cmd_m.group(1) if cmd_m else None,
-            log=log,
-        )
-    # A complete marker line carrying an unrecognized token: treat as failure
-    # rather than hang (we have a whole line: nl != -1, or this is the final
-    # pass). Anything that isn't the explicit ``ok`` token is not success.
-    return BuildResult(ok=False)
+    The marker can appear more than once: boot chatter can print the literal
+    ``TESTRANGE-RESULT:`` string before the real record (e.g. echoing the
+    provisioning script). We therefore scan *every* occurrence rather than
+    committing to the first — an earlier marker with a broken/unfinished frame
+    or an unrecognized token must not mask a later, complete record (which would
+    otherwise hang the build until the watchdog fires).
+    """
+    offsets: list[int] = []
+    pos = 0
+    while True:
+        idx = data.find(_RESULT_MARKER, pos)
+        if idx == -1:
+            break
+        offsets.append(idx)
+        pos = idx + len(_RESULT_MARKER)
+    if not offsets:
+        return None
+
+    for i, idx in enumerate(offsets):
+        is_last = i == len(offsets) - 1
+        # Bound each candidate record to the span up to the next marker so a
+        # broken earlier frame can't swallow the real record's log block.
+        segment = data[idx : (len(data) if is_last else offsets[i + 1])]
+        rest = segment[len(_RESULT_MARKER) :]
+        nl = rest.find(b"\n")
+        if nl == -1:
+            # The result line itself has not fully arrived. Only the last marker
+            # can be mid-line (anything before it is followed by a later marker).
+            if not final:
+                continue  # nothing actionable here yet — keep reading
+            line = rest
+        else:
+            line = rest[:nl]
+        text = line.decode("utf-8", "replace").strip()
+        tag = text.split(maxsplit=1)[0] if text else ""
+
+        if tag == "ok":
+            return BuildResult(ok=True)
+        if tag == "fail":
+            rc_m = _RC_RE.search(text)
+            cmd_m = _CMD_RE.search(text)
+            log, complete = _extract_log(segment)
+            if complete or final:
+                return BuildResult(
+                    ok=False,
+                    rc=int(rc_m.group(1)) if rc_m else None,
+                    cmd=cmd_m.group(1) if cmd_m else None,
+                    log=log,
+                )
+            if is_last:
+                return None  # the real fail's framed log is still arriving — wait
+            continue  # an earlier fail with a never-finished frame is chatter; skip
+        # A complete marker line carrying an unrecognized token. Anything that is
+        # not the explicit ``ok`` signal is a failure — but an earlier such line
+        # may be boot chatter before the real record, so only the *last* marker
+        # is treated as the verdict; earlier ones are skipped.
+        if is_last:
+            # Capture the raw line in the log so the failure is triageable rather
+            # than a contextless "build failed" (REL-29).
+            return BuildResult(
+                ok=False,
+                log=f"unrecognized build-result token; raw line: {text!r}".encode(),
+            )
+    return None
 
 
 def _extract_log(segment: bytes) -> tuple[bytes, bool]:

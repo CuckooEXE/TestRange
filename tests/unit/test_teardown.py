@@ -23,6 +23,19 @@ class _FakeDriver:
         self.destroyed.append((kind, backend_name))
 
 
+class _FlakyDriver(_FakeDriver):
+    """Destroys everything except resources of ``fail_kind`` (which raise)."""
+
+    def __init__(self, fail_kind: str) -> None:
+        super().__init__()
+        self.fail_kind = fail_kind
+
+    def destroy(self, kind: str, backend_name: str, **metadata: Any) -> None:
+        if kind == self.fail_kind:
+            raise RuntimeError(f"backend refused to destroy {kind} {backend_name}")
+        super().destroy(kind, backend_name, **metadata)
+
+
 def _ctx(store: StateStore, driver: _FakeDriver) -> RunContext:
     # teardown() only touches store/driver/run_id; plan and cache are unused.
     return RunContext(
@@ -85,3 +98,38 @@ def test_read_failure_bails_without_destroying(
     # No resource list to act on -> nothing destroyed (correct: read is the
     # source of truth, not just bookkeeping).
     assert driver.destroyed == []
+
+
+def test_one_destroy_failure_does_not_abort_the_rest(tmp_path: Path) -> None:
+    # A single resource the backend can't destroy must not stop the LIFO sweep;
+    # the survivors are still torn down and the failed one stays recorded so a
+    # later `cleanup` can retry it (teardown.py continue-on-error path).
+    store = _store_with_resources(tmp_path)
+    driver = _FlakyDriver(fail_kind="vm")
+
+    teardown(_ctx(store, driver))
+
+    assert ("network", "tr_net_a") in driver.destroyed  # survivor torn down
+    assert ("vm", "tr_vm_a") not in driver.destroyed  # the one that raised
+    # the failed resource is still recorded; the run dir is NOT removed.
+    assert store.exists()
+    assert [r.backend_name for r in store.read().resources] == ["tr_vm_a"]
+
+
+def test_final_bookkeeping_failure_does_not_propagate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # teardown() runs from __exit__; a failure in the final state-drain (after
+    # every resource is destroyed) must be swallowed so it can't replace the
+    # original bring-up exception that triggered teardown.
+    store = _store_with_resources(tmp_path)
+    driver = _FakeDriver()
+
+    def boom() -> None:
+        raise StateError("disk full removing state")
+
+    monkeypatch.setattr(store, "remove", boom)
+
+    teardown(_ctx(store, driver))  # must not raise
+
+    assert sorted(driver.destroyed) == [("network", "tr_net_a"), ("vm", "tr_vm_a")]

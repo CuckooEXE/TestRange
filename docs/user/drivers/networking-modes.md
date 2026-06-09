@@ -79,8 +79,8 @@ sidecar straddles both. See `nat` below for the topology.
 
 ### `mgmt=True`
 
-The host gets an L3 interface on the Switch's CIDR at `.2`. It's just
-an adapter — no NAT, no forwarding, no router semantics. A VM on the
+The host gets an L2 presence — a plain adapter with an IP — on the Switch's
+CIDR at `.2`. No NAT, no forwarding, no router semantics. A VM on the
 Switch can `ping 192.168.10.2` and reach the host kernel; the host can
 `ping 192.168.10.100` to reach a guest.
 
@@ -180,11 +180,14 @@ names a bridge). The sidecar-served `dhcp`/`dns`/`nat` story is uniform — one
 Alpine image, one config-ISO contract, no per-driver branching. Only the L2
 realization (`create_switch`/`create_network`) is driver-specific.
 
-| Knob        | MockDriver (reference)        | Proxmox (single-node)         | ESXi / Hyper-V (future)            |
+| Knob        | libvirt (reference)           | Proxmox (single-node)         | ESXi (standalone)                  |
 |-------------|-------------------------------|-------------------------------|------------------------------------|
-| `uplink`    | Resolve name → iface; segment record | Resolve name → host bridge; SDN zone + vnet | Resolve name → vmnic / external vSwitch |
-| `mgmt`      | Simulated `.2` adapter        | Bridge IP via SDN             | vmkernel adapter / share with mgmt OS |
+| `uplink`    | Resolve name → host network; one shared bridge per Switch via the libvirt network API | Resolve name → host bridge; SDN zone + vnet | Resolve name → host network; isolated standard vSwitch + portgroup per Network |
+| `mgmt`      | Bridge IP at the `.2` slot    | Bridge IP via SDN             | VMkernel NIC at `.2` on a dedicated portgroup |
 | `Sidecar`   | Sidecar VM model              | Same                          | Same                               |
+
+(Hyper-V is on the roadmap. `MockDriver` is the in-memory test backend, not a
+shipped driver — it simulates L2 in memory rather than realizing it; ADR-0019.)
 
 The `uplink` logical name resolves through the profile's `[uplinks]` map
 (ADR-0016); the driver receives the resolved host iface. An unmapped name is a
@@ -251,7 +254,7 @@ Switch("internet", Network("a"), cidr="10.53.0.0/24",
 Switch("lan", Network("a"), cidr="192.168.1.0/24", uplink="egress")
 ```
 
-The shipped `examples/capabilities.py` exercises these across its switches —
+The `tests/plans/generic/networking.py` plan exercises these across its switches —
 an isolated `priv-sw` (bare), a `mgmt`+`uplink`+`nat` `pub-sw`, and the
 `nat`+`uplink` build switch.
 

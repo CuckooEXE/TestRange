@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = []
 dependencies = [
     "cryptography>=42",
+    "rich>=13",
 ]
 
 [project.optional-dependencies]
@@ -125,8 +126,9 @@ ignore = [
 # ADR-0022: the sanctioned subprocess modules (installer-ISO prep via xorriso, to
 # preserve hybrid-boot layouts a pure-pycdlib rebuild strips). ADR-0024: qemu-img
 # disk-format conversion at a non-qcow2 driver boundary (CORE-2). Scoped here so
-# the project-wide ban still holds everywhere else.
-"testrange/builders/_proxmox_prepare.py" = ["TID251", "S404", "S603"]
+# the project-wide ban still holds everywhere else. S105: the grub menuentry
+# token is a boot-menu label, not a secret.
+"testrange/builders/_proxmox_prepare.py" = ["TID251", "S404", "S603", "S105"]
 "testrange/builders/_esxi_prepare.py" = ["TID251", "S404", "S603"]
 "testrange/drivers/_diskconvert.py" = ["TID251", "S404", "S603"]
 

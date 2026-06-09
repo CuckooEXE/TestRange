@@ -30,6 +30,7 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.networks.sidecar import LEASEFILE
 from testrange.orchestrator import Orchestrator
 from testrange.orchestrator.backend import ResolvedBackend
+from testrange.orchestrator.dashboard_state import VMStage
 from testrange.packages import Apt
 from testrange.preflight import PreflightFinding, PreflightReport
 from testrange.vms import VMRecipe, VMSpec
@@ -191,6 +192,44 @@ class TestEnterAndExit:
         # The libvirt-shaped bridge API is gone — nothing names a bridge.
         assert not any("bridge" in n for n in names)
 
+    def test_dashboard_tracks_vm_to_ready(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        """The run dashboard seeds VMs PENDING and walks them to READY (ADR-0029)."""
+        del fake_driver
+        mgr, _ = populated_cache
+        o = Orchestrator(_plan(), cache_manager=mgr)
+        seeded = {v.name: v.stage for v in o.ctx.dashboard.snapshot().vms}
+        assert seeded == {"web": VMStage.PENDING}
+        with o:
+            pass
+        final = {v.name: v.stage for v in o.ctx.dashboard.snapshot().vms}
+        assert final["web"] is VMStage.READY
+
+    def test_dashboard_guard_attributes_a_step_failure_to_its_vm(self) -> None:
+        """``_guard_vm`` tags the failing VM FAILED with the error, then re-raises (ADR-0029)."""
+        from types import SimpleNamespace
+
+        from testrange.orchestrator import run_phase
+        from testrange.orchestrator.dashboard_state import DashboardState
+
+        dash = DashboardState()
+        dash.seed_vms(["web"])
+        ctx = SimpleNamespace(dashboard=dash)
+        vm = SimpleNamespace(name="web")
+
+        def _boom(_ctx: object, _vm: object) -> None:
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError, match="boom"):
+            run_phase._guard_vm(ctx, vm, _boom)  # type: ignore[arg-type]
+
+        web = {v.name: v for v in dash.snapshot().vms}["web"]
+        assert web.stage is VMStage.FAILED
+        assert web.detail is not None and "boom" in web.detail
+
     def test_build_vm_brought_up_and_torn_down(
         self,
         fake_driver: MockDriver,
@@ -306,6 +345,27 @@ class TestEnterAndExit:
             pass
         names = [c[0] for c in fake_driver.calls]
         # Pool was created and then destroyed during teardown
+        assert "create_pool" in names
+        assert "destroy_pool" in names
+
+    def test_keyboard_interrupt_during_bringup_triggers_teardown(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # A Ctrl-C (or the SIGTERM/SIGHUP handler's raised KeyboardInterrupt)
+        # during the build phase must still tear down partial infra. The interrupt
+        # is a BaseException, not an Exception, and it fires inside __enter__ — so
+        # __exit__ never runs and teardown must come from __enter__'s own handler.
+        # If that handler only catches Exception, the pool leaks (the regression).
+        mgr, _ = populated_cache
+        with (
+            patch.object(fake_driver, "create_vm", side_effect=KeyboardInterrupt()),
+            pytest.raises(KeyboardInterrupt),
+            Orchestrator(_plan(), cache_manager=mgr),
+        ):
+            pass
+        names = [c[0] for c in fake_driver.calls]
         assert "create_pool" in names
         assert "destroy_pool" in names
 
@@ -553,6 +613,22 @@ class TestQGABinding:
         # Builder readiness ran `cloud-init status --wait` through the agent.
         agent_calls = [c for c in fake_driver.calls if c[0] == "native_guest_execute"]
         assert any(c[1][1] == ("cloud-init", "status", "--wait") for c in agent_calls)
+
+    def test_qga_dhcp_nic_waits_for_sidecar_lease(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # REL-24: a NativeCommunicator VM binds the moment its agent answers,
+        # which races the guest's DHCP. The run phase must still gate on every
+        # DHCP NIC's lease (read off the sidecar) before handing tests a guest —
+        # even though the QGA bind itself needs no IP.
+        mgr, _ = populated_cache
+        with Orchestrator(_qga_plan(), cache_manager=mgr):
+            pass
+        assert any(
+            c[0] == "native_guest_read_file" and c[1][1] == LEASEFILE for c in fake_driver.calls
+        )
 
     def test_qga_communicator_execute_reaches_driver(
         self,

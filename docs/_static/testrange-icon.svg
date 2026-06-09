@@ -1,0 +1,28 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="TestRange icon">
+
+<rect x="85" y="86" width="92" height="60" rx="6" fill="none" stroke="#D29922" stroke-width="1.5" stroke-dasharray="4 5" opacity="0.55"/>
+<circle cx="96" cy="98" r="2.4" fill="#D29922" opacity="0.45"/>
+<circle cx="107" cy="98" r="2.4" fill="#D29922" opacity="0.45"/>
+<circle cx="118" cy="98" r="2.4" fill="#D29922" opacity="0.45"/>
+
+<rect x="181" y="78" width="7" height="7" rx="1" fill="#D29922" opacity="0.5"/>
+<rect x="193" y="68" width="6" height="6" rx="1" fill="#D29922" opacity="0.42"/>
+<rect x="187" y="90" width="5" height="5" rx="1" fill="#D29922" opacity="0.4"/>
+<rect x="205" y="62" width="5" height="5" rx="1" fill="#D29922" opacity="0.32"/>
+<rect x="199" y="82" width="4" height="4" rx="1" fill="#D29922" opacity="0.34"/>
+<rect x="215" y="72" width="4" height="4" rx="1" fill="#D29922" opacity="0.26"/>
+<rect x="178" y="64" width="5" height="5" rx="1" fill="#D29922" opacity="0.46"/>
+<rect x="211" y="60" width="3" height="3" rx="1" fill="#D29922" opacity="0.2"/>
+
+<rect x="61" y="110" width="92" height="60" rx="6" fill="#58A6FF" fill-opacity="0.04" stroke="#58A6FF" stroke-width="1.5" stroke-dasharray="5 4" opacity="0.8"/>
+<circle cx="72" cy="122" r="2.4" fill="#58A6FF" opacity="0.6"/>
+<circle cx="83" cy="122" r="2.4" fill="#58A6FF" opacity="0.6"/>
+<circle cx="94" cy="122" r="2.4" fill="#58A6FF" opacity="0.6"/>
+
+<rect x="37" y="134" width="92" height="60" rx="6" fill="#161B22" stroke="#3FB950" stroke-width="1.5"/>
+<circle cx="48" cy="146" r="2.6" fill="#3FB950"/>
+<circle cx="59" cy="146" r="2.6" fill="#58A6FF"/>
+<circle cx="70" cy="146" r="2.6" fill="#D29922"/>
+<line x1="37" y1="157" x2="129" y2="157" stroke="#30363D" stroke-width="1"/>
+<rect x="65" y="170" width="7" height="9" fill="#3FB950" opacity="0.75"/>
+</svg>

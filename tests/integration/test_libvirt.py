@@ -138,16 +138,29 @@ def test_vm_lifecycle_serial_sink_and_snapshots(
     pool = driver.compose_resource_name(run_tag, "pool", "p1")
     os_ref = driver.compose_volume_ref(pool, f"{name}.qcow2")
     seed_ref = driver.compose_volume_ref(pool, f"{name}-seed.iso")
+    media_ref = driver.compose_volume_ref(pool, f"{name}-media.iso")
     # NIC-less: pure host-side lifecycle, no networking / no in-guest agent needed.
     spec = VMSpec(name="box", devices=[CPU(2), Memory(1024), OSDrive("p1", 4)])
     try:
         driver.create_pool(StoragePool("p1", 8), pool)
         driver.upload_to_pool(os_ref, base_image)
         driver.resize_volume(os_ref, 4)
-        # A seed makes create_vm attach the unix-socket serial sink (driver listens).
         driver.write_to_pool(seed_ref, b"dummy-seed")
+        # create_vm opens the unix-socket serial sink for a *provisioning* boot —
+        # a build VM (build_nic) or an installer-origin boot (boot_media_ref);
+        # a seed alone is a sidecar, monitored via QGA, and gets a throwaway pty.
+        # Pass a boot medium to trigger the sink without a NIC: the OS disk is
+        # bootable (boot order 1) so the guest still boots the base image and
+        # emits console bytes; the medium (order 2) is never reached.
+        driver.write_to_pool(media_ref, b"dummy-media")
         driver.create_vm(
-            name, spec, run_tag, os_disk_ref=os_ref, seed_iso_ref=seed_ref, network_refs={}
+            name,
+            spec,
+            run_tag,
+            os_disk_ref=os_ref,
+            seed_iso_ref=seed_ref,
+            network_refs={},
+            boot_media_ref=media_ref,
         )
         assert driver.get_vm_power_state(name) == "shutoff"
         driver.start_vm(name)

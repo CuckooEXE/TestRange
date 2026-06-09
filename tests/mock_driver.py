@@ -167,16 +167,12 @@ class MockDriver(HypervisorDriver):
         self.build_result_stream: Sequence[bytes] | None = None
         self.build_result_wedge = False
 
-    # -- construction paths ------------------------------------------------
-
     @classmethod
     def from_uri(cls, uri: str) -> MockDriver:
         return cls(uri=uri)
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
-
-    # -- connection --------------------------------------------------------
 
     def connect(self) -> None:
         self.connected = True
@@ -235,8 +231,6 @@ class MockDriver(HypervisorDriver):
                 )
         return out
 
-    # -- deterministic naming ----------------------------------------------
-
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str:
         return f"tr_{kind}_{run_id[:8]}_{name}"
 
@@ -250,8 +244,6 @@ class MockDriver(HypervisorDriver):
 
     def compose_volume_ref(self, pool_backend_name: str, vol_name: str) -> VolumeRef:
         return VolumeRef(str(self.pool_root / pool_backend_name / vol_name))
-
-    # -- switches & networks (driver owns L2) ------------------------------
 
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         nat = switch.sidecar is not None and switch.sidecar.nat
@@ -286,8 +278,6 @@ class MockDriver(HypervisorDriver):
     def destroy_network(self, backend_name: str) -> None:
         self._record("destroy_network", backend_name)
         self._networks.pop(backend_name, None)
-
-    # -- pools & volumes ---------------------------------------------------
 
     def volume_suffix(self, kind: str) -> str:
         return _SUFFIXES[kind]
@@ -350,8 +340,6 @@ class MockDriver(HypervisorDriver):
         self._record("delete_volume", str(vol_ref))
         Path(vol_ref).unlink(missing_ok=True)
 
-    # -- VMs ---------------------------------------------------------------
-
     def create_vm(
         self,
         backend_name: str,
@@ -407,8 +395,6 @@ class MockDriver(HypervisorDriver):
         self.power_state_calls += 1
         return "shutoff" if self.power_state_calls >= self.shutoff_after_calls else "running"
 
-    # -- native guest agent (QGA-shaped: unauthenticated, all ops) ---------
-
     def native_guest_execute(
         self, backend_name: str, *, credential: Credential | None = None
     ) -> GuestExec:
@@ -450,8 +436,6 @@ class MockDriver(HypervisorDriver):
 
         return _write_file
 
-    # -- build-result sink -------------------------------------------------
-
     def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:
         # Record eagerly (the generator body is lazy), then replay the canned
         # chunks. A wedge emits no record at all (only heartbeats); a normal
@@ -468,8 +452,6 @@ class MockDriver(HypervisorDriver):
                 yield b""
 
         return _stream()
-
-    # -- snapshots ---------------------------------------------------------
 
     def create_snapshot(
         self, vm_backend_name: str, name: str, description: str = "", *, mem: bool = False

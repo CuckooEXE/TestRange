@@ -140,9 +140,6 @@ class TestReadBuildResultSink:
         assert ws.closed
 
 
-# -- _client.open_serial_websocket ----------------------------------------
-
-
 class _TermproxyEndpoint:
     def __init__(self, api: _FakeSerialApi) -> None:
         self._api = api

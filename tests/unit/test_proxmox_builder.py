@@ -393,3 +393,97 @@ class TestWaitReady:
         b = _builder()
         with pytest.raises(BuildNotReadyError, match="not reachable over SSH"):
             b.wait_ready(_spec(), _recipe(b, _spec()), _FakeExec(exit_code=1))
+
+
+# A trimmed copy of PVE 9.x /boot/grub/grub.cfg: the automated entry (the only one
+# carrying ``proxmox-start-auto-installer``) plus a neighbor that must stay intact.
+_PVE_GRUB_CFG = """\
+if [ -f auto-installer-mode.toml ]; then
+    menuentry 'Install Proxmox VE (Automated)' --class debian {
+        linux       /boot/linux26 ro ramdisk_size=16777216 rw quiet splash=silent proxmox-start-auto-installer
+        initrd      /boot/initrd.img
+    }
+fi
+menuentry 'Install Proxmox VE (Graphical)' --class debian {
+    linux	/boot/linux26 ro ramdisk_size=16777216 rw quiet splash=silent
+    initrd	/boot/initrd.img
+}
+"""
+
+
+class TestGrubSerialConsole:
+    """The grub rewrite that makes the auto-installer observable on ttyS0."""
+
+    def _auto_line(self, cfg: str) -> str:
+        from testrange.builders._proxmox_prepare import _AUTO_INSTALLER_GRUB_TOKEN
+
+        return next(
+            ln
+            for ln in cfg.splitlines()
+            if _AUTO_INSTALLER_GRUB_TOKEN in ln and ln.lstrip().startswith("linux")
+        )
+
+    def test_grafts_serial_console_onto_automated_entry(self) -> None:
+        from testrange.builders._proxmox_prepare import _grub_with_serial_console
+
+        out = _grub_with_serial_console(_PVE_GRUB_CFG)
+        auto = self._auto_line(out)
+        assert "console=ttyS0,115200" in auto
+        # quiet/splash=silent give way to splash=verbose so the install is visible.
+        assert "quiet" not in auto
+        assert "splash=silent" not in auto and "splash=verbose" in auto
+        # The auto-installer activation token must survive — it is what selects
+        # unattended mode; without it the rewrite would break the install.
+        assert "proxmox-start-auto-installer" in auto
+
+    def test_leaves_other_entries_untouched(self) -> None:
+        from testrange.builders._proxmox_prepare import _grub_with_serial_console
+
+        out = _grub_with_serial_console(_PVE_GRUB_CFG)
+        # The graphical entry has no auto-installer token, so it keeps its console
+        # (no ttyS0) and its quiet/splash=silent — only the automated line changed.
+        graphical = next(
+            ln
+            for ln in out.splitlines()
+            if ln.lstrip().startswith("linux") and "proxmox-start-auto-installer" not in ln
+        )
+        assert "console=ttyS0" not in graphical
+        assert "quiet splash=silent" in graphical
+
+    def test_idempotent(self) -> None:
+        from testrange.builders._proxmox_prepare import _grub_with_serial_console
+
+        once = _grub_with_serial_console(_PVE_GRUB_CFG)
+        assert _grub_with_serial_console(once) == once
+
+    def test_raises_when_automated_entry_absent(self) -> None:
+        # A grub.cfg that exists but has no auto-installer entry is a PVE layout we
+        # no longer recognize — fail loud rather than ship a serial-blind ISO.
+        from testrange.builders._proxmox_prepare import (
+            ProxmoxPrepareError,
+            _grub_with_serial_console,
+        )
+
+        with pytest.raises(ProxmoxPrepareError, match="auto-installer grub entry not found"):
+            _grub_with_serial_console("menuentry 'Something Else' {\n    linux /boot/x\n}\n")
+
+
+class TestPrepareRecipeBustsCache:
+    """A prepare-recipe bump must change the prepared-ISO path (cache invalidation)."""
+
+    def test_recipe_version_folds_into_prepared_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            proxmox_mod,
+            "prepare_iso",
+            lambda v, out, **kw: Path(out).write_bytes(b"x"),
+        )
+        vanilla = tmp_path / "pve.iso"
+        vanilla.write_bytes(b"VANILLA")
+        before = _builder().prepare_boot_media(vanilla)
+        # Simulate a future recipe change: same inputs, new recipe tag => new path,
+        # so a stale cached copy from the prior recipe is never reused.
+        monkeypatch.setattr(proxmox_mod, "PREPARE_ISO_RECIPE", "some-newer-recipe-v2")
+        after = _builder().prepare_boot_media(vanilla)
+        assert before.name != after.name

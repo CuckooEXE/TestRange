@@ -32,6 +32,7 @@ from testrange.orchestrator.backend import (
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.orchestrator.build_phase import build_phase, probe_misses
 from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.nested_phase import (
     NestedHandle,
     NestedRun,
@@ -43,6 +44,7 @@ from testrange.orchestrator.run_phase import (
     bind_communicators,
     run_phase,
     wait_communicators_ready,
+    wait_dhcp_leases,
 )
 from testrange.orchestrator.teardown import teardown
 from testrange.plan import Plan
@@ -95,9 +97,11 @@ class Orchestrator:
         build_timeout_s: float = 600.0,
         lease_timeout_s: float = 120.0,
         sidecar_ready_timeout_s: float = 120.0,
+        agent_ready_timeout_s: float = 120.0,
         require_cache: bool = False,
         profile: BackendProfile | None = None,
         jobs: int | None = None,
+        dashboard: DashboardState | None = None,
     ) -> None:
         self.plan = plan
         self._require_cache = require_cache
@@ -116,13 +120,20 @@ class Orchestrator:
             build_timeout_s=build_timeout_s,
             lease_timeout_s=lease_timeout_s,
             sidecar_ready_timeout_s=sidecar_ready_timeout_s,
+            agent_ready_timeout_s=agent_ready_timeout_s,
             addressing={
                 n.name: NetworkAddressing.from_switch(s)
                 for s in plan.hypervisor.all_switches
                 for n in s.networks
             },
             jobs=jobs,
+            # The CLI owns the dashboard so it can render the same state the
+            # phases write; a library call with no dashboard gets a fresh one.
+            dashboard=dashboard if dashboard is not None else DashboardState(),
         )
+        # Register every run VM up front so the dashboard shows them PENDING
+        # before bring-up touches them (in plan order).
+        self.ctx.dashboard.seed_vms(vm.name for vm in plan.hypervisor.vms)
         self._handle: OrchestratorHandle | None = None
         self._leak = False
         # Entered inner orchestrators (one per GuestHypervisor), torn down LIFO
@@ -148,6 +159,10 @@ class Orchestrator:
     @property
     def lease_timeout_s(self) -> float:
         return self.ctx.lease_timeout_s
+
+    @property
+    def agent_ready_timeout_s(self) -> float:
+        return self.ctx.agent_ready_timeout_s
 
     def _preflight_and_initialize(self) -> None:
         """Run read-only preflight (abort on error) and open the state file."""
@@ -225,19 +240,34 @@ class Orchestrator:
                 run_phase(self.ctx)
                 bind_communicators(self.ctx)
                 wait_communicators_ready(self.ctx)
+                wait_dhcp_leases(self.ctx)
                 await_guest_readiness(self.ctx)
                 # Recurse into each GuestHypervisor (ADR-0021); built last so the
                 # returned handle carries the nested map. run_nested_phase tears
                 # down any inner it entered if a later one fails.
                 self._nested_runs, nested = run_nested_phase(self.ctx)
                 self._handle = self._build_handle(nested)
-            except Exception:
-                _log.exception("bring-up failed; tearing down")
+            except BaseException:
+                # BaseException, not Exception: a Ctrl-C / SIGTERM lands as
+                # KeyboardInterrupt (BaseException), and it fires inside __enter__
+                # — so Python never calls __exit__ (where the run-phase teardown
+                # lives). If this handler only caught Exception the interrupt would
+                # slip past and leak every resource the build phase created. We
+                # tear down and re-raise (never swallow), so the operator still
+                # sees the interrupt.
+                _log.exception("bring-up failed or interrupted; tearing down")
+                # parallel_map is fail-fast: the worker that raised tagged its
+                # own VM FAILED; sweep any sibling left mid-stage so the final
+                # dashboard frame is truthful rather than frozen at e.g. booting.
+                self.ctx.dashboard.abort_unfinished()
                 teardown_nested(self._nested_runs)
                 teardown(self.ctx)
                 raise
             return self._handle
-        except Exception:
+        except BaseException:
+            # Same rationale: an interrupt during preflight/initialize (before the
+            # inner try) or the inner handler's re-raise must still release the
+            # driver connection rather than leak it.
             self.ctx.driver.disconnect()
             raise
 

@@ -27,7 +27,10 @@ testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
   --leak-on-failure                     #   skip teardown if any test fails
   --jobs N                              #   cap I/O-phase workers (default 8; 0 or 1 = serial)
+  --no-dashboard                        #   disable the live dashboard; emit plain log lines
+  --verbose                             #   (global) surface the build serial console / test output
 testrange repl <plan.py>                # bring-up, drop into a Python REPL, no TESTS
+testrange cleanup --list                # list runs + status, tear down nothing
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
 testrange cache add <path-or-url>       # cache subcommands:
@@ -63,6 +66,29 @@ sum. `--jobs N` caps that pool (default 8); `--jobs 0` or `--jobs 1` forces it
 serial, which is handy when a backend misbehaves under concurrency or you want
 deterministic single-threaded logs while debugging.
 
+## The live dashboard
+
+On an interactive terminal, `run` and `build` render a live dashboard while the
+range comes up — four panes that update in place:
+
+- **VMs** — each VM and its current lifecycle stage
+  (`pending → provisioning → building → booting → binding → ready`, or `failed`
+  with the error), colour-coded, with elapsed time.
+- **Tests** — each test as it runs, then `✓`/`✗` with its duration.
+- **Log** — a tail of the orchestrator's progress log.
+- **Serial (build)** — the build VM's serial console as it streams, so a slow or
+  stuck install is visible instead of silent.
+
+The dashboard owns the terminal only while the range is up; the final frame is
+left in scrollback and the test report (`[PASS]/[FAIL]` lines) prints after.
+
+It activates only on a real TTY. When output is piped or redirected (CI, a log
+file), or when you pass `--no-dashboard`, there is no live region — logging falls
+back to plain, greppable lines. `--verbose` additionally surfaces the build
+serial console and per-test stdout/stderr (in the Serial pane on a TTY, or as
+plain log lines off one); without it those high-volume firehoses stay quiet
+regardless of `--log-level`.
+
 ## What `OrchestratorHandle` exposes
 
 `orch.run_id: str`
@@ -81,7 +107,7 @@ deterministic single-threaded logs while debugging.
 : User-facing Plan name.
 
 `vm.backend_name: str`
-: The driver-side handle (`tr_vm_<run_short>_web`). Pass to driver methods
+: The driver-side handle (`tr-vm-<run_id[:8]>-web`). Pass to driver methods
   like `orch.driver.create_snapshot(vm.backend_name, ...)`.
 
 `vm.communicator: Communicator`
@@ -165,8 +191,26 @@ orchestrator read over the native guest agent. When done, tear down:
 testrange cleanup <run_id>
 ```
 
+Not sure which runs are still around? `testrange cleanup --list` enumerates
+every retained run with its status (`running` if a live process still owns it,
+`stopped` otherwise), phase, plan name, resource count, and creation time —
+and tears nothing down:
+
+```sh
+testrange cleanup --list
+```
+
+```
+RUN ID                    STATUS    PHASE       PLAN                RES  CREATED
+20260608-141102-9af3c1    running   run         hello                 6  2026-06-08T14:11:02Z
+20260608-093344-1b7e02    stopped   run         nested-esxi           9  2026-06-08T09:33:44Z
+```
+
+(`PLAN` is the plan's name; the source `.py` file that spawned the run is not
+recorded in state.)
+
 `testrange cleanup --all` walks every retained run under
-`$XDG_STATE_HOME/testrange/runs/` and tears each down. PID-gated:
+`$XDG_STATE_HOME/testrange/runs/` and tears each down. Lock-gated:
 refuses to act on a run whose owning process is still alive.
 
 ## What `examples/hello_world.py` shows

@@ -454,6 +454,11 @@ class HypervisorDriver(ABC):
         disk-only. Drivers that don't support memory snapshots MUST raise
         :class:`DriverError` when ``mem=True``.
 
+        ``mem=True`` requires the VM to be **running**: a powered-off VM has no
+        RAM state to capture, so the driver MUST raise :class:`DriverError`
+        rather than silently demote to a disk-only snapshot (fail loud — the
+        request is contradictory). ``mem=False`` is valid in any power state.
+
         Raises :class:`DriverError` if a snapshot with ``name`` already
         exists on this VM.
         """

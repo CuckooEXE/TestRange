@@ -104,7 +104,9 @@ unchanged. Two wording corrections to the paragraph above:
 - The sibling helper `native_capability_findings` it cites was removed (see the
   ADR-0008 addendum). `mgmt_unsupported_findings` is now the lone shared
   topology gate in `testrange/preflight.py`; `managed_build_egress_findings`
-  moved onto the driver ABC (ADR-0014).
+  moved onto the driver ABC (ADR-0014) and was subsequently **removed entirely**
+  when ADR-0016 superseded ADR-0014 (egress is out-of-band — there is nothing to
+  gate).
 - `PreflightFinding` no longer carries a severity — the error/warning tier was
   dropped, since preflight only ever emitted blockers. "one error-level
   `PreflightFinding` per offending Switch" now reads simply "one

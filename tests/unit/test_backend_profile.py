@@ -177,6 +177,23 @@ class TestUplinkTableForm:
                 'sidecar_addr = "10.10.10.2/24"\ndns = "1.1.1.1"\n',
             )
 
+    def test_gateway_must_be_a_string(self, tmp_path: Path) -> None:
+        with pytest.raises(ProfileError, match="gateway must be a string"):
+            self._load(
+                tmp_path,
+                '[p.uplinks.egress]\nbridge = "vmbr9"\n'
+                'sidecar_addr = "10.10.10.2/24"\ngateway = 42\n',
+            )
+
+    def test_invalid_addressing_is_wrapped(self, tmp_path: Path) -> None:
+        # A syntactically-OK sidecar_addr whose CIDR StaticAddr rejects must
+        # surface as a ProfileError, not a bare ValueError from the device layer.
+        with pytest.raises(ProfileError, match="addressing is invalid"):
+            self._load(
+                tmp_path,
+                '[p.uplinks.egress]\nbridge = "vmbr9"\nsidecar_addr = "not-an-ip/24"\n',
+            )
+
 
 class TestABCConstraints:
     def test_cannot_instantiate_abc(self) -> None:

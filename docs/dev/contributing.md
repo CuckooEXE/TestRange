@@ -1,5 +1,27 @@
 # Contributing
 
+## Working agreement (hard rules)
+
+These are non-negotiable for this repo (the canonical copy lives in the
+repo-root `CLAUDE.md`):
+
+- **Ticket-first.** Every change needs a task on the board in
+  [`TODO.md`](../../TODO.md) before work starts — it is both the live status and
+  the audit trail, and versions with the code. No off-the-books fixes.
+- **Gates always pass.** The standard gate below must be green on every commit —
+  no `# type: ignore` to dodge mypy, no skipped tests, no `--no-verify`. If a
+  gate fails, the work isn't done.
+- **New driver-facing capabilities land in the certification corpus.** Anything
+  that touches a driver-facing contract (devices, networks, communicators,
+  builders, snapshots, power state, pools, …) must be covered in
+  [`tests/plans/`](../../tests/plans/README.md) **in the same change** — extend
+  the relevant plan (or add one) plus a `TESTS` entry. Portable capabilities go
+  in `tests/plans/generic/` (must run on every backend); backend-specific ones
+  go in `tests/plans/<driver>/`.
+- **`PLAN.md` and `TODO.md` are sources of truth.** `PLAN.md` is the living
+  design; a change that alters design or scope is incomplete until both are
+  updated to match. If code and `PLAN.md` disagree, that's a bug to fix.
+
 ## Dev setup
 
 ```sh

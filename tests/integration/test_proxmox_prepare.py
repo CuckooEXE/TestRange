@@ -45,6 +45,62 @@ def _iso_filenames(path: Path) -> set[str]:
         iso.close()
 
 
+def _make_source_iso_with_grub(path: Path) -> None:
+    """A source ISO carrying a minimal PVE-shaped ``/boot/grub/grub.cfg`` with the
+    automated menuentry, so the serial-console rewrite has something to bite on."""
+    pycdlib = pytest.importorskip("pycdlib")
+    iso = pycdlib.PyCdlib()
+    iso.new(interchange_level=3, joliet=3, rock_ridge="1.09", vol_ident="SOURCE")
+    iso.add_directory("/BOOT", rr_name="boot")
+    iso.add_directory("/BOOT/GRUB", rr_name="grub")
+    cfg = (
+        b"menuentry 'Install Proxmox VE (Automated)' {\n"
+        b"    linux /boot/linux26 ro rw quiet splash=silent proxmox-start-auto-installer\n"
+        b"    initrd /boot/initrd.img\n"
+        b"}\n"
+    )
+    iso.add_fp(io.BytesIO(cfg), len(cfg), "/BOOT/GRUB/GRUB.CFG;1", rr_name="grub.cfg")
+    with path.open("wb") as fp:
+        iso.write_fp(fp)
+    iso.close()
+
+
+def _read_iso_file(path: Path, rr_path: str) -> bytes:
+    pycdlib = pytest.importorskip("pycdlib")
+    iso = pycdlib.PyCdlib()
+    iso.open(str(path))
+    try:
+        out = io.BytesIO()
+        iso.get_file_from_iso_fp(out, rr_path=rr_path)
+        return out.getvalue()
+    finally:
+        iso.close()
+
+
+def test_prepare_iso_adds_serial_console_to_automated_entry(tmp_path: Path) -> None:
+    from testrange.builders._proxmox_prepare import prepare_iso
+
+    src = tmp_path / "source.iso"
+    out = tmp_path / "prepared.iso"
+    _make_source_iso_with_grub(src)
+
+    prepare_iso(
+        src,
+        out,
+        partition_label="PROXMOX-AIS",
+        first_boot_script="#!/bin/bash\necho first-boot\n",
+    )
+
+    grub = _read_iso_file(out, "/boot/grub/grub.cfg").decode("utf-8")
+    auto = next(
+        ln
+        for ln in grub.splitlines()
+        if "proxmox-start-auto-installer" in ln and ln.lstrip().startswith("linux")
+    )
+    assert "console=ttyS0,115200" in auto, f"serial console not grafted: {auto!r}"
+    assert "splash=silent" not in auto and "quiet" not in auto, f"still silent: {auto!r}"
+
+
 def test_prepare_iso_injects_activation_and_first_boot(tmp_path: Path) -> None:
     from testrange.builders._proxmox_prepare import prepare_iso
 

@@ -62,7 +62,7 @@ profiles (ADR-0016):
 
 ```toml
 [pve]
-driver = "proxmox"          # scheme: proxmox | libvirt | mock
+driver = "proxmox"          # scheme: proxmox | libvirt
 host = "10.0.0.5"
 user = "root@pam"           # optional; a bare "root" takes the @pam realm
 password = "Target123!"
@@ -76,11 +76,12 @@ egress = "vmbr0"            # the out-of-band bridge a NAT sidecar routes out of
 ```
 
 Each backend ships its own concrete `BackendProfile` subclass (CORE-18) — the
-`ProxmoxProfile` shown above; `LibvirtProfile(uri, uplinks)` (no `backing_pool`
-— libvirt creates per-run dir pools itself);
-`MockProfile(pool_root, backing_capacity_gb)` for the in-memory backend. The
-`driver = "..."` scheme picks which one TestRange loads, and each subclass
-rejects keys it doesn't know (typo protection).
+`ProxmoxProfile` shown above and `LibvirtProfile(uri, uplinks)` (no `backing_pool`
+— libvirt creates per-run dir pools itself). The `driver = "..."` scheme picks
+which one TestRange loads, and each subclass rejects keys it doesn't know (typo
+protection). (The unit suite's in-memory `MockProfile` lives in
+`tests/mock_driver.py` and only registers when that test module is imported — it
+is **not** a scheme the shipped CLI can bind.)
 
 Notes:
 
@@ -107,7 +108,7 @@ Plan (Hypervisor)
     driver: proxmox (ProxmoxDriver)
     host: 10.0.0.5
     password: ***set***
-    uplinks: egress→vmbr0
+    uplinks: egress -> vmbr0
     build egress: switch 'build' (uplink=egress)
 ```
 
@@ -131,11 +132,11 @@ PLAN = Plan(
 )
 ```
 
-`examples/capabilities-px.py` is a scheme-pinned-Proxmox plan.
+`tests/plans/proxmox/devices.py` is a scheme-pinned-Proxmox plan (`ProxmoxHypervisor`).
 
 A scheme-pinned plan still **requires** `--profile` — the entry carries no
 connection. The profile's `driver` scheme **must** match the pinned scheme; a
-mismatch (e.g. a `mock` profile against a `ProxmoxHypervisor`) is a hard
+mismatch (e.g. a `libvirt` profile against a `ProxmoxHypervisor`) is a hard
 error. Running `testrange describe` on a pinned plan with no `--profile`
 renders an UNBOUND binding that names the required scheme:
 

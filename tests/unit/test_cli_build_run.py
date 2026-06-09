@@ -174,8 +174,8 @@ class TestBuildVerb:
 class TestVerboseFlag:
     def test_run_verbose_end_to_end(self, env: tuple[MockDriver, str]) -> None:
         # --verbose is a global flag (before the subcommand). On a non-tty
-        # (pytest capture) live_output takes its plain-logging path; the run
-        # still completes normally (CORE-6).
+        # (pytest capture) run_dashboard takes its plain-logging path; the run
+        # still completes normally (CORE-6, ADR-0029).
         driver, plan_path = env
         rc = cli.main(["--verbose", "run", plan_path])
         assert rc == 0
@@ -241,6 +241,41 @@ class TestDataDiskLifecycle:
             if c[0] == "upload_to_pool" and "tr_vm_" in c[1][0] and c[1][0].endswith("-data0.qcow2")
         ]
         assert len(run_data_uploads) == 1
+
+
+class TestResultReporting:
+    """`[PASS]`/`[FAIL]` report lines are gated on the dashboard being inactive
+    (CORE-83): the live dashboard already shows pass/fail, so a redundant dump
+    below the final frame is suppressed when it was active — but failures (which
+    the tests panel renders without their error) still print."""
+
+    def test_no_dashboard_prints_pass_lines(
+        self, env: tuple[MockDriver, str], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _driver, plan_path = env
+        # Non-tty under pytest capture, so the dashboard is inactive regardless;
+        # --no-dashboard makes the intent explicit. The PASS line is the output.
+        assert cli.main(["--no-dashboard", "run", plan_path]) == 0
+        assert "[PASS] test_ok" in capsys.readouterr().out
+
+    def test_active_dashboard_suppresses_pass_lines(
+        self,
+        env: tuple[MockDriver, str],
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import io
+
+        from rich.console import Console
+
+        _driver, plan_path = env
+        # Force the dashboard active by giving cli a tty- like stderr console.
+        term = Console(file=io.StringIO(), force_terminal=True)
+        monkeypatch.setattr(cli, "err_console", lambda: term)
+        assert cli.main(["run", plan_path]) == 0
+        # The passing test's report line is suppressed on stdout (the dashboard,
+        # on stderr, already showed it).
+        assert "[PASS]" not in capsys.readouterr().out
 
 
 class TestBuildParser:

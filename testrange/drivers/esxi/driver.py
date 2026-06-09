@@ -166,8 +166,6 @@ class ESXiDriver(HypervisorDriver):
     def disconnect(self) -> None:
         self._client.close()
 
-    # -- pure naming (ESXI-7) ---------------------------------------------
-
     def compose_resource_name(self, run_id: str, kind: str, name: str) -> str:
         return _naming.compose_resource_name(run_id, kind, name)
 
@@ -179,8 +177,6 @@ class ESXiDriver(HypervisorDriver):
 
     def volume_suffix(self, kind: str) -> str:
         return _naming.volume_suffix(kind)
-
-    # -- preflight (ESXI-9) -----------------------------------------------
 
     @_translates
     def preflight(
@@ -296,8 +292,6 @@ class ESXiDriver(HypervisorDriver):
             ),
         )
 
-    # -- L2 fabric (ESXI-2) -----------------------------------------------
-
     @_translates
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         # Resolve the logical uplink name (ADR-0016) to a physical NIC; None when
@@ -348,8 +342,6 @@ class ESXiDriver(HypervisorDriver):
         with self._state_lock:
             _net.destroy_network(self._client, backend_name)
 
-    # -- datastore pool + volumes (ESXI-3) --------------------------------
-
     @_translates
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any:
         return _storage.create_pool(self._client, pool, backend_name)
@@ -381,8 +373,6 @@ class ESXiDriver(HypervisorDriver):
     @_translates
     def delete_volume(self, vol_ref: VolumeRef) -> None:
         _storage.delete_volume(self._client, vol_ref)
-
-    # -- VM lifecycle (ESXI-4) --------------------------------------------
 
     @_translates
     def create_vm(
@@ -427,8 +417,6 @@ class ESXiDriver(HypervisorDriver):
     def get_vm_power_state(self, backend_name: str) -> str:
         return _vm.get_vm_power_state(self._client, backend_name)
 
-    # -- native guest agent: VMware Tools (ESXI-5) ------------------------
-
     def native_guest_execute(
         self, backend_name: str, *, credential: Credential | None = None
     ) -> GuestExec:
@@ -461,12 +449,8 @@ class ESXiDriver(HypervisorDriver):
             password=self._conn.password or None,
         )
 
-    # -- build-result sink (ESXI-8) ---------------------------------------
-
     def read_build_result_sink(self, backend_name: str) -> Generator[bytes, None, None]:
         return _serial.read_build_result_sink(self._client, backend_name)
-
-    # -- snapshots (ESXI-6) -----------------------------------------------
 
     @_translates
     def create_snapshot(

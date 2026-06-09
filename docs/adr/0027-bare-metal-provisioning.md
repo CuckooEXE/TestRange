@@ -56,7 +56,7 @@ uplinks) and feeds the answer file; `--controller [file:]name` resolves a
   iLO5+/iDRAC9+/Lenovo XCC/Supermicro X11+), lazy-imported via `_import_redfish()`
   with a `[redfish]` install hint.
 
-- **`ProvisioningPlan(host: HostRecipe)` is nameless.** A populate `Plan` carries a
+- **`ProvisioningPlan(host: HostRecipe)` is nameless.** A populated `Plan` carries a
   name because it namespaces backend resources (`compose_mac(plan_name, …)`,
   per-plan pools) and because teardown must find its resources. Provision has
   none of that — the box *is* the resource, there is no co-tenancy to namespace,
@@ -152,5 +152,5 @@ uplinks) and feeds the answer file; `--controller [file:]name` resolves a
   box is an end in itself); when the output *is* a hypervisor, `run --profile`
   targets it next.
 - Provisioning is a **controller** capability, so it is exercised by its own
-  `examples/provision-proxmox.py`, not an `examples/capabilities.py` entry (the
-  portable *driver* survey).
+  provisioning plan, not a `tests/plans/` *driver*-certification entry (the
+  portable driver corpus, ADR-0028).

@@ -12,6 +12,10 @@ dist/
 .venv/
 venv/
 
+# No lockfile: pyproject.toml dependency ranges are authoritative (library, not
+# app). Ignore a regenerated uv.lock so `uv lock` can't sneak one back in.
+uv.lock
+
 # Test/lint caches
 .pytest_cache/
 .mypy_cache/
@@ -54,3 +58,6 @@ tools/build-sidecar-image/*.manifest.json
 
 # Research scratch (diag scripts, captures, screenshots, RE notes) — not codebase
 notes/
+
+# live certification run logs (REL e2e)
+*-cert.log

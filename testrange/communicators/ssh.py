@@ -17,6 +17,7 @@ uses the first NIC that carries an address::
 
 from __future__ import annotations
 
+import contextlib
 import io
 import shlex
 import socket
@@ -275,6 +276,12 @@ class SSHCommunicator(Communicator):
             finally:
                 drain.join(timeout)
             if drain.is_alive():
+                # The drain thread is still blocked on stderr.read() against the
+                # live channel. Close the channel so that read returns and the
+                # daemon thread (and its fd) is released, instead of leaking until
+                # the whole client is closed.
+                with contextlib.suppress(Exception):
+                    stdout.channel.close()
                 raise CommunicatorError(
                     f"SSH stderr drain of {cmd!r} on {self._host} did not finish "
                     f"within {timeout:.0f}s"

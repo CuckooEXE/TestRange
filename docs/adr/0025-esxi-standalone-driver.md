@@ -96,7 +96,7 @@ the unvalidated caveat is documentation. `ConfigSpec.firmware` maps
 
 - A new host-binary runtime dep (`qemu-img`, ADR-0024) for image-origin ESXi
   builds; preflight gates its absence (ESXI-9).
-- The portable `examples/capabilities.py` needs ESXi-aware adjustments (ESXI-12):
+- The portable cert corpus (`tests/plans/`) needs ESXi-aware adjustments (ESXI-12):
   `open-vm-tools` in the native image, guest credentials for VMware Tools, and
   disk device naming that isn't virtio-specific (`/dev/sd*`, not `/dev/vd*`).
 - Licensing: the vSphere **API write** path requires a non-free license (the free

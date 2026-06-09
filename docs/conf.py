@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
 project = "testrange"
 author = "testrange contributors"
-copyright = f"{author}"
+copyright = f"2026, {author}"
+
+try:
+    release = _pkg_version("testrange")
+except PackageNotFoundError:  # docs built without the package installed
+    release = ""
+version = ".".join(release.split(".")[:2])
 
 extensions = [
     "myst_parser",
@@ -28,6 +37,8 @@ myst_heading_anchors = 3
 html_theme = "furo"
 html_title = "testrange"
 html_static_path = ["_static"]
+html_logo = "_static/testrange-icon.svg"
+html_favicon = "_static/testrange-icon.png"
 
 # Sphinx 9.x dropped the implicit "include common metadata" default — silence
 # the "no master document" warning by being explicit.

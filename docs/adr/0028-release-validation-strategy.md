@@ -37,32 +37,59 @@ Two further problems shaped this:
 Cut a **`REL` release-validation epic** with three pillars, gated on all three
 backends passing the same adversarial suite before 1.0.0.
 
-### 1. An adversarial e2e suite in `tests/end-to-end/`, distinct from `capabilities.py`
+### 1. A certification & regression corpus in `tests/plans/`, run via `testrange run`
 
-A new `tests/end-to-end/` tree holds portable, backend-agnostic **Plans**
-(`PLAN` + `TESTS`, the same shape as `examples/`), each opening with a docstring
-stating **what** it stresses and **why** that edge is failure-prone. They run
-the normal way — `testrange run --profile <name> tests/end-to-end/plans/<plan>.py`
-— and are *also* wrapped by `test_e2e_<backend>.py` harnesses behind the
-per-backend pytest markers (`libvirt`/`proxmox`/`esxi`), gated on
-`TESTRANGE_*_PROFILE`, mirroring the existing cert wiring so they run out-of-band
-against a live host in CI.
+> **Amended 2026-06-07 (REL-2).** This pillar originally placed the suite in
+> `tests/end-to-end/` and wrapped each plan in a `test_e2e_<backend>.py` pytest
+> harness behind per-backend markers. That was reframed: the corpus now lives in
+> `tests/plans/` and is a **standalone `testrange run` artifact, not collected or
+> executed by pytest**, and it is the **new backend certification** (it
+> supersedes `examples/capabilities.py`, which is slated for deletion rather than
+> kept as a parallel survey). The rest of the strategy is unchanged.
+
+A `tests/plans/` tree holds **Plans** (`PLAN` + a few `TESTS`, the same shape as
+`examples/`), one plan per file, each opening with a docstring stating **what**
+it stresses and **why** that edge is failure-prone. They run the normal way —
+`testrange run --profile <name> tests/plans/<tier>/<plan>.py` — and that is the
+*only* way they run: the files are named without a `test_` prefix and the tree
+carries no `__init__.py`, so `pytest` (which collects `test_*.py`) never picks
+them up. They are still linted and type-checked (`ruff`, `mypy --strict`) as part
+of the standard gate. Keeping them out of pytest is deliberate: bringing up a
+real VM range is not a unit test, and a marker-gated harness would couple the
+corpus to the `pytest -m "not proxmox and not libvirt"` gate it has no business
+touching.
 
 Two tiers:
 
-- **Generic** plans run on *every* backend (lifecycle/power churn, networking
-  edge matrices, build/cache reuse, snapshot + memory-snapshot churn,
-  concurrency `--jobs`, teardown/leak/cleanup, error paths).
-- **Backend-specific** plans (`libvirt_specific.py`, `proxmox_specific.py`,
-  `esxi_specific.py`) exercise what only that backend exposes (device
-  bus/model concretes, VMXNET3, datastore/vmdk specifics, QGA vs VMware Tools,
-  remote `qemu+ssh` gateway).
+- **Generic** plans in `tests/plans/generic/` run on *every* backend
+  (lifecycle/power churn, identity/credential boundary, networking edge
+  matrices, build/cache reuse + disk integrity, snapshot + memory-snapshot
+  churn, concurrency `--jobs`). They are portable — plain `Hypervisor`, logical
+  `uplink`, no host/creds.
+- **Per-driver** plans in `tests/plans/{libvirt,proxmox,esxi}/` pin the driver
+  `Hypervisor` subclass and use that backend's **concrete device types**
+  (`LibvirtDataDrive`/`LibvirtNetworkIface`, `ProxmoxHardDrive`, `ESXiHardDrive`)
+  to exercise what only that backend exposes (controller bus/model, UEFI/OVMF
+  firmware, vmdk specifics, QGA vs VMware Tools guest-ops).
 
-`capabilities.py` stays **THE** certification survey (CLAUDE.md rule 4 unchanged;
-new capabilities still land there first). The e2e suite is the additive,
-adversarial layer on top of it — it does not replace it.
+A backend is **certified** when its generic sweep *and* its per-driver sweep are
+green; re-running the corpus after any change is the regression guard. New
+driver-facing capabilities land here as the corpus grows (replacing the old
+"land in `capabilities.py` first" rule once that file is removed).
 
 ### 2. An unmanaged, scripted nested host fleet in `tools/`
+
+> **Amendment 2026-06-08 (REL-10 WontDo):** the in-repo scripted scaffold below
+> is dropped. Scripts/orchestration for standing up validation hosts will **not**
+> live in this repo — the previously-rejected "operator stands the host up
+> out-of-band" approach is now adopted for the *host-provisioning* layer. The
+> repo still ships the certification corpus (`tests/plans/`) and the `testrange
+> run` runner; the operator brings a host and binds it to an `*-e2e` profile.
+> `tools/hypervisor-hosts/` is never created. The rest of this section (raw
+> non-TestRange standup, the independence rationale, the `*-e2e` profile
+> targets, the ESXI-11/12/13 + BUILD-13 egress supersession) still holds — it
+> just happens by hand rather than via in-repo tooling. REL-11/12/13 are
+> unblocked accordingly.
 
 A scripted harness under `tools/hypervisor-hosts/` stands up each hypervisor as a
 **raw libvirt VM** (`virt-install` + kickstart / answer ISO), **independent of
@@ -113,10 +140,13 @@ than intent.
 
 ## Consequences
 
-- A new `REL` swimlane and epic (REL-1..20): the e2e scaffolding + suite
-  (`tests/end-to-end/`), the `esxi` pytest marker, the scripted host fleet
-  (`tools/hypervisor-hosts/`), three run-and-report tasks, the docs/PLAN/TODO
-  reconciliation pass, and the release cut.
+- A new `REL` swimlane and epic (REL-1..20): the certification corpus
+  (`tests/plans/`, run via `testrange run` — **not** collected by pytest; see the
+  REL-2 amendment, which relocated it from the originally-planned
+  `tests/end-to-end/`), the scripted host fleet, three run-and-report tasks, the
+  docs/PLAN/TODO reconciliation pass, and the release cut. (The `esxi` pytest
+  marker and a `tools/hypervisor-hosts/` directory named in earlier drafts were
+  not created — see the REL-10 amendment.)
 - The ESXi cert tail (ESXI-11/12/13) and BUILD-13 are **unblocked** by the host
   fleet's egress; they fold into the e2e validation rather than waiting on the
   bare-metal host.

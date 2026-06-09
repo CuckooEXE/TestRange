@@ -529,6 +529,14 @@ class TestSnapshots:
         with pytest.raises(DriverError, match="already exists"):
             _vm.create_snapshot(client, "vm", "s1")  # type: ignore[arg-type]
 
+    def test_memory_snapshot_on_shutoff_vm_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ABC contract: mem=True requires a running VM (no RAM to capture off).
+        monkeypatch.setattr(_vm, "_import_libvirt", _fake_libvirt)
+        client = FakeClient()
+        client.domains["vm"] = FakeDomain("vm", state=5)  # shut off
+        with pytest.raises(DriverError, match="to be running"):
+            _vm.create_snapshot(client, "vm", "s1", mem=True)  # type: ignore[arg-type]
+
     def test_list_is_oldest_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_vm, "_import_libvirt", _fake_libvirt)
         client = FakeClient()

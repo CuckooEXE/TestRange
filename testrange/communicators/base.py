@@ -51,4 +51,13 @@ class Communicator(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """Release the connection. Idempotent."""
+        """End the current session. Idempotent and **not terminal**.
+
+        The communicator stays bound; the next ``execute``/``read_file``/
+        ``write_file`` re-establishes the session transparently. This is the
+        contract a Plan relies on to keep using one communicator across a guest
+        power cycle — ``driver.start_vm(...)`` then ``com.close()`` then
+        ``com.execute(...)``, where the next call waits out the reboot and
+        reconnects. (A communicator is still bind-once: a bound instance is
+        never re-bound to another VM.)
+        """

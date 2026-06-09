@@ -23,10 +23,10 @@ import shutil
 import tempfile
 import threading
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from testrange._log import get_logger
 from testrange.cache._names import validate_name
@@ -389,41 +389,36 @@ def _sha256_of(path: Path) -> str:
         return hashlib.file_digest(f, "sha256").hexdigest()
 
 
-def _atomic_copy(src: Path, dst: Path) -> None:
-    """Copy ``src`` to ``dst`` via a unique temp + ``os.replace``.
+def _atomic_materialize(path: Path, write: Callable[[BinaryIO], object]) -> None:
+    """Materialize ``path`` atomically: ``write`` into a unique temp, then
+    ``durable_replace`` it into place.
 
     The temp name comes from :func:`tempfile.mkstemp` (not a fixed
-    ``<dst>.partial``) so two concurrent copies of the same content sha don't
-    collide on one staging path (ADR-0023).
-    """
-    fd, tmp_name = tempfile.mkstemp(dir=dst.parent, suffix=".partial")
-    os.fchmod(fd, 0o644)  # mkstemp is 0600; restore the umask-typical cache perms
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as w, src.open("rb") as r:
-            shutil.copyfileobj(r, w)
-        durable_replace(tmp, dst)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` via a unique temp + ``os.replace``.
-
-    Unique temp (not ``<path>.partial``) so concurrent writers of the same
-    content-addressed sidecar don't race a fixed staging name (ADR-0023).
+    ``<path>.partial``) so two concurrent writers of the same content-addressed
+    target don't collide on one staging path (ADR-0023). The temp is unlinked on
+    any failure (including ``BaseException``), so a partial write never lingers.
     """
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=".partial")
     os.fchmod(fd, 0o644)  # mkstemp is 0600; restore the umask-typical cache perms
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as w:
+            write(w)
         durable_replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _atomic_copy(src: Path, dst: Path) -> None:
+    """Copy ``src`` to ``dst`` via a unique temp + ``durable_replace``."""
+    with src.open("rb") as r:
+        _atomic_materialize(dst, lambda w: shutil.copyfileobj(r, w))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` via a unique temp + ``durable_replace``."""
+    _atomic_materialize(path, lambda w: w.write(text.encode("utf-8")))
 
 
 def _now_utc_iso() -> str:

@@ -44,3 +44,13 @@ simply no longer literally true.
 - A future parallel install pass is a long-term TODO; it'll need a
   per-driver ``RLock`` (libvirt-python isn't fully thread-safe) plus
   whatever cross-process locking the cache needs.
+
+> **Addendum (2026-06-08, DOCS-20):** two things above have since changed.
+> (1) The "no ``ThreadPoolExecutor``" line and the "future parallel pass" TODO
+> were superseded by **ADR-0023** (in-process I/O parallelism): I/O phases now
+> run on a bounded ``ThreadPoolExecutor`` (``--jobs``) behind a per-driver
+> ``call_lock``, while *tests* still run serially. The "no ``asyncio`` in
+> ``testrange/``" decision is unchanged. (2) The pyroute2 caveat is moot —
+> pyroute2 was **dropped** (ADR-0016); bridges are built by the libvirt daemon
+> via the network API, so no dependency in the tree carries an asyncio variant
+> anymore.

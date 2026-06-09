@@ -48,6 +48,13 @@ _POLL_INTERVAL_S = 0.25
 # QGA reads return base64 in bounded chunks; loop until eof. 256 KiB/read keeps
 # the lease-file / marker reads to one or two round-trips.
 _READ_CHUNK = 256 * 1024
+# QGA's guest-file-write caps a single command's payload (a too-large buf-b64
+# wedges the agent — empirically a 256 KiB write times the channel out), so we
+# loop writes against one open handle (each write advances the file position)
+# rather than sending the whole blob at once. 32 KiB raw (~43 KiB base64) stays
+# comfortably under the ceiling — at/under the ~45 KB the Proxmox QGA path also
+# caps a single write at.
+_WRITE_CHUNK = 32 * 1024
 
 
 def _resolve_domain(client: LibvirtClient, backend_name: str) -> Any:
@@ -157,17 +164,25 @@ def make_write_file(client: LibvirtClient, backend_name: str) -> GuestWriteFile:
                 {"execute": "guest-file-open", "arguments": {"path": path, "mode": "w"}},
             )
             try:
-                _agent_command(
-                    client,
-                    dom,
-                    {
-                        "execute": "guest-file-write",
-                        "arguments": {
-                            "handle": handle,
-                            "buf-b64": base64.b64encode(data).decode("ascii"),
+                # Write in bounded chunks against the open handle: each write
+                # advances the file position, so the slices land contiguously and
+                # an arbitrarily large payload never exceeds the agent's
+                # per-command size cap. An empty payload still truncates (the
+                # mode="w" open did), so the loop is skipped only when there is
+                # nothing to write.
+                for start in range(0, len(data), _WRITE_CHUNK):
+                    chunk = data[start : start + _WRITE_CHUNK]
+                    _agent_command(
+                        client,
+                        dom,
+                        {
+                            "execute": "guest-file-write",
+                            "arguments": {
+                                "handle": handle,
+                                "buf-b64": base64.b64encode(chunk).decode("ascii"),
+                            },
                         },
-                    },
-                )
+                    )
             finally:
                 _agent_command(
                     client, dom, {"execute": "guest-file-close", "arguments": {"handle": handle}}
