@@ -505,7 +505,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (258)
+## Done (260)
 
 ### REL
 
@@ -520,6 +520,14 @@ on 2026-06-06.
   > DONE 2026-06-06. PLAN.md section "Bare-metal provisioning via out-of-band controller (ADR-0027)" + ADR-0027 (docs/adr/0027-bare-metal-provisioning.md, indexed) both landed. Records: third verb, NOT a run flag; controller is its OWN ABC, not a HypervisorDriver; nameless ProvisioningPlan; HostRecipe = spec x builder (no communicator, explicit builder injection, no front-door classmethods); HostSpec requirements-contract (Required* devices, discrete 1:1, no count/selector); inventory matcher + don't-touch; installer-origin only v1. Rejected alternatives captured in the ADR: BMC-as-HypervisorDriver, [proxmox.install] TOML block, --controller-on-run, count=/selector on requirements.
 
 ### CORE
+
+- [x] **CORE-82** · `chore` — route captured qemu-img output through logging (not discarded) _(done: 2026-06-08)_
+
+  > Follow-on to CORE-81. Audited every subprocess site (drivers/_diskconvert.py qemu-img; builders/_proxmox_prepare.py + _esxi_prepare.py xorriso) — all already use capture_output=True, so NONE leak to fd 2 / corrupt the dashboard (my earlier worry about qemu-img was wrong). The remaining gap: on SUCCESS the captured stdout/stderr was discarded. _diskconvert._run now logs any qemu-img chatter (progress/warnings) at DEBUG via the testrange logger, so every byte of output goes through the rich logging stack (ADR-0029) and nothing reaches the raw terminal. Test test_diskconvert.py::test_qemu_img_chatter_is_logged_not_discarded_or_leaked (fake subprocess.run → assert the stderr lands on the _diskconvert logger). The 3 xorriso sites share the identical capture-then-discard pattern (also off fd 2); left as-is unless wanted. Gates green: ruff (subprocess-ban respected), format, mypy --strict, unit suite.
+
+- [x] **CORE-81** · `bugfix` — libvirt C-level errors hit fd 2 directly, corrupting the dashboard _(done: 2026-06-08)_
+
+  > User-reported: the live dashboard flickers and shows glimpses of `libvirt: …`. ROOT CAUSE: libvirt's C layer prints every error to fd 2 by default (e.g. `libvirt: QEMU Driver error : Domain not found`), bypassing Python logging — so it never reaches DashboardLogHandler, and rich.Live's redirect_stderr can't catch it (that only wraps Python's sys.stderr, not the raw fd a C library writes to) → it lands on the terminal mid-frame and corrupts the Live region. FIX: drivers/libvirt/_conn.py::_route_libvirt_errors_to_log registers a libvirt error handler (in _import_libvirt, once, process-global) that logs at DEBUG via the testrange logger instead of stderr; the libvirtError exception still carries the message the driver surfaces explicitly, and many fire on benign polling/teardown conditions so DEBUG keeps them quiet. GOTCHA: registerErrorHandler(f, ctx) takes the callback FIRST — initial (None, handler) registered nothing and still leaked; (handler, None) is correct. LIVE-VERIFIED on real libvirt: a Domain-not-found lookup that printed to stderr before is now silenced (exception still raised + handled). Tests: test_libvirt_conn.py (registration + DEBUG-routing on the _conn logger directly to dodge propagate=False, + idempotency). Gates green: ruff, format, mypy --strict, full unit suite.
 
 - [x] **CORE-80** · `bugfix` — `_LineLogWriter.flush()` infinite recursion via a RichHandler on the tree _(done: 2026-06-08)_
 

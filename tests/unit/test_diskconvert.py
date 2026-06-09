@@ -7,7 +7,10 @@ to a host binary. The absence path (``require_qemu_img``) is tested without it.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -63,3 +66,40 @@ class TestConversion:
     def test_missing_source_fails_loud(self, tmp_path: Path) -> None:
         with pytest.raises(DriverError, match="does not exist"):
             _diskconvert.convert(tmp_path / "nope.qcow2", tmp_path / "x.vmdk", out_format="vmdk")
+
+
+class _Sink(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_qemu_img_chatter_is_logged_not_discarded_or_leaked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """qemu-img's captured stderr is routed to DEBUG logging, never to fd 2.
+
+    ``capture_output=True`` already keeps it off the terminal (so it can't corrupt
+    the live dashboard); this asserts the success-path output is logged rather
+    than silently dropped (ADR-0029 — all output through the rich logging stack).
+    """
+
+    def _fake_run(_argv: list[str], **_kw: Any) -> SimpleNamespace:
+        # Duck-typed CompletedProcess: _run only reads .stdout / .stderr.
+        return SimpleNamespace(stdout="", stderr="qemu-img: warning: lazy refcounts")
+
+    monkeypatch.setattr("testrange.drivers._diskconvert.subprocess.run", _fake_run)
+    logger = logging.getLogger("testrange.drivers._diskconvert")
+    sink = _Sink()
+    logger.addHandler(sink)
+    prev = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        _diskconvert._run(["qemu-img", "convert", "a", "b"])
+    finally:
+        logger.removeHandler(sink)
+        logger.setLevel(prev)
+    assert any("lazy refcounts" in r.getMessage() for r in sink.records)
