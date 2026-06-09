@@ -58,3 +58,6 @@ tools/build-sidecar-image/*.manifest.json
 
 # Research scratch (diag scripts, captures, screenshots, RE notes) — not codebase
 notes/
+
+# live certification run logs (REL e2e)
+*-cert.log

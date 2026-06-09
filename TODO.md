@@ -8,19 +8,16 @@ on 2026-06-06.
 - **Categories** (swimlanes): PVE · BACKEND · NET · CACHE · ORCH · BUILD · COMM · PROXY · CORE · CI · DOCS · ESXI · PROV · REL.
 - **Ticket shape:** `<type> | <ID>: description` — `type` ∈ feat/bugfix/chore/ci/test/docs/EPIC; `ID` uses the swimlane prefix.
 
-> Migrated 294 tickets — Doing 13, Ready 26, Done 242, Archive 13.
+> Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
+> the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (16)
+## Doing (10)
 
 ### CORE
 
 - [ ] **CORE-41** · `chore` — per-driver preflight capability rejection (firmware/installer-origin)
 
   > Code-review remediation (feature/builders, 2026-06-01). The Builder ABC says the driver MUST reproduce firmware/installer-origin, but nothing rejects a plan requesting firmware=uefi or installer-origin against a backend that cannot honor it (drivers/base.py:317-324). Latent today (only libvirt ships it). Add a per-driver preflight finding for unsupported firmware/origin, mirroring mgmt_unsupported_findings. User: drivers should offer their own pre-flight that rejects findings like this.
-
-- [ ] **CORE-83** · `bugfix` — `run` dumps `[PASS]` report lines after the dashboard (ADR-0029)
-
-  > After the live dashboard exits, `_run` (cli.py:300-301) unconditionally prints `r.report_line()` for every result, so even with the dashboard active the terminal gets a redundant `[PASS] …` block below the final frame — the dashboard already showed pass/fail. Gate the dump on dashboard-inactive (`--no-dashboard` or non-TTY), where those stdout lines ARE the machine-readable output. Keep printing FAILED lines when active, since the tests panel shows only glyph+duration, not the error/traceback. Found 2026-06-08.
 
 ### ESXI
 
@@ -76,10 +73,6 @@ on 2026-06-06.
 
 ### DOCS
 
-- [ ] **DOCS-22** · `docs` — integrate project logos into README + Sphinx site
-
-  > User added project logos (icon + horizontal wordmark, PNG + SVG). Moved them into `docs/_static/` (was `docs/images/`; `_static/` is what `html_static_path` already serves, and creating it also clears the pre-existing missing-`_static` build warning). Wire-up: README header (horizontal PNG), Sphinx `html_logo` = icon SVG + `html_favicon` = icon PNG in conf.py, horizontal SVG hero on `docs/index.md`.
-
 - [ ] **DOCS-8** · `docs` — ADR-0022 rescope (two prep modules + ESXi patch) + xorriso install note
 
   > Code-review remediation (feature/builders, 2026-06-01). ADR-0022 is scoped PVE-only / one module but the branch ships a second sanctioned subprocess module (_esxi_prepare.py), acknowledged by the ban whitelist + pyproject. Rescope ADR-0022 to installer-ISO prep generally; name both sanctioned modules; document the ESXi -boot_image any patch divergence (vs PVE keep) and the -rockridge off / two-pass flags. Add the 'apt install xorriso' system-dep note to docs/user/drivers (Proxmox section) — currently only pip install -e ..
@@ -92,22 +85,6 @@ on 2026-06-06.
 
 ### REL
 
-- [x] **REL-22** · `bugfix` — build_cache.py: post-install order marker unreadable by the non-root communicator _(done: 2026-06-08)_
-
-  > Found running `tests/plans/generic/build_cache.py` live (REL-14/15/16). `post_install_commands_ran_in_order` reads `/root/order` via the `admin` SSHCommunicator and gets `b''`. Not an ordering or cache bug: the disk-content tests pass, so the post-install echoes *did* run. The marker is written to `/root/order` by cloud-init `runcmd` (as root) at build time, but `/root` is mode 0700, so the non-root `admin` user can't read it at run time — `cat` returns empty stdout and the assert fails. Fix: write the ordering marker to a world-readable path that survives reboot (the other markers live under `/srv`, which is root-owned 0755), and point the test at it. DONE in working tree; changes `runcmd` so the next run is a cache miss + rebuild.
-
-- [x] **REL-23** · `bugfix` — Communicator.close() contract: NativeCommunicator is terminal, SSHCommunicator reconnects _(done: 2026-06-08)_
-
-  > Found running `tests/plans/generic/lifecycle.py` live (REL-16). Four failures, all the same root cause: `churn_survives_repeated_power_cycles`, `reboot_persists_on_disk_state`, `oversized_os_drive_grew_on_first_boot` (latter two cascade — they reuse the communicator the first test already closed), and `headless_survives_power_cycle`. The portable power-cycle idiom — `driver.start_vm(...)` → `com.close()` → `com.execute(...)` — relies on `close()` dropping the stale session and the *next* call transparently reconnecting. `SSHCommunicator` honors this (`close()` nulls `_client`; `_ensure_connected()` re-dials, retrying up to 180s for sshd to return) — `snapshots.py` uses the exact same idiom and passes. `NativeCommunicator.close()` is *terminal* (sets `_closed`, nulls callables, `_check_usable()` raises `CommunicatorClosedError` forever). The cert corpus is the portability spec and two plans depend on the reconnect semantic, so the contract must be uniform. Fix (product side): make `NativeCommunicator.close()` a session reset that leaves the communicator bound + usable (QGA is sessionless — callables are domain-bound closures), and have its `execute`/`read_file`/`write_file` tolerate the post-power-cycle agent-not-ready window by retrying on `GuestAgentError` up to a timeout (mirror SSH's `_ensure_connected` reconnect loop; the bind-time wait in `run_phase._wait_one_communicator_ready` doesn't cover in-test power cycles). Keep the re-*bind* guard (a closed/ bound communicator still must not be re-bound to another VM). Applies to every backend's NativeCommunicator path (libvirt + Proxmox). Document the `Communicator.close()` contract on the ABC + PLAN.
-
-- [x] **REL-24** · `bugfix` — DHCP NICs get no lease on native-communicator guests _(done: 2026-06-08)_
-
-  > Found running `tests/plans/generic/{concurrency,networking}.py` live (REL-16). Symptom: DHCP NICs acquire no lease while static NICs on the *same* guest come up fine. `concurrency.every_node_has_a_distinct_lease`: node shows only `lo`. `networking.client_dhcp_lease_in_pool`: client shows only its static priv-net addr (10.20.0.101), no 10.30.0.x lease. Downstream cascade in networking (all trace to the missing lease): `client_has_exactly_one_default_route` (got []), `client_reaches_public_web_across_labels_via_dns` + `public_web_reaches_internet_through_nat` (curl exit 6 = couldn't resolve — no DHCP-supplied resolver/route). Strong correlation: every SSH-communicator VM leased (build_cache/snapshots/users_credentials on lab-net got 10.40.0.x); every native-communicator VM that needed DHCP did not — even though lab-net's switch/sidecar config is byte-identical between build_cache (SSH, leases) and concurrency (native, no lease). The orchestrator only polls the sidecar dnsmasq lease file for SSH VMs (`discover_ip`), never for native VMs, so native DHCP failures were previously invisible. RESOLVED 2026-06-08: not a guest or sidecar bug — DHCP works. It's an orchestrator race. Live repro (one native + one SSH VM on one DHCP switch) showed the native guest leases at ~11s post-boot, but the orchestrator binds a NativeCommunicator the instant its QGA answers (~8s) and runs tests immediately; SSH VMs are gated by `discover_ip`'s sidecar-lease poll. concurrency's three tests ran in a ~1.5s window starting ~8s in, before the lease landed. Static NICs apply at boot, hence client's static showed but its DHCP NIC didn't. Fix: added `run_phase.wait_dhcp_leases(ctx)` — a backend-agnostic gate (extracted `_wait_for_dhcp_lease` from `discover_ip`) that polls the per-switch sidecar dnsmasq lease file for every DHCP NIC on every VM, wired into `runtime.__enter__` after `wait_communicators_ready`. Regression test `test_qga_dhcp_nic_waits_for_sidecar_lease`. Verified live: concurrency 3/3, networking 7/7 (incl. the pub-sw two-Network-on-one-L2 cross-label DNS + NAT paths, which were only masked by the race — L2 sharing confirmed good).
-
-- [x] **REL-25** · `test` — libvirt integration: serial-sink test stale vs build_nic-OR-boot_media gating _(done: 2026-06-08)_
-
-  > Found running `pytest -m "not proxmox and not esxi"` on feature/release-check: `tests/integration/test_libvirt.py::test_vm_lifecycle_serial_sink_and_snapshots` fails with `DriverError: no serial listener open for 'tr-vm-...-box'`. Not a product regression — the test is stale. It boots a NIC-less, seed-only guest and assumes a seed makes `create_vm` open the unix-socket serial sink, the pre-CORE-47 contract. The gating was deliberately reconciled (CORE-47, ~2026-06-01) to `build_nic is not None or boot_media_ref is not None`: a seed alone is a sidecar (monitored via QGA, not the serial sink), and binding the host-side socket for one is dead weight locally and outright broken on a remote daemon (nested-virt's remote-security-driver constraint, ADR-0021). Every production serial-sink boot sets `build_nic` (build_phase.py:512). FIX (test-side): attach a `boot_media_ref` so the boot is installer-origin and the sink opens per contract, staying NIC-less (the OS disk is bootable at order 1, so the guest still boots the base image and emits console bytes; the medium at order 2 is never reached). DONE 2026-06-08 in the working tree.
-
 - [ ] **REL** · `EPIC` — 1.0.0 validation & release: adversarial e2e suite on an unmanaged nested host fleet, then cut v1.0.0
 
   > Umbrella for the road to 1.0.0 — a validation pass, not a feature. Prove all three backends (libvirt, Proxmox, ESXi) hold up under the same adversarial end-to-end suite, on the same portable plans, on independently-built hosts; then reconcile docs/PLAN/TODO against validated reality and freeze the public API. Design of record: PLAN.md "1.0.0 validation & release" + ADR-0028 (REL-1).
@@ -116,7 +93,7 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (54)
+## Ready (53)
 
 ### CORE
 
@@ -143,9 +120,8 @@ on 2026-06-06.
   > Introduce proxmox-specific StoragePool subclass(es) for block-storage backends (lvm/zfs/ceph) + block-store volume I/O — the current dir+SFTP-into-content-dir model has no content dir on block stores (likely needs qm importdisk / REST alloc instead of sftp_put). Surfaced in capabilities-px.py (PVE-46), NOT the portable example. "Everything that makes sense", no niche over-optimizing. Proxmox-specific device per the driver-only scope.
 
 - [ ] **BUILD-13** · `test` — nested-PVE build smoke vs libvirt reference
-  _(blocked by: BUILD-1d, BUILD-2e, BUILD-12)_
 
-  > PARTIAL 2026-06-01. Runnable slice DONE: tests/integration/test_proxmox_prepare.py exercises the sanctioned xorriso prepare_iso end-to-end (real subprocess: injects /auto-installer-mode.toml + /proxmox-first-boot, preserves source content) — 2 tests green (xorriso present). BLOCKED on environment for the FULL nested-PVE build to green: needs a cached PVE 9 ISO + nested KVM + a bound libvirt-local profile (none in this sandbox). Run on a cert host: python -m testrange.cli run --profile libvirt-local examples/capabilities.py (pve-node).
+  > PARTIAL 2026-06-01. Runnable slice DONE: tests/integration/test_proxmox_prepare.py exercises the sanctioned xorriso prepare_iso end-to-end (real subprocess: injects /auto-installer-mode.toml + /proxmox-first-boot, preserves source content) — 2 tests green (xorriso present). BLOCKED on environment for the FULL nested-PVE build to green: needs a cached PVE 9 ISO + nested KVM + a bound libvirt-local profile (none in this sandbox). Largely subsumed by the REL host fleet (REL-12/15). Run on a cert host: `python -m testrange.cli run --profile <pve> tests/plans/proxmox/*.py`. _(pruned satisfied BUILD-1d/2e/12 blockers + repointed off `examples/capabilities.py` — REL-40.)_
 
 ### ESXI
 
@@ -197,37 +173,25 @@ on 2026-06-06.
   > the rendered kickstart digest into ESXiKickstartBuilder.config_hash so the
   > template change busts the stale esxi-a cache (CORE-64-style gap). Live-verify.
 
-- [ ] **ESXI-19** · `bugfix` — ESXi builder enabled sshd from credential-key presence, not from SSH transport _(code landed + merged 2026-06-08)_
-
-  > Code landed and merged to feature/release-check 2026-06-08 (unit-gated).
-  > `ESXiKickstartBuilder` no longer infers sshd-enable from `root.ssh_key`
-  > presence; `GuestHypervisor.esxi` derives `enable_ssh=isinstance(communicator,
-  > SSHCommunicator)` and passes it to the builder (the Builder ABC forbids the
-  > builder seeing a Communicator). `enable_ssh` defaults True. The vmk0 MAC-follow
-  > block (ESXI-18) is un-gated — transport-independent. Latent until a non-SSH
-  > ESXi communicator (COMM-2) lands; pure hardening, no live cert needed. Move to
-  > Done at the next board sweep. Touchpoints: `builders/esxi.py`,
-  > `builders/_esxi_prepare.py`, `vms/nested.py` + unit tests.
-
 - [ ] **ESXI-11** · `test` — live testrange run smoke (hello_world) on 40.160.34.83
-  _(blocks: ESXI-12; blocked by: ESXI-2, ESXI-3, ESXI-4, ESXI-8)_
+  _(blocks: ESXI-12)_
 
   > ESXI-11 live hello_world smoke. PIPELINE PROVEN LIVE 2026-06-02 end-to-end (preflight->L2->sidecar-ready-via-guest-ops->build VM boot->serial result). NOT green: build apt needs internet egress; host has no VM-egress path (no internet pNIC; public LAN locks DHCP; ESXi can't host-NAT). User confirmed no egress available 2026-06-02. Driver/pipeline correct; environment-blocked.
 
-- [ ] **ESXI-12** · `test` — examples/capabilities.py ESXi-node VM + TESTS entry
+- [ ] **ESXI-12** · `test` — tests/plans ESXi-node coverage + TESTS entry
   _(blocks: ESXI-13; blocked by: ESXI-11)_
 
-  > Extend the portable examples/capabilities.py with whatever the ESXi backend adds to the driver-facing contract and a corresponding TESTS entry that verifies it end-to-end (CLAUDE.md rule 4). Stays backend-agnostic (Hypervisor, no host/creds in the file); bind at run time via --profile esxi-local. Mirrors BUILD-12 (PVE). Depends ESXI-11. Created 2026-06-01.
+  > Extend the `tests/plans/` cert corpus (generic where portable, else `tests/plans/esxi/`) with whatever the ESXi backend adds to the driver-facing contract and a corresponding TESTS entry that verifies it end-to-end (CLAUDE.md rule 4). Stays backend-agnostic where it can; bind at run time via --profile esxi-e2e. Mirrors BUILD-12 (PVE). Depends ESXI-11. Created 2026-06-01. _(repointed off the deleted `examples/capabilities.py` — REL-40.)_
 
-- [ ] **ESXI-13** · `test` — capabilities.py full-green certification on the live ESXi host
-  _(blocks: ESXI-14, ESXI-15; blocked by: ESXI-5, ESXI-6, ESXI-9, ESXI-10, ESXI-12)_
+- [ ] **ESXI-13** · `test` — tests/plans full-green certification on the live ESXi host
+  _(blocks: ESXI-15; blocked by: ESXI-12)_
 
-  > ESXI-13 capabilities cert. BLOCKED on environment egress (build VMs cannot apt-install — no VM internet path on this ESXi host; user confirmed none available 2026-06-02). Driver + full pipeline proven live (hello_world). Not a driver defect.
+  > ESXi cert against the `tests/plans/` corpus on a live host. Originally BLOCKED on environment egress (build VMs cannot apt-install — no VM internet path on this ESXi host, 2026-06-02); the REL host fleet's `tr-egress` NAT supersedes that block (this is largely subsumed by REL-14). Driver + full pipeline proven live (hello_world). _(repointed off `examples/capabilities.py`; pruned satisfied ESXI-5/6/9/10 blockers + circular ESXI-14 block — REL-40.)_
 
-- [ ] **ESXI-15** · `feat` — examples/capabilities-esxi.py — additive ESXi-specific example
+- [ ] **ESXI-15** · `feat` — tests/plans/esxi additive ESXi-specific coverage
   _(blocked by: ESXI-13)_
 
-  > Once ESXi is certified working against the portable example, add examples/capabilities-esxi.py exercising ESXi-specific behavior (controller-bus selection, VMXNET3, datastore specifics) that the portable plan can't express — the per-driver additive example, mirroring PVE-46. Depends ESXI-13. Created 2026-06-01.
+  > Once ESXi is certified working against the generic corpus, add `tests/plans/esxi/` coverage for ESXi-specific behavior (controller-bus selection, VMXNET3, datastore specifics) that a generic plan can't express — the per-driver additive tier, mirroring PVE-46. Depends ESXI-13. Created 2026-06-01. _(repointed off the deleted `examples/capabilities-esxi.py` — REL-40.)_
 
 ### ORCH
 
@@ -316,7 +280,6 @@ on 2026-06-06.
   > L2/L3 features beyond the current IPv4 + flat-subnet model.
 
 - [ ] **NET-17** · `feat` — inner-uplink bridge on the guest hypervisor; chained-NAT egress
-  _(blocked by: CORE-38)_
 
   > Inner-VM RUNTIME egress (chained NAT through host-a). NOT required for nesting to work (verified with isolated inner net); deferred enhancement. The build-time egress (apt) already works via L0 build switch. When needed: GuestHypervisor builder provisions a bridge on host-a + inner profile maps the inner uplink to it.
 
@@ -452,17 +415,17 @@ on 2026-06-06.
   > Stand up a remote libvirt host (operator-provided — Debian + libvirtd), reachable over qemu+ssh. Emit the `libvirt-remote-e2e` profile bound to the host. Exercises the remote-libvirt path (BACKEND-5 egress / BACKEND-11 guest_gateway) — a remote backend rather than the local qemu:///system the reference cert uses. Third host. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
 
 - [ ] **REL-14** · `test` — run full e2e suite vs hosted ESXi -> discrepancy report
-  _(blocked by: REL-3, REL-4, REL-5, REL-6, REL-9, REL-11)_
+  _(blocked by: REL-11)_
 
   > Loop `testrange run --profile esxi-e2e` over `tests/plans/generic/*.py` + `tests/plans/esxi/*.py` against the hosted ESXi (REL-11) — the corpus runs via `testrange run`, NOT pytest. Record every discrepancy/bug/surprise in docs/dev/e2e-findings-esxi.md; file a bug ticket per finding in its swimlane (ESXI/CORE/ORCH/...). First in the run order. Report findings to the user before moving on.
 
 - [ ] **REL-15** · `test` — run full e2e suite vs hosted Proxmox -> discrepancy report
-  _(blocked by: REL-3, REL-4, REL-5, REL-6, REL-8, REL-12)_
+  _(blocked by: REL-12)_
 
   > Loop `testrange run --profile proxmox-e2e` over `tests/plans/generic/*.py` + `tests/plans/proxmox/*.py` against the hosted PVE (REL-12). Record findings in docs/dev/e2e-findings-proxmox.md; file a bug ticket per discrepancy. Second.
 
 - [ ] **REL-16** · `test` — run full e2e suite vs hosted libvirt -> discrepancy report
-  _(blocked by: REL-3, REL-4, REL-5, REL-6, REL-7, REL-13)_
+  _(blocked by: REL-13)_
 
   > Loop `testrange run --profile libvirt-remote-e2e` over `tests/plans/generic/*.py` + `tests/plans/libvirt/*.py` against the hosted libvirt (REL-13). Record findings in docs/dev/e2e-findings-libvirt.md; file a bug ticket per discrepancy. Third.
 
@@ -486,7 +449,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (287)
+## Done (309)
 
 ### ORCH
 
@@ -495,6 +458,83 @@ on 2026-06-06.
   > DONE 2026-06-08. A Ctrl-C (or the SIGTERM/SIGHUP handler's raised KeyboardInterrupt) during the BUILD phase leaked all partial infra — build pool, network, sidecar, build VM — with no teardown. Two causes, both rooted in KeyboardInterrupt/SystemExit subclassing BaseException, not Exception: (1) __enter__'s teardown-on-failure handlers (runtime.py:236,242) were `except Exception`, so the interrupt slipped past untouched — a normal Exception like BuildTimeoutError WAS caught and tore down, which is why interrupts vs timeouts behaved inconsistently; (2) the interrupt fires inside __enter__, so Python never invokes __exit__ (where the run-phase teardown lives). The signal-handler docstring (runtime.py:273) claimed the handler "unwinds an in-flight bring-up into teardown" — false for the build phase until now. Fix: broaden both __enter__ handlers to `except BaseException` (cleanup-then-reraise; never swallows). Run-phase interrupts already cleaned up via __exit__ and are unchanged. Regression test: test_keyboard_interrupt_during_bringup_triggers_teardown (tests/unit/test_orchestrator.py) injects KeyboardInterrupt into create_vm and asserts create_pool→destroy_pool; RED before the fix (no destroy_pool), green after.
 
 ### REL
+
+- [x] **REL-29** · `bugfix` — build-result serial parser: first-marker lock + silent unrecognized-token fail _(done: 2026-06-08)_
+
+  > `parse_build_result` (build_phase.py) now scans *every* `TESTRANGE-RESULT:` marker (bounded to the span up to the next one) instead of locking onto the first — an earlier chatter marker with a broken/unfinished frame or an unrecognized token no longer masks a later complete record (which previously hung the build to the watchdog). An unrecognized last-marker token now captures the raw line into `BuildResult.log` for triage. New `TestParseMultipleMarkers` cases + updated token-strictness tests. Pre-release audit (2026-06-08).
+
+- [x] **REL-30** · `chore` — driver code-quality nits (SSH fd leak on drain timeout, _atomic_* dedup, stale docstring, undocumented _CHUNK) _(done: 2026-06-08)_
+
+  > (1) ssh.py: on a stderr-drain timeout, `execute` now closes the channel before raising so the blocked daemon reader (and its fd) is released. (2) cache/local.py: extracted one `_atomic_materialize(path, write_fn)` shared by `_atomic_copy`/`_atomic_write_text`. (3) libvirt/driver.py: dropped the stale "not yet implemented" docstring. (4) libvirt/_serial.py + esxi/_client.py: annotated the two bare `_CHUNK` constants. Pre-release audit (2026-06-08).
+
+- [x] **REL-32** · `test` — close unit-test gaps on error/defensive paths _(done: 2026-06-08)_
+
+  > Added: teardown continue-on-error + final-bookkeeping-failure-doesn't-propagate (test_teardown.py); ESXi `_auth` missing-credential + key-only rejection (new test_esxi_guest.py); ssh_jump `_load_private_key` multi-keytype fallback + parse-failure (test_gateways.py); connect.py `gateway`-not-str + invalid-addressing `ProfileError` (test_backend_profile.py); LibvirtConn `to_uri`/`from_uri` round-trip + scheme-mismatch (test_libvirt_conn.py). Pre-release audit (2026-06-08).
+
+- [x] **REL-33** · `feat` — native QGA file-write chunking (Proxmox part-file assembly + libvirt loop) _(done: 2026-06-08)_
+
+  > Proxmox: payloads over PVE's one-shot ~45 KB `agent/file-write` cap are now staged as raw part files (each ≤ cap) and concatenated in-guest via a single `cat` exec, then cleaned up (PVE REST has no append/offset). libvirt: `guest-file-write` now loops 32 KiB chunks against one open handle — a 256 KiB single write empirically *wedges* the QGA channel; 32 KiB raw (~43 KiB base64) is safely under the ceiling. New generic case `native_write_handles_payload_over_the_agent_cap` (lifecycle.py) round-trips a 256 KiB payload — **green live on libvirt-local**. Proxmox chunking unit-tested (round-trip via a fake guest fs); live PVE cert rides REL-15. Pre-release audit.
+
+- [x] **REL-34** · `chore` — tighten `mem=True` snapshot ABC contract; backends silently diverged _(done: 2026-06-08)_
+
+  > ABC (drivers/base.py) now specifies: `mem=True` on a non-running VM MUST raise (no RAM to capture) rather than silently demote to disk-only. All three backends enforce it up front with a uniform message (libvirt was the silent-demoter; proxmox/esxi previously leaned on the backend's own downstream error). New per-backend unit tests + generic `memory_snapshot_on_shutoff_vm_is_rejected` (snapshots.py) — **green live on libvirt-local**. Pre-release audit (2026-06-08).
+
+- [x] **REL-35** · `test` — generic UEFI firmware cert plan _(done: 2026-06-08)_
+  _(Proxmox UEFI live-cert folded into REL-15)_
+
+  > Added `tests/plans/generic/firmware.py` (backend-agnostic `Hypervisor`, `VMSpec(firmware="uefi")`, in-guest `/sys/firmware/efi` + efivars assertions) so UEFI is certified on *every* backend per CLAUDE.md §4, not just the libvirt-pinned plan — **green live on libvirt-local**. The Proxmox `efidisk0`/`efitype` live UEFI cert stays with REL-15 (no PVE host here). Pre-release audit (2026-06-08).
+
+- [x] **REL-39** · `docs` — PLAN.md drift fixes (companion to REL-18) _(done: 2026-06-08)_
+
+  > Applied the factual corrections from the audit: regenerated the File layout tree (was 2026-05-22 — added the entire `drivers/esxi/`, gateways/, connect.py/hypervisor.py, nested.py, the dashboard/rich modules, the orchestrator additions, tests/plans), de-pinned the stale "404/434 unit tests" count, removed the reference to the retired `test_capabilities_example_certifies`, and demoted the ADR-0027 bare-metal-provisioning section to an explicit "DESIGN ONLY, NOT YET BUILT" banner. The broad `capabilities.py` narrative-prose sweep + §21 status/design separation remain REL-18's restructure remit (this enumerated them). Pre-release audit.
+
+- [x] **REL-40** · `chore` — TODO.md hygiene fixes (companion to REL-19) _(done: 2026-06-08)_
+
+  > Made the open board honest: pruned the satisfied `blocked by:` edges off REL-14/15/16 (kept only the open host-fleet blockers), ESXI-11/13, NET-17, BUILD-13; removed ESXI-13's circular `blocks: ESXI-14` (Done); repointed the deleted `examples/capabilities.py`/`-esxi` references in ESXI-12/13/15 + BUILD-13 to the `tests/plans/` corpus. The bulk Done→Archive sweep + archive-era ID hygiene (CHORE-CLEANUP, `*-DONE`, ID collisions) remain REL-19's deep-sweep remit (this enumerated them). Pre-release audit.
+
+- [x] **REL-22** · `bugfix` — build_cache.py: post-install order marker unreadable by the non-root communicator _(done: 2026-06-08)_
+
+  > Found running `tests/plans/generic/build_cache.py` live (REL-14/15/16). `post_install_commands_ran_in_order` reads `/root/order` via the `admin` SSHCommunicator and gets `b''`. Not an ordering or cache bug: the disk-content tests pass, so the post-install echoes *did* run. The marker is written to `/root/order` by cloud-init `runcmd` (as root) at build time, but `/root` is mode 0700, so the non-root `admin` user can't read it at run time — `cat` returns empty stdout and the assert fails. Fix: write the ordering marker to a world-readable path that survives reboot (the other markers live under `/srv`, which is root-owned 0755), and point the test at it. DONE in working tree; changes `runcmd` so the next run is a cache miss + rebuild.
+
+- [x] **REL-23** · `bugfix` — Communicator.close() contract: NativeCommunicator is terminal, SSHCommunicator reconnects _(done: 2026-06-08)_
+
+  > Found running `tests/plans/generic/lifecycle.py` live (REL-16). Four failures, all the same root cause: `churn_survives_repeated_power_cycles`, `reboot_persists_on_disk_state`, `oversized_os_drive_grew_on_first_boot` (latter two cascade — they reuse the communicator the first test already closed), and `headless_survives_power_cycle`. The portable power-cycle idiom — `driver.start_vm(...)` → `com.close()` → `com.execute(...)` — relies on `close()` dropping the stale session and the *next* call transparently reconnecting. `SSHCommunicator` honors this (`close()` nulls `_client`; `_ensure_connected()` re-dials, retrying up to 180s for sshd to return) — `snapshots.py` uses the exact same idiom and passes. `NativeCommunicator.close()` is *terminal* (sets `_closed`, nulls callables, `_check_usable()` raises `CommunicatorClosedError` forever). The cert corpus is the portability spec and two plans depend on the reconnect semantic, so the contract must be uniform. Fix (product side): make `NativeCommunicator.close()` a session reset that leaves the communicator bound + usable (QGA is sessionless — callables are domain-bound closures), and have its `execute`/`read_file`/`write_file` tolerate the post-power-cycle agent-not-ready window by retrying on `GuestAgentError` up to a timeout (mirror SSH's `_ensure_connected` reconnect loop; the bind-time wait in `run_phase._wait_one_communicator_ready` doesn't cover in-test power cycles). Keep the re-*bind* guard (a closed/ bound communicator still must not be re-bound to another VM). Applies to every backend's NativeCommunicator path (libvirt + Proxmox). Document the `Communicator.close()` contract on the ABC + PLAN.
+
+- [x] **REL-24** · `bugfix` — DHCP NICs get no lease on native-communicator guests _(done: 2026-06-08)_
+
+  > Found running `tests/plans/generic/{concurrency,networking}.py` live (REL-16). Symptom: DHCP NICs acquire no lease while static NICs on the *same* guest come up fine. `concurrency.every_node_has_a_distinct_lease`: node shows only `lo`. `networking.client_dhcp_lease_in_pool`: client shows only its static priv-net addr (10.20.0.101), no 10.30.0.x lease. Downstream cascade in networking (all trace to the missing lease): `client_has_exactly_one_default_route` (got []), `client_reaches_public_web_across_labels_via_dns` + `public_web_reaches_internet_through_nat` (curl exit 6 = couldn't resolve — no DHCP-supplied resolver/route). Strong correlation: every SSH-communicator VM leased (build_cache/snapshots/users_credentials on lab-net got 10.40.0.x); every native-communicator VM that needed DHCP did not — even though lab-net's switch/sidecar config is byte-identical between build_cache (SSH, leases) and concurrency (native, no lease). The orchestrator only polls the sidecar dnsmasq lease file for SSH VMs (`discover_ip`), never for native VMs, so native DHCP failures were previously invisible. RESOLVED 2026-06-08: not a guest or sidecar bug — DHCP works. It's an orchestrator race. Live repro (one native + one SSH VM on one DHCP switch) showed the native guest leases at ~11s post-boot, but the orchestrator binds a NativeCommunicator the instant its QGA answers (~8s) and runs tests immediately; SSH VMs are gated by `discover_ip`'s sidecar-lease poll. concurrency's three tests ran in a ~1.5s window starting ~8s in, before the lease landed. Static NICs apply at boot, hence client's static showed but its DHCP NIC didn't. Fix: added `run_phase.wait_dhcp_leases(ctx)` — a backend-agnostic gate (extracted `_wait_for_dhcp_lease` from `discover_ip`) that polls the per-switch sidecar dnsmasq lease file for every DHCP NIC on every VM, wired into `runtime.__enter__` after `wait_communicators_ready`. Regression test `test_qga_dhcp_nic_waits_for_sidecar_lease`. Verified live: concurrency 3/3, networking 7/7 (incl. the pub-sw two-Network-on-one-L2 cross-label DNS + NAT paths, which were only masked by the race — L2 sharing confirmed good).
+
+- [x] **REL-25** · `test` — libvirt integration: serial-sink test stale vs build_nic-OR-boot_media gating _(done: 2026-06-08)_
+
+  > Found running `pytest -m "not proxmox and not esxi"` on feature/release-check: `tests/integration/test_libvirt.py::test_vm_lifecycle_serial_sink_and_snapshots` fails with `DriverError: no serial listener open for 'tr-vm-...-box'`. Not a product regression — the test is stale. It boots a NIC-less, seed-only guest and assumes a seed makes `create_vm` open the unix-socket serial sink, the pre-CORE-47 contract. The gating was deliberately reconciled (CORE-47, ~2026-06-01) to `build_nic is not None or boot_media_ref is not None`: a seed alone is a sidecar (monitored via QGA, not the serial sink), and binding the host-side socket for one is dead weight locally and outright broken on a remote daemon (nested-virt's remote-security-driver constraint, ADR-0021). Every production serial-sink boot sets `build_nic` (build_phase.py:512). FIX (test-side): attach a `boot_media_ref` so the boot is installer-origin and the sink opens per contract, staying NIC-less (the OS disk is bootable at order 1, so the guest still boots the base image and emits console bytes; the medium at order 2 is never reached). DONE 2026-06-08 in the working tree.
+
+- [x] **REL-26** · `bugfix` — gate-red: `ruff check` (S105) + `ruff format` (2 test files) failing _(done: 2026-06-08)_
+
+  > The tree was RED against gate #2. (1) `ruff check` flagged one `S105` false positive on `_AUTO_INSTALLER_GRUB_TOKEN = "proxmox-start-auto-installer"` (builders/_proxmox_prepare.py:55 — a grub menuentry token, not a secret) → added `S105` to that file's `per-file-ignores` entry (pyproject.toml). (2) `ruff format --check` wanted to reformat `tests/integration/test_proxmox_prepare.py` + `tests/unit/test_proxmox_builder.py` → ran `ruff format`. Both gates green. Pre-release codebase audit (2026-06-08).
+
+- [x] **REL-27** · `chore` — cloudinit.py: module-level `import yaml` defeats the lazy optional-dep contract _(done: 2026-06-08)_
+
+  > `builders/cloudinit.py` imported `yaml` at module scope while `pyyaml` is a `[cloudinit]`-extra dep — importing `CloudInitBuilder` without the extra crashed with a bare `ModuleNotFoundError`. Added `_import_yaml()` mirroring `_import_pycdlib()` (typed `BuilderError` with a `[cloudinit]` hint); the three `render_*` methods now call it and bind the result to a `str`-typed local (the helper returns `Any`). Regression test `TestLazyYamlImport.test_missing_pyyaml_raises_typed_builder_error`. Pre-release audit (2026-06-08).
+
+- [x] **REL-28** · `chore` — strip 37 section-marker comment dividers (localized to ESXi/Proxmox code) _(done: 2026-06-08)_
+
+  > Removed all `# -- title ----` dividers (37 across 9 files: drivers/esxi/{driver,_client,_vm}.py, tests/mock_driver.py, tests/esxi_fakes.py, tests/unit/test_proxmox_{driver,vm,serial,storage}.py), then re-ran `ruff format`. The `# --- or ---` example line in builders/base.py is inside a docstring code block and was correctly left. Core + libvirt were already clean. Pre-release audit (2026-06-08).
+
+- [x] **REL-31** · `test` — kill vanity `guest_io` isinstance asserts + tighten loose ESXi device-plan asserts _(done: 2026-06-08)_
+
+  > (1) test_guest_io.py: the three `isinstance(method, GuestExec)` checks against `@runtime_checkable` Protocols proved nothing beyond callability; collapsed `TestProtocolShapes` to the typed assignments (the real, mypy-enforced check) plus an identity assertion so the names stay used. (2) tests/plans/esxi/devices.py: tightened `assert len(sd) >= 3` → `== 3` and `assert nvme` → `len(nvme) == 1`, so an nvme disk wrongly enumerating as `/dev/sd*` now fails (matches the libvirt/proxmox sibling plans). Pre-release audit (2026-06-08).
+
+- [x] **REL-36** · `docs` — README + install.md release-grade fixes (dead refs, stale extras, ktui pointer) _(done: 2026-06-08)_
+
+  > README: repointed the retired `examples/capabilities.py` to the `tests/plans/` corpus, flipped the `ktui` status pointer to `TODO.md`, added `--cache` to the global-flags block, refreshed the backend-status blurb (libvirt certified ref / Proxmox+ESXi code-complete, live-cert in progress). install.md: added the missing `libvirt` and `esxi` extras rows, corrected `all` to include them, and refreshed the requirements backend-status. Pre-release audit (2026-06-08).
+
+- [x] **REL-37** · `docs` — dev-guide reconciliation (stale networking-modes table, missing working-agreement spine) _(done: 2026-06-08)_
+
+  > networking-modes.md: rewrote the per-driver mapping table — libvirt is the reference column (was MockDriver), ESXi moved out of "future" with its real standard-vSwitch+portgroup realization, MockDriver noted as the in-memory test backend (ADR-0019), Hyper-V left as roadmap. contributing.md: added a "Working agreement (hard rules)" section linking TODO.md / PLAN.md / tests/plans/README.md (ticket-first, gates-always-pass, corpus-coverage same-change, PLAN-sync). Pre-release audit (2026-06-08).
+
+- [x] **REL-38** · `chore` — board status sweep: tick/move shipped tickets + fix stale line-11 banner _(done: 2026-06-08)_
+
+  > Moved to Done: REL-22/23/24/25 (were `[x]` but parked in Doing), DOCS-22 (logos), CORE-83 (`[PASS]`-dump suppression), ESXI-19 (sshd-enable hardening), plus the completed audit tickets REL-26/27/28/31/36/37. Reworded the stale line-11 migration banner to a fixed historical note and refreshed the live `##` section counts. Deeper hygiene (Done→Archive flow, blocked-by pruning, archive-era ID artifacts) is REL-40. Pre-release audit (2026-06-08).
 
 - [x] **REL-10** · `feat` — unmanaged host harness: `tools/hypervisor-hosts/` common scaffold _(wontdo: 2026-06-08)_
 
@@ -559,6 +599,10 @@ on 2026-06-06.
   > DONE 2026-06-06. PLAN.md section "Bare-metal provisioning via out-of-band controller (ADR-0027)" + ADR-0027 (docs/adr/0027-bare-metal-provisioning.md, indexed) both landed. Records: third verb, NOT a run flag; controller is its OWN ABC, not a HypervisorDriver; nameless ProvisioningPlan; HostRecipe = spec x builder (no communicator, explicit builder injection, no front-door classmethods); HostSpec requirements-contract (Required* devices, discrete 1:1, no count/selector); inventory matcher + don't-touch; installer-origin only v1. Rejected alternatives captured in the ADR: BMC-as-HypervisorDriver, [proxmox.install] TOML block, --controller-on-run, count=/selector on requirements.
 
 ### CORE
+
+- [x] **CORE-83** · `bugfix` — `run` dumps `[PASS]` report lines after the dashboard (ADR-0029) _(done: 2026-06-08)_
+
+  > After the live dashboard exits, `_run` (cli.py:300-301) unconditionally prints `r.report_line()` for every result, so even with the dashboard active the terminal gets a redundant `[PASS] …` block below the final frame — the dashboard already showed pass/fail. Gate the dump on dashboard-inactive (`--no-dashboard` or non-TTY), where those stdout lines ARE the machine-readable output. Keep printing FAILED lines when active, since the tests panel shows only glyph+duration, not the error/traceback. Fixed in commit 39e3950 (cli.py:300-308); ticket swept to Done in the REL-38 board sweep.
 
 - [x] **CORE-82** · `chore` — route captured qemu-img output through logging (not discarded) _(done: 2026-06-08)_
 
@@ -1505,6 +1549,10 @@ on 2026-06-06.
 
 ### ESXI
 
+- [x] **ESXI-19** · `bugfix` — ESXi builder enabled sshd from credential-key presence, not from SSH transport _(done: 2026-06-08)_
+
+  > `ESXiKickstartBuilder` no longer infers sshd-enable from `root.ssh_key` presence; `GuestHypervisor.esxi` derives `enable_ssh=isinstance(communicator, SSHCommunicator)` and passes it to the builder (the Builder ABC forbids the builder seeing a Communicator). `enable_ssh` defaults True. The vmk0 MAC-follow block (ESXI-18) is un-gated — transport-independent. Latent until a non-SSH ESXi communicator (COMM-2) lands; pure hardening, no live cert needed. Code landed + merged 2026-06-08 (unit-gated); touchpoints `builders/esxi.py`, `builders/_esxi_prepare.py`, `vms/nested.py` + unit tests. Swept to Done in the REL-38 board sweep.
+
 - [x] **ESXI-17** · `bugfix` — ESXi build-result signaling over serial _(done: 2026-06-06)_
 
   > RESOLVED. Root cause was NOT "%firstboot doesn't run" (it does). Two real bugs:
@@ -2208,6 +2256,10 @@ on 2026-06-06.
   > Live-found 2026-06-02 (nested ESXi bring-up): ESXi weasel's ks=cdrom:/ks.cfg scan on i440fx/BIOS only enumerates an IDE optical unit; a sata(AHCI) installer CD fails 'cannot find kickstart file on cd-rom /ks.cfg' before touching disk (600s build timeout). Proven via direct qemu: same ISO sata=fail, IDE=installs. Fix: drivers/libvirt/_vm.py _cdrom_bus(firmware) -> ide for pc/BIOS, sata for q35/UEFI (q35 has no IDE). Case (lowercase ks.cfg) was a red herring. DONE.
 
 ### DOCS
+
+- [x] **DOCS-22** · `docs` — integrate project logos into README + Sphinx site _(done: 2026-06-08)_
+
+  > User added project logos (icon + horizontal wordmark, PNG + SVG). Moved them into `docs/_static/` (was `docs/images/`; `_static/` is what `html_static_path` already serves, and creating it also clears the pre-existing missing-`_static` build warning). Wire-up: README header (horizontal PNG), Sphinx `html_logo` = icon SVG + `html_favicon` = icon PNG in conf.py, horizontal SVG hero on `docs/index.md`. Shipped in commit b0cc596; ticket swept to Done in the REL-38 board sweep.
 
 - [x] **DOCS-14** · `EPIC` — docs/ audit remediation: fix drift, broken examples, missing pages _(done: 2026-06-08)_
 
