@@ -102,6 +102,25 @@ class TestConstruction:
                 credentials=[PosixCred("root", password="VMware1!", ssh_key=SSHKey.generate())]
             )
 
+    def test_keyless_root_with_ssh_rejected(self) -> None:
+        # ESXI-20: SSH is ESXi's only run-phase channel (no host guest-agent), so a
+        # keyless root + the default enable_ssh=True bakes an unreachable node and
+        # hangs wait_ready for 300s. Fail loud at construction with a fix instead.
+        with pytest.raises(ValueError, match="requires the root PosixCred to carry an ssh_key"):
+            ESXiKickstartBuilder(
+                installer_iso=CacheEntry("x"),
+                credentials=[PosixCred("root", password="VMware1!")],
+            )
+
+    def test_keyless_root_allowed_when_ssh_disabled(self) -> None:
+        # The escape hatch: a non-SSH transport (enable_ssh=False) needs no key.
+        b = ESXiKickstartBuilder(
+            installer_iso=CacheEntry("x"),
+            credentials=[PosixCred("root", password="VMware1!")],
+            enable_ssh=False,
+        )
+        assert "/etc/ssh/keys-root/authorized_keys" not in b._render_kickstart()
+
     def test_ecdsa_root_key_accepted(self) -> None:
         b = _builder(credentials=[PosixCred("root", password="VMware1!", ssh_key=_KEY)])
         assert b.credentials[0].username == "root"
@@ -185,9 +204,11 @@ class TestKickstart:
         assert _KEY.auth_line in lines  # key written without leading whitespace
 
     def test_no_ssh_block_without_key(self) -> None:
-        # No key -> no SSH provisioning, but %firstboot still carries the vmk0
-        # MAC-follow fix (ESXI-18/19): that rides the image, not the transport.
-        b = _builder(credentials=[PosixCred("root", password="VMware1!")])
+        # A keyless root is legal only for a non-SSH transport (enable_ssh=False);
+        # %firstboot still carries the vmk0 MAC-follow fix (ESXI-18/19: it rides the
+        # image, not the transport). enable_ssh=True with no key is rejected at
+        # construction — see TestConstruction.test_keyless_root_with_ssh_rejected.
+        b = _builder(credentials=[PosixCred("root", password="VMware1!")], enable_ssh=False)
         ks = b._render_kickstart()
         assert "%firstboot --interpreter=busybox" in ks
         assert "/Net/FollowHardwareMac" in ks
@@ -263,7 +284,9 @@ class TestConfigHash:
         base = _config_hash(b, _spec(), base_sha="a")
         assert base != _config_hash(b, _spec(), base_sha="b")
         assert base != _config_hash(
-            _builder(credentials=[PosixCred("root", password="Other1!")]), _spec(), base_sha="a"
+            _builder(credentials=[PosixCred("root", password="Other1!", ssh_key=_KEY)]),
+            _spec(),
+            base_sha="a",
         )
         assert base != _config_hash(b, _spec(firmware="uefi"), base_sha="a")
         assert base != _config_hash(b, _spec(disk_gb=60), base_sha="a")
@@ -296,10 +319,14 @@ class TestConfigHash:
         assert h1 != h2
 
     def test_sensitive_to_ssh_presence(self) -> None:
+        # A keyed+SSH image vs a keyless non-SSH image (the only way to omit the
+        # key now that enable_ssh=True without a key is rejected) key distinct disks.
         spec = _spec()
         with_key = _config_hash(_builder(), spec, base_sha="a")
         without = _config_hash(
-            _builder(credentials=[PosixCred("root", password="VMware1!")]), spec, base_sha="a"
+            _builder(credentials=[PosixCred("root", password="VMware1!")], enable_ssh=False),
+            spec,
+            base_sha="a",
         )
         assert with_key != without
 

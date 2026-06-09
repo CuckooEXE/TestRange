@@ -95,6 +95,22 @@ class ESXiKickstartBuilder(Builder):
         self._credentials = self._validate_credentials(credentials)
         self._license = self._validate_license(license)
         self._enable_ssh = enable_ssh
+        # SSH is ESXi's ONLY run-phase channel — there is no host guest-agent
+        # (VMware Tools runs in the guests, not the hypervisor), so the node is
+        # reached over the root SSH login the kickstart provisions. When SSH is
+        # the transport, a missing root key bakes an image with no authorized_keys
+        # AND no sshd (`_firstboot` gates both on the key, esxi.py:252), yet
+        # `wait_ready` still probes SSH and only fails after a 300s timeout. Fail
+        # loud at construction with a fix instead of hanging mysteriously later
+        # (ESXI-20). `enable_ssh=False` (a non-SSH transport) needs no key.
+        if self._enable_ssh and self._root_credential().ssh_key is None:
+            raise ValueError(
+                "ESXiKickstartBuilder(enable_ssh=True) requires the root PosixCred to carry an "
+                "ssh_key: SSH is ESXi's only run-phase channel (no host guest-agent), so without "
+                "a baked key the installed node is unreachable and wait_ready hangs the full "
+                "timeout. Pass a root key (e.g. testrange.utils.EcdsaKey.generate()) — RSA/ECDSA, "
+                "not Ed25519 — or set enable_ssh=False for a non-SSH transport."
+            )
 
     @staticmethod
     def _validate_credentials(credentials: Sequence[Credential]) -> tuple[Credential, ...]:

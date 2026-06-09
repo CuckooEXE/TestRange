@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (10)
+## Doing (11)
 
 ### CORE
 
@@ -30,6 +30,37 @@ on 2026-06-06.
   > Module layout mirrors drivers/proxmox/: _client/_profile/_naming/_net/_storage/_vm/devices/_guest/_serial/driver.
   >
   > Children: CORE-60 (credential kwarg prereq), spikes ESXI-S1/S2/S3, core ESXI-1..9, ADR + cert tail ESXI-10..15. Pairs with COMM-2 (VMware Tools communicator) and PROXY-1 (console proxy = guest_gateway). Created 2026-06-01.
+
+- [ ] **ESXI-20** · `test` — finish ESXiKickstartBuilder + stand up/leak a nested ESXi node on libvirt + certify `tests/plans/` against it
+
+  > `feature/VMBuild`. Un-shelves ESXI-16/18 locally and advances ESXI-12/13/15:
+  > drive the full ESXi vertical end-to-end on this box (nested KVM, `tr-egress`
+  > NAT, ESXi 8.0U3b installer cached).
+  >
+  > 1. **Builder audit/finish** — confirm `ESXiKickstartBuilder` is complete and
+  >    correct against the Builder ABC + build-result contract; close any real gap
+  >    surfaced by review (the stale BUILD-15/16 nits are mostly already in-code —
+  >    verify). Keep every ESXi-specificism stove-piped in the builder/driver.
+  > 2. **Stand up + leak** — a standup plan (`GuestHypervisor.esxi`, the
+  >    `esxi-followhwmac.py` shape) installs one nested ESXi node on
+  >    `libvirt-local` and leaks it (`testrange repl` → `orch.leak()`). Exercises
+  >    the builder install + the ESXI-18 vmk0 MAC-follow fix live.
+  > 3. **Certify** — point an `esxi-leaked` profile at the node; run
+  >    `tests/plans/generic/*` + `tests/plans/esxi/*` via `testrange run --profile
+  >    esxi-leaked` (the ESXi *driver* path). Author any missing ESXi cert coverage.
+  > 4. **File + fix** every bug the cert surfaces (own swimlane per finding);
+  >    record discrepancies à la REL-14. Squash + push as milestones land.
+  >    Created 2026-06-09.
+  >
+  > Progress (2026-06-09):
+  > - M1 DONE — builder audit: `ESXiKickstartBuilder` is complete; BUILD-15/16
+  >   confirmed already-addressed in-code (stale, → Done). Hardened the one real
+  >   footgun: keyless root + `enable_ssh=True` now fails loud at construction
+  >   (SSH is ESXi's only run-phase channel; a keyless image hangs `wait_ready`).
+  >   Implemented the driver gap the ESXi cert needs: per-disk controller bus
+  >   (`ESXiHardDrive.bus` scsi/sata/nvme/ide) in `esxi/_vm.create_vm`, read off
+  >   `spec.data_drives` so the knob stays ESXi-stovepiped (no ABC/orchestrator
+  >   change). Unblocks `tests/plans/esxi/devices.py`. Gates green (1137 unit).
 
 ### ORCH
 
