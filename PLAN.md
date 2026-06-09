@@ -1050,28 +1050,27 @@ Exit codes: 0 = success; 1 = test failure; 2 = preflight failure;
 
 ## File layout
 
-Reflects the tree as built (regenerated 2026-05-22). The device subpackages are
+Reflects the tree as built (regenerated 2026-06-08). The device subpackages are
 `base.py` per device for the portable types; a `<backend>.py` alongside it holds
 that backend's concrete variants when one exists (`disk/libvirt.py`,
 `network/libvirt.py` carry `LibvirtOSDrive`/`LibvirtDataDrive` `bus` +
 `LibvirtNetworkIface` `model`, ADR-0026 — ESXi has no virtio so a nested ESXi
-guest needs sata/ide + e1000e). The orchestrator is split into per-phase modules
-(the planned single `phases.py`).
+guest needs sata/ide + e1000e). The orchestrator is split into per-phase modules.
 
 ```
 docs/
     user/                       # user-facing guides (+ user/drivers/)
     dev/                        # contributor docs (+ dev/extending/)
-    adr/                        # architecture decision records (0001–0010)
+    adr/                        # architecture decision records (0001–0029)
     index.md, conf.py           # Sphinx site
 examples/
-    hello_world.py  native_agent.py
-    capabilities.py             # broad-coverage portable cert: every driver-facing feature
-    capabilities-px.py          # Proxmox-specific showcase (scheme-pinned)
+    hello_world.py  native_agent.py  connect.toml.example
 testrange/
     builders/
         base.py                 # Builder ABC (+ wait_ready)
         cloudinit.py            # CloudInitBuilder
+        proxmox.py  esxi.py     # ProxmoxAnswerBuilder / ESXiKickstartBuilder
+        _proxmox_prepare.py  _esxi_prepare.py   # sanctioned xorriso ISO prep (ADR-0022)
         sidecar_iso.py          # sidecar config-ISO authoring
     cache/
         __init__.py  entry.py   # CacheEntry
@@ -1084,16 +1083,20 @@ testrange/
         ssh.py                  # SSHCommunicator (paramiko)
         native.py               # NativeCommunicator (driver-agent shim)
     credentials/
-        base.py                 # Credential ABC (pure data)
-        posix.py                # PosixCred
+        base.py  posix.py       # Credential ABC + PosixCred
     devices/
         base.py  __init__.py    # Device ABC + re-exports
-        cpu/  memory/  disk/  network/  pool/   # each: base.py + __init__.py
+        cpu/  memory/  disk/  network/  pool/   # each: base.py (+ <backend>.py)
     drivers/
         base.py                 # HypervisorDriver ABC
-        libvirt/                # LibvirtDriver — certified reference backend
         _registry.py            # Hypervisor-type → driver dispatch
-        proxmox/                # ProxmoxDriver — certified (single-node)
+        _diskconvert.py         # sanctioned qemu-img qcow2↔vmdk boundary (ADR-0024)
+        libvirt/                # LibvirtDriver — certified reference backend
+        proxmox/                # ProxmoxDriver — code-complete (single-node)
+        esxi/                   # ESXiDriver — code-complete (standalone host)
+    gateways/
+        base.py                 # GuestGateway ABC
+        ssh_jump.py             # SSHJumpGateway (remote-backend guest reach)
     networks/
         base.py                 # Network, Switch, NetworkAddressing
         sidecar.py              # per-Switch dnsmasq/nftables sidecar render
@@ -1101,8 +1104,10 @@ testrange/
         _addressing_consts.py   # the .1/.2/.10–.99/.100–.254 pinning
     orchestrator/
         runtime.py              # Orchestrator, OrchestratorHandle, VMHandle
-        context.py              # RunContext broker
-        build_phase.py  build.py  run_phase.py  provision.py
+        context.py  backend.py  # RunContext broker + resolved-backend binding
+        build_phase.py  build.py  run_phase.py  nested_phase.py  provision.py
+        _parallel.py            # bounded I/O thread pool (--jobs, ADR-0020/0023)
+        dashboard_state.py      # live-dashboard model
         runner.py               # test runner (run_tests, build_range)
         teardown.py  artifacts.py
     packages/
@@ -1112,16 +1117,21 @@ testrange/
         schema.py               # version 1 dataclasses
         cleanup.py              # state-file-driven teardown (PID-checked)
     utils/
-        sshkey.py               # SSHKey.generate
+        sshkey.py  fsutil.py    # SSHKey.generate + durable_replace
     vms/
-        spec.py  recipe.py  handle.py
+        spec.py  recipe.py  handle.py  validate.py
+        nested.py               # GuestHypervisor (nested-virt recipe, ADR-0021)
+    hypervisor.py               # backend-agnostic Hypervisor topology type
+    connect.py                  # BackendProfile + load_profile (--profile)
     cli.py  exceptions.py  guest_io.py  preflight.py  plan.py  _log.py
+    _ansi.py  _console.py  _dashboard.py  _progress.py  _tui.py   # rich CLI/dashboard
 tests/
-    unit/                       # 404 tests
-    integration/                # gated by pytest mark
+    unit/                       # MockDriver-driven (run: pytest -m "not proxmox and not libvirt")
+    integration/                # gated by pytest marks (proxmox/libvirt/esxi)
+    plans/                      # tests/plans cert corpus (run via `testrange run`, NOT pytest)
 ```
 
-Stubs for proxmox / esxi / winrm are NOT exported until they work (no
+Stubs for unimplemented backends are NOT exported until they work (no
 Hyrum's-law re-exports of `NotImplementedError` shims).
 
 ## Backend implementations & post-v0 design
@@ -1664,7 +1674,13 @@ run. It is **the existing pipeline, recursed**, not a new execution model.
   rejected. The real fix (a `GuestGateway` jumping through host-a, ADR-0020) is
   deferred; full findings in ADR-0021.
 
-### Bare-metal provisioning via out-of-band controller (ADR-0027)
+### Bare-metal provisioning via out-of-band controller (ADR-0027) — DESIGN ONLY, NOT YET BUILT
+
+> **Status: design of record, unbuilt (epic PROV, 2026-06-06).** Nothing in this
+> section ships yet — there is no `provision` verb in the CLI and no
+> `OutOfBandController` / `ProvisioningPlan` / `HostRecipe` / `HostSpec` in the
+> tree. The prose below is the intended shape (present tense = the design's
+> contract, not current behavior). Tracked under the `PROV` epic.
 
 A third CLI verb, `provision`, installs a hypervisor (or any installer-origin OS)
 onto **physical** hardware via its out-of-band management controller (Redfish /
@@ -1838,18 +1854,20 @@ step-by-step engineering-phase walkthroughs that used to fill this section
 the install->build split) have been executed and are dropped; their decisions
 live in the ADRs and the design sections above. Current state:
 
-- **Suite green:** 434 unit tests pass; `ruff` + `mypy --strict` clean.
+- **Suite green:** the unit suite (`pytest -m "not proxmox and not libvirt and
+  not esxi"`) passes; `ruff` + `mypy --strict` clean. (Count is not pinned here —
+  it drifts; `pytest --co -q | wc -l` is the live figure.)
 - **Reference backend:** the **libvirt** driver is the certified reference
-  implementation (BACKEND-1 complete, ADR-0019) — green across
-  `examples/capabilities.py` and `pytest -m libvirt` as a plain `libvirt`-group
+  implementation (BACKEND-1 complete, ADR-0019) — green across the
+  `tests/plans/` cert corpus and `pytest -m libvirt` as a plain `libvirt`-group
   user. `MockDriver` / `MockHypervisor` implement the full `HypervisorDriver`
   ABC (ADR-0008) and drive the unit suite, but as a unit-only fixture at
   `tests/mock_driver.py` (registered via `tests/conftest.py`) — the mock
   simulates a backend, not a real guest, so the live-certified driver is the
-  reference. The **Proxmox driver is also certified** (PVE-CERT, 2026-06-01):
-  `examples/capabilities.py` runs full-green on a live single-node PVE host,
-  wired into `pytest -m proxmox` (`test_proxmox.py::test_capabilities_example_certifies`)
-  the same way libvirt's BACKEND-1.D cert is — see *Proxmox backend* below.
+  reference. The **Proxmox and ESXi drivers are code-complete** and certified
+  against the `tests/plans/` corpus; the live end-to-end re-cert on the
+  independently-built host fleet is the REL 1.0.0 validation pass (REL-14/15/16)
+  — see *Proxmox backend* / *ESXi backend* below.
 - **Build/run split (ADR-0010) complete:** `build_phase` warms the cache and
   nothing else; `run_phase` creates the user's pools, gates sidecar readiness,
   pushes every built disk (OS + each data disk) per VM, and runs tests.
