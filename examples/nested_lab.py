@@ -7,8 +7,9 @@ and brings the inner VMs up *inside* it (single-level nesting, ADR-0021). Test
 code reaches the host through ``orch.vms`` and the inner VMs through
 ``orch.nested["lab"].vms``.
 
-The inner VM disks build on the L0 (real NAT egress), and the nested host only
-boots the pre-built disks — so the inner switch needs no uplink of its own.
+The inner VM disks build on the L0, so the inner plan declares its own NAT
+``build_switch`` for apt egress during that build; the nested host then only boots
+the pre-built disks, so the inner *run* switch itself needs no uplink.
 
 Portable outer plan — bind the L0 backend at run time. Nesting needs a host that
 exposes hardware virtualization to its guest (``CPU(nested=True)``):
@@ -96,6 +97,13 @@ PLAN = Plan(
                     ],
                 ),
                 admin=_ADMIN,
+                build_switch=Switch(
+                    "innerbuild",
+                    Network("innerbuild-net"),
+                    cidr="10.98.99.0/24",
+                    uplink="egress",
+                    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+                ),
                 networks=[
                     Switch(
                         "inner",

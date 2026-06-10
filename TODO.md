@@ -524,7 +524,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (333)
+## Done (334)
 
 ### CORE
 
@@ -2401,6 +2401,8 @@ on 2026-06-06.
   > Live-found 2026-06-02 (nested ESXi bring-up): ESXi weasel's ks=cdrom:/ks.cfg scan on i440fx/BIOS only enumerates an IDE optical unit; a sata(AHCI) installer CD fails 'cannot find kickstart file on cd-rom /ks.cfg' before touching disk (600s build timeout). Proven via direct qemu: same ISO sata=fail, IDE=installs. Fix: drivers/libvirt/_vm.py _cdrom_bus(firmware) -> ide for pc/BIOS, sata for q35/UEFI (q35 has no IDE). Case (lowercase ks.cfg) was a red herring. DONE.
 
 ### DOCS
+
+- [x] **DOCS-28** · `bugfix` — `nested_lab.py`: inner plan needs its own NAT `build_switch` so the inner VMs get apt egress during their L0 build (live-found) _(done: 2026-06-09)_
 
 - [x] **DOCS-27** · `docs` — past-tense the `e2e-findings-proxmox.md` method recipe + note `pve_node.py` removal (review fix) _(done: 2026-06-09)_
 
