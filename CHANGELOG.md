@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/) from 1.0.0.
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-06-09
+
+### Fixed
+
+- ``examples/nested_lab.py`` — the nested host's inner plan now declares its own
+  NAT ``build_switch`` so the inner VMs reach the internet for ``apt`` during their
+  L0 build. Without it the inner build booted on the default isolated, no-egress
+  build network and ``apt`` could not resolve its mirror.
+
 ## [1.1.0] — 2026-06-09
 
 ### Added
