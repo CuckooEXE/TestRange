@@ -514,8 +514,12 @@ class EsxiClient:
         A Range GET against the /folder file service: ``206`` returns just the new
         tail; a ``200`` (server ignored Range) is sliced; ``416`` (range past EOF)
         and ``404`` (file not yet created — the build VM hasn't opened its serial
-        port) both mean "nothing new", returned as ``b""``. Backs the serial
-        build-result sink's incremental polling (ESXI-8).
+        port) both mean "nothing new", returned as ``b""``. ``503``/``429`` —
+        hostd/envoy momentarily refusing under parallel build fan-out on a small
+        host (live-found, ESXI-37) — are likewise one missed poll, not a build
+        failure: the sink heartbeats and the build-timeout watchdog still bounds
+        a genuinely dead host. Backs the serial build-result sink's incremental
+        polling (ESXI-8).
         """
         requests = _import_requests()
         resp = requests.get(
@@ -529,7 +533,7 @@ class EsxiClient:
             return bytes(resp.content)
         if resp.status_code == 200:
             return bytes(resp.content[offset:])
-        if resp.status_code in (404, 416):
+        if resp.status_code in (404, 416, 429, 503):
             return b""
         resp.raise_for_status()
         return b""
