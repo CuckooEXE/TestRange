@@ -101,6 +101,10 @@ PLAN = Plan(
                     "EOF",
                     "virsh net-define /tmp/tr-egress.xml",
                     "virsh net-autostart tr-egress",
+                    # Autostart only fires at libvirtd startup; when cloud-init
+                    # re-runs this script on the run boot (CORE-67) the daemon is
+                    # already up, so start the network explicitly if needed.
+                    "virsh net-list --name | grep -qx tr-egress || virsh net-start tr-egress",
                 ),
             ),
         ],
@@ -118,9 +122,15 @@ def node_cpu_exposes_virtualization(orch: OrchestratorHandle) -> None:
     assert r.ok and int(r.stdout.strip()) > 0, f"vmx/svm not exposed to the node: {r}"
 
 
-def node_egress_network_is_defined(orch: OrchestratorHandle) -> None:
-    r = orch.vms["node"].communicator.execute(["virsh", "net-list", "--all", "--name"])
-    assert b"tr-egress" in r.stdout, f"tr-egress network missing on the node: {r}"
+def node_egress_network_is_active(orch: OrchestratorHandle) -> None:
+    # Explicit system URI: bare virsh as the unprivileged admin defaults to
+    # qemu:///session, where the network can never appear (live-found). The
+    # bare --name listing is ACTIVE networks only — the corpus needs it up,
+    # not merely defined.
+    r = orch.vms["node"].communicator.execute(
+        ["virsh", "-c", "qemu:///system", "net-list", "--name"]
+    )
+    assert b"tr-egress" in r.stdout, f"tr-egress not active on the node: {r}"
 
 
 def leak_node_for_certification(orch: OrchestratorHandle) -> None:
@@ -133,7 +143,7 @@ def leak_node_for_certification(orch: OrchestratorHandle) -> None:
 TESTS: list[Callable[[OrchestratorHandle], None]] = [
     node_runs_libvirtd,
     node_cpu_exposes_virtualization,
-    node_egress_network_is_defined,
+    node_egress_network_is_active,
     leak_node_for_certification,
 ]
 

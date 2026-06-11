@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (12)
+## Doing (10)
 
 ### CORE
 
@@ -114,16 +114,6 @@ on 2026-06-06.
   > - Dedup _OriginlessBuilder/_Weird test doubles across files.
   > - _vm.py:100 drop dead _cdrom_xml(dev='sda') default (seed/boot-media collision risk); make dev required.
 
-### BACKEND
-
-- [ ] **BACKEND-15** · `test` — nested-libvirt cert leg: standup plan leaks a libvirt-in-libvirt host; corpus runs against it
-
-  > Cross-backend nested-cert sweep, libvirt leg (siblings ESXI-34, PVE-60). Stand up a nested LIBVIRT host on libvirt-local via a standup plan (`GuestHypervisor.libvirt`, empty inner topology, `CPU(nested=True)`, sized for corpus fan-out: ~6 vCPU / 10 GiB / large thin disk), leak it (`orch.leak()` as the final TEST — the pve_node.py shape), point a `libvirt-nested` qemu+ssh profile at it, and run `tests/plans/generic/*` + `tests/plans/libvirt/*` against the LEAKED host — the remote-libvirt driver path (qemu+ssh, SSHJumpGateway off-box guest reach: BACKEND-11's surface gets its first corpus exercise). File + fix what breaks (own ticket per finding), then `testrange cleanup` the leaked run. Standup vehicle lives in `tools/standup/`. Created 2026-06-11.
-
-- [ ] **BACKEND-11** · `feat` — remote-libvirt guest_gateway — SSH-jump through the qemu+ssh host (ADR-0020/0021)
-
-  > A remote (qemu+ssh) LibvirtDriver's guests sit on the remote host's internal networks, unreachable from the orchestrator (the depth-2 nested wall, and any SSHCommunicator inner VM). Mirror ProxmoxDriver.guest_gateway: return an SSHJumpGateway through the qemu+ssh host (host/user/key parsed from the connect URI). Local qemu:///system stays None (direct). Motivated by the depth-2 Gateway experiment requested 2026-05-31.
-
 ### DOCS
 
 - [ ] **DOCS-8** · `docs` — ADR-0022 rescope (two prep modules + ESXi patch) + xorriso install note
@@ -152,7 +142,7 @@ on 2026-06-06.
 
   > Cross-backend nested-cert sweep, PVE leg (siblings BACKEND-15, ESXI-34). `px-cloud` (40.160.34.83) is no longer PVE — the host was re-imaged to ESXi — so the proxmox driver currently has NO live cert target. Resurrect `examples/pve_node.py` (deleted in fafae9c; the ProxmoxAnswerBuilder installer-origin standup with the load-bearing knobs: uefi/q35 NIC naming, EFI removable-media fallback, run switch `mgmt=True` + static `.100`, run-phase `pvesm set local --content ...,images,import`) as `tools/standup/pve_node.py`, leak the node, point a `pve-nested` proxmox profile at its static mgmt addr, run `tests/plans/generic/*` + `tests/plans/proxmox/*` against it, file + fix findings, `testrange cleanup` the leaked run. Created 2026-06-11.
 
-## Ready (56)
+## Ready (55)
 
 ### CORE
 
@@ -396,10 +386,6 @@ on 2026-06-06.
 
   > Mute "guest agent is not responding" retry noise via a process-global `registerErrorHandler`. Refcounted mutable global state — rides BACKEND-1.
 
-- [ ] **BACKEND-5** · `feat` — remote-libvirt egress over qemu+ssh:// (verify named uplink on remote host)
-
-  > REFRAMED 2026-05-30 (BACKEND-1 drops pyroute2). The original blocker — host-local netlink can't reach a remote URI — is GONE: L2 is realized by the libvirt DAEMON via the network API, so a remote qemu+ssh:// daemon builds the bridge/dnsmasq/NAT remotely. What remains is much smaller: (1) the named uplink bridge (e.g. tr-egress) must already exist ON THE REMOTE HOST; (2) verify pool stream I/O + serial unix-socket + QGA all work across a remote connection (the serial <serial type=unix> socket path is on the remote host); (3) preflight check that the resolved uplink exists remotely. No virInterface*/SSH side-channel/remote-agent needed. Rides BACKEND-1.
-
 - [ ] **BACKEND-6** · `feat` — content-addressed image cache at the driver ABC (ADR-0011 draft)
 
   > DRAFT design in docs/adr/0011-content-addressed-backend-image-cache.md (not implemented). Reshapes the ABC storage surface from pool byte-I/O (upload_to_pool/download_from_pool/create_blank_volume/resize_volume) to content-addressed images: ensure_image(id, fetch)->ref (idempotent, lazy fetch, skip-on-resident), capture_image(vm,id,sink), list_images/evict_image (GC), create_vm consumes ImageRef. Keeps orchestrator dumb (no has_cached_layer branching; warm hit = fast return inside driver) and prevents disk spray (content-addressed names + images as a distinct lifecycle kind, GC via list/evict). Amends ADR-0008/0010. Open: eviction policy location (lean: cross-backend cache layer, cascade-on-local-eviction) + capture sink shape. Then implement per-backend, PVE first.
@@ -550,7 +536,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (372)
+## Done (376)
 
 ### CORE
 
@@ -2438,6 +2424,22 @@ on 2026-06-06.
   > Fixed: validate.py now uses USER_STATIC_LO/HI from _addressing_consts for the DHCP-pool hint (was hardcoded +100/+254 - the exact drift those consts prevent). Regression: test_dhcp_pool_hint_tracks_user_static_consts. Done 2026-05-24.
 
 ### BACKEND
+
+- [x] **BACKEND-5** · `feat` — remote-libvirt egress over qemu+ssh:// (verify named uplink on remote host)
+
+  > REFRAMED 2026-05-30 (BACKEND-1 drops pyroute2). The original blocker — host-local netlink can't reach a remote URI — is GONE: L2 is realized by the libvirt DAEMON via the network API, so a remote qemu+ssh:// daemon builds the bridge/dnsmasq/NAT remotely. What remains is much smaller: (1) the named uplink bridge (e.g. tr-egress) must already exist ON THE REMOTE HOST; (2) verify pool stream I/O + serial unix-socket + QGA all work across a remote connection (the serial <serial type=unix> socket path is on the remote host); (3) preflight check that the resolved uplink exists remotely. No virInterface*/SSH side-channel/remote-agent needed. Rides BACKEND-1. LIVE 2026-06-11 (BACKEND-15 sweep, leaked libvirt-in-libvirt node over qemu+ssh): (1) uplink-on-remote-host proven — the standup plan bakes `tr-egress` on the node and the corpus resolves it. (2) split: pool stream I/O ✓ (cache-hit plans upload+boot green), QGA ✓ (Native plans green), SSHJumpGateway ✓ (SSH plans green — BACKEND-11's surface), serial unix-socket ✗ CONFIRMED: fresh builds fail `virDomainCreate: unable to stat: /tmp/tr-lv-serial-…/….sock` — the orchestrator-LOCAL listener path is baked into the remote domain XML, so QEMU on the node stats a path that only exists on the runner. Fix: drop the host-side unix listener entirely; build VMs get `<serial type='pty'>` like every other guest and `read_build_result_sink` live-tails via `virDomainOpenConsole` + virStream over the existing connection — one code path local AND remote, and it deletes the world-connectable socket surface CORE-91's uid filter had to guard plus the /tmp listener-dir machinery. FIX LANDED 2026-06-11: `_vm` emits pty serial unconditionally (serial_sock plumbing deleted), `_conn` listener machinery + uid filter deleted, `_serial` rewritten on `virDomainOpenConsole` + non-blocking virStream (openConsole retried ≤60s with heartbeats; recv -2 = would-block → heartbeat; EOF/libvirtError = normal end); unit + integration tests reshaped. Remains: live re-verify a fresh build on the leaked qemu+ssh node (BACKEND-15 sweep). FIX LANDED + LIVE-CERTIFIED 2026-06-11: build VMs now carry `<serial type='pty'>` and the sink rides `virDomainOpenConsole` + nonblocking virStream over the existing connection — which surfaced the second half of the bug live: without a registered libvirt EVENT LOOP, remote stream data (and the power-off EOF) never pumps, so four parallel remote builds sat would-blocked for the full build timeout. `_ensure_event_loop` (virEventRegisterDefaultImpl + a daemon pump thread, once per process, before the first connect) closed it. Re-ran the five affected plans on the leaked nested node: all green, builds ~2 min. docs/libvirt.md + PLAN.md reconciled. _(done: 2026-06-11)_
+
+- [x] **BACKEND-16** · `bugfix` — libvirt networks omit a bridge name: libvirtd's `virbr%d` allocator races parallel switch creation
+
+  > Found in the BACKEND-15 nested-cert sweep (2026-06-11): `switch_isolation` against the leaked node fails `create_switch` with `error creating bridge interface virbr1: File exists` — `_network_xml` emits `<bridge stp='off' delay='0'/>` with no name, so libvirtd allocates `virbr%d` at create time, and parallel run-phase switch provisioning (ADR-0023 `--jobs`) can race two networks onto one name (an orphan bridge from a crashed run collides the same way). Fix: deterministic per-network bridge name derived from the backend name (`trb-` + sha256[:10], ≤15 chars IFNAMSIZ), mirroring the ESXi `trp-`/`trm-` short-hash naming; unit regression pins the XML and distinctness. Created 2026-06-11. Landed: `_naming.bridge_name` (`trb-` + sha256[:10]) emitted explicitly in the network XML; unit regression pins determinism + distinctness; `switch_isolation` (4 parallel switches) re-ran green on the nested node. _(done: 2026-06-11)_
+
+- [x] **BACKEND-15** · `test` — nested-libvirt cert leg: standup plan leaks a libvirt-in-libvirt host; corpus runs against it
+
+  > Cross-backend nested-cert sweep, libvirt leg (siblings ESXI-34, PVE-60). Stand up a nested LIBVIRT host on libvirt-local via a standup plan (`GuestHypervisor.libvirt`, empty inner topology, `CPU(nested=True)`, sized for corpus fan-out: ~6 vCPU / 10 GiB / large thin disk), leak it (`orch.leak()` as the final TEST — the pve_node.py shape), point a `libvirt-nested` qemu+ssh profile at it, and run `tests/plans/generic/*` + `tests/plans/libvirt/*` against the LEAKED host — the remote-libvirt driver path (qemu+ssh, SSHJumpGateway off-box guest reach: BACKEND-11's surface gets its first corpus exercise). File + fix what breaks (own ticket per finding), then `testrange cleanup` the leaked run. Standup vehicle lives in `tools/standup/`. Created 2026-06-11. DONE 2026-06-11: standup plan leaked the node (run 20260611-112441-8e2e5f, `tools/standup/libvirt_node.py`; one plan fix live-found — bare `virsh` as admin is qemu:///session, the egress assert now pins qemu:///system + ACTIVE); full corpus 15/15 GREEN against `libvirt-nested` (13 generic + 2 libvirt) — first complete remote-qemu+ssh certification. Findings filed + fixed in-leg: BACKEND-5 (serial sink remote-deaf, two-layer fix), BACKEND-16 (bridge-name allocator race), BACKEND-11 live-certified. Leaked resources cleaned up post-cert via `testrange cleanup`. _(done: 2026-06-11)_
+
+- [x] **BACKEND-11** · `feat` — remote-libvirt guest_gateway — SSH-jump through the qemu+ssh host (ADR-0020/0021)
+
+  > A remote (qemu+ssh) LibvirtDriver's guests sit on the remote host's internal networks, unreachable from the orchestrator (the depth-2 nested wall, and any SSHCommunicator inner VM). Mirror ProxmoxDriver.guest_gateway: return an SSHJumpGateway through the qemu+ssh host (host/user/key parsed from the connect URI). Local qemu:///system stays None (direct). Motivated by the depth-2 Gateway experiment requested 2026-05-31. LIVE-CERTIFIED 2026-06-11 (BACKEND-15 sweep): the qemu+ssh SSHJumpGateway (driver.py guest_gateway) carried every SSH generic plan green against the leaked nested node — key parsed from the URI's keyfile param, jump as the URI user, close()-reopen via PROXY-3. docs/user/drivers/libvirt.md reconciled. _(done: 2026-06-11)_
 
 - [x] **BACKEND-14** · `test` — generic `snapshot_chain` plan: multi-snapshot chains, data-disk/multi-pool revert, ABC contract edges
 
