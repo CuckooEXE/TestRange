@@ -120,6 +120,14 @@ class TestStaticAddr:
         with pytest.raises(ValueError, match="dns entry is not a valid"):
             StaticAddr("10.0.0.5", dns=("8.8.8.8", "bad"))
 
+    def test_bare_string_dns_rejected(self) -> None:
+        # A bare str is itself an iterable of chars, so dns="8.8.8.8" would
+        # char-split to ('8','.','8',…) and fail with the misleading
+        # "entry '8' is not a valid IPv4". Reject it with an actionable
+        # "wrap it in a tuple" message at the boundary instead (CORE-95).
+        with pytest.raises(ValueError, match="not a single string"):
+            StaticAddr("10.0.0.5", dns="8.8.8.8")  # type: ignore[arg-type]
+
 
 class TestPool:
     def test_valid(self) -> None:

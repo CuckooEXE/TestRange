@@ -8,6 +8,8 @@ registers a handler that routes them through Python logging instead.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -70,6 +72,29 @@ def test_registration_is_idempotent() -> None:
     _conn._route_libvirt_errors_to_log(fake)
     _conn._route_libvirt_errors_to_log(fake)
     assert len(calls) == 1  # registered once; re-imports are no-ops
+
+
+def test_event_loop_registers_once_and_pumps(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Nonblocking virStream I/O (the BACKEND-5 console sink) is deaf without a
+    # registered + running event loop: stream data and the power-off EOF arrive
+    # only through it (live-found: remote builds sat would-blocked for the whole
+    # build timeout). Registration must happen exactly once per process.
+    monkeypatch.setattr(_conn, "_event_loop_running", False)
+    registered: list[bool] = []
+    pumped = threading.Event()
+
+    def _run_impl() -> None:
+        pumped.set()
+        time.sleep(0.05)  # keep the daemon thread tame while the test asserts
+
+    fake = SimpleNamespace(
+        virEventRegisterDefaultImpl=lambda: registered.append(True),
+        virEventRunDefaultImpl=_run_impl,
+    )
+    _conn._ensure_event_loop(fake)
+    _conn._ensure_event_loop(fake)
+    assert registered == [True], "event impl must register exactly once"
+    assert pumped.wait(2.0), "pump thread never ran virEventRunDefaultImpl"
 
 
 class TestTeardownUri:

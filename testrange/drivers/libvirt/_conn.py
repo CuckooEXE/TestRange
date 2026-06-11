@@ -13,29 +13,25 @@ URI persisted in ``state.json``); :class:`LibvirtClient` wraps a live
 modules (``_net``, ``_storage``, ``_vm``, ``_guest``, ``_serial``) take it as
 their first argument.
 
-Remote URIs (``qemu+ssh://…``) connect fine — and because L2 is realized by the
-*daemon*, even the bridge/dnsmasq are built on the remote host — but a remote
-connection still needs its named uplink bridge to pre-exist remotely and its
-serial unix-socket path is on the remote host; that surface is tracked
-separately (BACKEND-5).
+Remote URIs (``qemu+ssh://…``) are first-class: because L2 is realized by the
+*daemon*, even the bridge/dnsmasq are built on the remote host, and the
+build-result sink rides this same connection (``virDomainOpenConsole`` of the
+guest's pty serial — no host-local socket path in the domain XML, BACKEND-5).
+A remote connection still needs its named uplink bridge to pre-exist remotely.
 """
 
 from __future__ import annotations
 
-import contextlib
-import hashlib
-import socket
-import tempfile
 import threading
 import urllib.parse
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from testrange._log import get_logger
 from testrange.exceptions import DriverError
 
 _log = get_logger(__name__)
+
 
 # The wrapper scheme TestRange persists into state.json. The libvirt connect URI
 # is itself a URI (with its own scheme/query), so it is url-quoted *inside* this
@@ -56,6 +52,35 @@ def _import_libvirt() -> Any:
 
 
 _error_handler_registered = False
+
+# Process-wide libvirt event loop, started once before the first connection.
+# Nonblocking virStream I/O (the BACKEND-5 console sink) only makes progress
+# when something pumps the connection's socket: blocking RPCs pump it as a side
+# effect of their own wait, but a sink that only ever polls `recv` on an idle
+# connection would see would-block forever — stream data (and the EOF when the
+# build VM powers off) arrives exclusively through the event loop. Live-found
+# on the nested-cert sweep: four parallel remote builds sat deaf for the whole
+# build-timeout. The loop must be registered BEFORE any virConnect is opened.
+_event_loop_lock = threading.Lock()
+_event_loop_running = False
+
+
+def _ensure_event_loop(libvirt: Any) -> None:
+    global _event_loop_running
+    with _event_loop_lock:
+        if _event_loop_running:
+            return
+        libvirt.virEventRegisterDefaultImpl()
+
+        def _pump() -> None:
+            while True:
+                try:
+                    libvirt.virEventRunDefaultImpl()
+                except Exception as e:  # pragma: no cover - never seen; keep pumping
+                    _log.warning("libvirt event loop iteration failed: %s", e)
+
+        threading.Thread(target=_pump, name="libvirt-events", daemon=True).start()
+        _event_loop_running = True
 
 
 def _route_libvirt_errors_to_log(libvirt: Any) -> None:
@@ -143,39 +168,23 @@ class LibvirtClient:
     def __init__(self, conn: LibvirtConn) -> None:
         self._conn = conn
         self._lv: Any | None = None
-        # Serial build-result sink plumbing. A guest's <serial type='unix'> is
-        # mode='connect' (QEMU connects to a socket WE listen on) — the inverse
-        # of mode='bind', which fails non-root because the qemu-owned socket is
-        # not connect-able by uid 1000. We must be listening *before* the domain
-        # starts (libvirt's security driver stats the path at start), so the
-        # listener is opened in create_vm and accept()ed later by the sink.
-        self._serial_dir: Path | None = None
-        self._serial_listeners: dict[str, tuple[Any, str]] = {}
-        # Serializes mutation of this one shared connection's in-memory state
-        # when the I/O phases drive it from several worker threads (ADR-0023):
-        # QGA agent commands (so concurrent readiness polls don't interleave on
-        # the channel) and the lazy serial-listener plumbing below (the
-        # ``_serial_dir`` create + the ``_serial_listeners`` map, which a
-        # parallel build mutates per build VM). Held only for the quick op — a
-        # command, or a dict/dir mutation — never across a readiness-loop sleep,
+        # Serializes QGA agent commands on this one shared connection when the
+        # I/O phases drive it from several worker threads (ADR-0023), so
+        # concurrent readiness polls don't interleave on the channel. Held only
+        # for the quick op — one command — never across a readiness-loop sleep,
         # so the waits still overlap. Re-entrant because a guest op
         # (exec/read/write) issues several agent commands in sequence.
         self.call_lock = threading.RLock()
 
     def connect(self) -> None:
         libvirt = _import_libvirt()
+        _ensure_event_loop(libvirt)
         self._lv = libvirt.open(self._conn.libvirt_uri)
         if self._lv is None:  # libvirt.open returns None on failure in some bindings
             raise DriverError(f"libvirt.open({self._conn.libvirt_uri!r}) returned no connection")
         _log.info("connected to libvirt at %s", self._conn.libvirt_uri)
 
     def close(self) -> None:
-        for backend_name in list(self._serial_listeners):
-            self.close_serial_listener(backend_name)
-        if self._serial_dir is not None:
-            with contextlib.suppress(OSError):
-                self._serial_dir.rmdir()
-            self._serial_dir = None
         if self._lv is not None:
             self._lv.close()
             self._lv = None
@@ -230,77 +239,3 @@ class LibvirtClient:
             if e.get_error_code() == libvirt.VIR_ERR_NO_NETWORK:
                 return None
             raise
-
-    def _ensure_serial_dir(self) -> Path:
-        """A driver-owned dir under ``/tmp`` to hold serial sockets.
-
-        Two constraints fix the location:
-
-        - **Traversable by the daemon.** QEMU (``libvirt-qemu``) must connect to
-          our ``mode='connect'`` socket, so every parent dir needs ``o+x``. We
-          create directly under ``/tmp`` (``1777``) rather than honoring
-          ``$TMPDIR`` (often a private ``0700`` dir the daemon can't enter), and
-          chmod the dir ``0755``.
-        - **Cleanable.** libvirt's security driver relabels each socket to
-          ``libvirt-qemu`` at domain start; because we *own* this (non-sticky)
-          dir, we can still unlink the relabeled socket and rmdir afterward.
-
-        (A host whose libvirtd runs with systemd ``PrivateTmp=yes`` would not
-        share this ``/tmp``; that is a remote/hardened-host concern tracked under
-        BACKEND-5, not the local-cert path.)
-        """
-        # Double-checked under call_lock: a parallel build (ADR-0023) calls
-        # open_serial_listener for several build VMs at once, and an unguarded
-        # check-then-set would mkdtemp twice and leak the loser's dir.
-        with self.call_lock:
-            if self._serial_dir is None:
-                d = Path(tempfile.mkdtemp(prefix="tr-lv-serial-", dir="/tmp"))
-                d.chmod(0o755)
-                self._serial_dir = d
-            return self._serial_dir
-
-    def open_serial_listener(self, backend_name: str) -> str:
-        """Bind+listen a unix socket for ``backend_name``'s serial console.
-
-        Returns the socket path to embed in the domain XML (mode='connect'). Must
-        be called before ``start_vm`` so the socket exists when QEMU connects;
-        the connection waits in the listen backlog until :meth:`accept_serial`.
-        """
-        sock_dir = self._ensure_serial_dir()
-        token = hashlib.sha256(backend_name.encode()).hexdigest()[:12]
-        path = str(sock_dir / f"{token}.sock")
-        with contextlib.suppress(FileNotFoundError):
-            Path(path).unlink()
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(path)
-        Path(path).chmod(0o777)  # qemu (libvirt-qemu) must be able to connect
-        srv.listen(1)
-        with self.call_lock:  # concurrent build VMs each register their listener
-            self._serial_listeners[backend_name] = (srv, path)
-        return path
-
-    def accept_serial(self, backend_name: str, *, timeout: float) -> Any:
-        """Accept QEMU's connection to ``backend_name``'s serial listener.
-
-        Raises :class:`DriverError` if no listener was opened for this VM.
-        """
-        with self.call_lock:  # guard the shared map; release before the blocking accept
-            entry = self._serial_listeners.get(backend_name)
-        if entry is None:
-            raise DriverError(f"no serial listener open for {backend_name!r}")
-        srv, _path = entry
-        srv.settimeout(timeout)
-        conn, _ = srv.accept()
-        return conn
-
-    def close_serial_listener(self, backend_name: str) -> None:
-        """Close + unlink ``backend_name``'s serial listener. Tolerant of absence."""
-        with self.call_lock:
-            entry = self._serial_listeners.pop(backend_name, None)
-        if entry is None:
-            return
-        srv, path = entry
-        with contextlib.suppress(OSError):
-            srv.close()
-        with contextlib.suppress(OSError):
-            Path(path).unlink()

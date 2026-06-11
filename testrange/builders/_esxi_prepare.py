@@ -180,36 +180,43 @@ def _firstboot(ssh_key: str | None, allow_tcp_forwarding: bool) -> list[str]:
     which runs late on *every* boot, after hostd — where ``vim-cmd``/``esxcli``
     work (calling them in ``%firstboot`` itself runs before hostd and hangs).
 
-    **vmk0 MAC follow (ESXI-18), sentinel-guarded one-shot reboot — ALWAYS.** ESXi
-    pins ``vmk0``'s MAC to the pNIC present at *install* (the build NIC) and keeps
-    it (``Net.FollowHardwareMac=0`` default), so when the captured disk is booted on
-    a different *run* NIC, ``vmk0`` DHCPs under the stale build MAC and the
-    orchestrator's lease discovery — keyed on the run NIC's MAC — misses.
-    ``FollowHardwareMac`` is read only at ``vmk0`` *creation* and ``vmk0`` is already
-    up by the time ``local.sh`` runs, and a live down/up does NOT re-MAC it — so the
-    only lever is a reboot. On the first run boot the block sets the flag, persists
-    it (``auto-backup.sh``), drops a sentinel, and ``reboot``\\ s. The sentinel
-    (``/etc/vmware/.trfollowhwmac``, persisted by that same ``auto-backup.sh``) makes
-    it one-shot — the second boot skips the block. That second boot re-creates
-    ``vmk0`` under the run NIC's hardware MAC, so the lease lands under the polled
-    MAC. (``local.sh``'s plain reboot is what works here — a detached reboot from
-    ``%firstboot`` was tried and did not fire. Run-phase lease discovery must
-    tolerate the two boots.) This is independent of the transport: the orchestrator
-    DHCP-discovers the host however it is later reached, so it is always emitted.
+    **vmk0 MAC follow is solved at the BUILD NIC, not here (ESXI-18).** ESXi pins
+    ``vmk0``'s MAC to the pNIC present at *install* and restores it from
+    ``esx.conf`` on every later boot (``FollowHardwareMac`` is consulted only at
+    vmk *creation*, so the flag-plus-reboot ``local.sh`` block this section used
+    to emit was live-disproven — a reboot restores the pinned MAC rather than
+    re-creating ``vmk0``). The fix lives upstream: an installer-origin build's
+    dedicated build NIC wears the MAC of the VM's first *declared* NIC
+    (``_build_nic_for``, orchestrator/build_phase.py), so the install pins
+    ``vmk0`` to exactly the identity the run-phase VM wakes up with and the
+    orchestrator's lease discovery polls. One boot, no guest-side surgery.
 
-    **SSH (only when SSH is the transport, i.e. ``ssh_key`` is set; ESXI-19).** Drop
-    the root key (pure filesystem) before the MAC block, and enable sshd *after* the
-    ``fi`` — so on the first boot the MAC block reboots before reaching it, and on
-    the post-reboot boot (sentinel present) the block is skipped and sshd comes up.
-    When ``ssh_key`` is ``None`` the key write and sshd enable are omitted entirely
-    and the host gets no open sshd. ``allow_tcp_forwarding`` (ESXI-22) adds one
-    more key-gated file edit: ``AllowTcpForwarding yes`` appended to
-    ``/etc/ssh/sshd_config`` so the ``guest_gateway`` jump can tunnel to guests.
+    **SSH (only when SSH is the transport, i.e. ``ssh_key`` is set; ESXI-19).**
+    Drop the root key (pure filesystem), and enable + start sshd from
+    ``local.sh`` — which runs late on every boot, after hostd, where
+    ``vim-cmd``/``esxcli`` work. When ``ssh_key`` is ``None`` the key write and
+    sshd enable are omitted entirely and the host gets no open sshd.
+    ``allow_tcp_forwarding`` (ESXI-22) rides ``local.sh`` too, as a REPLACE of
+    the shipped ``AllowTcpForwarding no`` line: ESXi regenerates
+    ``/etc/ssh/sshd_config`` from the ConfigStore after ``%firstboot``, so a
+    firstboot edit is reverted — and a trailing append would lose anyway (sshd
+    takes the first match). ``local.sh`` then restarts sshd so the edit is live
+    (ESXI-36).
+
+    ``%firstboot`` ends with ``/sbin/auto-backup.sh`` and a sentinel-guarded
+    one-shot ``reboot``: ESXi's ``/etc`` is a ramdisk overlay, so the key file
+    and ``local.sh`` written here survive a later boot only if backed up into
+    the persisted state archive — and ``rc.local.d`` has ALREADY run by the
+    time ``%firstboot`` fires, so the ``local.sh`` content written above
+    executes from the NEXT boot only (live-found twice: boot 1 always settles
+    at the DCUI sshd-less). The reboot makes boot 2 — sshd up, config live —
+    deterministic; the sentinel (persisted by the same backup) makes it
+    one-shot even if ``%firstboot`` ever re-ran (ESXI-36).
 
     Flat layout (no indentation): busybox only closes a plain ``cat <<'EOF'``
     heredoc on a column-0 terminator, so an indented body would let the heredoc
-    swallow the rest of the script — so the appended ``local.sh`` block (``if``
-    body included) is written unindented.
+    swallow the rest of the script — so the appended ``local.sh`` block is
+    written unindented.
     """
     lines = ["", "%firstboot --interpreter=busybox"]
     if ssh_key:
@@ -220,33 +227,36 @@ def _firstboot(ssh_key: str | None, allow_tcp_forwarding: bool) -> list[str]:
             "KEYEOF",
             "chmod 600 /etc/ssh/keys-root/authorized_keys",
             "chown root:root /etc/ssh/keys-root/authorized_keys",
+            # REPLACE local.sh (cat >), never append: the stock ESXi local.sh
+            # ends with `exit 0`, so appended lines are dead code on every boot
+            # — the live-found reason sshd stayed off across three standup
+            # attempts while every prior design "appended" its activation
+            # (ESXI-36; esxi-manager.sh proved the replace shape).
+            "cat > /etc/rc.local.d/local.sh <<'RCEOF'",
+            "#!/bin/sh",
         ]
         if allow_tcp_forwarding:
-            # ESXI-22: the guest_gateway tunnels to guests over a direct-tcpip
-            # channel, which sshd refuses unless AllowTcpForwarding is on. Pure
-            # file I/O in %firstboot (before the local.sh block), persisted by the
-            # MAC block's auto-backup.sh the same way the key above is; idempotent
-            # append so a re-run never duplicates the directive.
-            lines.append(
-                "grep -q '^AllowTcpForwarding' /etc/ssh/sshd_config 2>/dev/null || "
-                "echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config"
-            )
+            lines += [
+                "grep -vi '^AllowTcpForwarding' /etc/ssh/sshd_config > /etc/ssh/sshd_config.tr",
+                "echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config.tr",
+                "mv /etc/ssh/sshd_config.tr /etc/ssh/sshd_config",
+            ]
+        lines += [
+            "vim-cmd hostsvc/enable_ssh",
+            "esxcli network firewall ruleset set --enabled true --ruleset-id sshServer",
+            "/etc/init.d/SSH restart",
+            "exit 0",
+            "RCEOF",
+            "chmod +x /etc/rc.local.d/local.sh",
+        ]
     lines += [
-        "cat >> /etc/rc.local.d/local.sh <<'RCEOF'",
-        "if [ ! -f /etc/vmware/.trfollowhwmac ]; then",
-        "esxcli system settings advanced set -o /Net/FollowHardwareMac -i 1",
-        "touch /etc/vmware/.trfollowhwmac",
+        "if [ ! -f /etc/vmware/.tr-rebooted ]; then",
+        "touch /etc/vmware/.tr-rebooted",
         "/sbin/auto-backup.sh",
         "reboot",
         "fi",
+        "/sbin/auto-backup.sh",
     ]
-    if ssh_key:
-        lines += [
-            "vim-cmd hostsvc/enable_ssh",
-            "vim-cmd hostsvc/start_ssh",
-            "esxcli network firewall ruleset set --enabled true --ruleset-id sshServer",
-        ]
-    lines += ["RCEOF"]
     return lines
 
 

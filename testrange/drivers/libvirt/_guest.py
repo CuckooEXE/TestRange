@@ -99,16 +99,26 @@ def make_execute(client: LibvirtClient, backend_name: str) -> GuestExec:
         except Exception as e:
             raise GuestAgentError(f"QGA exec failed on {backend_name!r}: {e}") from e
         while True:
-            status = _agent_command(
-                client, dom, {"execute": "guest-exec-status", "arguments": {"pid": pid}}
-            )
-            if status.get("exited"):
-                return ExecResult(
-                    exit_code=int(status.get("exitcode", -1)),
-                    stdout=_b64(status.get("out-data")),
-                    stderr=_b64(status.get("err-data")),
-                    duration=time.monotonic() - start,
+            # The poll call (and the reply dereference) sit inside the same
+            # try->GuestAgentError as the launch above: a mid-poll libvirtError, or
+            # a reply with no 'return' member (status is None -> AttributeError),
+            # must surface as the GuestAgentError callers catch, not leak a raw
+            # libvirtError/AttributeError past the module's error contract (CORE-97).
+            try:
+                status = _agent_command(
+                    client, dom, {"execute": "guest-exec-status", "arguments": {"pid": pid}}
                 )
+                if status.get("exited"):
+                    return ExecResult(
+                        exit_code=int(status.get("exitcode", -1)),
+                        stdout=_b64(status.get("out-data")),
+                        stderr=_b64(status.get("err-data")),
+                        duration=time.monotonic() - start,
+                    )
+            except Exception as e:
+                raise GuestAgentError(
+                    f"QGA exec-status poll failed on {backend_name!r}: {e}"
+                ) from e
             if time.monotonic() - start > timeout:
                 raise GuestAgentError(
                     f"QGA exec of {argv!r} timed out after {timeout}s on {backend_name!r}"

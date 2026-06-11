@@ -14,7 +14,8 @@ mirroring the Proxmox split:
 - ``_vm`` — VM lifecycle (domain XML) and snapshots;
 - ``_guest`` — the QGA native guest agent (exec / read / write) over
   ``libvirt_qemu.qemuAgentCommand``;
-- ``_serial`` — the build-result sink (the ``<serial type='unix'>`` socket).
+- ``_serial`` — the build-result sink (``virDomainOpenConsole`` live-tail of
+  the guest's pty serial over the same connection, BACKEND-5).
 
 Every concern is implemented and delegated; the driver is the certified
 reference backend (ADR-0019).

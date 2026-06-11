@@ -247,6 +247,22 @@ class TestStateStore:
         assert not store.pid_path.exists()
         assert not store.lock_path.exists()
 
+    def test_remove_clears_leftover_partial(self, tmp_path: Path) -> None:
+        # A crash mid atomic-write leaves a `state.json.partial`; remove() must
+        # reclaim its own temp files or the rmdir silently fails and the dir
+        # phantoms forever in `cleanup --list` (ORCH-38).
+        store = self._store(tmp_path)
+        store.initialize(
+            run_id="r1",
+            plan_name="hello",
+            driver_class="MockDriver",
+            driver_uri="qemu:///session",
+        )
+        store.state_path.with_suffix(".json.partial").write_text("{}", encoding="utf-8")
+        store.pid_path.with_suffix(".pid.partial").write_text("1\n", encoding="utf-8")
+        store.remove()
+        assert not store.run_dir.exists()  # dir fully reclaimed, no phantom
+
 
 class TestRunDirFor:
     def test_path(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

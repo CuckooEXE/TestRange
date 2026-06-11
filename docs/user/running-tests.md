@@ -34,6 +34,9 @@ testrange repl <plan.py>                # bring-up, drop into a Python REPL, no 
 testrange cleanup --list                # list runs + status, tear down nothing
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
+testrange cleanup --forget <run_id>     # drop a run's ledger; backend untouched
+                                        #   (for a backend that is permanently gone,
+                                        #   e.g. a torn-down nested node)
 testrange cache add <path-or-url>       # cache subcommands:
 testrange cache list                    #   add / list / del / rename / forget-name / purge / push / pull
 testrange cache del <sha-or-name>

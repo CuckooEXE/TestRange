@@ -121,6 +121,9 @@ ignore = [
 # comments in examples" rule, so ignore S106 (hardcoded password) + S108
 # (temp-dir path) here instead.
 "examples/**" = ["S106", "S108"]
+# Standup vehicles bake deliberate lab credentials and print operator-facing
+# facts (the leaked node's address) from their TESTS.
+"tools/standup/**" = ["S106", "S108", "T201"]
 # The CLI's job is to print to stdout; T201 guards library code, not the CLI.
 "testrange/cli.py" = ["T201"]
 # ADR-0022: the sanctioned subprocess modules (installer-ISO prep via xorriso, to

@@ -18,20 +18,33 @@ from testrange.utils import SSHKey
 
 
 class _FakeChannel:
-    def __init__(self, exit_code: int = 0) -> None:
+    def __init__(self, exit_code: int = 0, *, status_ready: bool = True) -> None:
         self._ec = exit_code
+        self._status_ready = status_ready
+        self.closed = False
+
+    def exit_status_ready(self) -> bool:
+        return self._status_ready
 
     def recv_exit_status(self) -> int:
         return self._ec
 
+    def close(self) -> None:
+        self.closed = True
+
 
 class _FakeStream:
     def __init__(
-        self, data: bytes, exit_code: int = 0, read_exc: BaseException | None = None
+        self,
+        data: bytes,
+        exit_code: int = 0,
+        read_exc: BaseException | None = None,
+        *,
+        status_ready: bool = True,
     ) -> None:
         self._data = data
         self._read_exc = read_exc
-        self.channel = _FakeChannel(exit_code)
+        self.channel = _FakeChannel(exit_code, status_ready=status_ready)
 
     def read(self) -> bytes:
         if self._read_exc is not None:
@@ -65,6 +78,9 @@ class _FakeSFTP:
 
     def open(self, path: str, mode: str) -> _FakeSFTPFile:
         self.opened.append((path, mode))
+        if "r" in mode and path not in self.files:
+            # paramiko raises FileNotFoundError (an OSError) for a missing path.
+            raise FileNotFoundError(path)
         return self.files.setdefault(path, _FakeSFTPFile())
 
     def putfo(self, fl: Any, path: str, confirm: bool = True) -> None:
@@ -89,6 +105,7 @@ class _FakeClient:
         self.stderr_payload = b""
         self.exit_code = 0
         self.read_exc: BaseException | None = None  # stdout.read() raises this when set
+        self.status_ready = True  # stdout channel reports exit-status-ready
         self.closed = False
         self.sftp = _FakeSFTP()
 
@@ -105,7 +122,12 @@ class _FakeClient:
         self.exec_commands.append((cmd, kwargs))
         return (
             object(),
-            _FakeStream(self.stdout_payload, exit_code=self.exit_code, read_exc=self.read_exc),
+            _FakeStream(
+                self.stdout_payload,
+                exit_code=self.exit_code,
+                read_exc=self.read_exc,
+                status_ready=self.status_ready,
+            ),
             _FakeStream(self.stderr_payload, exit_code=self.exit_code),
         )
 
@@ -179,6 +201,18 @@ class TestExecute:
         assert r.stderr == b"oops\n"
         assert not r.ok
 
+    def test_missing_exit_status_is_bounded(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        # COMM-6: the peer sends EOF (stdout.read() returns) but never delivers an
+        # exit status and keeps the channel half-open. paramiko's recv_exit_status()
+        # would block forever; execute() must instead time out as a
+        # CommunicatorError (no run/test-phase watchdog covers this).
+        _, client = fake_paramiko
+        client.status_ready = False
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        with pytest.raises(CommunicatorError, match="no exit status"):
+            c.execute(["hang"], timeout=0.05)
+
     def test_read_timeout_is_wrapped(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         # COMM-4: a socket.timeout (TimeoutError) from stdout.read() — the
         # bound on a chatty-stderr wedge — must surface as CommunicatorError,
@@ -247,17 +281,29 @@ class TestRetry:
             c.execute(["true"])
 
 
-class _FakeGateway(GuestGateway):
-    """A GuestGateway stand-in: hands back a sentinel sock and records use."""
+class _FakeSock:
+    """A closable stand-in for the gateway's per-attempt direct-tcpip channel."""
 
     def __init__(self) -> None:
-        self.sentinel = object()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeGateway(GuestGateway):
+    """A GuestGateway stand-in: hands back a fresh sock per call and records use."""
+
+    def __init__(self) -> None:
         self.opened: list[tuple[str, int]] = []
+        self.socks: list[_FakeSock] = []
         self.closed = False
 
     def open_socket(self, host: str, port: int) -> Any:
         self.opened.append((host, port))
-        return self.sentinel
+        sock = _FakeSock()
+        self.socks.append(sock)
+        return sock
 
     def open_local_forward(self, host: str, port: int) -> int:
         raise NotImplementedError
@@ -278,9 +324,45 @@ class TestGateway:
         c = SSHCommunicator("u")
         c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
         c.execute(["true"])
-        assert client.connect_args["sock"] is gw.sentinel
+        assert client.connect_args["sock"] is gw.socks[-1]
         assert client.connect_args["hostname"] == "10.30.0.41"
         assert gw.opened == [("10.30.0.41", 22)]
+
+    def test_close_then_execute_redials_through_the_gateway(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # The ABC close() contract is non-terminal: the next call reconnects —
+        # THROUGH the gateway on a gatewayed backend. The real SSHJumpGateway is
+        # reopenable after close() (PROXY-3); this pins the communicator side:
+        # a fresh gateway dial, not a ride on the supposedly-closed session.
+        _, client = fake_paramiko
+        gw = _FakeGateway()
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
+        c.execute(["true"])
+        assert gw.closed is False
+        c.close()
+        assert gw.closed is True
+        assert c.execute(["true"]).ok
+        assert len(gw.opened) == 2, "reconnect did not redial the gateway"
+        assert client.connect_args["sock"] is gw.socks[-1]
+
+    def test_gateway_config_fault_raises_communicator_error(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # A GatewayError is a config fault, not a booting guest: it must not be
+        # retried for 180s, and it must surface as the single boundary exception
+        # type (PROXY-3), not leak as a raw GatewayError.
+        from testrange.exceptions import GatewayError
+
+        class _BrokenGateway(_FakeGateway):
+            def open_socket(self, host: str, port: int) -> Any:
+                raise GatewayError("no creds")
+
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=_BrokenGateway())
+        with pytest.raises(CommunicatorError, match="gateway"):
+            c.execute(["true"])
 
     def test_no_gateway_means_direct_connect(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         _, client = fake_paramiko
@@ -299,6 +381,19 @@ class TestGateway:
         c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
         c.execute(["true"])
         assert len(gw.opened) == 3  # 2 failed attempts + 1 success
+
+    def test_failed_attempt_socket_is_closed(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
+        # COMM-7: paramiko does not close a user-supplied sock on connect failure,
+        # so the loop must close the spent gateway channel each retry — else a
+        # slow-booting guest piles up open direct-tcpip channels on the bastion.
+        _, client = fake_paramiko
+        client.fail_first_n = 2
+        gw = _FakeGateway()
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
+        c.execute(["true"])
+        # The two failed attempts' socks are closed; the successful one is kept.
+        assert [s.closed for s in gw.socks] == [True, True, False]
 
     def test_close_releases_gateway(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         gw = _FakeGateway()
@@ -324,6 +419,16 @@ class TestSFTP:
         c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
         c.write_file("/tmp/foo", b"data")
         assert client.sftp.files["/tmp/foo"].written == b"data"
+
+    def test_read_file_missing_raises_communicator_error(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # paramiko's FileNotFoundError must be wrapped like write_file's errors,
+        # so callers see one exception type instead of transport internals (COMM-9).
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        with pytest.raises(CommunicatorError, match="SFTP read"):
+            c.read_file("/no/such/file")
 
     def test_write_file_truncated_raises(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         # A short transfer (remote size != source size) must fail loud, not be

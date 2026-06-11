@@ -156,6 +156,13 @@ class StateStore:
             self.state_path.unlink(missing_ok=True)
         self.pid_path.unlink(missing_ok=True)
         self.lock_path.unlink(missing_ok=True)
+        # Also reclaim our own atomic-write temp files: a crash mid-write leaves a
+        # `state.json.partial` (the very case the .partial+os.replace scheme exists
+        # to survive). If one lingers, the rmdir below silently fails and the dir
+        # phantoms forever in `cleanup --list` with no way to reclaim it, since
+        # cleanup_run gates on state.json existing (ORCH-38).
+        self.state_path.with_suffix(".json.partial").unlink(missing_ok=True)
+        self.pid_path.with_suffix(".pid.partial").unlink(missing_ok=True)
         with contextlib.suppress(OSError):  # non-empty (foreign files) — leave it
             self.run_dir.rmdir()
 

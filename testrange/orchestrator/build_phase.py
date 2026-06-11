@@ -142,20 +142,33 @@ def _build_ip_offset(vm_index: int) -> int:
     return _BUILD_IP_SLOTS[vm_index]
 
 
-def _build_nic_for(ctx: RunContext, build_switch: Switch, vm_name: str, vm_index: int) -> BuildNic:
+def _build_nic_for(ctx: RunContext, build_switch: Switch, vm: VMRecipe, vm_index: int) -> BuildNic:
     """Synthesize the dedicated build NIC for one VM (ADR-0017).
 
-    One transient NIC on the build switch, statically addressed with a
-    reserved-slot MAC (:data:`BUILD_NIC_NIC_IDX`) disjoint from the VM's declared
-    NICs. The host offset is :func:`_build_ip_offset` of the VM's plan position,
-    so concurrent build VMs (ORCH-4) get distinct, deterministic addresses. When
-    the build switch is ``nat`` the address derives its gateway/DNS from the
-    sidecar at ``.1``, so the build boot egresses for ``apt``/``pip``.
+    One transient NIC on the build switch, statically addressed. The host offset
+    is :func:`_build_ip_offset` of the VM's plan position, so concurrent build
+    VMs (ORCH-4) get distinct, deterministic addresses. When the build switch is
+    ``nat`` the address derives its gateway/DNS from the sidecar at ``.1``, so
+    the build boot egresses for ``apt``/``pip``.
+
+    MAC selection (ESXI-18): an image-origin build gets the reserved-slot MAC
+    (:data:`BUILD_NIC_NIC_IDX`), disjoint from the VM's declared NICs. An
+    INSTALLER-origin build instead wears the MAC of the VM's first declared NIC:
+    an installed OS can pin its first-boot identity to the install-time MAC and
+    keep it (ESXi creates ``vmk0`` with it and restores it from ``esx.conf`` on
+    every later boot), while the run phase recreates the VM with the declared
+    NICs and polls the sidecar lease file for the *declared idx-0* MAC — so the
+    install must happen under the identity the node wakes up with. Safe because
+    a build VM carries ONLY the build NIC (the declared NICs are replaced, not
+    joined), and the build/run switches are distinct L2s. Falls back to the
+    reserved slot when the spec declares no NICs (nothing will poll a lease).
     """
     network = build_switch.networks[0]
     build_ip = str(build_switch.network.network_address + _build_ip_offset(vm_index))
+    installer_origin = vm.builder.os_disk_base() is None
+    mac_idx = 0 if installer_origin and vm.spec.nics else BUILD_NIC_NIC_IDX
     return BuildNic(
-        mac=ctx.driver.compose_mac(ctx.plan_name, vm_name, BUILD_NIC_NIC_IDX),
+        mac=ctx.driver.compose_mac(ctx.plan_name, vm.name, mac_idx),
         network=network.name,
         addr=StaticAddr(build_ip),
         addressing=NetworkAddressing.from_switch(build_switch),
@@ -262,6 +275,11 @@ def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
             for s in inner_plan.hypervisor.all_switches
             for n in s.networks
         },
+        # Honor the operator's worker cap on the inner build too; without this the
+        # inner build_phase falls back to RunContext.jobs=None (8-way default) and
+        # silently ignores `--jobs 1` exactly where heavy nested-virt builds make
+        # throttling most relevant (ORCH-35).
+        jobs=ctx.jobs,
         # Share the outer dashboard so a nested host's inner-VM builds report
         # their serial/stage into the same panes (ADR-0029).
         dashboard=ctx.dashboard,
@@ -343,7 +361,7 @@ def _probe_vm(
     macs = tuple(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
     )
-    build_nic = _build_nic_for(ctx, build_switch, vm.name, vm_index)
+    build_nic = _build_nic_for(ctx, build_switch, vm, vm_index)
     # CORE-90: a NativeCommunicator VM needs the backend's native agent in the
     # guest. The orchestrator — the only component that knows both the driver
     # (agent identity) and the communicator (agent wanted) — brokers the driver's

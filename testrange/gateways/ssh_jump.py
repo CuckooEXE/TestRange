@@ -17,6 +17,10 @@ Two reach shapes (see :class:`~testrange.gateways.base.GuestGateway`):
 
 The jump connection is established lazily on first use and multiplexes every
 channel opened afterwards; :meth:`close` stops the forwards and tears it down.
+``close`` is **not terminal**: a later deliberate :meth:`open_socket` /
+:meth:`open_local_forward` lazily re-establishes a tracked jump (the
+Communicator ``close()`` contract rides on this, PROXY-3) — only a stale
+``_serve`` thread racing ``close()`` is refused (PROXY-2).
 """
 
 from __future__ import annotations
@@ -73,8 +77,15 @@ class SSHJumpGateway(GuestGateway):
     port: int = 22
     _client: Any = field(default=None, init=False, repr=False)
     _listeners: list[socket.socket] = field(default_factory=list, init=False, repr=False)
+    # Guards _client/_listeners/_generation against _serve threads racing close().
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    # Bumped by close(). A _serve thread carries the generation it was spawned
+    # under and is refused once it goes stale (PROXY-2); deliberate calls pass
+    # no generation and may lazily re-establish the jump (PROXY-3).
+    _generation: int = field(default=0, init=False, repr=False)
 
     def _ensure_jump(self) -> Any:
+        """Return the live bastion client, dialling lazily. Call with ``_lock`` held."""
         if self._client is not None:
             return self._client
         paramiko = _import_paramiko()
@@ -103,8 +114,22 @@ class SSHJumpGateway(GuestGateway):
         _log.info("ssh jump established via %s@%s:%d", self.username, self.host, self.port)
         return client
 
-    def _channel_to(self, host: str, port: int, origin: tuple[str, int]) -> Any:
-        transport = self._ensure_jump().get_transport()
+    def _channel_to(
+        self, host: str, port: int, origin: tuple[str, int], *, generation: int | None = None
+    ) -> Any:
+        with self._lock:
+            if generation is not None and generation != self._generation:
+                # A local-forward _serve thread can win the accept() race against
+                # close() and dial here after teardown; reconnecting would
+                # resurrect a brand-new, untracked bastion client that nothing
+                # ever tears down (PROXY-2). Refuse — _serve catches this and
+                # unwinds on its next accept(). A DELIBERATE post-close call
+                # passes no generation and falls through to a lazy, *tracked*
+                # reconnect instead: close() is not terminal (the Communicator
+                # close() contract, PROXY-3).
+                raise GatewayError(f"SSHJumpGateway({self.username}@{self.host}) is closed")
+            client = self._ensure_jump()
+        transport = client.get_transport()
         if transport is None:  # pragma: no cover - paramiko sets a transport on connect
             raise GatewayError(f"ssh jump to {self.host} has no live transport")
         return transport.open_channel("direct-tcpip", (host, port), origin)
@@ -121,27 +146,34 @@ class SSHJumpGateway(GuestGateway):
 
     def open_local_forward(self, host: str, port: int) -> int:
         """Bind a local listener that tunnels each connection to ``(host, port)``."""
-        self._ensure_jump()
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
+        # The whole setup runs under the lock so close() can never slip between
+        # the jump dial and the listener registration (an unregistered listener
+        # would survive close() with its accept loop alive).
+        with self._lock:
+            self._ensure_jump()
+            generation = self._generation
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            self._listeners.append(listener)
         local_port: int = listener.getsockname()[1]
         # Daemon threads that unwind on their own when the sockets they own close
         # (the listener in close(), the channels when the jump transport drops),
         # so there is no stop-flag to manage.
-        threading.Thread(target=self._serve, args=(listener, host, port), daemon=True).start()
-        self._listeners.append(listener)
+        threading.Thread(
+            target=self._serve, args=(listener, host, port, generation), daemon=True
+        ).start()
         _log.info("ssh jump local-forward 127.0.0.1:%d -> %s:%d", local_port, host, port)
         return local_port
 
-    def _serve(self, listener: socket.socket, host: str, port: int) -> None:
+    def _serve(self, listener: socket.socket, host: str, port: int, generation: int) -> None:
         while True:
             try:
                 conn, _peer = listener.accept()
             except OSError:
                 return  # listener closed by close()
             try:
-                chan = self._channel_to(host, port, conn.getpeername())
+                chan = self._channel_to(host, port, conn.getpeername(), generation=generation)
             except Exception as e:
                 _log.debug("forward dial to %s:%d failed: %s", host, port, e)
                 conn.close()
@@ -167,12 +199,17 @@ class SSHJumpGateway(GuestGateway):
             right.close()
 
     def close(self) -> None:
-        for listener in self._listeners:
-            listener.close()  # unblocks the accept() loop; pumps unwind on channel close
-        self._listeners.clear()
-        if self._client is not None:
+        with self._lock:
+            # Bump first (under the lock) so a _serve thread mid-dial goes stale
+            # and is refused rather than reconnecting through _ensure_jump after
+            # the teardown below (PROXY-2). Deliberate later opens re-establish.
+            self._generation += 1
+            for listener in self._listeners:
+                listener.close()  # unblocks the accept() loop; pumps unwind on channel close
+            self._listeners.clear()
+            client, self._client = self._client, None
+        if client is not None:
             try:
-                self._client.close()
+                client.close()
             except Exception as e:  # pragma: no cover - best-effort teardown
                 _log.warning("ssh jump close failed: %s", e)
-            self._client = None

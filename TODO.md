@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (14)
+## Doing (7)
 
 ### CORE
 
@@ -30,95 +30,6 @@ on 2026-06-06.
   > Module layout mirrors drivers/proxmox/: _client/_profile/_naming/_net/_storage/_vm/devices/_guest/_serial/driver.
   >
   > Children: CORE-60 (credential kwarg prereq), spikes ESXI-S1/S2/S3, core ESXI-1..9, ADR + cert tail ESXI-10..15. Pairs with COMM-2 (VMware Tools communicator) and PROXY-1 (console proxy = guest_gateway). Created 2026-06-01.
-
-- [x] **ESXI-26** · `bugfix` — ESXi VM NICs bind to the network backend name, not the realized `trp-*` portgroup
-
-  > Found running `tests/plans/` against a nested ESXi node: `tests/plans/esxi/devices.py` fails its build phase with `apt: Temporary failure resolving 'deb.debian.org'`. Root cause is NOT egress (the sidecar's uplink NIC leases + resolves fine) and NOT an env limit — it's a portgroup-name mismatch. The orchestrator threads the network **backend name** (`tr-build_network-<run>-build-net`) into `create_vm`'s `network_refs` (`provision.py:115`, kept as the backend name because teardown recomputes `trp-*` from it), but `_net.create_network` realizes the Network as a portgroup named `trp-<hash>` (`_naming.portgroup_name`). So the build VM + sidecar internal NICs bind to a portgroup that does not exist → ESXi `connected=False, status=unrecoverableError` → guest `NO-CARRIER` → no DHCP lease → no resolver. Libvirt is immune (realized name == backend name); the ESXi uplink NIC works because it carries the realized `trx-*` ref. Fix: `ESXiDriver.create_vm` resolves each `network_refs` value through the `_portgroup_by_network` map it already builds in `create_network` (`.get(ref, ref)` — uplink ref passes through). Unit regression in `test_esxi_vm.py`; end-to-end proof is the now-green `tests/plans/esxi/devices.py`. _(done: 2026-06-10)_
-
-- [x] **ESXI-27** · `test` — generic plans hardcode virtio `/dev/vd*` device nodes; not portable to ESXi (scsi → `/dev/sd*`)
-
-  > Found running the generic corpus against a nested ESXi node: `tests/plans/generic/build_cache.py` (lines 82-85) does `mkfs.ext4 -F -L data-b /dev/vdb` / `mount /dev/vdb`, which fails on ESXi with `The file /dev/vdb does not exist` → `BuildFailedError` — note egress is fine here (apt + pip + build-essential + cowsay install cleanly). ESXi has no virtio, so the generic `HardDrive` enumerates as `/dev/sd*`, not `/dev/vd*`. The plan only ever ran on virtio backends (libvirt + proxmox both present `HardDrive` as `/dev/vd*`), so the hardcoded node was latent non-portability that violates the "a generic plan must run on every backend" contract (CLAUDE.md §4). Fix: discover the data-disk nodes portably — `os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1); set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)` then mkfs/mount `/dev/$1`,`/dev/$2` (shared bash script, so `set --` carries); run-mount already by `LABEL=`. Works on vd*/sd*/nvme. (Only build_cache hardcoded a device node; the other generic plans fail on the agent, CORE-90.) Created 2026-06-10. _(done: 2026-06-10)_
-
-- [x] **ESXI-29** · `test` — generic NativeCommunicator plans declare no guest credential; ESXi VMware Tools guest-ops require one (CORE-60)
-
-  > Found running the generic corpus against a nested ESXi node (after CORE-90 landed): the build VMs get `open-vm-tools` auto-injected and boot, but the run-phase `NativeCommunicator` fails `GuestAgentError: ESXi VMware Tools guest-ops … require a guest credential (username+password); none was supplied (CORE-60)`. ESXi VMware Tools authenticate against the guest OS on **every** guest-op; QGA backends (libvirt/proxmox) are unauthenticated and ignore the credential, so the generic Native plans (`lifecycle`/`firmware`/`concurrency`/`networking`) declare none and only ever worked on QGA. Quick fix (portable): declare a `PosixCred` on each generic Native plan's builder — harmless on QGA, required on ESXi (mirrors what `tests/plans/esxi/devices.py` already does). Possible framework alternative (note, not chosen yet): broker a default ephemeral guest credential for Native VMs the way CORE-90 brokers the agent. Verified live: `firmware` 2/2 green on esxi-unmanaged (also validates uefi-on-ESXi); `lifecycle` stays green on libvirt. Created 2026-06-10. _(done: 2026-06-10)_
-
-- [x] **ESXI-30** · `bugfix` — ESXi guest_gateway SSH-jump to internal run VMs fails `Connect failed` (PROXY-1) — WONTFIX (architectural)
-
-  > Found running the generic corpus against a nested ESXi node (after the AllowTcpForwarding block was lifted): the SSHCommunicator plans (`build_cache`/`preflight`/`snapshots`/`users_credentials`) now get past `Administratively prohibited` but fail `communicator not ready … SSH connect to <guest>:22 … ChannelException(2, 'Connect failed')`. So forwarding is permitted, but the ESXi host (the guest_gateway jump host) cannot open a `direct-tcpip` channel to the run VM's `:22` on the internal lab segment.
-  >
-  > **Diagnosed live (NativeCommunicator introspection + node-side `vmkping`/route dump):** the guest is fully healthy — `openssh-server` installed, `ssh` active+enabled, `LISTENING` on `0.0.0.0:22`, leased on the lab segment, and it can `ping` the node's mgmt vmk (`10.42.0.2`). Node side: `esxcli network ip route ipv4 list` shows a connected route `10.42.0.0/24 → vmk1`, and `vmkping` from the node reaches the guest. **Yet the SSH `direct-tcpip` jump still fails `Connect failed`.** Root cause is architectural, not a misconfig: the SSH jump runs in ESXi's **userworld** TCP stack (hostd/sshd), which — unlike the **vmkernel** stack that `vmkping` uses — cannot originate a TCP connection into an arbitrary guest on a vSwitch. A vSwitch only carries host→guest traffic for a vmk **whose own stack is on that portgroup**; the userworld sshd has no such path. Adding a vmk + connected route (which we have) is necessary but not sufficient — the userworld stack still won't punch into the guest. Confirmed by the user: *"the vmk tcp stack can't just arbitrarily reach into any guest."*
-  >
-  > **Resolution: WONTFIX.** ESXi's supported TestRange transport is the `NativeCommunicator` (VMware Tools / pyVmomi guest-ops, a control-plane path with no host→guest network dependency), which is fully green across the generic + esxi corpus. The off-box `SSHCommunicator` + `guest_gateway` SSH-jump (PROXY-1) is a libvirt/proxmox-shaped transport that is architecturally unavailable for internal ESXi guests; ESXi plans must use `NativeCommunicator`. Documented as a known ESXi transport limitation rather than chasing an unimplementable host-side TCP path. _(done: 2026-06-10)_
-
-- [ ] **ESXI-31** · `bugfix` — ESXi disk-staging temp dirs default to `/tmp` (tmpfs) → multi-GiB build-cache I/O overflows it (`[Errno 28]`)
-
-  > Found running `tests/plans/generic/switch_isolation.py` against the unmanaged ESXi node (NET-18 cross-backend cert): the build phase for 3 VMs succeeded on-host, but the post-build **cache download** crashed `OSError: [Errno 28] No space left on device` in `esxi/_client.py:426 folder_get`, re-raised through `build_phase`'s `parallel_map`. NOT the datastore (datastore1 had 94 GiB free) — the **local** filesystem: `_storage.download_from_pool` (`_storage.py:220`) and `upload_to_pool` (`:187`) stage the multi-GiB `-flat.vmdk` / `monolithicSparse` conversions in `tempfile.TemporaryDirectory()` **with no `dir=`**, so they land in `gettempdir()` → `/tmp`, which on this host (and most systemd distros) is a **12 GiB tmpfs**. Three concurrent 8 GiB flat-vmdk exports (24 GiB, the default `--jobs` build fan-out) overflow it. Egress-topology-independent, reproduces on any host with a small/tmpfs `/tmp`. Fix (idiomatic — mirrors `cache/local.py:401`'s `dir=path.parent`): anchor the staging temp dir to the cache filesystem each function already holds a path on — `download_from_pool` → `dir=dest_path.parent`, `upload_to_pool` → `dir=source_path.parent`. Same-filesystem staging also makes the qemu-img convert read+write on one device (no cross-device copy). Unit regression in `test_esxi_storage.py` (staging path is under the cache dir, not the default tempdir); end-to-end proof is the now-green ESXi `switch_isolation` run. Follow-up (noted, lower-risk): `write_to_pool`'s `NamedTemporaryFile` (`:131`) has the same default-tempdir staging for seed/boot-ISO bytes but no in-signature cache anchor — small for seeds, only large for boot ISOs. Created 2026-06-11.
-- [ ] **ESXI-20** · `test` — finish ESXiKickstartBuilder + stand up/leak a nested ESXi node on libvirt + certify `tests/plans/` against it
-
-  > `feature/VMBuild`. Un-shelves ESXI-16/18 locally and advances ESXI-12/13/15:
-  > drive the full ESXi vertical end-to-end on this box (nested KVM, `tr-egress`
-  > NAT, ESXi 8.0U3b installer cached).
-  >
-  > 1. **Builder audit/finish** — confirm `ESXiKickstartBuilder` is complete and
-  >    correct against the Builder ABC + build-result contract; close any real gap
-  >    surfaced by review (the stale BUILD-15/16 nits are mostly already in-code —
-  >    verify). Keep every ESXi-specificism stove-piped in the builder/driver.
-  > 2. **Stand up + leak** — a standup plan (`GuestHypervisor.esxi`, the
-  >    `esxi-followhwmac.py` shape) installs one nested ESXi node on
-  >    `libvirt-local` and leaks it (`testrange repl` → `orch.leak()`). Exercises
-  >    the builder install + the ESXI-18 vmk0 MAC-follow fix live.
-  > 3. **Certify** — point an `esxi-leaked` profile at the node; run
-  >    `tests/plans/generic/*` + `tests/plans/esxi/*` via `testrange run --profile
-  >    esxi-leaked` (the ESXi *driver* path). Author any missing ESXi cert coverage.
-  > 4. **File + fix** every bug the cert surfaces (own swimlane per finding);
-  >    record discrepancies à la REL-14. Squash + push as milestones land.
-  >    Created 2026-06-09.
-  >
-  > Progress (2026-06-09):
-  > - M1 DONE — builder audit: `ESXiKickstartBuilder` is complete; BUILD-15/16
-  >   confirmed already-addressed in-code (stale, → Done). Hardened the one real
-  >   footgun: keyless root + `enable_ssh=True` now fails loud at construction
-  >   (SSH is ESXi's only run-phase channel; a keyless image hangs `wait_ready`).
-  >   Implemented the driver gap the ESXi cert needs: per-disk controller bus
-  >   (`ESXiHardDrive.bus` scsi/sata/nvme/ide) in `esxi/_vm.create_vm`, read off
-  >   `spec.data_drives` so the knob stays ESXi-stovepiped (no ABC/orchestrator
-  >   change). Unblocks `tests/plans/esxi/devices.py`. Gates green (1137 unit).
-  > - M3 (standup) findings, see `docs/dev/e2e-findings-esxi.md`:
-  >   - FIXED — a modest-disk install left NO datastore (ESX-OSData fills the
-  >     disk). Added `systemMediaSize=min` to the installer kernelopt so the
-  >     install leaves a `datastore1`; folded the kernelopt into `config_hash`.
-  >   - OPEN — ESXI-18 (vmk0 keeps the build MAC) live-DISPROVEN: the shipped
-  >     FollowHardwareMac+reboot fix does NOT take (a reboot restores vmk0's
-  >     pinned MAC; the flag only affects vmk creation). ESXI-18 updated.
-  >     Sidestepped for the cert (reach the node by its DHCP IP over pyVmomi;
-  >     enable sshd host-side). Node spun up + leaked via the diag bring-up.
-  > - M4 (cert) ran `tests/plans/esxi/devices.py` against the leaked node. The
-  >   ESXi DRIVER pipeline is proven live end to end EXCEPT the final L2 hop:
-  >   pyVmomi, preflight, vSwitch+uplink(vmnic1)+portgroup, datastore pool,
-  >   qcow2→vmdk + datastore upload, VM/sidecar CreateVM, serial sink, the
-  >   sidecar's DHCP/DNS/NAT, guest-ops — all green. Fixed: the dead package name
-  >   and the stale-serial0.log replay (both bugs surfaced here). BLOCKED by a
-  >   nested-ESXi environmental limit: a VM NIC cannot connect to an UPLINK-LESS
-  >   vSwitch (status=unrecoverableError) on ESXi-on-libvirt, and `_net` realizes
-  >   every isolated guest segment as exactly that — so the on-node build VM gets
-  >   no network. NOT a code defect (works on real ESXi); this is the documented
-  >   ESXI-16 "nested build phase is finicky" reason ESXi certifies on a RAW host
-  >   (REL-11), not nested. Full chain in `docs/dev/e2e-findings-esxi.md`.
-  > - M1 disk-bus feature LIVE-VERIFIED on the leaked node, side-stepping the
-  >   build (the cert's `buses` VM has no NIC, so its disk-bus assert is
-  >   NIC-independent): drove the driver to boot the pre-built sidecar image + 3
-  >   `ESXiHardDrive`s and read `/sys/block` over guest-ops → `sda`/`sdb`/`sdc` on
-  >   `/dev/sd*` (OS-scsi + scsi + sata) and `nvme0n1` on `/dev/nvme*` — exactly
-  >   `esxi/devices.py`'s two asserts. PASS, on real ESXi managed objects.
-
-### NET
-
-- [ ] **NET-18** · `test` — generic `switch_isolation` plan: the three switch tiers (uplinked / isolated / mgmt) + directional reachability matrix
-
-  > Cert-corpus gap surfaced while sweeping `tests/plans/generic/` across backends: `networking.py` stresses one uplink switch (multi-`Network` L2) + one air-gapped switch, but nothing certifies the **mgmt switch** (`Switch(mgmt=True)`, host adapter at `.2`) as a reachability boundary, nor the directional egress-isolation matrix across the three switch *tiers*. Add `tests/plans/generic/switch_isolation.py`: a plain `Hypervisor` with **A** = `Switch(uplink="egress", sidecar dhcp/dns/nat)`, **B** = bare `Switch` (no uplink, air-gapped), **C** = `Switch(mgmt=True)` (no uplink, host adapter at `.2`). `web-a` static on A (derived sidecar gateway → egress + DNS host-record), `web-b` static on air-gapped B, `client` triple-homed (DHCP on A, static on B, static on C → exactly one default route via A). Matrix (10 TESTS, provenance-pinned): client default-route-**via-a1-sidecar** (`via .1`, not a bare count), client→web-a (DNS, shared A), client→web-b (IP, shared B), client→mgmt-**over-c1-leg** (`ip route get` `src`==c1 + ping, shared C), client→internet (NAT via A), web-a→internet (derived-gateway egress), **web-b serves-locally (positive control)**, web-b↛web-a (IP, curl exit 7), web-b↛mgmt (ping `unreachable`), web-b↛internet-**by-IP-literal** (curl exit 7). Asserts reach AND isolation in both directions, each checked for the right *cause* — the mgmt-adapter and per-tier egress boundaries `networking.py` doesn't touch. **Live-certified green on TWO backends, hardened: libvirt-local 10/10 + esxi-unmanaged 10/10 (2026-06-11).**
-
-  > **Authoring path (the green run was not the end):** (1) first drafted 9 tests, certified libvirt 9/9 — but the live run corrected a wrong assumption (a draft asserted `web-a↛mgmt`; it FAILED because `.2` is a *host* IP and the host is web-a's NAT egress next-hop, so web-a reaches it incidentally via MASQUERADE — expected, egress-topology-dependent, not isolation; the genuine mgmt-isolation edge is the air-gapped guest). (2) The ESXi cross-backend sweep gated the [[project_testrange_esxi]] **ESXI-31** fix (default-tempdir disk staging overflowed tmpfs `/tmp` on the build→cache download; first attempt crashed `[Errno 28]`, re-ran 9/9 green after the fix). (3) A 3-skeptic adversarial-verification pass over the 9/9 result refused to rubber-stamp it: it found **3 tests that passed for the wrong reason** (client→mgmt over-determined by the same NAT path — passes even if the mgmt adapter is mis-homed; web-b↛internet by-name conflates no-DNS with no-route, hiding a route leak; web-b↛web-a had no positive curl-from-web-b control, so a broken curl passes it vacuously) + 2 caveats (default-route count not interface-pinned; bare `not r.ok` on negatives). (4) Hardened to 10 tests addressing all of it — pinned the default-route next-hop, proved mgmt reachability traverses the c1 leg (`ip route get src`), added the web-b-serves-locally positive control, switched isolation probes to IP literals with curl-exit-7 / ping-`unreachable` discrimination — then re-certified 10/10 on both backends. Portable (generic); bind a backend with `--profile`. Created 2026-06-10.
 
 ### ORCH
 
@@ -140,12 +51,6 @@ on 2026-06-06.
   > - ISO9660 ids /ANSWER.TOM;1, /BOOT.EFI.CFG deviate from .;1 convention.
   > - Dedup _OriginlessBuilder/_Weird test doubles across files.
   > - _vm.py:100 drop dead _cdrom_xml(dev='sda') default (seed/boot-media collision risk); make dev required.
-
-### BACKEND
-
-- [ ] **BACKEND-11** · `feat` — remote-libvirt guest_gateway — SSH-jump through the qemu+ssh host (ADR-0020/0021)
-
-  > A remote (qemu+ssh) LibvirtDriver's guests sit on the remote host's internal networks, unreachable from the orchestrator (the depth-2 nested wall, and any SSHCommunicator inner VM). Mirror ProxmoxDriver.guest_gateway: return an SSHJumpGateway through the qemu+ssh host (host/user/key parsed from the connect URI). Local qemu:///system stays None (direct). Motivated by the depth-2 Gateway experiment requested 2026-05-31.
 
 ### DOCS
 
@@ -172,6 +77,10 @@ on 2026-06-06.
 ## Ready (54)
 
 ### CORE
+
+- [ ] **CORE-99** · `bugfix` — `compatibility_findings` is a stale no-op: backend-pinned devices are not rejected at binding
+
+  > Found in the 2026-06-11 API survey: `orchestrator/backend.py:119-131` returns `()` unconditionally with a docstring claiming "no backend-specific device subclasses exist yet" — stale since ADR-0026: `LibvirtOSDrive`/`LibvirtDataDrive`/`LibvirtNetworkIface`, `ProxmoxHardDrive`, `ESXiHardDrive` all exist and their docstrings name this hook as the portability lint that pins a plan to its backend. Today a plan with `LibvirtDataDrive` binds to ESXi without complaint and fails opaquely at create_vm (or silently drops the knob). Implement the lint: per-device backend-pin vs bound driver scheme, generic devices pass everywhere; unit-test the matrix. Relates to CORE-41 (per-driver capability preflight). Created 2026-06-11.
 
 - [ ] **CORE-3** · `feat` — `pytest-testrange` plugin
 
@@ -229,60 +138,6 @@ on 2026-06-06.
   >
   > examples/capabilities-nested-esxi.py + GuestHypervisor.esxi DONE (code+unit gate-green). LIVE 2026-06-02: fixed BACKEND-13 (IDE installer CD) + BUILD-22 (heredoc) + CORE-62 (--build-timeout). ESXi install now validated end-to-end to DCUI on libvirt L0. ESXI-17 RESOLVED 2026-06-06 (build-result via %post vsish→logPort=com1; build phase certified end-to-end on libvirt L0). CORE-63 RESOLVED 2026-06-06 (EcdsaKey for the FIPS-sshd run-phase key). CORE-65 RESOLVED 2026-06-07 (pNIC discovery: the inner cache-only run was spuriously pNIC-validating the build switch's uplink against the inherited libvirt bridge-name map; preflight now passes build_switch=None under require_cache so the never-realized build switch is exempt — unit-proven + hello_world smoke green). Remaining: the live nested run-phase cert (esxcli/SSH to the node + inner VM over pyVmomi) end-to-end on libvirt L0. Move to Done once that run-phase cert is green.
 
-- [ ] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
-
-  > **LIVE-DISPROVEN 2026-06-09 (ESXI-20): the shipped fix does NOT take.** Built +
-  > booted a node end-to-end on libvirt L0. It settles at the DCUI on its lab DHCP
-  > lease, but vmk0 STILL carries the build-NIC MAC (confirmed via the DCUI IPv6
-  > link-local EUI-64 `fe80::…:f177:c0` ⇒ `02:91:5a:f1:77:c0`, and the lab sidecar
-  > lease under that MAC) — so `discover_ip` (polling the run NIC MAC) still misses.
-  > sshd is also off. ROOT CAUSE OF THE FIX'S FAILURE: the "second boot re-inits
-  > vmk0 under the hardware MAC" premise is wrong — `FollowHardwareMac` is consulted
-  > only at vmk *creation*, and a plain `reboot` **restores** vmk0 from `esx.conf`
-  > with its pinned (build) MAC instead of re-creating it, so the flag never moves
-  > an existing vmk0. A real fix must DELETE + re-add vmk0 (`esxcli network ip
-  > interface remove/add` from `local.sh`, after hostd) so it adopts vmnic0's MAC,
-  > or set vmk0's MAC explicitly. SIDESTEPPED for the ESXI-20 cert: reach the node
-  > at its actual DHCP IP via pyVmomi (cert transport is VMware-Tools/pyVmomi, not
-  > SSH lease-discovery) and enable sshd host-side via pyVmomi. See
-  > `docs/dev/e2e-findings-esxi.md`. Still parked for a proper builder fix.
-  >
-  > **BUILDER FIX LANDED 2026-06-08 (merged to feature/release-check); live cert
-  > still SHELVED post-1.0.0.** `%firstboot` now seeds `local.sh` with a
-  > sentinel-guarded one-shot reboot that sets `Net.FollowHardwareMac=1` + persists
-  > (auto-backup.sh), and the rendered ks.cfg digest is folded into `config_hash`.
-  > Unit-gated. The live nested run-phase cert (run with `--lease-timeout ~600`;
-  > ad-hoc plan at `~/Desktop/TestRange-Adhoc/esxi-followhwmac.py`) remains shelved
-  > — and was NEVER actually live-tested (the earlier "Option A" live run executed
-  > pre-fix code from this branch). Earlier diagnosis below.
-  >
-  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** The diagnosis
-  > below is complete and the deterministic fix is known (Fallback A/B); we are
-  > parking nested ESXi until after the 1.0.0 release rather than finishing it now.
-  > The ESXi *backend* is certified via REL-11 (raw kickstart host), which needs
-  > none of this. Pick this up when nested ESXi becomes a priority.
-  >
-  > LIVE-FOUND under ESXI-16 (2026-06-07). esxi-a's run boot never satisfied
-  > `discover_ip` → "did not acquire a DHCP lease on 'lab-net' within Ns". NOT a
-  > timeout: proven by reading the lab sidecar's dnsmasq.leases mid-run —
-  > esxi-a DID lease (10.50.0.33) but under `02:df:31:62:2b:5e` (the **build NIC**
-  > MAC), while the orchestrator polls the run/lab NIC MAC `02:54:e8:60:81:17`.
-  > ROOT CAUSE: ESXi binds vmk0's MAC to the pNIC present at **install** (the
-  > dedicated build NIC) and keeps it (`Net.FollowHardwareMac=0` default); the
-  > captured image is later booted on a different run NIC, so vmk0 DHCPs under the
-  > stale build MAC. FIX (user-chosen): bake `Net.FollowHardwareMac=1` into the
-  > kickstart so vmk0 follows its uplink's current hardware MAC. Wrinkle: %post
-  > powers off during build (ESXI-17), so %firstboot first runs in the run phase
-  > AFTER vmk0's early DHCP under the build MAC. LIVE-PROVEN 2026-06-07: setting the
-  > flag at runtime + bouncing vmk0 (down/up) does NOT move a live vmk0's MAC (DCUI
-  > still showed the build-MAC IPv6) and the down/up broke rc.local. So local.sh
-  > (after hostd) sets the flag, persists config (auto-backup.sh), and does a
-  > ONE-SHOT guarded reboot (sentinel /etc/vmware/.trfollowhwmac); the second boot
-  > re-inits vmk0 under the hardware (run) MAC so the lease lands under the polled
-  > MAC. Needs a longer run-phase lease window (two nested-ESXi boots). Also fold
-  > the rendered kickstart digest into ESXiKickstartBuilder.config_hash so the
-  > template change busts the stale esxi-a cache (CORE-64-style gap). Live-verify.
-
 - [ ] **ESXI-11** · `test` — live testrange run smoke (hello_world) on 40.160.34.83
   _(blocks: ESXI-12)_
 
@@ -304,6 +159,10 @@ on 2026-06-06.
   > Once ESXi is certified working against the generic corpus, add `tests/plans/esxi/` coverage for ESXi-specific behavior (controller-bus selection, VMXNET3, datastore specifics) that a generic plan can't express — the per-driver additive tier, mirroring PVE-46. Depends ESXI-13. Created 2026-06-01. _(repointed off the deleted `examples/capabilities-esxi.py` — REL-40.)_
 
 ### ORCH
+
+- [ ] **ORCH-39** · `chore` — board/PLAN say multi-hypervisor islands (ORCH-1) are DONE; the code at HEAD disagrees
+
+  > Found designing corpus coverage 2026-06-11: the board's Done section carries ORCH-1/ORCH-26..31 (islands, "ADR-0025 multiple-hypervisors-per-plan") as done 2026-06-01, but at HEAD `plan.py:37-40` still raises NotImplementedError for >1 hypervisor, `Hypervisor` has no `name` field, `--profile` is single-valued, and `docs/adr/0025-*` is the ESXi-driver ADR. The islands work exists only on unmerged commits (`ce8903a`/`65df4f8`; `examples/capabilities-multihyp.py` deleted). Either land the islands work or re-status the tickets and reconcile PLAN.md §2 ("v0 enforces exactly one") — sources of truth must match code (CLAUDE.md §3). Blocks any multi-hypervisor corpus plan. Created 2026-06-11.
 
 - [ ] **ORCH-3** · `feat` — `--resume <run_id>`
 
@@ -404,10 +263,6 @@ on 2026-06-06.
 - [ ] **BACKEND-4** · `chore` — QGA libvirt-stderr silencer
 
   > Mute "guest agent is not responding" retry noise via a process-global `registerErrorHandler`. Refcounted mutable global state — rides BACKEND-1.
-
-- [ ] **BACKEND-5** · `feat` — remote-libvirt egress over qemu+ssh:// (verify named uplink on remote host)
-
-  > REFRAMED 2026-05-30 (BACKEND-1 drops pyroute2). The original blocker — host-local netlink can't reach a remote URI — is GONE: L2 is realized by the libvirt DAEMON via the network API, so a remote qemu+ssh:// daemon builds the bridge/dnsmasq/NAT remotely. What remains is much smaller: (1) the named uplink bridge (e.g. tr-egress) must already exist ON THE REMOTE HOST; (2) verify pool stream I/O + serial unix-socket + QGA all work across a remote connection (the serial <serial type=unix> socket path is on the remote host); (3) preflight check that the resolved uplink exists remotely. No virInterface*/SSH side-channel/remote-agent needed. Rides BACKEND-1.
 
 - [ ] **BACKEND-6** · `feat` — content-addressed image cache at the driver ABC (ADR-0011 draft)
 
@@ -559,9 +414,45 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (334)
+## Done (385)
 
 ### CORE
+
+- [x] **CORE-100** · `feat` — expose the communicator-ready timeout on the run verb (`--ready-timeout`)
+
+  > Found on the ESXI-34 standup (2026-06-11): after the ESXI-18 MAC fix the nested ESXi node leases promptly, but its sshd only comes up via `local.sh` after hostd — minutes past the lease on nested KVM — and the ready gate (`agent_ready_timeout_s`, 120s) + the SSH connect budget (180s) expire first: `communicator not ready within 120s ... SSH connect ... failed after 180s`. The Orchestrator already takes `agent_ready_timeout_s`; it was just not reachable from the CLI/runner. Added `--ready-timeout SECONDS` (default 120, unchanged) on `run`, plumbed `run_tests(ready_timeout_s=...)` → `Orchestrator(agent_ready_timeout_s=...)`; unit regression pins the pass-through. Created 2026-06-11. LIVE-VERIFIED 2026-06-11 (--ready-timeout 600 carried the nested-ESXi standup + corpus). _(done: 2026-06-11)_
+
+- [x] **CORE-91** · `bugfix` — libvirt build-result serial socket is world-connectable (cache-poison vector)
+
+  > Adversarial-review sweep (2026-06-11). The `mode='connect'` serial socket sat `0o777` in a `0o755` (world-listable) `/tmp` dir with no peer check, so a local co-tenant could connect ahead of QEMU and write a forged `TESTRANGE-RESULT: ok`. Orchestrator runs unprivileged (can't chown to libvirt-qemu), so: dir → `0o711` (traversable, not listable) and an `SO_PEERCRED` filter in `accept_serial` (allow self/root/libvirt-qemu/qemu). Tests in `test_libvirt_conn.py`. _(done: 2026-06-11)_
+
+- [x] **CORE-92** · `bugfix` — `build`/`run`/`repl` leak `BuilderError`/`BuildNotReadyError` as a raw traceback
+
+  > Adversarial-review sweep (2026-06-11). The verbs caught `BuildFailedError` but not its parent `BuilderError` (nor `BuildNotReadyError`), so e.g. running without the `[cloudinit]` extra dumped a Python stack trace instead of a clean `Exit.FAILURE`. Added an `except BuilderError` to `_build`/`_run`/`_repl`. _(done: 2026-06-11)_
+
+- [x] **CORE-93** · `bugfix` — `repl` doesn't catch `DriverError` around `connect()` in `__enter__`
+
+  > Adversarial-review sweep (2026-06-11). `__init__` only resolves the backend; the real `driver.connect()` runs in `__enter__`, but the `with o as orch:` block caught `PreflightError`/`OrchestratorError`, not `DriverError`. A host-down/bad-creds connect escaped as a traceback (unlike `_run`/`_build`). Added `except DriverError → Exit.USAGE`. _(done: 2026-06-11)_
+
+- [x] **CORE-94** · `bugfix` — ProgressReporter leaks the rich `Live` on a failed download
+
+  > Adversarial-review sweep (2026-06-11). `esxi/_client.folder_get` and `proxmox/_client.sftp_get` only called `finish()` on success, so a mid-transfer exception left the operator's terminal in live mode (hidden cursor, stale bar). Made `ProgressReporter` a context manager with an idempotent `finish()`; the download sites now release it on every exit path. _(done: 2026-06-11)_
+
+- [x] **CORE-95** · `bugfix` — `StaticAddr` char-splits a bare-string `dns`
+
+  > Adversarial-review sweep (2026-06-11). `dns="8.8.8.8"` (a str is an iterable of chars) normalized to `('8','.',…)` and failed with the misleading "entry '8' is not a valid IPv4". Reject a bare str at the boundary with an actionable "wrap it in a tuple" message. _(done: 2026-06-11)_
+
+- [x] **CORE-96** · `bugfix` — `describe`/`repl` leak a raw traceback on an HTTP cache-tier error
+
+  > Adversarial-review sweep (2026-06-11). `_print_describe` only guarded `CacheMissError`; with `--cache URL`, a 5xx/unreachable tier raised a non-miss `CacheError` (or a raw `requests` exception) out of the passive verb. Contained `CacheError` in describe and translated transport-layer `requests` errors to `CacheError` in `HttpCache._get/_put/_delete`. _(done: 2026-06-11)_
+
+- [x] **CORE-97** · `bugfix` — libvirt guest exec-status poll leaks a raw error past the GuestAgentError contract
+
+  > Adversarial-review sweep (2026-06-11). The `guest-exec-status` poll loop sat outside the `try`→`GuestAgentError`, so a mid-poll `libvirtError` (or a `None` reply → `AttributeError`) escaped un-normalized, breaking callers that catch `GuestAgentError`. Wrapped the poll body; the timeout raise stays outside so it isn't double-wrapped. _(done: 2026-06-11)_
+
+- [x] **CORE-98** · `bugfix` — `Credential.username` unvalidated → guest-shell injection surface
+
+  > Adversarial-review sweep (2026-06-11). The username is interpolated into guest-side shell (e.g. nested `usermod -aG … <username>`) but was only checked non-empty. Constrain it to a POSIX-safe charset (`^[a-zA-Z_][a-zA-Z0-9_-]*$`) at the trust boundary. _(done: 2026-06-11)_
 
 - [x] **CORE-89** · `test` — smoke-test every `examples/*.py` via `describe` (a structural-regression net for the example set) (review fix) _(done: 2026-06-09)_
 
@@ -594,6 +485,30 @@ on 2026-06-06.
   > Two run-phase bugs, both confirmed by mounting/booting the captured disk (qemu-nbd + a serial-forced overlay). (1) `vmbr0` binds `bridge-ports enp1s0`, a PCI-slot-derived name; the build NIC and run NIC sit at different slots, so the run NIC came up under a different name and vmbr0's port was missing → static unreachable (same class as ESXI-18). (2) PVE's first-boot service is gated on the sentinel `/var/lib/proxmox-first-boot/pending-first-boot-setup`, removed in `ExecStartPost` AFTER our script — but our `systemctl poweroff` pre-empts it, so the sentinel survived and first-boot RE-RAN at run, powering the node off ~10s in. FIX: first-boot bakes `/etc/systemd/network/10-testrange-mgmt.link` (`Driver=virtio_net` → `Name=network_interface`, slot-independent rename) AND `rm -f`s the PVE sentinel before poweroff so first-boot runs once. answer.toml untouched (an earlier interface-name-pinning attempt was reverted — the PVE 9.2 installer chokes on it). config_hash folds the first-boot digest (cache-busts). Live-confirmed: node stays up, NIC enp0s2→enp1s0, vmbr0 UP 10.50.0.100/24, full run green (user-confirmed).
 
 ### ORCH
+
+- [x] **ORCH-40** · `feat` — `cleanup` cannot finalize a run whose backend is permanently gone
+
+  > Found sweeping stray run dirs (2026-06-11): four ledgers pointed at DEAD nested ESXi hosts (a guest of an already-destroyed lab, and the deleted esxi-manager node) — their resources died with their hypervisors, but `cleanup` insists on connecting the recorded driver before finalizing, so it errors forever (`ESXi connect ... timed out`) and the dirs linger. Disposed of manually (`rm -rf` of the four run dirs after verifying each `driver_uri` targeted a dead host: 3× 10.50.0.85, 1× 192.168.199.206). Product gap: a `cleanup --forget <run-id>` (explicit, per-run, loud) that drops the ledger without touching a backend — for exactly the nested case where the outer teardown already reclaimed everything (nested_phase relies on this; the dirs are pure bookkeeping). Created 2026-06-11. IMPLEMENTED 2026-06-11 as `cleanup --forget <run-id>`: per-run only (rejects --all/--list/--dry-run combos), refuses a live owner, never instantiates a driver, tolerates a corrupt state.json (disposing of broken bookkeeping is the point), and reports every dropped ledger entry by name. Unit-covered in test_cleanup_cli.TestForget; running-tests.md updated. _(done: 2026-06-11)_
+
+- [x] **ORCH-34** · `bugfix` — signal handlers leaked (never restored) on the `__enter__` bring-up failure path
+
+  > Adversarial-review sweep (2026-06-11). `__enter__` installs SIGTERM/SIGHUP handlers before bring-up; on any failure (notably a routine `PreflightError`) Python never calls `__exit__`, so the prior handlers were never restored — the process was left with SIGTERM rewired to raise `KeyboardInterrupt`. Restore on the outer failure path too, mirroring `build()`'s finally. _(done: 2026-06-11)_
+
+- [x] **ORCH-35** · `bugfix` — nested inner-VM build/run drops the `--jobs` worker cap
+
+  > Adversarial-review sweep (2026-06-11). `_inner_build_ctx` (and the inner run-phase `Orchestrator`) didn't pass `jobs=ctx.jobs`, so a nested GuestHypervisor's inner build/run fell back to the 8-way default and silently ignored `--jobs 1`. Thread `jobs` through both. _(done: 2026-06-11)_
+
+- [x] **ORCH-36** · `bugfix` — `cleanup_run` needs a reachable backend to reclaim a drained run
+
+  > Adversarial-review sweep (2026-06-11). `cleanup_run` connected to the backend before checking for anything to destroy, so a drained (empty-resource) `state.json` could never be reclaimed while the backend was down — the exact failure mode cleanup exists for. Short-circuit: an empty resource set finalizes with local file I/O only. _(done: 2026-06-11)_
+
+- [x] **ORCH-37** · `bugfix` — nested `_write_keyfile` orphans the temp keyfile on `os.write`/`chmod` failure
+
+  > Adversarial-review sweep (2026-06-11). `mkstemp` creates the file; the `finally` only closed the fd, so a failing write/chmod left a `0600` temp file holding SSH key material in `$TMPDIR` (the path is never returned, so no caller could clean it). Unlink on any failure between mkstemp and return. _(done: 2026-06-11)_
+
+- [x] **ORCH-38** · `bugfix` — `StateStore.remove` leaves a phantom run dir when a stale `.partial` is present
+
+  > Adversarial-review sweep (2026-06-11). `remove()` unlinked `state.json/.pid/.lock` but not its own atomic-write temp files; a leftover `state.json.partial` (crash mid-write) made the `rmdir` silently fail, phantoming the dir in `cleanup --list` forever. Also unlink the `.partial` temps. _(done: 2026-06-11)_
 
 - [x] **ORCH-33** · `bugfix` — build-phase Ctrl-C / SIGTERM bypasses teardown (BaseException not caught) _(done: 2026-06-08)_
 
@@ -1357,6 +1272,18 @@ on 2026-06-06.
 
 ### PVE
 
+- [x] **PVE-60** · `test` — nested-PVE cert leg: resurrect the pve_node standup, leak a PVE 9 node; corpus runs against it
+
+  > Cross-backend nested-cert sweep, PVE leg (siblings BACKEND-15, ESXI-34). `px-cloud` (40.160.34.83) is no longer PVE — the host was re-imaged to ESXi — so the proxmox driver currently has NO live cert target. Resurrect `examples/pve_node.py` (deleted in fafae9c; the ProxmoxAnswerBuilder installer-origin standup with the load-bearing knobs: uefi/q35 NIC naming, EFI removable-media fallback, run switch `mgmt=True` + static `.100`, run-phase `pvesm set local --content ...,images,import`) as `tools/standup/pve_node.py`, leak the node, point a `pve-nested` proxmox profile at its static mgmt addr, run `tests/plans/generic/*` + `tests/plans/proxmox/*` against it, file + fix findings, `testrange cleanup` the leaked run. Created 2026-06-11. DONE 2026-06-11: tools/standup/pve_node.py (resurrected, corpus-duty sizing) leaked a PVE 9 node at 10.55.0.100 on the FIRST attempt — the answer-builder pipeline held, including under the new ESXI-18 build-NIC MAC selection (the answer file filters by NIC NAME, unaffected). Corpus 14/14 GREEN against `pve-nested` (all 13 generic incl. the SSH plans through the always-on SSHJumpGateway — PROXY-3's close()-reopen live-proven gateway-bound — plus proxmox/devices); snapshot_chain exercised the PVE-61 shutdown-after-vmstate lock-retry in its hot path. ZERO new findings. Leaked resources cleaned up post-cert. _(done: 2026-06-11)_
+
+- [x] **PVE-61** · `bugfix` — `shutdown_vm` has no config-flock retry: a `mem=True` snapshot's lingering vmstate flock fails the next shutdown
+
+  > Found by the BACKEND-14 plan review (2026-06-11): the driver's own docs (proxmox/_vm.py:416-427, REL-15 F6) state a `mem=True` create/rollback holds the per-VM config flock PAST task completion, and only `restore_snapshot`/`delete_snapshot` ride it out via `_await_lock_retry`. `snapshot_chain.py` is the first corpus plan whose next driver call after a vmstate save is a shutdown — `shutdown_vm` awaits via `_await_with_margin` with no retry, so it intermittently fails `can't lock file ... got timeout`. Fix: give `_await_lock_retry` an awaiter hook (shutdown needs the margin-await) and route `shutdown_vm` through it; unit regression mirroring the rollback/delete lock-retry tests. Created 2026-06-11. _(done: 2026-06-11)_
+
+- [x] **PVE-59** · `bugfix` — installer-origin OS disk allocated without `format=qcow2` (qcow2 cache-contract break)
+
+  > Adversarial-review sweep (2026-06-11). The installer-origin `scsi0` was a bare `{storage}:{size}` — on a `dir` store PVE allocates that RAW, which the build then caches under a `.qcow2` name (content/label mismatch). The sibling data-disk branch was already fixed; mirror it: append `,format=qcow2`. _(done: 2026-06-11)_
+
 - [x] **PVE-57** · `feat` — `examples/pve_node.py`: stand up + leak a live PVE node via `ProxmoxAnswerBuilder` on libvirt _(done: 2026-06-09)_
 
   > Live-certified the Proxmox *builder* end-to-end on `libvirt-local`: builds PVE 9.2.2 installer-origin (UEFI/q35, blank `vda` + prepared installer ISO + `PROXMOX-AIS` answer seed + serial build-result), reboots into the installed system, run boot comes up reachable at `10.55.0.100` and `leak()`s. Unique resource names + a private `10.55.0.0/24` mgmt subnet keep it robust against other same-day leaked labs. Surfaced + fixed F1 (pmxcfs offline during first-boot → storage config moved to the run phase) and the libvirt **Secure-Boot** fix (F3 — UEFI domains now select a non-SB OVMF so the captured disk's removable-media bootloader runs). Closes the FULL-build slice of **BUILD-13** and stands up the **REL-12** `pve-live` host.
@@ -1703,6 +1630,170 @@ on 2026-06-06.
 
 ### ESXI
 
+- [x] **ESXI-18** · `bugfix` — nested ESXi vmk0 keeps the build-NIC MAC → run-phase DHCP-lease discovery misses
+
+  > **LIVE-DISPROVEN 2026-06-09 (ESXI-20): the shipped fix does NOT take.** Built +
+  > booted a node end-to-end on libvirt L0. It settles at the DCUI on its lab DHCP
+  > lease, but vmk0 STILL carries the build-NIC MAC (confirmed via the DCUI IPv6
+  > link-local EUI-64 `fe80::…:f177:c0` ⇒ `02:91:5a:f1:77:c0`, and the lab sidecar
+  > lease under that MAC) — so `discover_ip` (polling the run NIC MAC) still misses.
+  > sshd is also off. ROOT CAUSE OF THE FIX'S FAILURE: the "second boot re-inits
+  > vmk0 under the hardware MAC" premise is wrong — `FollowHardwareMac` is consulted
+  > only at vmk *creation*, and a plain `reboot` **restores** vmk0 from `esx.conf`
+  > with its pinned (build) MAC instead of re-creating it, so the flag never moves
+  > an existing vmk0. A real fix must DELETE + re-add vmk0 (`esxcli network ip
+  > interface remove/add` from `local.sh`, after hostd) so it adopts vmnic0's MAC,
+  > or set vmk0's MAC explicitly. SIDESTEPPED for the ESXI-20 cert: reach the node
+  > at its actual DHCP IP via pyVmomi (cert transport is VMware-Tools/pyVmomi, not
+  > SSH lease-discovery) and enable sshd host-side via pyVmomi. See
+  > `docs/dev/e2e-findings-esxi.md`. Still parked for a proper builder fix.
+  >
+  > **BUILDER FIX LANDED 2026-06-08 (merged to feature/release-check); live cert
+  > still SHELVED post-1.0.0.** `%firstboot` now seeds `local.sh` with a
+  > sentinel-guarded one-shot reboot that sets `Net.FollowHardwareMac=1` + persists
+  > (auto-backup.sh), and the rendered ks.cfg digest is folded into `config_hash`.
+  > Unit-gated. The live nested run-phase cert (run with `--lease-timeout ~600`;
+  > ad-hoc plan at `~/Desktop/TestRange-Adhoc/esxi-followhwmac.py`) remains shelved
+  > — and was NEVER actually live-tested (the earlier "Option A" live run executed
+  > pre-fix code from this branch). Earlier diagnosis below.
+  >
+  > **SHELVED 2026-06-07 (post-1.0.0): ESXi-as-a-guest deferred.** The diagnosis
+  > below is complete and the deterministic fix is known (Fallback A/B); we are
+  > parking nested ESXi until after the 1.0.0 release rather than finishing it now.
+  > The ESXi *backend* is certified via REL-11 (raw kickstart host), which needs
+  > none of this. Pick this up when nested ESXi becomes a priority.
+  >
+  > LIVE-FOUND under ESXI-16 (2026-06-07). esxi-a's run boot never satisfied
+  > `discover_ip` → "did not acquire a DHCP lease on 'lab-net' within Ns". NOT a
+  > timeout: proven by reading the lab sidecar's dnsmasq.leases mid-run —
+  > esxi-a DID lease (10.50.0.33) but under `02:df:31:62:2b:5e` (the **build NIC**
+  > MAC), while the orchestrator polls the run/lab NIC MAC `02:54:e8:60:81:17`.
+  > ROOT CAUSE: ESXi binds vmk0's MAC to the pNIC present at **install** (the
+  > dedicated build NIC) and keeps it (`Net.FollowHardwareMac=0` default); the
+  > captured image is later booted on a different run NIC, so vmk0 DHCPs under the
+  > stale build MAC. FIX (user-chosen): bake `Net.FollowHardwareMac=1` into the
+  > kickstart so vmk0 follows its uplink's current hardware MAC. Wrinkle: %post
+  > powers off during build (ESXI-17), so %firstboot first runs in the run phase
+  > AFTER vmk0's early DHCP under the build MAC. LIVE-PROVEN 2026-06-07: setting the
+  > flag at runtime + bouncing vmk0 (down/up) does NOT move a live vmk0's MAC (DCUI
+  > still showed the build-MAC IPv6) and the down/up broke rc.local. So local.sh
+  > (after hostd) sets the flag, persists config (auto-backup.sh), and does a
+  > ONE-SHOT guarded reboot (sentinel /etc/vmware/.trfollowhwmac); the second boot
+  > re-inits vmk0 under the hardware (run) MAC so the lease lands under the polled
+  > MAC. Needs a longer run-phase lease window (two nested-ESXi boots). Also fold
+  > the rendered kickstart digest into ESXiKickstartBuilder.config_hash so the
+  > template change busts the stale esxi-a cache (CORE-64-style gap). Live-verify. REPRODUCED 2026-06-11 on the ESXI-34 standup (lease gate 900s miss) — the sentinel FollowHardwareMac+reboot local.sh variant fails for the disproof's exact reason. ROOT FIX LANDED upstream of the guest: an installer-origin build's dedicated build NIC now wears the MAC of the VM's first DECLARED NIC (`_build_nic_for`, build_phase.py), so the install pins vmk0 to the identity the run-phase VM wakes up with and lease discovery polls — one boot, no guest-side surgery; the disproven local.sh block is deleted from the kickstart. Unit regressions: build-NIC MAC selection matrix + kickstart no-MAC-block. Live verify rides the ESXI-34 standup re-run. LIVE-VERIFIED 2026-06-11: standup leases under the declared idx-0 MAC on the first try. _(done: 2026-06-11)_
+
+- [x] **ESXI-36** · `bugfix` — kickstart %firstboot writes don't survive a node reboot, and the AllowTcpForwarding edit was doubly ineffective
+
+  > Found on the ESXI-34 standup (2026-06-11), by comparison against the proven esxi-manager.sh kickstart: (1) ESXi's `/etc` is a ramdisk overlay — the root key and `local.sh` written in `%firstboot` survive a later node reboot only if `/sbin/auto-backup.sh` persists them, and the only call rode the deleted ESXI-18 MAC block; `%firstboot` now ends with an unconditional `auto-backup.sh`. (2) The ESXI-22 `AllowTcpForwarding yes` edit appended to `sshd_config` from `%firstboot` — but ESXi regenerates `sshd_config` from the ConfigStore after `%firstboot` (revert), and even unreverted the shipped `AllowTcpForwarding no` precedes it (sshd takes the first match). Moved into `local.sh` as a grep-out + append + `mv` REPLACE followed by `/etc/init.d/SSH restart`, mirroring esxi-manager.sh. Unit regressions pin the local.sh block shape and the auto-backup ordering. SECOND LIVE FINDING (standup attempt 3, sshd still off with a 600s ready budget): rc.local.d has ALREADY run by the time %firstboot fires, so local.sh content written there executes from the NEXT boot only — the old design's reboot was load-bearing for sshd activation all along (just not for the MAC). %firstboot now ends with a sentinel-guarded one-shot reboot (sentinel persisted by the same auto-backup), making boot 2 — sshd up, config live — deterministic. THIRD LIVE FINDING (attempt 4, identical symptom): the builder APPENDED its local.sh block (`cat >>`) — but the stock ESXi local.sh ends with `exit 0`, so every appended line was dead code on every boot; this, not timing and not the MAC, is why sshd stayed off across every prior attempt (incl. the original ESXI-18 disproof's 'sshd is also off'). local.sh is now REPLACED wholesale (`cat >`, own shebang + exit 0 + chmod +x) — the esxi-manager.sh shape that demonstrably works. Created 2026-06-11. LIVE-VERIFIED 2026-06-11: standup attempt 5 green — sshd up on boot 2, node leaked. _(done: 2026-06-11)_
+
+- [x] **ESXI-37** · `bugfix` — serial-sink /folder tail dies on transient 503s under parallel build fan-out
+
+  > Found in the ESXI-34 nested-cert sweep (2026-06-11): every plan needing 3+ PARALLEL fresh builds (`concurrency`, `networking`, `routed_segments`) crashed the build phase with `HTTPError: 503 Server Error` on the `/folder/<vm>/serial0.log` Range GET, while ≤2-build and cache-hit plans sailed — a small nested host's hostd/envoy momentarily refuses under the concurrent tail+upload load. A 503 on one poll of an incremental tail is not a build failure; `folder_read_from` now returns `b""` for 503/429 like it already does for 404/416 ("nothing new this poll") — the sink's heartbeat keeps the build-timeout watchdog ticking, which still bounds a genuinely dead host. Unit regression in test_esxi_client. Created 2026-06-11. LIVE-VERIFIED 2026-06-11: concurrency (4 parallel builds), networking + routed_segments (3 each) re-ran green. _(done: 2026-06-11)_
+
+- [x] **ESXI-38** · `test` — generic `lifecycle` writes root-owned paths over the native channel; ESXi guest-ops run as the unprivileged admin
+
+  > Found in the ESXI-34 nested-cert sweep (2026-06-11): `reboot_persists_on_disk_state` and `native_write_handles_payload_over_the_agent_cap` fail on ESXi writing `/root/persist` / `/root/big.bin` — QGA executes as root so the path never mattered on libvirt/proxmox (ESXI-29's quick-fix added the credential but the cert only validated `firmware` on ESXi), while VMware Tools guest-ops authenticate and run as the declared `admin` (CORE-60). Same portability class as ESXI-27's `/dev/vd*`. Fix: the markers move to `/home/admin/...` — root on QGA writes there just as happily. Created 2026-06-11. LIVE-VERIFIED 2026-06-11: lifecycle 7/7 on esxi-nested — its first full ESXi certification. _(done: 2026-06-11)_
+
+- [x] **ESXI-34** · `test` — nested-ESXi cert leg: TestRange-BUILT (managed) ESXi node, leaked; corpus runs against it
+
+  > Cross-backend nested-cert sweep, ESXi leg (siblings BACKEND-15, PVE-60). Re-run the ESXI-20 M3/M4 path now that the corpus is ESXi-clean (ESXI-26/27/29/31, CORE-90): a standup plan (`GuestHypervisor.esxi` with empty inner topology, ESXi-compatible guest hardware per ADR-0026 — LibvirtOSDrive sata + LibvirtNetworkIface e1000e + CPU(nested=True), `--build-timeout 1800`) installs + leaks a nested ESXi node on libvirt-local; an `esxi-nested` profile (root/password, DHCP-discovered addr — mind the ESXI-18 vmk0-MAC caveat) drives `tests/plans/generic/*` (Native plans; the SSH plans are documented-skip per ESXI-30) + `tests/plans/esxi/*` against it; file + fix findings; `testrange cleanup` the leaked run. Prior cert ran against the UNMANAGED esxi-manager.sh node — this leg certifies the TestRange-BUILT node end to end. Created 2026-06-11. DONE 2026-06-11: tools/standup/esxi_node.py leaked a TestRange-BUILT node (10.67.0.54, run 20260611-145010-?); corpus 9/9 GREEN against `esxi-nested` (8 Native generic + esxi/devices; SSH plans documented-skip per ESXI-30) — first full corpus cert of a MANAGED nested ESXi node. Five findings filed + fixed in-leg, each live-disproven/verified through five standup attempts: ESXI-18 root fix (installer-origin build NIC wears the run NIC's MAC), ESXI-36 (local.sh REPLACE — the stock exit 0 made every appended activation line dead code, the true reason sshd never came up — plus auto-backup persistence and a sentinel-guarded activation reboot), CORE-100 (--ready-timeout), ESXI-37 (503-tolerant serial tail under parallel build fan-out), ESXI-38 (lifecycle root-path portability). Leaked resources cleaned up post-cert. _(done: 2026-06-11)_
+
+- [x] **ESXI-20** · `test` — finish ESXiKickstartBuilder + stand up/leak a nested ESXi node on libvirt + certify `tests/plans/` against it
+
+  > `feature/VMBuild`. Un-shelves ESXI-16/18 locally and advances ESXI-12/13/15:
+  > drive the full ESXi vertical end-to-end on this box (nested KVM, `tr-egress`
+  > NAT, ESXi 8.0U3b installer cached).
+  >
+  > 1. **Builder audit/finish** — confirm `ESXiKickstartBuilder` is complete and
+  >    correct against the Builder ABC + build-result contract; close any real gap
+  >    surfaced by review (the stale BUILD-15/16 nits are mostly already in-code —
+  >    verify). Keep every ESXi-specificism stove-piped in the builder/driver.
+  > 2. **Stand up + leak** — a standup plan (`GuestHypervisor.esxi`, the
+  >    `esxi-followhwmac.py` shape) installs one nested ESXi node on
+  >    `libvirt-local` and leaks it (`testrange repl` → `orch.leak()`). Exercises
+  >    the builder install + the ESXI-18 vmk0 MAC-follow fix live.
+  > 3. **Certify** — point an `esxi-leaked` profile at the node; run
+  >    `tests/plans/generic/*` + `tests/plans/esxi/*` via `testrange run --profile
+  >    esxi-leaked` (the ESXi *driver* path). Author any missing ESXi cert coverage.
+  > 4. **File + fix** every bug the cert surfaces (own swimlane per finding);
+  >    record discrepancies à la REL-14. Squash + push as milestones land.
+  >    Created 2026-06-09.
+  >
+  > Progress (2026-06-09):
+  > - M1 DONE — builder audit: `ESXiKickstartBuilder` is complete; BUILD-15/16
+  >   confirmed already-addressed in-code (stale, → Done). Hardened the one real
+  >   footgun: keyless root + `enable_ssh=True` now fails loud at construction
+  >   (SSH is ESXi's only run-phase channel; a keyless image hangs `wait_ready`).
+  >   Implemented the driver gap the ESXi cert needs: per-disk controller bus
+  >   (`ESXiHardDrive.bus` scsi/sata/nvme/ide) in `esxi/_vm.create_vm`, read off
+  >   `spec.data_drives` so the knob stays ESXi-stovepiped (no ABC/orchestrator
+  >   change). Unblocks `tests/plans/esxi/devices.py`. Gates green (1137 unit).
+  > - M3 (standup) findings, see `docs/dev/e2e-findings-esxi.md`:
+  >   - FIXED — a modest-disk install left NO datastore (ESX-OSData fills the
+  >     disk). Added `systemMediaSize=min` to the installer kernelopt so the
+  >     install leaves a `datastore1`; folded the kernelopt into `config_hash`.
+  >   - OPEN — ESXI-18 (vmk0 keeps the build MAC) live-DISPROVEN: the shipped
+  >     FollowHardwareMac+reboot fix does NOT take (a reboot restores vmk0's
+  >     pinned MAC; the flag only affects vmk creation). ESXI-18 updated.
+  >     Sidestepped for the cert (reach the node by its DHCP IP over pyVmomi;
+  >     enable sshd host-side). Node spun up + leaked via the diag bring-up.
+  > - M4 (cert) ran `tests/plans/esxi/devices.py` against the leaked node. The
+  >   ESXi DRIVER pipeline is proven live end to end EXCEPT the final L2 hop:
+  >   pyVmomi, preflight, vSwitch+uplink(vmnic1)+portgroup, datastore pool,
+  >   qcow2→vmdk + datastore upload, VM/sidecar CreateVM, serial sink, the
+  >   sidecar's DHCP/DNS/NAT, guest-ops — all green. Fixed: the dead package name
+  >   and the stale-serial0.log replay (both bugs surfaced here). BLOCKED by a
+  >   nested-ESXi environmental limit: a VM NIC cannot connect to an UPLINK-LESS
+  >   vSwitch (status=unrecoverableError) on ESXi-on-libvirt, and `_net` realizes
+  >   every isolated guest segment as exactly that — so the on-node build VM gets
+  >   no network. NOT a code defect (works on real ESXi); this is the documented
+  >   ESXI-16 "nested build phase is finicky" reason ESXi certifies on a RAW host
+  >   (REL-11), not nested. Full chain in `docs/dev/e2e-findings-esxi.md`.
+  > - M1 disk-bus feature LIVE-VERIFIED on the leaked node, side-stepping the
+  >   build (the cert's `buses` VM has no NIC, so its disk-bus assert is
+  >   NIC-independent): drove the driver to boot the pre-built sidecar image + 3
+  >   `ESXiHardDrive`s and read `/sys/block` over guest-ops → `sda`/`sdb`/`sdc` on
+  >   `/dev/sd*` (OS-scsi + scsi + sata) and `nvme0n1` on `/dev/nvme*` — exactly
+  >   `esxi/devices.py`'s two asserts. PASS, on real ESXi managed objects. CLOSED 2026-06-11 via ESXI-34: the M2-M4 goals (TestRange-built node stood up, leaked, corpus certified against it) landed there, with the M4 blocker (uplink-less vSwitch) long since debunked and the ESXI-18 sidestep replaced by the root fix. _(done: 2026-06-11)_
+
+- [x] **ESXI-35** · `bugfix` — guest-ops exec path is only half-wrapped: poll/transfer pyVmomi faults escape as raw exceptions, breaking the NativeCommunicator reconnect contract
+
+  > Found by the BACKEND-14 plan review (2026-06-11): `NativeCommunicator`'s reconnect loop retries only `GuestAgentError` (communicators/native.py:110-126), but in `esxi/_guest.py` only `StartProgramInGuest` is wrapped — the `ListProcessesInGuest` poll and the `_read` temp-file transfers (`InitiateFileTransferFromGuest` + HTTP get) raise raw pyVmomi faults. If VMware Tools drops mid-exec (plausible in the post-resume settling window after a RAM-snapshot restore — exactly snapshot_chain's shape), the raw fault escapes `communicator.execute()` instead of being retried. Fix: extend the GuestAgentError translation across the whole exec/read/write path; unit regression with the existing fake-client pattern. Created 2026-06-11. _(done: 2026-06-11)_
+
+- [x] **ESXI-31** · `bugfix` — ESXi disk-staging temp dirs default to `/tmp` (tmpfs) → multi-GiB build-cache I/O overflows it (`[Errno 28]`)
+
+  > Found running `tests/plans/generic/switch_isolation.py` against the unmanaged ESXi node (NET-18 cross-backend cert): the build phase for 3 VMs succeeded on-host, but the post-build **cache download** crashed `OSError: [Errno 28] No space left on device` in `esxi/_client.py:426 folder_get`, re-raised through `build_phase`'s `parallel_map`. NOT the datastore (datastore1 had 94 GiB free) — the **local** filesystem: `_storage.download_from_pool` (`_storage.py:220`) and `upload_to_pool` (`:187`) stage the multi-GiB `-flat.vmdk` / `monolithicSparse` conversions in `tempfile.TemporaryDirectory()` **with no `dir=`**, so they land in `gettempdir()` → `/tmp`, which on this host (and most systemd distros) is a **12 GiB tmpfs**. Three concurrent 8 GiB flat-vmdk exports (24 GiB, the default `--jobs` build fan-out) overflow it. Egress-topology-independent, reproduces on any host with a small/tmpfs `/tmp`. Fix (idiomatic — mirrors `cache/local.py:401`'s `dir=path.parent`): anchor the staging temp dir to the cache filesystem each function already holds a path on — `download_from_pool` → `dir=dest_path.parent`, `upload_to_pool` → `dir=source_path.parent`. Same-filesystem staging also makes the qemu-img convert read+write on one device (no cross-device copy). Unit regression in `test_esxi_storage.py` (staging path is under the cache dir, not the default tempdir); end-to-end proof is the now-green ESXi `switch_isolation` run. Follow-up (noted, lower-risk): `write_to_pool`'s `NamedTemporaryFile` (`:131`) has the same default-tempdir staging for seed/boot-ISO bytes but no in-signature cache anchor — small for seeds, only large for boot ISOs. Created 2026-06-11. _(done: 2026-06-11)_
+
+- [x] **ESXI-30** · `bugfix` — ESXi guest_gateway SSH-jump to internal run VMs fails `Connect failed` (PROXY-1) — WONTFIX (architectural)
+
+  > Found running the generic corpus against a nested ESXi node (after the AllowTcpForwarding block was lifted): the SSHCommunicator plans (`build_cache`/`preflight`/`snapshots`/`users_credentials`) now get past `Administratively prohibited` but fail `communicator not ready … SSH connect to <guest>:22 … ChannelException(2, 'Connect failed')`. So forwarding is permitted, but the ESXi host (the guest_gateway jump host) cannot open a `direct-tcpip` channel to the run VM's `:22` on the internal lab segment.
+  >
+  > **Diagnosed live (NativeCommunicator introspection + node-side `vmkping`/route dump):** the guest is fully healthy — `openssh-server` installed, `ssh` active+enabled, `LISTENING` on `0.0.0.0:22`, leased on the lab segment, and it can `ping` the node's mgmt vmk (`10.42.0.2`). Node side: `esxcli network ip route ipv4 list` shows a connected route `10.42.0.0/24 → vmk1`, and `vmkping` from the node reaches the guest. **Yet the SSH `direct-tcpip` jump still fails `Connect failed`.** Root cause is architectural, not a misconfig: the SSH jump runs in ESXi's **userworld** TCP stack (hostd/sshd), which — unlike the **vmkernel** stack that `vmkping` uses — cannot originate a TCP connection into an arbitrary guest on a vSwitch. A vSwitch only carries host→guest traffic for a vmk **whose own stack is on that portgroup**; the userworld sshd has no such path. Adding a vmk + connected route (which we have) is necessary but not sufficient — the userworld stack still won't punch into the guest. Confirmed by the user: *"the vmk tcp stack can't just arbitrarily reach into any guest."*
+  >
+  > **Resolution: WONTFIX.** ESXi's supported TestRange transport is the `NativeCommunicator` (VMware Tools / pyVmomi guest-ops, a control-plane path with no host→guest network dependency), which is fully green across the generic + esxi corpus. The off-box `SSHCommunicator` + `guest_gateway` SSH-jump (PROXY-1) is a libvirt/proxmox-shaped transport that is architecturally unavailable for internal ESXi guests; ESXi plans must use `NativeCommunicator`. Documented as a known ESXi transport limitation rather than chasing an unimplementable host-side TCP path. _(done: 2026-06-10)_
+
+- [x] **ESXI-29** · `test` — generic NativeCommunicator plans declare no guest credential; ESXi VMware Tools guest-ops require one (CORE-60)
+
+  > Found running the generic corpus against a nested ESXi node (after CORE-90 landed): the build VMs get `open-vm-tools` auto-injected and boot, but the run-phase `NativeCommunicator` fails `GuestAgentError: ESXi VMware Tools guest-ops … require a guest credential (username+password); none was supplied (CORE-60)`. ESXi VMware Tools authenticate against the guest OS on **every** guest-op; QGA backends (libvirt/proxmox) are unauthenticated and ignore the credential, so the generic Native plans (`lifecycle`/`firmware`/`concurrency`/`networking`) declare none and only ever worked on QGA. Quick fix (portable): declare a `PosixCred` on each generic Native plan's builder — harmless on QGA, required on ESXi (mirrors what `tests/plans/esxi/devices.py` already does). Possible framework alternative (note, not chosen yet): broker a default ephemeral guest credential for Native VMs the way CORE-90 brokers the agent. Verified live: `firmware` 2/2 green on esxi-unmanaged (also validates uefi-on-ESXi); `lifecycle` stays green on libvirt. Created 2026-06-10. _(done: 2026-06-10)_
+
+- [x] **ESXI-27** · `test` — generic plans hardcode virtio `/dev/vd*` device nodes; not portable to ESXi (scsi → `/dev/sd*`)
+
+  > Found running the generic corpus against a nested ESXi node: `tests/plans/generic/build_cache.py` (lines 82-85) does `mkfs.ext4 -F -L data-b /dev/vdb` / `mount /dev/vdb`, which fails on ESXi with `The file /dev/vdb does not exist` → `BuildFailedError` — note egress is fine here (apt + pip + build-essential + cowsay install cleanly). ESXi has no virtio, so the generic `HardDrive` enumerates as `/dev/sd*`, not `/dev/vd*`. The plan only ever ran on virtio backends (libvirt + proxmox both present `HardDrive` as `/dev/vd*`), so the hardcoded node was latent non-portability that violates the "a generic plan must run on every backend" contract (CLAUDE.md §4). Fix: discover the data-disk nodes portably — `os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1); set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)` then mkfs/mount `/dev/$1`,`/dev/$2` (shared bash script, so `set --` carries); run-mount already by `LABEL=`. Works on vd*/sd*/nvme. (Only build_cache hardcoded a device node; the other generic plans fail on the agent, CORE-90.) Created 2026-06-10. _(done: 2026-06-10)_
+
+- [x] **ESXI-26** · `bugfix` — ESXi VM NICs bind to the network backend name, not the realized `trp-*` portgroup
+
+  > Found running `tests/plans/` against a nested ESXi node: `tests/plans/esxi/devices.py` fails its build phase with `apt: Temporary failure resolving 'deb.debian.org'`. Root cause is NOT egress (the sidecar's uplink NIC leases + resolves fine) and NOT an env limit — it's a portgroup-name mismatch. The orchestrator threads the network **backend name** (`tr-build_network-<run>-build-net`) into `create_vm`'s `network_refs` (`provision.py:115`, kept as the backend name because teardown recomputes `trp-*` from it), but `_net.create_network` realizes the Network as a portgroup named `trp-<hash>` (`_naming.portgroup_name`). So the build VM + sidecar internal NICs bind to a portgroup that does not exist → ESXi `connected=False, status=unrecoverableError` → guest `NO-CARRIER` → no DHCP lease → no resolver. Libvirt is immune (realized name == backend name); the ESXi uplink NIC works because it carries the realized `trx-*` ref. Fix: `ESXiDriver.create_vm` resolves each `network_refs` value through the `_portgroup_by_network` map it already builds in `create_network` (`.get(ref, ref)` — uplink ref passes through). Unit regression in `test_esxi_vm.py`; end-to-end proof is the now-green `tests/plans/esxi/devices.py`. _(done: 2026-06-10)_
+
+- [x] **ESXI-32** · `bugfix` — `EsxiClient.call_lock` created + documented but never acquired
+
+  > Adversarial-review sweep (2026-06-11). The lock (ADR-0023) was declared but no esxi module ever held it, so under `--jobs>1` guest-ops ran unserialized on the shared pyVmomi stub (session/ticket-refresh race) — while libvirt/proxmox siblings honor the same contract. Wrap each guest-ops SOAP call in `_guest.py` with `call_lock`, released before the poll sleep and byte transfers. _(done: 2026-06-11)_
+
+- [x] **ESXI-33** · `bugfix` — `EsxiClient.connect` leaks the SOAP session on inventory-resolution failure
+
+  > Adversarial-review sweep (2026-06-11). `SmartConnect` opens an authenticated session; if `RetrieveContent`/`_resolve_inventory` then fails (e.g. a datastore not yet mounted during a nested-ESXi boot), the session was never `Disconnect()`ed — and `wait_esxi_ready`'s retry loop leaked one per poll. Close on failure before re-raising. _(done: 2026-06-11)_
+
 - [x] **ESXI-24** · `chore` — trim the public `allow_tcp_forwarding` docstring to consumer altitude; drop the dead `_firstboot` default (review fix) _(done: 2026-06-09)_
 
 - [x] **ESXI-23** · `test` — mixed NAT + non-NAT uplink preflight regression (only the NAT switch demands a pNIC) (review fix) _(done: 2026-06-09)_
@@ -2048,6 +2139,18 @@ on 2026-06-06.
 
 ### BUILD
 
+- [x] **BUILD-25** · `bugfix` — proxmox `prepare_iso` never unlinks `out_path` before xorriso
+
+  > Adversarial-review sweep (2026-06-11). xorriso's `-outdev` refuses to clobber an existing image (exits non-zero); the docstring promised overwrite but the ESXi sibling's pre-`unlink` was missing on the PVE path. Added `out_path.unlink(missing_ok=True)`. _(done: 2026-06-11)_
+
+- [x] **BUILD-26** · `bugfix` — `prepare_boot_media` ISO cache is not concurrency-safe (TOCTOU)
+
+  > Adversarial-review sweep (2026-06-11). Two same-config build misses derive the same `prepared` path and can both pass `if not prepared.exists()`, then race on the output file → torn ISO (ESXi) / build abort (PVE). New `materialize_prepared` helper builds into a fresh temp dir and `Path.replace`s atomically (last-writer-wins); both builders route through it. Also subsumes BUILD-25's clobber. _(done: 2026-06-11)_
+
+- [x] **BUILD-27** · `bugfix` — `_toml_str` doesn't escape control chars other than `\n\r\t`
+
+  > Adversarial-review sweep (2026-06-11). A root password carrying e.g. a vertical tab (or DEL) landed raw in a TOML basic string, which the PVE auto-installer parser rejects. Escape every U+0000–U+001F and U+007F as `\uXXXX`. _(done: 2026-06-11)_
+
 - [x] **BUILD-24** · `test` — harden the b64 build-log decode tests (distinct-byte truncation, lone-trailing-char `rem==1`) (review fix) _(done: 2026-06-09)_
 
 - [x] **BUILD-23** · `bugfix` — decode the base64 build-log tail before printing; tolerate interleaved serial chatter so a corrupt block never dumps a raw blob _(done: 2026-06-09)_
@@ -2204,6 +2307,24 @@ on 2026-06-06.
 
 ### NET
 
+- [x] **NET-21** · `test` — generic `sidecar_flags` plan: dhcp-only sidecar tier — leases without router/resolver options
+
+  > Corpus gap: every corpus sidecar is `(dhcp,dns,nat)` or `(dhcp,dns)`; the dhcp-only tier — and the option-suppression semantics `render_dnsmasq_conf` deliberately implements (`dhcp-option=3`/`dhcp-option=6` empty forms + `port=0`, networks/sidecar.py:184-206) — is never certified, nor is the stable-MAC ⇒ stable-lease contract (ADR-0006, drivers/base.py:132-140) across a power cycle. Add `tests/plans/generic/sidecar_flags.py`: one air-gapped switch with `Sidecar(dhcp=True)` only, two DHCP VMs. Tests: both leases in the `.10-.99` pool; leases distinct; same lease after shutdown→start (stable MAC); zero default routes offered (nat off ⇒ router option suppressed); resolver list carries no sidecar `.1` (dns off ⇒ DNS option suppressed); peers reach each other by leased IP (positive control that the tier serves at all). "Switch flags describe the sidecar" made executable. NativeCommunicator + admin cred. Created 2026-06-11. Live-certified 6/6 on libvirt-local 2026-06-11. Cross-backend sweep continues in BACKEND-15/ESXI-34/PVE-60. _(done: 2026-06-11)_
+
+- [x] **NET-20** · `test` — generic `routed_segments` plan: guest-as-router forwarding across two air-gapped segments
+
+  > Corpus gap: no plan routes traffic THROUGH a guest — multi-NIC guests exist (networking/switch_isolation) but only as endpoints; ip_forward, return-path routing, forwarding provenance, and `addr=None` unconfigured-NIC semantics (devices/network/base.py:110-113) are asserted nowhere. Add `tests/plans/generic/routed_segments.py`: two air-gapped switches (no sidecars), `router` dual-homed static with `net.ipv4.ip_forward=1` baked via a post-install sysctl drop-in, `client` on A plus an `addr=None` NIC on B (the unconfigured-NIC cert), `server` static on B (nginx). Tests add the /24 routes guest-side at test time (no static-route knob in StaticAddr — deliberate), then: client→server HTTP through the router; ping TTL==63 pins the path to exactly one forwarding hop (a direct L2 answer would be 64); `sudo -n sysctl -w net.ipv4.ip_forward=0` breaks it (curl exit 28 — silent drop, not refused — with positive controls either side); re-enable restores (self-cleaning, PLAN.md §14); the unconfigured NIC stays addressless. NativeCommunicator + admin PosixCred (CORE-60/ESXI-29) so the plan runs on ESXi. Created 2026-06-11. Live-certified 6/6 on libvirt-local 2026-06-11 (one live correction: networkd reports an unconfigured NIC as `configuring` even with dhcp4 off, so the render pin moved to the netplan artifact). Cross-backend sweep continues in BACKEND-15/ESXI-34/PVE-60. _(done: 2026-06-11)_
+
+- [x] **NET-18** · `test` — generic `switch_isolation` plan: the three switch tiers (uplinked / isolated / mgmt) + directional reachability matrix
+
+  > Cert-corpus gap surfaced while sweeping `tests/plans/generic/` across backends: `networking.py` stresses one uplink switch (multi-`Network` L2) + one air-gapped switch, but nothing certifies the **mgmt switch** (`Switch(mgmt=True)`, host adapter at `.2`) as a reachability boundary, nor the directional egress-isolation matrix across the three switch *tiers*. Add `tests/plans/generic/switch_isolation.py`: a plain `Hypervisor` with **A** = `Switch(uplink="egress", sidecar dhcp/dns/nat)`, **B** = bare `Switch` (no uplink, air-gapped), **C** = `Switch(mgmt=True)` (no uplink, host adapter at `.2`). `web-a` static on A (derived sidecar gateway → egress + DNS host-record), `web-b` static on air-gapped B, `client` triple-homed (DHCP on A, static on B, static on C → exactly one default route via A). Matrix (10 TESTS, provenance-pinned): client default-route-**via-a1-sidecar** (`via .1`, not a bare count), client→web-a (DNS, shared A), client→web-b (IP, shared B), client→mgmt-**over-c1-leg** (`ip route get` `src`==c1 + ping, shared C), client→internet (NAT via A), web-a→internet (derived-gateway egress), **web-b serves-locally (positive control)**, web-b↛web-a (IP, curl exit 7), web-b↛mgmt (ping `unreachable`), web-b↛internet-**by-IP-literal** (curl exit 7). Asserts reach AND isolation in both directions, each checked for the right *cause* — the mgmt-adapter and per-tier egress boundaries `networking.py` doesn't touch. **Live-certified green on TWO backends, hardened: libvirt-local 10/10 + esxi-unmanaged 10/10 (2026-06-11).**
+
+  > **Authoring path (the green run was not the end):** (1) first drafted 9 tests, certified libvirt 9/9 — but the live run corrected a wrong assumption (a draft asserted `web-a↛mgmt`; it FAILED because `.2` is a *host* IP and the host is web-a's NAT egress next-hop, so web-a reaches it incidentally via MASQUERADE — expected, egress-topology-dependent, not isolation; the genuine mgmt-isolation edge is the air-gapped guest). (2) The ESXi cross-backend sweep gated the [[project_testrange_esxi]] **ESXI-31** fix (default-tempdir disk staging overflowed tmpfs `/tmp` on the build→cache download; first attempt crashed `[Errno 28]`, re-ran 9/9 green after the fix). (3) A 3-skeptic adversarial-verification pass over the 9/9 result refused to rubber-stamp it: it found **3 tests that passed for the wrong reason** (client→mgmt over-determined by the same NAT path — passes even if the mgmt adapter is mis-homed; web-b↛internet by-name conflates no-DNS with no-route, hiding a route leak; web-b↛web-a had no positive curl-from-web-b control, so a broken curl passes it vacuously) + 2 caveats (default-route count not interface-pinned; bare `not r.ok` on negatives). (4) Hardened to 10 tests addressing all of it — pinned the default-route next-hop, proved mgmt reachability traverses the c1 leg (`ip route get src`), added the web-b-serves-locally positive control, switched isolation probes to IP literals with curl-exit-7 / ping-`unreachable` discrimination — then re-certified 10/10 on both backends. Portable (generic); bind a backend with `--profile`. Created 2026-06-10. _(done: 2026-06-11)_
+
+- [x] **NET-19** · `bugfix` — `render_dnsmasq_conf` emits duplicate per-subnet `domain=` for a multi-Network DNS switch
+
+  > Adversarial-review sweep (2026-06-11). All Networks on a Switch share one CIDR, but dnsmasq assigns one domain per address-range — one `domain=` per Network produced conflicting directives (only the last took effect; some strict builds reject the duplicate). Emit a single canonical `domain=` (the last/previously-winning label), behavior-preserving for the live cert. _(done: 2026-06-11)_
+
 - [x] **NET-8** · `feat` — per-switch uplink static address (generalize build_uplink_addr)
   _(blocks: PVE-51; done: 2026-05-31)_
 
@@ -2321,6 +2442,26 @@ on 2026-06-06.
   > Fixed: validate.py now uses USER_STATIC_LO/HI from _addressing_consts for the DHCP-pool hint (was hardcoded +100/+254 - the exact drift those consts prevent). Regression: test_dhcp_pool_hint_tracks_user_static_consts. Done 2026-05-24.
 
 ### BACKEND
+
+- [x] **BACKEND-5** · `feat` — remote-libvirt egress over qemu+ssh:// (verify named uplink on remote host)
+
+  > REFRAMED 2026-05-30 (BACKEND-1 drops pyroute2). The original blocker — host-local netlink can't reach a remote URI — is GONE: L2 is realized by the libvirt DAEMON via the network API, so a remote qemu+ssh:// daemon builds the bridge/dnsmasq/NAT remotely. What remains is much smaller: (1) the named uplink bridge (e.g. tr-egress) must already exist ON THE REMOTE HOST; (2) verify pool stream I/O + serial unix-socket + QGA all work across a remote connection (the serial <serial type=unix> socket path is on the remote host); (3) preflight check that the resolved uplink exists remotely. No virInterface*/SSH side-channel/remote-agent needed. Rides BACKEND-1. LIVE 2026-06-11 (BACKEND-15 sweep, leaked libvirt-in-libvirt node over qemu+ssh): (1) uplink-on-remote-host proven — the standup plan bakes `tr-egress` on the node and the corpus resolves it. (2) split: pool stream I/O ✓ (cache-hit plans upload+boot green), QGA ✓ (Native plans green), SSHJumpGateway ✓ (SSH plans green — BACKEND-11's surface), serial unix-socket ✗ CONFIRMED: fresh builds fail `virDomainCreate: unable to stat: /tmp/tr-lv-serial-…/….sock` — the orchestrator-LOCAL listener path is baked into the remote domain XML, so QEMU on the node stats a path that only exists on the runner. Fix: drop the host-side unix listener entirely; build VMs get `<serial type='pty'>` like every other guest and `read_build_result_sink` live-tails via `virDomainOpenConsole` + virStream over the existing connection — one code path local AND remote, and it deletes the world-connectable socket surface CORE-91's uid filter had to guard plus the /tmp listener-dir machinery. FIX LANDED 2026-06-11: `_vm` emits pty serial unconditionally (serial_sock plumbing deleted), `_conn` listener machinery + uid filter deleted, `_serial` rewritten on `virDomainOpenConsole` + non-blocking virStream (openConsole retried ≤60s with heartbeats; recv -2 = would-block → heartbeat; EOF/libvirtError = normal end); unit + integration tests reshaped. Remains: live re-verify a fresh build on the leaked qemu+ssh node (BACKEND-15 sweep). FIX LANDED + LIVE-CERTIFIED 2026-06-11: build VMs now carry `<serial type='pty'>` and the sink rides `virDomainOpenConsole` + nonblocking virStream over the existing connection — which surfaced the second half of the bug live: without a registered libvirt EVENT LOOP, remote stream data (and the power-off EOF) never pumps, so four parallel remote builds sat would-blocked for the full build timeout. `_ensure_event_loop` (virEventRegisterDefaultImpl + a daemon pump thread, once per process, before the first connect) closed it. Re-ran the five affected plans on the leaked nested node: all green, builds ~2 min. docs/libvirt.md + PLAN.md reconciled. _(done: 2026-06-11)_
+
+- [x] **BACKEND-16** · `bugfix` — libvirt networks omit a bridge name: libvirtd's `virbr%d` allocator races parallel switch creation
+
+  > Found in the BACKEND-15 nested-cert sweep (2026-06-11): `switch_isolation` against the leaked node fails `create_switch` with `error creating bridge interface virbr1: File exists` — `_network_xml` emits `<bridge stp='off' delay='0'/>` with no name, so libvirtd allocates `virbr%d` at create time, and parallel run-phase switch provisioning (ADR-0023 `--jobs`) can race two networks onto one name (an orphan bridge from a crashed run collides the same way). Fix: deterministic per-network bridge name derived from the backend name (`trb-` + sha256[:10], ≤15 chars IFNAMSIZ), mirroring the ESXi `trp-`/`trm-` short-hash naming; unit regression pins the XML and distinctness. Created 2026-06-11. Landed: `_naming.bridge_name` (`trb-` + sha256[:10]) emitted explicitly in the network XML; unit regression pins determinism + distinctness; `switch_isolation` (4 parallel switches) re-ran green on the nested node. _(done: 2026-06-11)_
+
+- [x] **BACKEND-15** · `test` — nested-libvirt cert leg: standup plan leaks a libvirt-in-libvirt host; corpus runs against it
+
+  > Cross-backend nested-cert sweep, libvirt leg (siblings ESXI-34, PVE-60). Stand up a nested LIBVIRT host on libvirt-local via a standup plan (`GuestHypervisor.libvirt`, empty inner topology, `CPU(nested=True)`, sized for corpus fan-out: ~6 vCPU / 10 GiB / large thin disk), leak it (`orch.leak()` as the final TEST — the pve_node.py shape), point a `libvirt-nested` qemu+ssh profile at it, and run `tests/plans/generic/*` + `tests/plans/libvirt/*` against the LEAKED host — the remote-libvirt driver path (qemu+ssh, SSHJumpGateway off-box guest reach: BACKEND-11's surface gets its first corpus exercise). File + fix what breaks (own ticket per finding), then `testrange cleanup` the leaked run. Standup vehicle lives in `tools/standup/`. Created 2026-06-11. DONE 2026-06-11: standup plan leaked the node (run 20260611-112441-8e2e5f, `tools/standup/libvirt_node.py`; one plan fix live-found — bare `virsh` as admin is qemu:///session, the egress assert now pins qemu:///system + ACTIVE); full corpus 15/15 GREEN against `libvirt-nested` (13 generic + 2 libvirt) — first complete remote-qemu+ssh certification. Findings filed + fixed in-leg: BACKEND-5 (serial sink remote-deaf, two-layer fix), BACKEND-16 (bridge-name allocator race), BACKEND-11 live-certified. Leaked resources cleaned up post-cert via `testrange cleanup`. _(done: 2026-06-11)_
+
+- [x] **BACKEND-11** · `feat` — remote-libvirt guest_gateway — SSH-jump through the qemu+ssh host (ADR-0020/0021)
+
+  > A remote (qemu+ssh) LibvirtDriver's guests sit on the remote host's internal networks, unreachable from the orchestrator (the depth-2 nested wall, and any SSHCommunicator inner VM). Mirror ProxmoxDriver.guest_gateway: return an SSHJumpGateway through the qemu+ssh host (host/user/key parsed from the connect URI). Local qemu:///system stays None (direct). Motivated by the depth-2 Gateway experiment requested 2026-05-31. LIVE-CERTIFIED 2026-06-11 (BACKEND-15 sweep): the qemu+ssh SSHJumpGateway (driver.py guest_gateway) carried every SSH generic plan green against the leaked nested node — key parsed from the URI's keyfile param, jump as the URI user, close()-reopen via PROXY-3. docs/user/drivers/libvirt.md reconciled. _(done: 2026-06-11)_
+
+- [x] **BACKEND-14** · `test` — generic `snapshot_chain` plan: multi-snapshot chains, data-disk/multi-pool revert, ABC contract edges
+
+  > Corpus gap: `generic/snapshots.py` certifies one snapshot at a time on a single-disk VM; uncovered ABC surface (drivers/base.py:470-511): multiple coexisting snapshots + oldest-first `list_snapshots`, duplicate-name `create_snapshot` raises, missing-name `restore_snapshot` raises / `delete_snapshot` no-ops, whether a revert covers DATA disks at all, restore of a memory snapshot onto a SHUTOFF VM, and snapshots taken on a shut-off VM (libvirt running-domain snapshots always capture RAM — drivers/libvirt/_vm.py:514-524 — so chain snapshots must be taken shut-off to assert the disk-only post-restore `shutoff` state portably). Also the corpus' first multi-StoragePool cert (OS disk in one pool, data disk in a second). Add `tests/plans/generic/snapshot_chain.py`: one VM, OSDrive(pool-os) + HardDrive(pool-data) labeled + fstab-mounted via the ESXI-27 portable node discovery; epoch markers written to BOTH disks; tests walk create×2 (shut-off) → list ordering → duplicate rejected → restore to the middle (power state `shutoff`, both disks rolled back) → restore forward → missing-restore raises → missing-delete no-op → delete-oldest leaves newest restorable → mem-snapshot restore onto a shutoff VM resumes running tmpfs state. NativeCommunicator + admin cred — the first snapshot cert that can run on ESXi (`generic/snapshots.py` is SSH-bound, unusable there per ESXI-30). Created 2026-06-11. Live-certified 8/8 on libvirt-local 2026-06-11. Cross-backend sweep continues in BACKEND-15/ESXI-34/PVE-60. _(done: 2026-06-11)_
 
 - [x] **BACKEND-2** · `feat` — ESXi driver
   _(done: 2026-06-01)_
@@ -2645,6 +2786,10 @@ on 2026-06-06.
 
 ### CACHE
 
+- [x] **CACHE-8** · `bugfix` — `HttpCache.fetch` doesn't close the streamed response on the error paths
+
+  > Adversarial-review sweep (2026-06-11). On the 404 / non-ok early returns the `stream=True` response was never closed, holding the connection checked out (a `ResourceWarning` against the project's own convention). Wrap the streamed `_get` in `contextlib.closing`. _(done: 2026-06-11)_
+
 - [x] **CACHE-7** · `bugfix` — durability docstring vs missing fsync; perm + manager lock-bypass
   _(done: 2026-06-01)_
 
@@ -2682,7 +2827,33 @@ on 2026-06-06.
 
   > WON'T DO (2026-05-24): the local-cache eviction story is being absorbed into BACKEND-6/ADR-0011's content-addressed image cache (list_images/evict_image GC + cross-backend cascade-on-local-eviction); a standalone LRU+size-cap is not pursued separately. Original: Bound the local cache; evict least-recently-used entries past a size cap.
 
+### PROXY
+
+- [x] **PROXY-3** · `bugfix` — PROXY-2's use-after-close fence makes `SSHJumpGateway.close()` permanent — breaks the non-terminal `close()` contract on every gatewayed backend
+
+  > Found by the COMM-8 plan review (2026-06-11), a fresh regression from caaf766: `SSHCommunicator.close()` closes its gateway; since PROXY-2, `SSHJumpGateway.close()` latches `_closed=True` forever and `_ensure_jump` refuses, so the next `execute()` — which the Communicator ABC documents as reconnecting transparently (communicators/base.py:53-63) — dies. Worse, it dies with a raw `GatewayError`: the connect retry loop catches only paramiko/OSError. Hits every gateway-bound backend (proxmox always; remote/nested-L1 libvirt) — `generic/snapshots.py` alone has 4 `close()` sites, so the PVE-60/BACKEND-15 nested legs would fail across the corpus; the PVE 33/33 cert predates caaf766. The unit fake gateway lacked the one-shot latch, masking it. Fix: scope the fence to what PROXY-2 actually protects (a stale `_serve` thread racing `close()` must not resurrect an untracked bastion client) via a generation counter + lock — deliberate `open_socket`/`open_local_forward` calls after `close()` lazily re-establish a *tracked* client; stale serve-generation dials refuse as before. Also wrap an escaping `GatewayError` at the communicator connect boundary into `CommunicatorError`. Unit regressions: gateway reopen-after-close, stale-generation refusal, communicator close→execute redial through a one-shot-close gateway. Created 2026-06-11. Fixed via generation counter + lock; live-proven by guest_io's close_is_not_terminal. _(done: 2026-06-11)_
+
+- [x] **PROXY-2** · `bugfix` — `SSHJumpGateway.close` can be defeated by an in-flight local-forward connection
+
+  > Adversarial-review sweep (2026-06-11). A `_serve` thread that wins the accept() race against `close()` re-dials `_ensure_jump`, which (seeing `_client is None`) reconnects a brand-new, untracked bastion client (use-after-close). Added a `_closed` flag set first in `close()` and checked in `_ensure_jump`. Latent today (no production caller of `open_local_forward`). _(done: 2026-06-11)_
+
 ### COMM
+
+- [x] **COMM-9** · `bugfix` — SSH `read_file` leaks raw paramiko errors instead of `CommunicatorError`
+
+  > Found authoring COMM-8 (2026-06-11): `communicators/ssh.py` wraps `write_file` failures (`except OSError` → CommunicatorError, COMM-5) and every `execute` failure ("so callers see one exception type, not paramiko internals"), but `read_file` has no wrapping — a missing path or permission failure surfaces as paramiko's raw `FileNotFoundError`/`PermissionError`. Inconsistent error model at the transport boundary; `generic/guest_io.py` pins the contract. Fix: mirror write_file's `except OSError` wrap. Unit regression in `test_ssh_communicator.py` (the fake SFTP now raises FileNotFoundError on missing reads, matching paramiko). Created 2026-06-11. _(done: 2026-06-11)_
+
+- [x] **COMM-8** · `test` — generic `guest_io` plan: SSH transport contract — SFTP byte-fidelity, cwd, timeout, reconnect
+
+  > Corpus gap: SSH `write_file`/`read_file` (SFTP, communicators/ssh.py:334-357) are called by zero plans (binary round-trip coverage exists only on the native channel, 256 KiB); `execute(cwd=)` is unused everywhere; the COMM-6 hung-command bound (`CommunicatorError` when a command exceeds `timeout=`) and `close()`-then-reconnect (bind-once, close is not terminal) are unasserted. Add `tests/plans/generic/guest_io.py`: one SSH VM; a 4 MiB deterministic binary SFTP round-trip verified by guest-side sha256 AND `read_file` equality; `execute(["pwd"], cwd=...)`; nonzero exit + stderr capture; `close()` then reuse; a `sleep` past `timeout=` raises CommunicatorError and the channel stays usable afterwards. SSH transport ⇒ not applicable on ESXi (ESXI-30 WONTFIX), same as the existing SSH generic plans. Created 2026-06-11. Live-certified 6/6 on libvirt-local 2026-06-11 (3-lens adversarial review hardened all six tests first: non-periodic payload, lower-bounded timeout, connection-identity pin for close()). _(done: 2026-06-11)_
+
+- [x] **COMM-6** · `bugfix` — `SSHCommunicator.execute` can hang forever on `recv_exit_status`
+
+  > Adversarial-review sweep (2026-06-11). paramiko's `recv_exit_status()` ignores the channel timeout and blocks forever if the peer sends EOF (read returns) but never delivers an exit status (half-open channel) — no run/test-phase watchdog covers it. Bound it: poll `exit_status_ready()` against the deadline and raise `CommunicatorError` on a miss. _(done: 2026-06-11)_
+
+- [x] **COMM-7** · `bugfix` — gateway socket leaked on every failed connect attempt in the SSH retry loop
+
+  > Adversarial-review sweep (2026-06-11). paramiko doesn't close a user-supplied `sock` on connect failure, so a slow-booting guest piled up open `direct-tcpip` channels on the bastion across retries. Close the spent gateway sock on each failed attempt. _(done: 2026-06-11)_
 
 - [x] **COMM-5** · `bugfix` — SSH write_file unverified + stderr drain wedge
   _(done: 2026-06-01)_

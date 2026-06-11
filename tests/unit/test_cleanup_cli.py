@@ -62,6 +62,94 @@ def _populate_run(runs_root: Path, run_id: str = "r-test") -> StateStore:
     return store
 
 
+class TestForget:
+    """cleanup --forget drops bookkeeping without touching any backend (ORCH-40)."""
+
+    def test_forget_drops_ledger_without_a_driver(
+        self,
+        isolated_state: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # The whole point: the backend may be permanently gone, so forgetting
+        # must never instantiate or connect a driver.
+        def _boom(cls: str, uri: str) -> None:
+            raise AssertionError("forget must not touch the driver registry")
+
+        monkeypatch.setattr("testrange.state.cleanup._instantiate_driver", _boom)
+        store = _populate_run(isolated_state, "r-forget")
+        store.release()
+        rc = cli.main(["cleanup", "--forget", "r-forget"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "backend untouched" in out
+        assert "bn-pool" in out and "bn-netA" in out  # loud: every entry named
+        assert not (isolated_state / "r-forget").exists()
+
+    def test_forget_refuses_a_live_owner(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _populate_run(isolated_state, "r-live")  # advisory lock still held
+        rc = cli.main(["cleanup", "--forget", "r-live"])
+        assert rc == 1
+        assert "owned by a live process" in capsys.readouterr().err
+        assert (isolated_state / "r-live").exists()
+
+    def test_forget_requires_a_run_id(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        del isolated_state
+        rc = cli.main(["cleanup", "--forget"])
+        assert rc == 2
+        assert "requires <run-id>" in capsys.readouterr().err
+
+    def test_forget_missing_run_errors(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        del isolated_state
+        rc = cli.main(["cleanup", "--forget", "nope"])
+        assert rc == 2
+        assert "no run dir" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("extra", ["--all", "--list", "--dry-run"])
+    def test_forget_rejects_other_mode_flags(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+        extra: str,
+    ) -> None:
+        # Forgetting is deliberate and per-run; a sweep or dry-run combination
+        # would blur exactly the explicitness that makes it safe.
+        store = _populate_run(isolated_state, "r-combo")
+        store.release()
+        rc = cli.main(["cleanup", "--forget", "r-combo", extra])
+        assert rc == 2
+        assert "no other mode flags" in capsys.readouterr().err
+        assert (isolated_state / "r-combo").exists()
+
+    def test_forget_tolerates_corrupt_state(
+        self,
+        isolated_state: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Disposing of broken bookkeeping is part of the point: a corrupt
+        # state.json must not block the drop (cleanup_run would refuse).
+        store = _populate_run(isolated_state, "r-corrupt")
+        store.release()
+        store.state_path.write_text("{not json")
+        rc = cli.main(["cleanup", "--forget", "r-corrupt"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "0 ledger entries dropped" in out
+        assert not (isolated_state / "r-corrupt").exists()
+
+
 class TestCleanupCLI:
     def test_cleanup_run_dry(
         self,

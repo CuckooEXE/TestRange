@@ -157,6 +157,12 @@ def prepare_iso(
             "UEFI boot setup while injecting /auto-installer-mode.toml (ADR-0022)."
         )
 
+    # xorriso's -outdev opens an existing file as an image to grow rather than
+    # writing fresh, and then aborts non-zero (it refuses to clobber). The
+    # docstring promises out_path is overwritten if present, so unlink it first —
+    # mirrors the ESXi sibling's prepare_iso (BUILD-25).
+    out_path.unlink(missing_ok=True)
+
     _log.info(
         "preparing PVE ISO %s -> %s (partition_label=%s)",
         vanilla_iso,

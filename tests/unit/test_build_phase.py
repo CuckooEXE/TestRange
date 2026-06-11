@@ -14,6 +14,8 @@ import base64
 import logging
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -24,7 +26,7 @@ from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface, StaticAddr
-from testrange.drivers.base import VolumeRef
+from testrange.drivers.base import BUILD_NIC_NIC_IDX, VolumeRef
 from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.exceptions import BuildFailedError, DriverError, OrchestratorError
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
@@ -32,6 +34,7 @@ from testrange.networks.base import BuildNic
 from testrange.networks.sidecar import SIDECAR_DNSMASQ_CONF
 from testrange.orchestrator.backend import ResolvedBackend
 from testrange.orchestrator.build_phase import (
+    _build_nic_for,
     _decode_b64_tolerant,
     _fallback_log,
     _VMBuildPlan,
@@ -837,6 +840,55 @@ class TestSidecarReadinessGate:
             run_phase(ctx)
         # The user VM never started — the gate blocked first.
         assert not any(c[0] == "create_vm" and c[1][0].startswith("tr_vm_") for c in driver.calls)
+
+
+class TestBuildNicMacSelection:
+    """ESXI-18: an installer-origin build NIC must wear the MAC of the VM's
+    first DECLARED NIC — an installed OS (ESXi vmk0) pins its identity to the
+    install-time MAC and keeps it across the build->run VM recreation, and the
+    run phase polls the lease file for the declared idx-0 MAC. Image-origin
+    builds keep the reserved disjoint slot."""
+
+    class _InstallerBuilder(OriginlessBuilder):
+        def boot_media(self) -> CacheEntry:
+            return CacheEntry("installer-iso")
+
+    def _ctx(self) -> Any:
+        class _Drv:
+            def compose_mac(self, plan: str, vm: str, idx: int) -> str:
+                return f"02:{idx & 0xFF:02x}:00:00:00:01"
+
+        return SimpleNamespace(driver=_Drv(), plan_name="p")
+
+    def _switch(self) -> Switch:
+        return Switch("build", Network("bn"), cidr="10.97.0.0/24", sidecar=Sidecar(dhcp=True))
+
+    def _vm(self, builder: Any, nics: int) -> VMRecipe:
+        devices: list[Any] = [CPU(1), Memory(512), OSDrive("pool1", 8)]
+        devices += [NetworkIface("bn", addr=DHCPAddr()) for _ in range(nics)]
+        return VMRecipe(
+            spec=VMSpec(name="vm", devices=devices),
+            builder=builder,
+            communicator=SSHCommunicator("u"),
+        )
+
+    def test_installer_origin_wears_the_declared_idx0_mac(self) -> None:
+        ctx = self._ctx()
+        nic = _build_nic_for(ctx, self._switch(), self._vm(self._InstallerBuilder(), nics=2), 0)
+        assert nic.mac == ctx.driver.compose_mac("p", "vm", 0)
+
+    def test_image_origin_keeps_the_reserved_slot(self) -> None:
+        ctx = self._ctx()
+        builder = CloudInitBuilder(base=CacheEntry("debian-13"))
+        nic = _build_nic_for(ctx, self._switch(), self._vm(builder, nics=2), 0)
+        assert nic.mac == ctx.driver.compose_mac("p", "vm", BUILD_NIC_NIC_IDX)
+
+    def test_installer_origin_without_nics_keeps_the_reserved_slot(self) -> None:
+        # No declared NIC means nothing will ever poll a lease for idx 0 —
+        # there is no identity to inherit.
+        ctx = self._ctx()
+        nic = _build_nic_for(ctx, self._switch(), self._vm(self._InstallerBuilder(), nics=0), 0)
+        assert nic.mac == ctx.driver.compose_mac("p", "vm", BUILD_NIC_NIC_IDX)
 
 
 class TestVMBuildPlanOriginInvariant:

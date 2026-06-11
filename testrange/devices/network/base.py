@@ -47,6 +47,15 @@ class StaticAddr:
     dns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if isinstance(self.dns, str):
+            # A str is itself an iterable of characters, so `dns="8.8.8.8"` would
+            # silently normalize to ('8','.','8',…) and then fail validation with
+            # the misleading "entry '8' is not a valid IPv4". Reject it at the
+            # boundary with an actionable message instead (CORE-95).
+            raise ValueError(
+                "StaticAddr.dns must be an iterable of IPs, not a single string; "
+                f"wrap it in a tuple: dns=({self.dns!r},)"
+            )
         if not isinstance(self.dns, tuple):
             # Accept any iterable of str at the user boundary; store a tuple.
             object.__setattr__(self, "dns", tuple(self.dns))

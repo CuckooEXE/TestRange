@@ -93,6 +93,21 @@ class TestExecute:
         with pytest.raises(GuestAgentError, match="exec failed"):
             execute(["x"])
 
+    def test_poll_error_wrapped_as_guest_agent_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # CORE-97: the exec succeeds but a mid-poll status call raises a raw
+        # library error (libvirtError-like); the poll loop must normalize it to
+        # GuestAgentError, not leak it past the module's error contract.
+        class _BoomQGA:
+            def qemuAgentCommand(self, dom: Any, cmd: str, timeout: int, flags: int) -> str:
+                if json.loads(cmd)["execute"] == "guest-exec":
+                    return json.dumps({"return": {"pid": 5}})
+                raise RuntimeError("QGA channel wedged")
+
+        monkeypatch.setattr(_guest, "_import_libvirt_qemu", _BoomQGA)
+        execute = _guest.make_execute(FakeClient(), "vm")  # type: ignore[arg-type]
+        with pytest.raises(GuestAgentError, match="poll failed"):
+            execute(["x"])
+
 
 class TestReadFile:
     def test_reads_until_eof(self, monkeypatch: pytest.MonkeyPatch) -> None:

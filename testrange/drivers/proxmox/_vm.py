@@ -186,7 +186,11 @@ def create_vm(
         "serial0": "socket",  # cloud images expect a serial console
         "boot": "order=scsi0",  # the seed ISO is data, not bootable
         "scsi0": (
-            f"{storage}:{spec.os_drive.size_gb}"  # installer-origin: blank, sized
+            # installer-origin: blank, sized. format=qcow2 for the same reason the
+            # blank data disks below carry it — on a dir store a bare `<storage>:N`
+            # allocates RAW, which the build then captures into a .qcow2-named cache
+            # file whose content disagrees with its format label (PVE-59).
+            f"{storage}:{spec.os_drive.size_gb},format=qcow2"
             if installer_origin
             else f"{storage}:0,import-from={os_disk_ref}"  # image-origin: import base
         ),
@@ -330,14 +334,23 @@ def start_vm(client: ProxmoxClient, backend_name: str) -> None:
 
 
 def shutdown_vm(client: ProxmoxClient, backend_name: str, *, timeout: float = 120.0) -> None:
-    """Graceful ACPI shutdown, hard-stopping after ``timeout`` (``forceStop``)."""
+    """Graceful ACPI shutdown, hard-stopping after ``timeout`` (``forceStop``).
+
+    Issued via :func:`_await_lock_retry`: a preceding ``mem=True`` snapshot op
+    holds the per-VM config flock past its task's completion, and a shutdown
+    can be the very next driver call (PVE-61).
+    """
     vmid = resolve_vmid(client, backend_name)
-    result = (
-        client.api.nodes(client.node)
-        .qemu(vmid)
-        .status.shutdown.post(timeout=int(timeout), forceStop=1)
+    _await_lock_retry(
+        client,
+        lambda: (
+            client.api.nodes(client.node)
+            .qemu(vmid)
+            .status.shutdown.post(timeout=int(timeout), forceStop=1)
+        ),
+        what=f"shutdown of vm {backend_name!r}",
+        awaiter=lambda r: _await_with_margin(client, r, timeout),
     )
-    _await_with_margin(client, result, timeout)
 
 
 def destroy_vm(client: ProxmoxClient, backend_name: str) -> None:
@@ -409,22 +422,38 @@ _LOCK_RETRY_ATTEMPTS = 10
 _LOCK_RETRY_BACKOFF_S = 3.0
 
 
-def _await_lock_retry(client: ProxmoxClient, issue: Callable[[], Any], *, what: str) -> None:
+def _await_lock_retry(
+    client: ProxmoxClient,
+    issue: Callable[[], Any],
+    *,
+    what: str,
+    awaiter: Callable[[Any], None] | None = None,
+) -> None:
     """Issue a PVE task via ``issue`` and await it, retrying the transient per-VM
     config flock (``/var/lock/qemu-server/lock-<vmid>.conf``).
 
     A ``mem=True`` snapshot create/rollback writes/restores the RAM state and
     holds that flock **past** the API task's completion (the QEMU vmstate
-    save/resume), so a follow-on op (delete after a rollback, the next test's
-    shutdown) fails with ``can't lock file ... got timeout``. That lock is a host
-    file, invisible to the config ``lock`` metadata :func:`_wait_unlocked` polls,
-    so the only way to ride it out is to retry — same shape as
-    :func:`_resize_os_disk`'s post-import image-lock retry. Any non-lock failure
-    re-raises immediately.
+    save/resume), so a follow-on op fails with ``can't lock file ... got
+    timeout``. That follow-on is a delete after a rollback — or a shutdown
+    right after a vmstate save: the snapshot_chain corpus plan (BACKEND-14)
+    makes ``shutdown_vm`` the very next driver call after a ``mem=True``
+    create (PVE-61). That lock is a host file, invisible to the config
+    ``lock`` metadata :func:`_wait_unlocked` polls, so the only way to ride it
+    out is to retry — same shape as :func:`_resize_os_disk`'s post-import
+    image-lock retry. Any non-lock failure re-raises immediately.
+
+    ``awaiter`` overrides how the issued result is awaited (``None`` → plain
+    :func:`_await`); ``shutdown_vm`` passes :func:`_await_with_margin` so the
+    task wait keeps its margin over the guest's graceful-shutdown window.
     """
     for attempt in range(1, _LOCK_RETRY_ATTEMPTS + 1):
         try:
-            _await(client, issue())
+            result = issue()
+            if awaiter is None:
+                _await(client, result)
+            else:
+                awaiter(result)
             return
         except Exception as e:
             msg = str(e).lower()

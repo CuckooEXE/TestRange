@@ -487,3 +487,23 @@ class TestPrepareRecipeBustsCache:
         monkeypatch.setattr(proxmox_mod, "PREPARE_ISO_RECIPE", "some-newer-recipe-v2")
         after = _builder().prepare_boot_media(vanilla)
         assert before.name != after.name
+
+
+class TestTomlStr:
+    def test_escapes_backslash_and_quote(self) -> None:
+        assert proxmox_mod._toml_str("hello") == '"hello"'
+        assert proxmox_mod._toml_str('a"b\\c') == '"a\\"b\\\\c"'
+
+    def test_short_forms_for_common_whitespace(self) -> None:
+        assert proxmox_mod._toml_str("a\nb\tc\rd") == '"a\\nb\\tc\\rd"'
+
+    def test_escapes_other_control_chars_as_uXXXX(self) -> None:
+        # A control char other than \n\r\t (vertical tab, bell) or DEL is
+        # forbidden raw in a TOML basic string; escape as \uXXXX so a password
+        # carrying one can't emit an answer.toml the PVE parser rejects (BUILD-27).
+        assert proxmox_mod._toml_str("p\x0bw") == '"p\\u000bw"'
+        assert proxmox_mod._toml_str("a\x07b") == '"a\\u0007b"'
+        assert proxmox_mod._toml_str("x\x7fy") == '"x\\u007fy"'
+
+    def test_leaves_unicode_untouched(self) -> None:
+        assert proxmox_mod._toml_str("café") == '"café"'

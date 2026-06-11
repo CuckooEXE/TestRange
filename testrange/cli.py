@@ -29,6 +29,7 @@ from testrange.connect import BackendProfile, load_profile
 from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.drivers import scheme_for_hypervisor
 from testrange.exceptions import (
+    BuilderError,
     BuildFailedError,
     BuildRequiredError,
     CacheError,
@@ -52,6 +53,7 @@ from testrange.preflight import PreflightCheck, PreflightReport
 from testrange.state.cleanup import (
     cleanup_all,
     cleanup_run,
+    forget_run,
     format_cleanup_results,
     format_run_list,
     list_runs,
@@ -242,6 +244,12 @@ def _build(args: argparse.Namespace) -> int:
     except BuildFailedError as e:
         _err(f"build failed: {e}")
         return Exit.FAILURE
+    except BuilderError as e:
+        # Parent of BuildFailedError/BuildNotReadyError; also a bare BuilderError
+        # (e.g. a missing optional builder dep raised from a lazy-import helper).
+        # Without this it would escape the verb as a raw traceback (CORE-92).
+        _err(f"build failed: {e}")
+        return Exit.FAILURE
     except OrchestratorError as e:
         _err(f"build failed: {e}")
         return Exit.FAILURE
@@ -273,6 +281,7 @@ def _run(args: argparse.Namespace) -> int:
                 jobs=args.jobs,
                 build_timeout_s=args.build_timeout,
                 lease_timeout_s=args.lease_timeout,
+                ready_timeout_s=args.ready_timeout,
                 dashboard=dashboard,
             )
     except DriverError as e:
@@ -291,6 +300,11 @@ def _run(args: argparse.Namespace) -> int:
         _err(f"cache error: {e}")
         return Exit.FAILURE
     except BuildFailedError as e:
+        _err(f"build failed: {e}")
+        return Exit.FAILURE
+    except BuilderError as e:
+        # Parent of BuildFailedError/BuildNotReadyError plus a bare BuilderError
+        # (e.g. a missing optional builder dep): otherwise a raw traceback (CORE-92).
         _err(f"build failed: {e}")
         return Exit.FAILURE
     except OrchestratorError as e:
@@ -344,9 +358,21 @@ def _repl(args: argparse.Namespace) -> int:
                 local={"orch": orch, "plan": plan, "tests": tests},
                 exitmsg="",
             )
+    except DriverError as e:
+        # __init__ only resolves the backend; the actual driver.connect() happens
+        # in __enter__ above, so a connect-time failure (host down, bad creds,
+        # refused connection) lands here, not at construction. Mirror _run/_build
+        # rather than escaping as a raw traceback (CORE-93).
+        _err(f"error: {e}")
+        return Exit.USAGE
     except PreflightError as e:
         _err(f"preflight failed:\n{e}")
         return Exit.USAGE
+    except BuilderError as e:
+        # repl auto-builds on a cache miss (no --require-cache), so the build phase
+        # can raise BuilderError/BuildFailedError here too (CORE-92).
+        _err(f"build failed: {e}")
+        return Exit.FAILURE
     except OrchestratorError as e:
         _err(f"orchestrator failed: {e}")
         return Exit.FAILURE
@@ -358,6 +384,23 @@ def _repl(args: argparse.Namespace) -> int:
 
 def _cleanup(args: argparse.Namespace) -> int:
     try:
+        if args.forget:
+            # Forgetting drops bookkeeping without touching a backend — an
+            # explicitly per-run act, so it never combines with the sweeping or
+            # destructive modes.
+            if args.all or args.list or args.dry_run:
+                _err("error: --forget takes a single <run-id> and no other mode flags")
+                return Exit.USAGE
+            if not args.run_id:
+                _err("error: --forget requires <run-id>")
+                return Exit.USAGE
+            forgotten = forget_run(args.run_id)
+            names = f": {', '.join(forgotten)}" if forgotten else ""
+            _out(
+                f"forgot run {args.run_id}: {len(forgotten)} ledger entr"
+                f"{'y' if len(forgotten) == 1 else 'ies'} dropped, backend untouched{names}"
+            )
+            return Exit.OK
         if args.list:
             # Read-only: enumerate runs and their status, tear down nothing.
             _out(format_run_list(list_runs()))
@@ -581,6 +624,12 @@ def _print_describe(
                     )
                 except CacheMissError:
                     node.add(Text(f"{label}:   {entry!r}  (!) not in cache"))
+                except CacheError as e:
+                    # describe is a passive read-only check; with --cache URL a
+                    # 5xx / unreachable tier raises a non-miss CacheError, which
+                    # must not crash the verb with a raw traceback (CORE-96). The
+                    # HTTP tier translates its own transport errors to CacheError.
+                    node.add(Text(f"{label}:   {entry!r}  (!) cache error: {e}"))
             if creds := getattr(builder, "credentials", ()):
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
                 node.add(Text(f"creds:  {names}"))
@@ -835,6 +884,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print what would be destroyed without touching the backend",
     )
+    p_cleanup.add_argument(
+        "--forget",
+        action="store_true",
+        help="drop <run-id>'s ledger without touching any backend (for a backend that is permanently gone)",
+    )
     p_cleanup.set_defaults(func=_cleanup)
 
     p_build = sub.add_parser(
@@ -889,6 +943,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=120.0,
         metavar="SECONDS",
         help="max seconds a run VM may take to acquire its DHCP lease (default 120)",
+    )
+    p_run.add_argument(
+        "--ready-timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="max seconds a communicator may take to answer its first probe (default 120)",
     )
     _add_jobs_arg(p_run)
     _add_connect_arg(p_run)

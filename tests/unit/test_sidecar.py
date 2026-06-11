@@ -173,6 +173,22 @@ class TestRenderDnsmasqConf:
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "host-record" not in conf
 
+    def test_multi_network_emits_single_domain(self) -> None:
+        # All Networks on a Switch share one subnet, but dnsmasq assigns one
+        # domain per address-range — so one domain= per Network produced
+        # conflicting directives for the same range (only the last took effect).
+        # Emit exactly one, the last/previously-winning label (NET-19).
+        sw = Switch(
+            "sw",
+            Network("pub-a"),
+            Network("pub-b"),
+            cidr="10.30.0.0/24",
+            sidecar=Sidecar(dhcp=True, dns=True),
+        )
+        conf = render_dnsmasq_conf(sw, [], _mac_for)
+        domain_lines = [ln for ln in conf.splitlines() if ln.startswith("domain=")]
+        assert domain_lines == ["domain=pub-b,10.30.0.0/24"]
+
 
 class TestRenderNftablesRuleset:
     def test_no_nat_empty(self) -> None:

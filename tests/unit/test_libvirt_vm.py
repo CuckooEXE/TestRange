@@ -1,14 +1,13 @@
 """VM lifecycle + serial build-result sink for the libvirt backend (BACKEND-1.B).
 
 Driven against duck-typed fakes — no daemon, ``libvirt`` only as a monkeypatched
-constants namespace for the lifecycle calls. Covers domain-XML synthesis (the
-device shape the guest depends on), the define/start/shutdown/destroy/state
-lifecycle, and the serial sink's heartbeat/EOF contract.
+constants namespace. Covers domain-XML synthesis (the device shape the guest
+depends on), the define/start/shutdown/destroy/state lifecycle, and the
+``virDomainOpenConsole`` sink's retry/heartbeat/EOF contract (BACKEND-5).
 """
 
 from __future__ import annotations
 
-import socket
 from contextlib import closing
 from types import SimpleNamespace
 from typing import Any
@@ -138,9 +137,6 @@ class FakeClient:
         self.conn = FakeConn()
         self.vols: dict[str, FakeVol] = {}
         self.domains: dict[str, FakeDomain] = {}
-        self.serial_opened: list[str] = []
-        self.serial_closed: list[str] = []
-        self._accept: Any = None
 
     @property
     def raw(self) -> FakeConn:
@@ -151,18 +147,6 @@ class FakeClient:
 
     def lookup_domain(self, name: str) -> FakeDomain | None:
         return self.domains.get(name)
-
-    def open_serial_listener(self, backend_name: str) -> str:
-        self.serial_opened.append(backend_name)
-        return f"/run/tr/{backend_name}.sock"
-
-    def close_serial_listener(self, backend_name: str) -> None:
-        self.serial_closed.append(backend_name)
-
-    def accept_serial(self, backend_name: str, *, timeout: float) -> Any:
-        if self._accept is None:
-            raise AssertionError("no accept fake set")
-        return self._accept
 
 
 def _spec(name: str = "web", *, nics: int = 0, data: int = 0) -> VMSpec:
@@ -184,7 +168,6 @@ class TestDomainXML:
                 ("02:aa:bb:cc:dd:01", "net-a", "virtio"),
                 ("02:aa:bb:cc:dd:02", "net-b", "virtio"),
             ],
-            serial_sock="/run/tr/web.sock",
         )
         assert "<name>tr-vm-x-web</name>" in xml
         assert "<memory unit='MiB'>1024</memory>" in xml and "<vcpu>2</vcpu>" in xml
@@ -194,7 +177,10 @@ class TestDomainXML:
         assert "device='cdrom'" in xml and "/p/seed.iso" in xml
         assert xml.count("<interface type='network'>") == 2
         assert "org.qemu.guest_agent.0" in xml
-        assert "<serial type='unix'>" in xml and "mode='connect'" in xml
+        # Every guest gets a pty serial — the sink reads it via openConsole
+        # (BACKEND-5), so no host-local socket path is in the XML.
+        assert "<serial type='pty'>" in xml
+        assert "<serial type='unix'>" not in xml
         assert "<acpi/>" in xml  # graceful shutdown needs ACPI
         # A VGA device is mandatory: without it (under libvirt's -nodefaults) the
         # Debian cloud image's GRUB gfxterm loops and never boots the kernel.
@@ -208,7 +194,6 @@ class TestDomainXML:
             data_paths=[],
             seed_path=None,
             nics=[],
-            serial_sock=None,
         )
         assert "<serial type='pty'>" in xml
         assert "device='cdrom'" not in xml
@@ -237,7 +222,6 @@ class TestLibvirtDeviceVariants:
             seed_path=None,
             boot_media_path="/p/esxi.iso",
             nics=[("02:aa:bb:cc:dd:10", "lab-net", "e1000e")],
-            serial_sock="/run/tr/esxi.sock",
         )
         # OS disk on sata -> sd-prefix; the installer CDROM is IDE on BIOS/i440fx
         # (ESXi weasel only finds ks= on an IDE CDROM), so they don't even share a
@@ -263,7 +247,6 @@ class TestLibvirtDeviceVariants:
             seed_path=None,
             boot_media_path="/p/esxi.iso",
             nics=[],
-            serial_sock="/run/tr/esxi.sock",
         )
         # IDE OS disk -> hda; the installer CDROM is also IDE (BIOS), so the shared
         # per-prefix allocator gives it the next hd letter (hdb) — no collision.
@@ -288,7 +271,6 @@ class TestLibvirtDeviceVariants:
             data_paths=[],
             seed_path=None,
             nics=[],
-            serial_sock=None,
         )
         assert "<os firmware='efi'>" in xml
         assert "machine='q35'" in xml
@@ -311,7 +293,6 @@ class TestLibvirtDeviceVariants:
             data_paths=["/p/d.qcow2"],
             seed_path=None,
             nics=[],
-            serial_sock=None,
         )
         assert "<target dev='vda' bus='virtio'/>" in xml
         assert "<target dev='sda' bus='sata'/>" in xml  # data disk on sata
@@ -328,15 +309,16 @@ _BUILD_NIC = BuildNic(
 
 
 class TestCreateVM:
-    def test_build_vm_defines_and_opens_serial(self) -> None:
-        # ADR-0017/0021: the build VM (the one with a build_nic) is the only VM
-        # that gets the unix-socket serial sink — the orchestrator reads its
-        # TESTRANGE-RESULT off it.
-        client = FakeClient()
+    def test_build_vm_gets_pty_serial(self) -> None:
+        # BACKEND-5: the build VM gets the same pty serial as every guest — no
+        # host-local socket path in the XML, so the identical domain boots on a
+        # local and a remote (qemu+ssh) daemon; the orchestrator reads its
+        # TESTRANGE-RESULT via virDomainOpenConsole instead.
+        client: Any = FakeClient()
         client.vols["bp/tr-vm-x-web.qcow2"] = FakeVol("/img/os.qcow2")
         client.vols["bp/seed.iso"] = FakeVol("/img/seed.iso")
         _vm.create_vm(
-            client,  # type: ignore[arg-type]
+            client,
             "tr-vm-x-web",
             _spec(),
             "plan",
@@ -345,14 +327,15 @@ class TestCreateVM:
             network_refs={"build-net": "tr-build-net"},
             build_nic=_BUILD_NIC,
         )
-        assert client.serial_opened == ["tr-vm-x-web"]  # build VM => serial listener
-        assert "mode='connect' path=\"/run/tr/tr-vm-x-web.sock\"" in client.conn.defined_xml[0]
+        xml = client.conn.defined_xml[0]
+        assert xml.count("<serial type='pty'>") == 1
+        assert "<serial type='unix'>" not in xml and "mode='connect'" not in xml
 
     def test_build_nic_inherits_declared_e1000e_model(self) -> None:
         # The build NIC stands in for the guest's hardware: an ESXi-shaped guest
         # that declares an e1000e NIC must install over an e1000e build interface
         # (it has no virtio-net driver).
-        client = FakeClient()
+        client: Any = FakeClient()
         client.vols["bp/tr-vm-x-esxi.qcow2"] = FakeVol("/img/os.qcow2")
         spec = VMSpec(
             name="esxi",
@@ -364,7 +347,7 @@ class TestCreateVM:
             ],
         )
         _vm.create_vm(
-            client,  # type: ignore[arg-type]
+            client,
             "tr-vm-x-esxi",
             spec,
             "plan",
@@ -375,15 +358,14 @@ class TestCreateVM:
         )
         assert "<model type='e1000e'/>" in client.conn.defined_xml[0]
 
-    def test_sidecar_seed_vm_gets_pty_not_serial_sink(self) -> None:
-        # A seed-carrying VM that is NOT a build VM (no build_nic) — e.g. a sidecar
-        # — must NOT open the unix-socket serial sink: it's monitored via QGA, and
-        # the socket would be unreachable on a remote daemon (ADR-0021).
-        client = FakeClient()
+    def test_sidecar_seed_vm_gets_pty_and_seed(self) -> None:
+        # A seed-carrying non-build VM (e.g. a sidecar) gets the same pty serial
+        # as everyone else — undrained but harmless — with the seed CD attached.
+        client: Any = FakeClient()
         client.vols["bp/tr-sidecar.qcow2"] = FakeVol("/img/os.qcow2")
         client.vols["bp/cfg.iso"] = FakeVol("/img/cfg.iso")
         _vm.create_vm(
-            client,  # type: ignore[arg-type]
+            client,
             "tr-sidecar",
             _spec(),
             "plan",
@@ -391,29 +373,14 @@ class TestCreateVM:
             seed_iso_ref=VolumeRef("bp/cfg.iso"),
             network_refs={},
         )
-        assert client.serial_opened == []  # seed but no build_nic => pty, no sink
         assert "<serial type='pty'>" in client.conn.defined_xml[0]
         assert "device='cdrom'" in client.conn.defined_xml[0]  # seed still attached
 
-    def test_run_vm_no_serial_listener(self) -> None:
-        client = FakeClient()
-        client.vols["p/os.qcow2"] = FakeVol("/img/os.qcow2")
-        _vm.create_vm(
-            client,  # type: ignore[arg-type]
-            "tr-vm-x-web",
-            _spec(),
-            "plan",
-            os_disk_ref=VolumeRef("p/os.qcow2"),
-            seed_iso_ref=None,
-            network_refs={},
-        )
-        assert client.serial_opened == []
-
     def test_missing_volume_raises(self) -> None:
-        client = FakeClient()
+        client: Any = FakeClient()
         with pytest.raises(DriverError, match="no volume"):
             _vm.create_vm(
-                client,  # type: ignore[arg-type]
+                client,
                 "tr-vm-x-web",
                 _spec(),
                 "plan",
@@ -439,25 +406,19 @@ class TestLifecycle:
         _vm.shutdown_vm(client, "tr-vm-x-web", timeout=5.0)  # type: ignore[arg-type]
         assert "shutdown" in dom.ops and dom.state()[0] == 5
 
-    def test_destroy_undefines_with_flags_and_closes_serial(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_destroy_undefines_with_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_vm, "_import_libvirt", _fake_libvirt)
-        client = FakeClient()
+        client: Any = FakeClient()
         dom = FakeDomain("tr-vm-x-web", state=1)
         client.domains["tr-vm-x-web"] = dom
-        _vm.destroy_vm(client, "tr-vm-x-web")  # type: ignore[arg-type]
+        _vm.destroy_vm(client, "tr-vm-x-web")
         assert dom.ops == ["destroy", "undefine"]
         assert dom.undefine_flags == 1 | 2 | 16 | 4  # snapshots/checkpoints/nvram cleared
-        assert client.serial_closed == ["tr-vm-x-web"]
 
-    def test_destroy_absent_is_noop_but_releases_serial(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_destroy_absent_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_vm, "_import_libvirt", _fake_libvirt)
-        client = FakeClient()
-        _vm.destroy_vm(client, "ghost")  # type: ignore[arg-type]
-        assert client.serial_closed == ["ghost"]
+        client: Any = FakeClient()
+        _vm.destroy_vm(client, "ghost")  # no raise
 
     def test_power_state_maps_to_vocab(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(_vm, "_import_libvirt", _fake_libvirt)
@@ -472,67 +433,162 @@ class TestLifecycle:
             _vm.start_vm(FakeClient(), "ghost")  # type: ignore[arg-type]
 
 
-class _FakeSock:
-    """A socketpair-like fake: replays scripted recv results."""
+class _FakeStream:
+    """Scripts ``virStream.recv``'s verified semantics: ``bytes`` is data
+    (``b""`` = EOF), the int ``-2`` is the NONBLOCK would-block sentinel, and an
+    exception instance is raised (a libvirtError from a powered-off domain)."""
 
-    def __init__(self, script: list[Any]) -> None:
+    def __init__(self, script: list[Any], *, finish_raises: bool = False) -> None:
         self._script = list(script)
-        self.closed = False
+        self._finish_raises = finish_raises
+        self.finished = False
+        self.aborted = False
 
-    def settimeout(self, t: float) -> None:
-        pass
-
-    def recv(self, n: int) -> bytes:
+    def recv(self, nbytes: int) -> Any:
         item = self._script.pop(0)
-        if isinstance(item, type) and issubclass(item, BaseException):
-            raise item()
-        assert isinstance(item, bytes)
+        if isinstance(item, BaseException):
+            raise item
         return item
 
-    def close(self) -> None:
-        self.closed = True
+    def finish(self) -> None:
+        if self._finish_raises:
+            raise _FakeLibvirtError(1)
+        self.finished = True
+
+    def abort(self) -> None:
+        self.aborted = True
+
+
+class _FakeConsoleDomain:
+    """``openConsole`` raises libvirtError ``fail_opens`` times, then binds."""
+
+    def __init__(self, fail_opens: int = 0) -> None:
+        self.fail_opens = fail_opens
+        self.opened: list[tuple[Any, Any, int]] = []
+
+    def openConsole(self, dev_name: Any, st: Any, flags: int) -> None:
+        if self.fail_opens > 0:
+            self.fail_opens -= 1
+            raise _FakeLibvirtError(55)  # domain is not running (yet)
+        self.opened.append((dev_name, st, flags))
+
+
+class _FakeSinkClient:
+    """Duck-typed LibvirtClient for the sink: lookup_domain + raw.newStream."""
+
+    def __init__(self, dom: _FakeConsoleDomain | None, stream: _FakeStream) -> None:
+        self._dom = dom
+        self._stream = stream
+        self.new_stream_flags: list[int] = []
+
+    @property
+    def raw(self) -> _FakeSinkClient:
+        return self
+
+    def newStream(self, flags: int) -> _FakeStream:
+        self.new_stream_flags.append(flags)
+        return self._stream
+
+    def lookup_domain(self, name: str) -> _FakeConsoleDomain | None:
+        return self._dom
+
+
+class _FakeTime:
+    """Deterministic clock: ``sleep`` advances ``monotonic``, so the sink's
+    heartbeat pacing and the 60s openConsole deadline run instantly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def sink_time(monkeypatch: pytest.MonkeyPatch) -> _FakeTime:
+    monkeypatch.setattr(
+        _serial,
+        "_import_libvirt",
+        lambda: SimpleNamespace(VIR_STREAM_NONBLOCK=1, libvirtError=_FakeLibvirtError),
+    )
+    ft = _FakeTime()
+    monkeypatch.setattr(_serial, "time", ft)
+    return ft
 
 
 class TestSerialSink:
-    def test_yields_chunks_heartbeat_then_eof(self) -> None:
-        client = FakeClient()
-        client._accept = _FakeSock([b"boot...", TimeoutError, b"TESTRANGE-RESULT: ok\n", b""])
-        got = list(_serial.read_build_result_sink(client, "tr-vm-x-web"))  # type: ignore[arg-type]
+    """The virDomainOpenConsole live-tail (BACKEND-5) against the ABC contract."""
+
+    def test_data_would_block_heartbeat_then_eof(self, sink_time: _FakeTime) -> None:
+        # recv: data -> yield; -2 (would-block) -> b"" heartbeat + paced sleep;
+        # b"" (EOF: the build VM powered off) -> iteration ends.
+        stream = _FakeStream([b"boot...", -2, b"TESTRANGE-RESULT: ok\n", b""])
+        client: Any = _FakeSinkClient(_FakeConsoleDomain(), stream)
+        got = list(_serial.read_build_result_sink(client, "tr-vm-x-web"))
         assert got == [b"boot...", b"", b"TESTRANGE-RESULT: ok\n"]
+        # The heartbeat slept (the ABC contract puts pacing on the sink — an
+        # unslept would-block loop would busy-spin the orchestrator).
+        assert sink_time.sleeps == [1.0]
+        assert stream.finished
+        # The stream was opened non-blocking — recv's -2 sentinel requires it.
+        assert client.new_stream_flags == [1]
 
-    def test_closes_socket_on_early_break(self) -> None:
-        client = FakeClient()
-        sock = _FakeSock([b"a", b"b", b""])
-        client._accept = sock
-        with closing(_serial.read_build_result_sink(client, "x")) as gen:  # type: ignore[arg-type]
-            next(gen)  # one chunk, then break early
-        assert sock.closed
+    def test_libvirt_error_mid_read_is_normal_end(self, sink_time: _FakeTime) -> None:
+        # A powered-off domain / aborted stream raises from recv: that is the
+        # normal end of a build, not a failure — iteration just ends.
+        stream = _FakeStream([b"chunk", _FakeLibvirtError(1)])
+        client: Any = _FakeSinkClient(_FakeConsoleDomain(), stream)
+        assert list(_serial.read_build_result_sink(client, "x")) == [b"chunk"]
 
-    def test_accept_timeout_raises(self) -> None:
-        client = FakeClient()
+    def test_open_console_retries_with_heartbeats_then_succeeds(self, sink_time: _FakeTime) -> None:
+        # ORCH-15: while the domain isn't running yet, openConsole fails; the
+        # sink heartbeats between attempts (a fresh stream each try) so the
+        # orchestrator's deadline keeps ticking, then tails normally.
+        stream = _FakeStream([b"data", b""])
+        dom = _FakeConsoleDomain(fail_opens=2)
+        client: Any = _FakeSinkClient(dom, stream)
+        got = list(_serial.read_build_result_sink(client, "x"))
+        assert got == [b"", b"", b"data"]
+        assert len(client.new_stream_flags) == 3  # one stream per open attempt
+        assert len(dom.opened) == 1
 
-        def _boom(backend_name: str, *, timeout: float) -> Any:
-            raise TimeoutError
-
-        client.accept_serial = _boom  # type: ignore[method-assign]
-        gen = _serial.read_build_result_sink(client, "x")  # type: ignore[arg-type]
-        # ORCH-15: the connect-wait heartbeats (b"") so the orchestrator can
-        # re-check its build deadline; once the accept budget is exhausted it
-        # raises rather than blocking the whole wait on a single accept.
+    def test_open_console_timeout_raises_driver_error(self, sink_time: _FakeTime) -> None:
+        # A console that never opens exhausts the 60s budget: heartbeats while
+        # waiting, then a typed DriverError (not an exhausted generator, which
+        # the orchestrator would misread as "powered off without a result").
+        stream = _FakeStream([])
+        client: Any = _FakeSinkClient(_FakeConsoleDomain(fail_opens=10_000), stream)
+        gen = _serial.read_build_result_sink(client, "x")
         assert next(gen) == b""
-        with pytest.raises(DriverError, match="never connected"):
+        with pytest.raises(DriverError, match="did not open"):
             list(gen)
 
+    def test_missing_domain_raises(self, sink_time: _FakeTime) -> None:
+        client: Any = _FakeSinkClient(None, _FakeStream([]))
+        with pytest.raises(DriverError, match="no libvirt domain"):
+            next(_serial.read_build_result_sink(client, "ghost"))
 
-def test_socketpair_roundtrip_real_socket() -> None:
-    """A real AF_UNIX socketpair through the sink, to exercise true recv()."""
-    a, b = socket.socketpair()
-    client = FakeClient()
-    client._accept = a
-    b.sendall(b"hello-serial")
-    b.close()  # EOF after the bytes
-    got = b"".join(_serial.read_build_result_sink(client, "x"))  # type: ignore[arg-type]
-    assert got == b"hello-serial"
+    def test_finishes_stream_on_early_break(self, sink_time: _FakeTime) -> None:
+        # The orchestrator breaks out as soon as it has a result; closing()
+        # must release the stream via the generator's finally.
+        stream = _FakeStream([b"TESTRANGE-RESULT: ok\n", b""])
+        client: Any = _FakeSinkClient(_FakeConsoleDomain(), stream)
+        with closing(_serial.read_build_result_sink(client, "x")) as gen:
+            next(gen)  # one chunk, then break early
+        assert stream.finished
+
+    def test_finish_failure_falls_back_to_abort(self, sink_time: _FakeTime) -> None:
+        # finish() fails on a stream that ended in an error state; the release
+        # falls back to abort() and never masks the build verdict.
+        stream = _FakeStream([b""], finish_raises=True)
+        client: Any = _FakeSinkClient(_FakeConsoleDomain(), stream)
+        assert list(_serial.read_build_result_sink(client, "x")) == []
+        assert stream.aborted
 
 
 class TestSnapshots:

@@ -376,19 +376,22 @@ class ProxmoxClient:
         """
         client = self._ensure_ssh()
         sftp = client.open_sftp()
+        reporter: ProgressReporter | None = None
+
+        def _cb(done: int, total: int) -> None:
+            nonlocal reporter
+            if reporter is None:
+                reporter = ProgressReporter(total, f"download {dest_path.name}", log=_log)
+            reporter.update(done)
+
         try:
-            reporter: ProgressReporter | None = None
-
-            def _cb(done: int, total: int) -> None:
-                nonlocal reporter
-                if reporter is None:
-                    reporter = ProgressReporter(total, f"download {dest_path.name}", log=_log)
-                reporter.update(done)
-
             sftp.get(remote_path, str(dest_path), callback=_cb)
+        finally:
+            # finish() in the finally so a mid-stream sftp.get failure (after the
+            # first progress callback created the reporter) still releases the rich
+            # Live instead of leaving the terminal in live mode (CORE-94).
             if reporter is not None:
                 reporter.finish()
-        finally:
             sftp.close()
 
     def sftp_put(self, source_path: Path, remote_path: str) -> None:

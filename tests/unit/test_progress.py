@@ -98,3 +98,30 @@ def test_tty_draws_a_bar_and_does_not_log() -> None:
     out = buf.getvalue()
     assert "uploading disk" in out  # the task description was rendered
     assert log.lines == []  # the non-TTY log path stayed silent
+
+
+def test_context_manager_finishes_on_exception() -> None:
+    # CORE-94: a transfer that raises must still run finish() (release the rich
+    # Live / emit the final line), so use as a context manager guarantees it.
+    r, clk, log = _reporter(100 * _MIB, interval=1.0)
+    clk.advance(0.1)
+    try:
+        with r:
+            r.update(60 * _MIB)  # below interval → suppressed
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert len(log.lines) == 1  # __exit__ ran finish() despite the error
+    assert "60.0/100.0 MiB" in log.lines[0]
+
+
+def test_finish_is_idempotent() -> None:
+    # finish() may run twice (explicit call + context-manager exit); the second
+    # is a no-op rather than a double stop / double final line (CORE-94).
+    r, _clk, log = _reporter(100 * _MIB, interval=1.0)
+    r.update(10 * _MIB)
+    r.finish()
+    r.finish()
+    with r:
+        pass
+    assert len(log.lines) == 1

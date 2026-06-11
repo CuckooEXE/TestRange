@@ -282,6 +282,26 @@ class TestEnterAndExit:
         names = [c[0] for c in fake_driver.calls]
         assert "create_pool" not in names
 
+    def test_signal_handlers_restored_after_failed_enter(
+        self,
+        fake_driver: MockDriver,
+        populated_cache: tuple[CacheManager, Path],
+    ) -> None:
+        # ORCH-34: __enter__ installs SIGTERM/SIGHUP handlers before bring-up. A
+        # failed entry (here a routine PreflightError) means Python never calls
+        # __exit__, so __enter__'s own failure path must restore them — else the
+        # process is left with SIGTERM rewired to raise KeyboardInterrupt.
+        import signal
+
+        mgr, _ = populated_cache
+        fake_driver.preflight_override = PreflightReport(
+            findings=(PreflightFinding(code="x", message="nope"),)
+        )
+        before = signal.getsignal(signal.SIGTERM)
+        with pytest.raises(PreflightError), Orchestrator(_plan(), cache_manager=mgr):
+            pass
+        assert signal.getsignal(signal.SIGTERM) is before
+
     def test_normal_run_preflights_a_concrete_build_switch(
         self,
         fake_driver: MockDriver,

@@ -16,6 +16,7 @@ runs no auth and no rate-limit, and self-signed certs are expected.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -74,21 +75,35 @@ class HttpCache:
 
     def _get(self, path: str, *, stream: bool = False) -> Any:
         requests = _import_requests()
-        return requests.get(self._url(path), verify=False, stream=stream, timeout=_DEFAULT_TIMEOUT)
+        try:
+            return requests.get(
+                self._url(path), verify=False, stream=stream, timeout=_DEFAULT_TIMEOUT
+            )
+        except requests.exceptions.RequestException as e:
+            # ConnectionError/Timeout/etc. are not TestRangeErrors; translate them
+            # so every caller (resolve, fetch, passive describe) sees a CacheError
+            # rather than a raw requests traceback (CORE-96).
+            raise CacheError(f"http cache: GET {path} failed: {e}") from e
 
     def _put(self, path: str, data: Any, *, headers: dict[str, str] | None = None) -> Any:
         requests = _import_requests()
-        return requests.put(
-            self._url(path),
-            data=data,
-            headers=headers or {},
-            verify=False,
-            timeout=_DEFAULT_TIMEOUT,
-        )
+        try:
+            return requests.put(
+                self._url(path),
+                data=data,
+                headers=headers or {},
+                verify=False,
+                timeout=_DEFAULT_TIMEOUT,
+            )
+        except requests.exceptions.RequestException as e:
+            raise CacheError(f"http cache: PUT {path} failed: {e}") from e
 
     def _delete(self, path: str) -> Any:
         requests = _import_requests()
-        return requests.delete(self._url(path), verify=False, timeout=_DEFAULT_TIMEOUT)
+        try:
+            return requests.delete(self._url(path), verify=False, timeout=_DEFAULT_TIMEOUT)
+        except requests.exceptions.RequestException as e:
+            raise CacheError(f"http cache: DELETE {path} failed: {e}") from e
 
     def resolve(self, identifier: str) -> CacheEntryInfo:
         """Look up by full sha or by name. Raises ``CacheMissError`` on 404.
@@ -152,31 +167,34 @@ class HttpCache:
         hit (B3). The content self-certifies against the sha the sidecar named,
         which is what makes the unverified-TLS posture defensible.
         """
-        resp = self._get(f"/isos/{sha}.bin", stream=True)
-        if resp.status_code == 404:
-            raise CacheMissError(f"no entry with sha {sha[:16]} in http cache")
-        if not resp.ok:
-            raise CacheError(f"http cache: GET /isos/{sha}.bin → {resp.status_code}")
-        _log.info("fetching %s ← http cache → %s", sha[:16], dest_path)
-        digest = hashlib.sha256()
-        fd, tmp_name = tempfile.mkstemp(dir=dest_path.parent, suffix=".partial")
-        os.fchmod(fd, 0o644)  # mkstemp is 0600; match the umask-typical cache perms
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "wb") as out:
-                for chunk in resp.iter_content(chunk_size=None):
-                    if chunk:
-                        digest.update(chunk)
-                        out.write(chunk)
-            actual = digest.hexdigest()
-            if actual != sha:
-                raise CacheError(
-                    f"http cache: fetched /isos/{sha[:16]}.bin but its bytes hash to "
-                    f"{actual[:16]}… — corrupt or tampered transfer; not cached"
-                )
-            durable_replace(tmp, dest_path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        # closing() releases the streamed connection back to the pool on every exit
+        # path — including the 404 / non-ok early raises, which otherwise leave the
+        # body undrained and the socket checked out under stream=True (CACHE-8).
+        with contextlib.closing(self._get(f"/isos/{sha}.bin", stream=True)) as resp:
+            if resp.status_code == 404:
+                raise CacheMissError(f"no entry with sha {sha[:16]} in http cache")
+            if not resp.ok:
+                raise CacheError(f"http cache: GET /isos/{sha}.bin → {resp.status_code}")
+            _log.info("fetching %s ← http cache → %s", sha[:16], dest_path)
+            digest = hashlib.sha256()
+            fd, tmp_name = tempfile.mkstemp(dir=dest_path.parent, suffix=".partial")
+            os.fchmod(fd, 0o644)  # mkstemp is 0600; match the umask-typical cache perms
+            tmp = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    for chunk in resp.iter_content(chunk_size=None):
+                        if chunk:
+                            digest.update(chunk)
+                            out.write(chunk)
+                actual = digest.hexdigest()
+                if actual != sha:
+                    raise CacheError(
+                        f"http cache: fetched /isos/{sha[:16]}.bin but its bytes hash to "
+                        f"{actual[:16]}… — corrupt or tampered transfer; not cached"
+                    )
+                durable_replace(tmp, dest_path)
+            finally:
+                tmp.unlink(missing_ok=True)
 
     def push(self, info: CacheEntryInfo, bin_path: Path) -> None:
         """Upload bin + sidecar + name aliases. Write order:

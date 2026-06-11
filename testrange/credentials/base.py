@@ -8,6 +8,7 @@ orchestrator brokers.
 
 from __future__ import annotations
 
+import re
 from abc import ABC
 from dataclasses import dataclass
 
@@ -22,3 +23,12 @@ class Credential(ABC):
     def __post_init__(self) -> None:
         if not self.username:
             raise ValueError("Credential.username must be a non-empty string")
+        # The username is interpolated into guest-side shell (e.g. the nested
+        # `usermod -aG ... <username>` provisioning command, CloudInit runcmd).
+        # Constrain it to a POSIX-safe charset at this trust boundary so a
+        # metacharacter username can't inject a command into that shell (CORE-98).
+        if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_-]*$", self.username):
+            raise ValueError(
+                "Credential.username must be POSIX-safe "
+                rf"(match ^[a-zA-Z_][a-zA-Z0-9_-]*$); got {self.username!r}"
+            )

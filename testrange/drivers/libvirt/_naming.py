@@ -58,6 +58,19 @@ def compose_resource_name(run_id: str, kind: str, name: str) -> str:
     return _lv_name(f"tr-{kind}-{run_id[:8]}-{name}")
 
 
+def bridge_name(network_backend_name: str) -> str:
+    """Deterministic Linux bridge name for a driver-created network (BACKEND-16).
+
+    Without an explicit ``<bridge name=>``, libvirtd allocates ``virbr%d`` at
+    create time, and parallel switch provisioning (ADR-0023) can race two
+    networks onto the same name ("error creating bridge interface virbr1: File
+    exists"); an orphan bridge from a crashed run collides the same way. A
+    name derived from the backend name involves no allocator at all. 14 chars
+    fits IFNAMSIZ-1 (15).
+    """
+    return f"trb-{hashlib.sha256(network_backend_name.encode()).hexdigest()[:10]}"
+
+
 def compose_mac(plan_name: str, vm_name: str, nic_idx: int) -> str:
     digest = hashlib.sha256(f"{plan_name}/{vm_name}/{nic_idx}".encode()).digest()
     octets = [_OUI_FIRST, *digest[:5]]

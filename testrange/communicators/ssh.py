@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from testrange._log import get_logger
 from testrange.communicators.base import Communicator, ExecResult
 from testrange.credentials.posix import PosixCred
-from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError
+from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError, GatewayError
 
 if TYPE_CHECKING:
     from testrange.gateways.base import GuestGateway
@@ -206,19 +206,36 @@ class SSHCommunicator(Communicator):
         deadline = time.monotonic() + total_timeout_s
         last_exc: Exception | None = None
         while time.monotonic() < deadline:
+            sock = None
             try:
                 # When a gateway is bound, tunnel through it: open a fresh socket
-                # to the guest each attempt (the prior one is spent on failure,
-                # and the gateway's channel-open is what fails while the guest's
-                # sshd is still coming up). paramiko dials over the supplied sock.
+                # to the guest each attempt. paramiko dials over the supplied sock,
+                # but it only closes a sock it creates itself — a user-supplied one
+                # (here, a live direct-tcpip channel on the bastion) survives a
+                # failed connect() and would leak one channel per retry. Close it
+                # ourselves on failure so a slow-booting guest can't exhaust the
+                # bastion's channel window over many warmup attempts (COMM-7).
                 if self._gateway is not None:
-                    kwargs["sock"] = self._gateway.open_socket(self._host, self._port)
+                    try:
+                        sock = self._gateway.open_socket(self._host, self._port)
+                    except GatewayError as e:
+                        # A GatewayError is a configuration fault (missing creds,
+                        # unparseable key), not a booting guest — retrying cannot
+                        # help. Fail loud as the one boundary exception type
+                        # callers are promised (PROXY-3).
+                        raise CommunicatorError(
+                            f"SSH gateway to {self._host}:{self._port} failed: {e}"
+                        ) from e
+                    kwargs["sock"] = sock
                 client.connect(**kwargs)
                 self._client = client
                 _log.info("ssh connected to %s@%s:%d", self._username, self._host, self._port)
                 return client
             except (paramiko.SSHException, OSError, socket.error) as e:  # noqa: UP024
                 last_exc = e
+                if sock is not None:
+                    with contextlib.suppress(Exception):
+                        sock.close()
                 _log.debug("ssh connect retry: %s", e)
                 time.sleep(backoff_s)
         raise CommunicatorError(
@@ -272,7 +289,26 @@ class SSHCommunicator(Communicator):
             drain.start()
             try:
                 stdout_bytes = stdout.read()
-                exit_code = stdout.channel.recv_exit_status()
+                # paramiko's recv_exit_status() waits on an internal event with NO
+                # timeout — it ignores the channel timeout entirely and blocks
+                # forever if the peer sends EOF (so the read above returns) but
+                # never delivers an exit-status request and keeps the channel
+                # half-open. Bound it against the same `timeout` instead, and close
+                # the channel on a miss so it surfaces as a CommunicatorError rather
+                # than a silent hang (no build-phase watchdog covers run/test
+                # execute() calls) — COMM-6.
+                channel = stdout.channel
+                exit_deadline = time.monotonic() + timeout
+                while not channel.exit_status_ready():
+                    if time.monotonic() >= exit_deadline:
+                        with contextlib.suppress(Exception):
+                            channel.close()
+                        raise CommunicatorError(
+                            f"SSH exec of {cmd!r} on {self._host} returned EOF but no "
+                            f"exit status within {timeout:.0f}s (half-open channel)"
+                        )
+                    time.sleep(0.05)
+                exit_code = channel.recv_exit_status()
             finally:
                 drain.join(timeout)
             if drain.is_alive():
@@ -311,6 +347,11 @@ class SSHCommunicator(Communicator):
             with sftp.open(path, "rb") as f:
                 data: bytes = f.read()
                 return data
+        except OSError as e:
+            # Mirror write_file: a missing path or permission failure arrives as
+            # paramiko's raw OSError subclasses — wrap them so callers see one
+            # exception type (CommunicatorError), not transport internals.
+            raise CommunicatorError(f"SFTP read of {path!r} on {self._host} failed: {e}") from e
         finally:
             sftp.close()
 

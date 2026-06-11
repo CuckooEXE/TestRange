@@ -124,6 +124,31 @@ class TestRunTests:
         assert all(r.passed for r in results)
         assert {r.name for r in results} == {"test_one", "test_two"}
 
+    def test_ready_timeout_reaches_the_orchestrator(
+        self,
+        setup_env: CacheManager,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # CORE-100: --ready-timeout must land on agent_ready_timeout_s — a
+        # nested ESXi node's sshd comes up minutes after its DHCP lease, so the
+        # 120s default needs to be operator-tunable end to end.
+        _install_fake_driver(monkeypatch, tmp_path)
+        seen: dict[str, float] = {}
+        orig = Orchestrator.__init__
+
+        def spy(self: Orchestrator, *args: Any, **kwargs: Any) -> None:
+            seen["ready"] = kwargs.get("agent_ready_timeout_s", -1.0)
+            orig(self, *args, **kwargs)
+
+        monkeypatch.setattr(Orchestrator, "__init__", spy)
+
+        def test_one(orch):  # type: ignore[no-untyped-def]
+            pass
+
+        run_tests([test_one], _plan(), cache_manager=setup_env, ready_timeout_s=600.0)
+        assert seen["ready"] == 600.0
+
     def test_one_fails_others_continue(
         self,
         setup_env: CacheManager,

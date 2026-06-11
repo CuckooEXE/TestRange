@@ -174,6 +174,22 @@ class TestParallelBuild:
         )
         assert len(built_os) == 4
 
+    def test_inner_build_ctx_honors_jobs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # ORCH-35: a nested GuestHypervisor's inner build must inherit the outer
+        # --jobs cap; without it the inner build_phase falls back to the 8-way
+        # default and silently ignores `--jobs 1`.
+        import dataclasses
+
+        from testrange.orchestrator.build_phase import _inner_build_ctx
+
+        driver = MockDriver(pool_root=tmp_path / "pools")
+        cache = _env(tmp_path, monkeypatch, driver)
+        ctx = dataclasses.replace(_ctx(_multi_plan(1), driver, cache), jobs=1)
+        inner = _inner_build_ctx(ctx, _multi_plan(2))
+        assert inner.jobs == 1
+
     def test_capture_downloads_overlap(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

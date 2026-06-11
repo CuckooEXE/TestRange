@@ -158,6 +158,10 @@ def _bring_up_one(ctx: RunContext, guest: GuestHypervisor) -> NestedRun:
             cache_manager=ctx.cache,
             require_cache=True,
             profile=profile,
+            # Honor the outer worker cap on the inner run phase too (ORCH-35);
+            # otherwise the inner Orchestrator defaults to the 8-way pool and
+            # ignores the operator's --jobs throttle.
+            jobs=ctx.jobs,
         )
         inner_handle = inner.__enter__()
     except Exception:
@@ -281,12 +285,20 @@ def _write_keyfile(private_key: str) -> Path:
     is materialized for the lifetime of the inner run and unlinked at teardown.
     """
     fd, name = tempfile.mkstemp(prefix="tr-inner-key-")
-    try:
-        os.write(fd, private_key.encode("utf-8"))
-    finally:
-        os.close(fd)
     path = Path(name)
-    path.chmod(0o600)
+    try:
+        try:
+            os.write(fd, private_key.encode("utf-8"))
+        finally:
+            os.close(fd)
+        path.chmod(0o600)
+    except BaseException:
+        # mkstemp already created the file on disk; if write or chmod fails the
+        # path is never returned, so no caller can unlink it. Reclaim it here so a
+        # failure (ENOSPC/EIO, or a chmod that ran after a full-key write) does not
+        # orphan a temp file containing SSH key material in $TMPDIR (ORCH-37).
+        path.unlink(missing_ok=True)
+        raise
     return path
 
 

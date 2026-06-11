@@ -96,6 +96,39 @@ def test_close_releases_the_jump(fake_paramiko: _FakeJumpClient) -> None:
     gw.close()  # idempotent
 
 
+def test_deliberate_reopen_after_close_redials_a_tracked_jump(
+    fake_paramiko: _FakeJumpClient,
+) -> None:
+    # close() is not terminal (PROXY-3): the Communicator close()/reconnect
+    # contract rides the gateway, so a deliberate open after close() must lazily
+    # re-establish the jump — and the new client must be tracked (closed by the
+    # next close()), not a leaked side-channel.
+    gw = SSHJumpGateway(host="bastion", username="root", password="pw")
+    gw.open_socket("10.30.0.41", 22)
+    gw.close()
+    assert fake_paramiko.closed is True
+    fake_paramiko.closed = False
+    gw.open_socket("10.30.0.41", 22)
+    assert fake_paramiko.connect_calls == 2  # genuinely redialled
+    gw.close()
+    assert fake_paramiko.closed is True  # the reopened client is tracked
+
+
+def test_stale_serve_generation_is_refused_after_close(fake_paramiko: _FakeJumpClient) -> None:
+    # A local-forward _serve thread can win the accept() race against close()
+    # and re-dial; it carries the generation it was spawned under, and a stale
+    # generation must be refused so it cannot resurrect an untracked bastion
+    # client (use-after-close, PROXY-2). _serve dials with generation= — mirror
+    # that call shape.
+    gw = SSHJumpGateway(host="bastion", username="root", password="pw")
+    gw.open_socket("10.30.0.41", 22)
+    stale = gw._generation
+    gw.close()
+    with pytest.raises(GatewayError, match="closed"):
+        gw._channel_to("10.30.0.41", 22, ("127.0.0.1", 0), generation=stale)
+    assert fake_paramiko.connect_calls == 1  # no resurrection happened
+
+
 def test_missing_credentials_raises_gateway_error(fake_paramiko: _FakeJumpClient) -> None:
     gw = SSHJumpGateway(host="bastion", username="root")  # no password, no pkey
     with pytest.raises(GatewayError):
@@ -131,7 +164,9 @@ def test_local_forward_pumps_bytes_end_to_end(monkeypatch: pytest.MonkeyPatch) -
     gw = SSHJumpGateway(host="bastion", username="root", password="pw")
     monkeypatch.setattr(gw, "_ensure_jump", lambda: object())
 
-    def _real_channel(host: str, port: int, origin: tuple[str, int]) -> socket.socket:
+    def _real_channel(
+        host: str, port: int, origin: tuple[str, int], *, generation: int | None = None
+    ) -> socket.socket:
         return socket.create_connection(("127.0.0.1", echo_port), timeout=5)
 
     monkeypatch.setattr(gw, "_channel_to", _real_channel)

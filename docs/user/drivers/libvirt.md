@@ -25,10 +25,13 @@ chains), and L2 fabric is built by the **libvirt daemon** via the network API
 ([ADR-0019](../../adr/0019-libvirt-reference-backend.md)). The full `tests/plans/`
 corpus (generic + `libvirt/`) and the `pytest -m libvirt` integration suite run
 green against a local `qemu:///system`, and UEFI/OVMF firmware is certified.
-Remote `qemu+ssh://` builds the bridge + `dnsmasq`/NAT on the remote daemon
-(BACKEND-5); off-box guest reachability via an `SSHJumpGateway`
-([ADR-0020](../../adr/0020-guest-gateway-abstraction.md)) is still in progress
-(BACKEND-11).
+Remote `qemu+ssh://` is certified end to end against a nested libvirt host
+(2026-06-11): the remote daemon builds the bridge + `dnsmasq`/NAT and serves
+the build-result console sink over the same connection (BACKEND-5), and
+off-box guest reachability rides the `SSHJumpGateway`
+([ADR-0020](../../adr/0020-guest-gateway-abstraction.md)) parsed from the
+connect URI (BACKEND-11). The named uplink network must pre-exist on the
+remote host (`tools/standup/libvirt_node.py` bakes one).
 
 Run the live integration suite against the local host (no root — just `libvirt`
 group):
