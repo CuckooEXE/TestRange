@@ -74,7 +74,7 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (54)
+## Ready (55)
 
 ### CORE
 
@@ -159,6 +159,10 @@ on 2026-06-06.
   > Once ESXi is certified working against the generic corpus, add `tests/plans/esxi/` coverage for ESXi-specific behavior (controller-bus selection, VMXNET3, datastore specifics) that a generic plan can't express — the per-driver additive tier, mirroring PVE-46. Depends ESXI-13. Created 2026-06-01. _(repointed off the deleted `examples/capabilities-esxi.py` — REL-40.)_
 
 ### ORCH
+
+- [ ] **ORCH-40** · `feat` — `cleanup` cannot finalize a run whose backend is permanently gone
+
+  > Found sweeping stray run dirs (2026-06-11): four ledgers pointed at DEAD nested ESXi hosts (a guest of an already-destroyed lab, and the deleted esxi-manager node) — their resources died with their hypervisors, but `cleanup` insists on connecting the recorded driver before finalizing, so it errors forever (`ESXi connect ... timed out`) and the dirs linger. Disposed of manually (`rm -rf` of the four run dirs after verifying each `driver_uri` targeted a dead host: 3× 10.50.0.85, 1× 192.168.199.206). Product gap: a `cleanup --forget <run-id>` (explicit, per-run, loud) that drops the ledger without touching a backend — for exactly the nested case where the outer teardown already reclaimed everything (nested_phase relies on this; the dirs are pure bookkeeping). Created 2026-06-11.
 
 - [ ] **ORCH-39** · `chore` — board/PLAN say multi-hypervisor islands (ORCH-1) are DONE; the code at HEAD disagrees
 
