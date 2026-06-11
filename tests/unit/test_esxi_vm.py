@@ -84,6 +84,44 @@ def test_build_vm_attaches_only_build_nic() -> None:
     assert nics[0].device.macAddress == "00:50:56:01:02:03"
 
 
+def test_nic_binds_to_realized_portgroup_not_network_backend_name() -> None:
+    # ESXI-26 regression: create_network realizes a Network as a portgroup whose
+    # ESXi name is derived (trp-<hash>) and differs from the orchestrator's network
+    # *backend name* — which is what arrives in network_refs. create_vm must bind the
+    # NIC to the realized portgroup; binding to the backend name yields a vNIC whose
+    # backing references a portgroup that does not exist (status=unrecoverableError ->
+    # guest NO-CARRIER -> no DHCP). Libvirt is immune (realized name == backend name).
+    from testrange.drivers.esxi import _naming
+
+    client = FakeEsxiClient()
+    d = _driver(client)
+    switch = Switch("build", Network("build-net"), cidr="10.97.99.0/24")
+    d.create_switch(switch, "bn-build")
+    d.create_network(Network("build-net"), switch, "bn-net", switch_backend_name="bn-build")
+    realized = _naming.portgroup_name("bn-net")
+    assert realized.startswith("trp-") and realized != "bn-net"
+
+    bnic = BuildNic(
+        mac="00:50:56:01:02:03",
+        network="build-net",
+        addr=StaticAddr("10.97.99.3/24"),
+        addressing=NetworkAddressing.from_switch(switch),
+    )
+    d.create_vm(
+        "tr-build-buses",
+        _spec("buses"),
+        "plan",
+        os_disk_ref=VolumeRef("[datastore1] pool1/buses.vmdk"),
+        seed_iso_ref=None,
+        network_refs={"build-net": "bn-net"},  # the orchestrator passes the BACKEND name
+        build_nic=bnic,
+    )
+    vm = client.find_vm("tr-build-buses")
+    nics = [d for d in vm.config_spec.deviceChange if "Vmxnet3" in d.device._vimtype]
+    assert len(nics) == 1
+    assert nics[0].device.backing.deviceName == realized, "NIC must bind to the trp-* portgroup"
+
+
 def test_data_disks_in_spec_order() -> None:
     client = FakeEsxiClient()
     d = _driver(client)

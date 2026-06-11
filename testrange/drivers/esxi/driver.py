@@ -435,6 +435,18 @@ class ESXiDriver(HypervisorDriver):
         build_nic: BuildNic | None = None,
         boot_media_ref: VolumeRef | None = None,
     ) -> Any:
+        # A NIC binds to the *portgroup* create_network realized for its Network.
+        # On ESXi that portgroup name is derived (trp-<hash>, _naming.portgroup_name)
+        # and differs from the orchestrator's network *backend name*, which is what
+        # arrives in network_refs. Resolve each ref through the map create_network
+        # populated so the backing lands on a portgroup that exists; the synthetic
+        # uplink ref is already a portgroup name (trx-*), absent from the map, so
+        # `.get(ref, ref)` passes it through unchanged. (Libvirt is immune: there the
+        # realized network name == the backend name, so the raw ref already matches.)
+        with self._state_lock:
+            portgroup_refs = {
+                net: self._portgroup_by_network.get(ref, ref) for net, ref in network_refs.items()
+            }
         return _vm.create_vm(
             self._client,
             backend_name,
@@ -442,7 +454,7 @@ class ESXiDriver(HypervisorDriver):
             plan_name,
             os_disk_ref=os_disk_ref,
             seed_iso_ref=seed_iso_ref,
-            network_refs=network_refs,
+            network_refs=portgroup_refs,
             data_disk_refs=data_disk_refs,
             build_nic=build_nic,
             boot_media_ref=boot_media_ref,
