@@ -26,9 +26,10 @@ fake. Live validation rides the integration suite.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape, quoteattr
 
 from testrange._log import get_logger
+from testrange.drivers.libvirt import _naming
 from testrange.exceptions import DriverError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -53,7 +54,12 @@ def _network_xml(backend_name: str, *, mgmt_host: tuple[str, int] | None) -> str
     # backend_name is composed by _naming (a safe charset), but escape it as
     # element text anyway — matching the quoteattr/escape discipline the peer
     # _vm.py XML builders use, so the safety doesn't rely on a remote invariant.
-    parts = [f"<network><name>{escape(backend_name)}</name>", "<bridge stp='off' delay='0'/>"]
+    parts = [
+        f"<network><name>{escape(backend_name)}</name>",
+        # Explicit deterministic bridge name: the nameless form delegates to
+        # libvirtd's virbr%d allocator, which races parallel creates (BACKEND-16).
+        f"<bridge name={quoteattr(_naming.bridge_name(backend_name))} stp='off' delay='0'/>",
+    ]
     if mgmt_host is not None:
         host_ip, prefix = mgmt_host
         parts.append("<dns enable='no'/>")

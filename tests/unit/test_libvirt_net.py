@@ -8,6 +8,7 @@ tolerant teardown.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
@@ -108,6 +109,25 @@ class TestCreateSwitch:
         assert "<ip address='10.0.0.2' prefix='24'/>" in xml
         assert "<dns enable='no'/>" in xml
         assert "<forward" not in xml and "<dhcp" not in xml
+
+    def test_bridge_name_is_explicit_and_deterministic(self) -> None:
+        # A nameless <bridge> delegates to libvirtd's virbr%d allocator, which
+        # races parallel switch creation (BACKEND-16): the XML must carry a
+        # deterministic per-network name, distinct across networks, within
+        # IFNAMSIZ-1.
+        client: Any = FakeClient()
+        _net.create_switch(client, _switch(), "tr-switch-x-sw")
+        _net.create_switch(client, _switch("other"), "tr-switch-x-other")
+        first, second = client.conn.defined_xml[0], client.conn.defined_xml[1]
+        m1 = re.search(r'<bridge name="(trb-[0-9a-f]{10})"', first)
+        m2 = re.search(r'<bridge name="(trb-[0-9a-f]{10})"', second)
+        assert m1 and m2, f"explicit trb- bridge name missing: {first!r}"
+        assert m1.group(1) != m2.group(1), "distinct networks share a bridge name"
+        assert len(m1.group(1)) <= 15
+        # Re-rendering the same backend name yields the same bridge name.
+        client2: Any = FakeClient()
+        _net.create_switch(client2, _switch(), "tr-switch-x-sw")
+        assert m1.group(1) in client2.conn.defined_xml[0]
 
     def test_nat_switch_returns_resolved_uplink(self) -> None:
         client: Any = FakeClient()
