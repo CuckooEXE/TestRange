@@ -49,6 +49,7 @@ tests/plans/
 | `generic/lifecycle.py` | power-cycle churn, graceful shutdown → shutoff, reboot persistence, oversized OS-drive first-boot growth, NIC-less native-agent under churn |
 | `generic/users_credentials.py` | SSH key vs password auth, multi-user privilege boundary (non-admin sudo denied), group membership, explicit per-NIC resolver |
 | `generic/networking.py` | multi-`Network`-per-`Switch`, air-gap reachability matrix, NAT egress on/off, DHCP pool-boundary lease, exactly-one-default-route, cross-label DNS |
+| `generic/switch_isolation.py` | the three switch tiers (uplinked / air-gapped / `mgmt` host adapter) + a provenance-pinned directional reach/isolation matrix (default route via the sidecar, mgmt reached over the `c1` leg not the NAT path, isolation by IP-literal + curl-exit-7 with a positive control); static-on-NAT sidecar-derived egress; triple-homed single-default-route |
 | `generic/build_cache.py` | multi-data-disk content integrity (build→cache→run, no swap), `apt` + `pip`, post-install command ordering |
 | `generic/snapshots.py` | disk snapshot create/list/restore/delete, memory snapshot restores running tmpfs state |
 | `generic/concurrency.py` | independent multi-VM fan-out; run with `--jobs N` to stress parallel bring-up + teardown |
