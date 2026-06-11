@@ -26,8 +26,9 @@ from pathlib import Path
 
 from testrange._ansi import scrub_terminal_control
 from testrange._log import get_logger
-from testrange.builders.base import Builder
+from testrange.builders.base import Builder, NativeAgentProvision
 from testrange.cache.entry import CacheEntry
+from testrange.communicators import NativeCommunicator
 from testrange.devices.network import StaticAddr
 from testrange.devices.pool.base import StoragePool
 from testrange.drivers.base import BUILD_NIC_NIC_IDX, HypervisorDriver, VolumeRef
@@ -87,6 +88,10 @@ class _VMBuildPlan:
     config_hash: str
     macs: tuple[str, ...]
     build_nic: BuildNic
+    # CORE-90: the backend's native-agent install recipe, resolved once at probe
+    # time so config_hash (the cache key) and render_seed see the identical value.
+    # None unless the VM uses a NativeCommunicator.
+    native_agent: NativeAgentProvision | None
     # Image-origin: the local path of the OS base to upload+grow. Installer-
     # origin: None (the OS disk is materialized blank; the install medium is
     # ``boot_media_path`` instead).
@@ -339,6 +344,16 @@ def _probe_vm(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
     )
     build_nic = _build_nic_for(ctx, build_switch, vm.name, vm_index)
+    # CORE-90: a NativeCommunicator VM needs the backend's native agent in the
+    # guest. The orchestrator — the only component that knows both the driver
+    # (agent identity) and the communicator (agent wanted) — brokers the driver's
+    # provision recipe into the builder; an SSH-only VM gets None and nothing is
+    # injected. Resolved here so config_hash and render_seed use the same value.
+    native_agent = (
+        ctx.driver.native_agent_provision()
+        if isinstance(vm.communicator, NativeCommunicator)
+        else None
+    )
     config_hash = builder.config_hash(
         vm.spec,
         vm,
@@ -347,6 +362,7 @@ def _probe_vm(
         sidecar_sha=sidecar_sha,
         macs=macs,
         build_nic=build_nic,
+        native_agent=native_agent,
     )
     roles = built_artifact_roles(len(vm.spec.data_drives))
     cached = _resolve_full_set(ctx, config_hash, roles)
@@ -356,6 +372,7 @@ def _probe_vm(
         config_hash=config_hash,
         macs=macs,
         build_nic=build_nic,
+        native_agent=native_agent,
         base_path=base_path,
         boot_media_path=boot_media_path,
         roles=roles,
@@ -500,7 +517,12 @@ def build_one_vm(
     seed_ref: VolumeRef | None = None
     seed_name: str | None = None
     seed_bytes = bp.builder.render_seed(
-        spec, vm, addressing=ctx.addressing, macs=bp.macs, build_nic=bp.build_nic
+        spec,
+        vm,
+        addressing=ctx.addressing,
+        macs=bp.macs,
+        build_nic=bp.build_nic,
+        native_agent=bp.native_agent,
     )
     if seed_bytes is not None:
         seed_name = f"{build_vm_backend}-seed{drv.volume_suffix('build_seed')}"

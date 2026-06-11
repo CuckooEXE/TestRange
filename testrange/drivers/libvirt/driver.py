@@ -30,12 +30,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from testrange._log import get_logger
+from testrange.builders.base import NativeAgentProvision
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.libvirt import _guest, _naming, _net, _serial, _storage, _vm
 from testrange.drivers.libvirt._conn import LibvirtClient, LibvirtConn
 from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
+from testrange.packages import Apt
 from testrange.preflight import (
     HostCapacity,
     PreflightCheck,
@@ -300,6 +302,15 @@ class LibvirtDriver(HypervisorDriver):
 
     def volume_suffix(self, kind: str) -> str:
         return _naming.volume_suffix(kind)
+
+    def native_agent_provision(self) -> NativeAgentProvision:
+        # libvirt's NativeCommunicator speaks QGA over the org.qemu.guest_agent.0
+        # virtio-serial channel _vm.py adds unconditionally; the guest needs
+        # qemu-guest-agent installed + running (CORE-90).
+        return NativeAgentProvision(
+            packages=(Apt("qemu-guest-agent"),),
+            enable_commands=("systemctl enable --now qemu-guest-agent",),
+        )
 
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:
         return _net.create_switch(

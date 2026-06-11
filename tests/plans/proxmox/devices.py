@@ -27,7 +27,6 @@ from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.drivers.proxmox import ProxmoxHardDrive, ProxmoxHypervisor
 from testrange.networks import Network, Sidecar, Switch
-from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
@@ -55,11 +54,8 @@ PLAN = Plan(
                         ProxmoxHardDrive("pool1", 1, bus="virtio"),
                     ],
                 ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    packages=[Apt("qemu-guest-agent")],
-                    post_install_commands=("systemctl enable --now qemu-guest-agent",),
-                ),
+                # NativeCommunicator agent (qemu-guest-agent) auto-provisioned (CORE-90).
+                builder=CloudInitBuilder(base=CacheEntry("debian-13")),
                 communicator=NativeCommunicator(),
             ),
         ],

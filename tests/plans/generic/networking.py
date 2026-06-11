@@ -44,12 +44,14 @@ _PUB_DHCP_HI = 99
 
 
 def _web_image(content: str) -> CloudInitBuilder:
+    # NativeCommunicator agent auto-provisioned per backend (CORE-90); only the
+    # real app deps (nginx/curl) are declared here.
     return CloudInitBuilder(
         base=CacheEntry("debian-13"),
-        packages=[Apt("qemu-guest-agent"), Apt("nginx"), Apt("curl")],
+        packages=[Apt("nginx"), Apt("curl")],
         post_install_commands=(
             f"sh -c 'echo {content} > /var/www/html/index.html'",
-            "systemctl enable --now qemu-guest-agent nginx",
+            "systemctl enable --now nginx",
         ),
     )
 
@@ -94,10 +96,10 @@ PLAN = Plan(
                         NetworkIface("pub-b"),
                     ],
                 ),
+                # NativeCommunicator agent auto-provisioned per backend (CORE-90).
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
-                    packages=[Apt("qemu-guest-agent"), Apt("curl")],
-                    post_install_commands=("systemctl enable --now qemu-guest-agent",),
+                    packages=[Apt("curl")],
                 ),
                 communicator=NativeCommunicator(),
             ),

@@ -622,14 +622,22 @@ The wire protocol lives entirely inside each driver. The reference is
 virtio `<channel>`) ships with the libvirt rebuild (ADR-0008); Proxmox QGA,
 VMware Tools, and Hyper-V PowerShell-Direct follow the same contract.
 
-#### `qemu-guest-agent` is user-declared
+#### The native agent is backend-declared, orchestrator-brokered (CORE-90)
 
-For agent-based backends the guest needs the agent installed and running.
-`CloudInitBuilder` is *not* changed to auto-inject it — that would be the
-builder peeking at the communicator type. The plan author declares
-`Apt("qemu-guest-agent")` + a `systemctl enable --now` line (see
-`examples/native_agent.py`). A plan that forgets it fails at the first
-`execute` with a clear `GuestAgentError`.
+For agent-based backends the guest needs the agent installed and running, and
+the *right* agent differs per backend (`qemu-guest-agent` for QGA backends,
+`open-vm-tools` for ESXi VMware Tools). The driver that owns the native channel
+also declares its in-guest agent via `HypervisorDriver.native_agent_provision()`
+(default `None`). The **orchestrator** — the one component allowed to know both
+the driver (agent identity) and the communicator (agent wanted) — brokers it
+into the builder for a `NativeCommunicator` VM, exactly as it already brokers
+`addressing`; the builder receives an opaque `NativeAgentProvision` and never
+peeks at the communicator type, so the stovepipe holds. The agent install folds
+into `config_hash` (a per-backend cache key). Plans therefore **do not** declare
+the agent — a `NativeCommunicator` recipe is portable across libvirt, Proxmox,
+and ESXi unchanged. (This reverses the earlier "user-declared / not auto-injected"
+stance: the rationale was the *builder* peeking at the communicator; auto-injection
+through the orchestrator avoids that.)
 
 #### Error type
 

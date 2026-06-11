@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
 from testrange._log import get_logger
+from testrange.builders.base import NativeAgentProvision
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import _guest, _naming, _sdn, _serial, _storage, _vm
@@ -40,6 +41,7 @@ from testrange.drivers.proxmox._client import ProxmoxClient, ProxmoxConn
 from testrange.exceptions import DriverError
 from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
+from testrange.packages import Apt
 from testrange.preflight import (
     HostCapacity,
     PreflightCheck,
@@ -335,6 +337,14 @@ class ProxmoxDriver(HypervisorDriver):
 
     def volume_suffix(self, kind: str) -> str:
         return _naming.volume_suffix(kind)
+
+    def native_agent_provision(self) -> NativeAgentProvision:
+        # Proxmox's NativeCommunicator speaks QGA over the PVE REST agent
+        # endpoint; the guest needs qemu-guest-agent installed + running (CORE-90).
+        return NativeAgentProvision(
+            packages=(Apt("qemu-guest-agent"),),
+            enable_commands=("systemctl enable --now qemu-guest-agent",),
+        )
 
     @_translates
     def create_switch(self, switch: Switch, backend_name: str) -> str | None:

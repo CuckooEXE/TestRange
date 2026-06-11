@@ -74,8 +74,7 @@ PLAN = Plan(
                 ),
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
-                    packages=[Apt("qemu-guest-agent"), Apt("curl")],
-                    post_install_commands=("systemctl enable --now qemu-guest-agent",),
+                    packages=[Apt("curl")],
                 ),
                 communicator=NativeCommunicator(),
             ),
@@ -92,10 +91,10 @@ PLAN = Plan(
                 ),
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
-                    packages=[Apt("qemu-guest-agent"), Apt("nginx")],
+                    packages=[Apt("nginx")],
                     post_install_commands=(
                         "sh -c 'echo backend-tier-online > /var/www/html/index.html'",
-                        "systemctl enable --now qemu-guest-agent nginx",
+                        "systemctl enable --now nginx",
                     ),
                 ),
                 communicator=NativeCommunicator(),

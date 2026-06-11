@@ -11,6 +11,7 @@ from testrange.exceptions import DriverError
 from testrange.preflight import HostCapacity, PreflightReport
 
 if TYPE_CHECKING:  # pragma: no cover
+    from testrange.builders.base import NativeAgentProvision
     from testrange.cache.manager import CacheManager
     from testrange.credentials.base import Credential
     from testrange.devices.pool.base import StoragePool
@@ -394,6 +395,19 @@ class HypervisorDriver(ABC):
         """A VM-bound callable that writes a file into the guest via the
         backend's native agent. Default: no native agent."""
         raise DriverError(f"{type(self).__name__}: no native guest agent")
+
+    def native_agent_provision(self) -> NativeAgentProvision | None:
+        """Guest package(s) + enable command(s) this backend's native agent needs,
+        or ``None`` for a backend with no native agent.
+
+        Default ``None`` mirrors the ``native_guest_*`` accessors' no-agent
+        default: the driver that owns the native channel also owns the in-guest
+        agent install. The orchestrator brokers this into the builder for a
+        ``NativeCommunicator`` VM (CORE-90), so plans no longer hardcode
+        ``qemu-guest-agent`` / ``open-vm-tools`` and stay portable across
+        backends. QGA backends return the qemu-guest-agent recipe; ESXi returns
+        open-vm-tools (VMware Tools)."""
+        return None
 
     # Guest reachability (off-box transports like SSHCommunicator).
 

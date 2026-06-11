@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from testrange.builders import CloudInitBuilder
+from testrange.builders.base import NativeAgentProvision
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
@@ -690,11 +691,22 @@ class TestWaitReady:
                 return None
 
             def config_hash(  # type: ignore[no-untyped-def]
-                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+                self,
+                spec,
+                recipe,
+                *,
+                addressing,
+                base_sha="",
+                sidecar_sha="",
+                macs=(),
+                build_nic,
+                native_agent=None,
             ):
                 return "0" * 16
 
-            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+            def render_seed(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, macs=(), build_nic, native_agent=None
+            ):
                 return b""
 
         b = _NullBuilder()
@@ -734,3 +746,52 @@ class TestLazyYamlImport:
         spec = _spec()
         with pytest.raises(BuilderError, match=r"\[cloudinit\]"):
             b.render_meta_data(spec, _recipe(b, spec))
+
+
+_QGA = NativeAgentProvision(
+    (Apt("qemu-guest-agent"),), ("systemctl enable --now qemu-guest-agent",)
+)
+_TOOLS = NativeAgentProvision((Apt("open-vm-tools"),), ("systemctl enable --now open-vm-tools",))
+
+
+class TestNativeAgentInjection:
+    """CORE-90: the orchestrator-brokered native agent installs ahead of the plan."""
+
+    def test_agent_installs_and_enables_before_plan_provisioning(self) -> None:
+        b = CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            packages=[Apt("nginx")],
+            post_install_commands=("systemctl enable --now nginx",),
+        )
+        spec = _spec()
+        body = yaml.safe_load(b.render_user_data(spec, _recipe(b, spec), native_agent=_TOOLS))
+        script = _provision_script(body)
+        # The agent apt joins the single install line, ahead of the plan's package.
+        assert "apt-get install -y open-vm-tools nginx" in script
+        # The agent enable runs before the plan's own enable (a plan step may
+        # depend on the agent being up, never the reverse).
+        assert script.index("enable --now open-vm-tools") < script.index("enable --now nginx")
+
+    def test_none_injects_nothing(self) -> None:
+        b = CloudInitBuilder(base=CacheEntry("debian-13"), packages=[Apt("nginx")])
+        spec = _spec()
+        script = _provision_script(yaml.safe_load(b.render_user_data(spec, _recipe(b, spec))))
+        assert "open-vm-tools" not in script
+        assert "qemu-guest-agent" not in script
+        assert "apt-get install -y nginx" in script
+
+    def test_config_hash_folds_in_the_agent(self) -> None:
+        # The agent choice keys the cache: a backend whose agent differs gets a
+        # distinct entry; the same agent is stable; either differs from None.
+        b = _basic_builder()
+        spec = _spec()
+        kw: dict[str, Any] = {
+            "addressing": DEFAULT_ADDR,
+            "macs": _macs(spec),
+            "build_nic": _build_nic(),
+        }
+        h_none = b.config_hash(spec, _recipe(b, spec), **kw)
+        h_qga = b.config_hash(spec, _recipe(b, spec), native_agent=_QGA, **kw)
+        h_tools = b.config_hash(spec, _recipe(b, spec), native_agent=_TOOLS, **kw)
+        assert len({h_none, h_qga, h_tools}) == 3
+        assert h_qga == b.config_hash(spec, _recipe(b, spec), native_agent=_QGA, **kw)

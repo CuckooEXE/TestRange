@@ -38,7 +38,7 @@ from testrange.builders._esxi_prepare import (
     prepare_iso,
     render_kickstart,
 )
-from testrange.builders.base import Builder
+from testrange.builders.base import Builder, NativeAgentProvision
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
@@ -219,9 +219,10 @@ class ESXiKickstartBuilder(Builder):
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> None:
         """No separate seed (single-CDROM): the ks.cfg rides the boot media."""
-        del spec, recipe, addressing, macs, build_nic
+        del spec, recipe, addressing, macs, build_nic, native_agent
 
     def config_hash(
         self,
@@ -233,6 +234,7 @@ class ESXiKickstartBuilder(Builder):
         sidecar_sha: str = "",
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> str:
         """Deterministic 16-char hex hash keying the installed ESXi disk.
 
@@ -253,7 +255,7 @@ class ESXiKickstartBuilder(Builder):
         ``authorized_keys`` there is — excluding it would let a plan with a
         different key cache-hit a disk it cannot log into.
         """
-        del recipe, addressing, macs, build_nic
+        del recipe, addressing, macs, build_nic, native_agent  # ESXi node, not a Linux guest
         root = self._root_credential()
         ssh_key = root.ssh_key.auth_line if root.ssh_key is not None else ""
         ks_digest = hashlib.sha256(self._render_kickstart().encode("utf-8")).hexdigest()[:16]

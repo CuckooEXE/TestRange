@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from testrange.builders._proxmox_prepare import PREPARE_ISO_RECIPE, prepare_iso
-from testrange.builders.base import Builder
+from testrange.builders.base import Builder, NativeAgentProvision
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
@@ -237,6 +237,7 @@ class ProxmoxAnswerBuilder(Builder):
         sidecar_sha: str = "",
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> str:
         """Deterministic 16-char hex hash keying the installed PVE disk.
 
@@ -252,7 +253,7 @@ class ProxmoxAnswerBuilder(Builder):
         ``authorized_keys`` there is — excluding them would let a plan with a
         different key cache-hit a disk it cannot log into.
         """
-        del macs, build_nic
+        del macs, build_nic, native_agent  # installer builds the PVE node, not a Linux guest
         root = self._root_credential()
         network = "\n".join(self._network_block(spec, addressing))
         disks = f"{self.filesystem}:{self.disk_device}:{spec.os_drive.size_gb}"
@@ -282,9 +283,10 @@ class ProxmoxAnswerBuilder(Builder):
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> bytes:
         """Build the ``PROXMOX-AIS``-labelled seed ISO carrying ``answer.toml``."""
-        del macs, build_nic
+        del macs, build_nic, native_agent  # installer builds the PVE node, not a Linux guest
         answer = self.build_answer_toml(spec, recipe, addressing=addressing)
         return self._build_seed_iso_bytes(answer)
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,8 +44,26 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.credentials.base import Credential
     from testrange.guest_io import GuestExec
     from testrange.networks.base import BuildNic, NetworkAddressing
+    from testrange.packages.apt import Apt
     from testrange.vms.recipe import VMRecipe
     from testrange.vms.spec import VMSpec
+
+
+@dataclass(frozen=True)
+class NativeAgentProvision:
+    """Guest install recipe for a backend's native agent (QGA, VMware Tools).
+
+    Brokered by the orchestrator from the driver into the builder when a VM uses
+    a ``NativeCommunicator`` (CORE-90): the driver that owns the native channel
+    (``HypervisorDriver.native_agent_provision``) declares the agent its channel
+    needs in the guest, and the builder prepends these to its install payload.
+    The builder never learns which backend it is — only this opaque value — so
+    the stovepipe holds (the orchestrator is the one component that knows both
+    the driver and the communicator).
+    """
+
+    packages: tuple[Apt, ...]
+    enable_commands: tuple[str, ...]
 
 
 class Builder(ABC):
@@ -143,6 +162,7 @@ class Builder(ABC):
         sidecar_sha: str = "",
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> str:
         """16-char hex hash that uniquely identifies the VM's built disk set.
 
@@ -160,6 +180,12 @@ class Builder(ABC):
         assign at run-phase. ``build_nic`` is the dedicated build NIC the build
         phase attaches (ADR-0017); its MAC/address are baked into the netplan,
         so they are part of the key.
+
+        ``native_agent`` is the backend's native-agent install recipe (CORE-90),
+        brokered in by the orchestrator for a ``NativeCommunicator`` VM. It is
+        baked into the install payload, so it folds into the key — a backend
+        whose agent differs (qemu-guest-agent vs open-vm-tools) gets a distinct
+        cache entry; ``None`` (SSH-only / no native agent) folds in nothing.
         """
 
     @abstractmethod
@@ -171,6 +197,7 @@ class Builder(ABC):
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> bytes | None:
         """Render the install payload (e.g., a cloud-init seed ISO) as bytes.
 

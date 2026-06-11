@@ -45,7 +45,7 @@ import io
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from testrange.builders.base import Builder
+from testrange.builders.base import Builder, NativeAgentProvision
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
@@ -150,7 +150,9 @@ class CloudInitBuilder(Builder):
         """The base image bytes are uploaded onto the OS disk and grown."""
         return self.base
 
-    def render_user_data(self, spec: VMSpec, recipe: VMRecipe) -> str:
+    def render_user_data(
+        self, spec: VMSpec, recipe: VMRecipe, *, native_agent: NativeAgentProvision | None = None
+    ) -> str:
         """Render cloud-init ``user-data`` (YAML, ``#cloud-config`` header).
 
         Covers users/credentials, package + post-install provisioning (the
@@ -158,6 +160,12 @@ class CloudInitBuilder(Builder):
         is *not* here — it lives entirely in ``network-config`` now (ADR-0017);
         the only network-related ``write_files`` entry is the unconditional
         ``99-testrange-disable-network.cfg`` guard (see module docstring).
+
+        ``native_agent`` (CORE-90) is the backend's native-agent install recipe,
+        brokered in by the orchestrator for a ``NativeCommunicator`` VM. Its
+        package(s) install and enable command(s) run *first* — ahead of the
+        plan's own packages/commands — because a plan post-install step may
+        depend on the agent being up, never the reverse. ``None`` injects nothing.
         """
         del spec, recipe  # not used; reserved for future per-recipe hooks
         # NOTE: any plaintext password below is baked into the cloud-init seed
@@ -186,7 +194,11 @@ class CloudInitBuilder(Builder):
                 # The top-level `list:` string form is deprecated.
                 chpasswd_users.append({"name": c.username, "type": "text", "password": c.password})
 
-        apt_pkgs = [p.name for p in self.packages if isinstance(p, Apt)]
+        # CORE-90: the backend's native agent (qemu-guest-agent / open-vm-tools)
+        # installs + enables ahead of the plan's own packages/commands.
+        agent_apt = [p.name for p in native_agent.packages] if native_agent else []
+        agent_cmds = native_agent.enable_commands if native_agent else ()
+        apt_pkgs = agent_apt + [p.name for p in self.packages if isinstance(p, Apt)]
         pips = [p for p in self.packages if isinstance(p, Pip)]
 
         body: dict[str, Any] = {
@@ -207,7 +219,13 @@ class CloudInitBuilder(Builder):
         # — so a failed install aborts the script and reports `fail` instead of
         # powering off "successfully" with a half-provisioned disk.
         body["runcmd"] = [
-            ["bash", "-c", _render_provision_script(apt_pkgs, pips, self.post_install_commands)]
+            [
+                "bash",
+                "-c",
+                _render_provision_script(
+                    apt_pkgs, pips, (*agent_cmds, *self.post_install_commands)
+                ),
+            ]
         ]
 
         yaml_text: str = _import_yaml().safe_dump(
@@ -299,6 +317,7 @@ class CloudInitBuilder(Builder):
         sidecar_sha: str = "",
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> str:
         """Deterministic 16-char hex hash keying the built **disk set**.
 
@@ -325,7 +344,7 @@ class CloudInitBuilder(Builder):
         disk's size, the data-disk count, the OS-disk size) must move the
         hash — otherwise a resized disk would silently reuse a stale artifact.
         """
-        u = self.render_user_data(spec, recipe)
+        u = self.render_user_data(spec, recipe, native_agent=native_agent)
         m = self.render_meta_data(spec, recipe)
         n = self.render_network_config(
             spec, recipe, addressing=addressing, build_nic=build_nic, macs=macs
@@ -367,11 +386,12 @@ class CloudInitBuilder(Builder):
         addressing: Mapping[str, NetworkAddressing],
         macs: Sequence[str] = (),
         build_nic: BuildNic,
+        native_agent: NativeAgentProvision | None = None,
     ) -> bytes:
         """Build the ISO9660 ``cidata`` seed image as bytes."""
         pycdlib = _import_pycdlib()
 
-        user_data = self.render_user_data(spec, recipe).encode("utf-8")
+        user_data = self.render_user_data(spec, recipe, native_agent=native_agent).encode("utf-8")
         meta_data = self.render_meta_data(spec, recipe).encode("utf-8")
         network_config = self.render_network_config(
             spec, recipe, addressing=addressing, build_nic=build_nic, macs=macs

@@ -18,10 +18,9 @@ Pinned to ESXi (firmware defaults to ``bios``, the certified path)::
 
     testrange run --profile <esxi> tests/plans/esxi/devices.py
 
-The guest needs the VMware Tools vix plugin for guest-ops exec; on Debian the base
-``open-vm-tools`` package already ships it (``…/plugins/common/libvix.so``), so
-that one package is enough. (An earlier ``open-vm-tools-plugins-all`` does NOT
-exist in Debian and made the build's ``apt-get install`` exit 100 — ESXI-20.)
+The guest reaches the host over VMware Tools guest-ops, whose ``open-vm-tools``
+package the ESXi driver auto-provisions for any ``NativeCommunicator`` VM
+(CORE-90) — so the plan declares no agent package itself.
 """
 
 from __future__ import annotations
@@ -38,7 +37,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.drivers.esxi import ESXiHypervisor
 from testrange.drivers.esxi.devices import ESXiHardDrive
 from testrange.networks import Network, Sidecar, Switch
-from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 PLAN = Plan(
@@ -68,11 +66,11 @@ PLAN = Plan(
                         ESXiHardDrive("pool1", 1, bus="nvme"),
                     ],
                 ),
+                # open-vm-tools auto-provisioned by the ESXi driver (CORE-90); the
+                # PosixCred stays — VMware Tools guest-ops authenticates per call.
                 builder=CloudInitBuilder(
                     base=CacheEntry("debian-13"),
                     credentials=[PosixCred("admin", password="TestRangeEsxi2026!", admin=True)],
-                    packages=[Apt("open-vm-tools")],
-                    post_install_commands=("systemctl enable --now open-vm-tools",),
                 ),
                 communicator=NativeCommunicator(),
             ),

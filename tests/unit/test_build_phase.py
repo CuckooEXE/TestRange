@@ -339,13 +339,24 @@ class TestBuildPhase:
                 return CacheEntry("pve-iso")
 
             def config_hash(  # type: ignore[no-untyped-def]
-                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+                self,
+                spec,
+                recipe,
+                *,
+                addressing,
+                base_sha="",
+                sidecar_sha="",
+                macs=(),
+                build_nic,
+                native_agent=None,
             ):
                 # Fold base_sha (the orchestrator passes the boot-media sha here)
                 # so a different installer ISO keys a different build.
                 return ("pve" + base_sha)[:16].ljust(16, "0")
 
-            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+            def render_seed(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, macs=(), build_nic, native_agent=None
+            ):
                 return b"answer.toml-seed"
 
         plan = Plan(
@@ -420,11 +431,22 @@ class TestBuildPhase:
                 return CacheEntry("esxi-iso")
 
             def config_hash(  # type: ignore[no-untyped-def]
-                self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+                self,
+                spec,
+                recipe,
+                *,
+                addressing,
+                base_sha="",
+                sidecar_sha="",
+                macs=(),
+                build_nic,
+                native_agent=None,
             ):
                 return ("esxi" + base_sha)[:16].ljust(16, "0")
 
-            def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+            def render_seed(  # type: ignore[no-untyped-def]
+                self, spec, recipe, *, addressing, macs=(), build_nic, native_agent=None
+            ):
                 return None
 
         plan = Plan(
@@ -841,6 +863,7 @@ class TestVMBuildPlanOriginInvariant:
                 addr=StaticAddr("10.0.0.3"),
                 addressing=NetworkAddressing.from_switch(sw),
             ),
+            native_agent=None,
             base_path=base_path,
             boot_media_path=boot_media_path,
             roles=("os",),

@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
-from testrange.builders.base import Builder
+from testrange.builders.base import Builder, NativeAgentProvision
 from testrange.communicators.base import ExecResult
 from testrange.connect import BackendProfile, register_profile
 from testrange.credentials.base import Credential
@@ -30,6 +30,7 @@ from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.exceptions import DriverError, GuestAgentError
 from testrange.hypervisor import Hypervisor
 from testrange.networks.sidecar import LEASEFILE
+from testrange.packages import Apt
 from testrange.preflight import (
     HostCapacity,
     PreflightCheck,
@@ -107,11 +108,20 @@ class OriginlessBuilder(Builder):
         return None
 
     def config_hash(  # type: ignore[no-untyped-def]
-        self, spec, recipe, *, addressing, base_sha="", sidecar_sha="", macs=(), build_nic
+        self,
+        spec,
+        recipe,
+        *,
+        addressing,
+        base_sha="",
+        sidecar_sha="",
+        macs=(),
+        build_nic,
+        native_agent=None,
     ):
         return "0" * 16
 
-    def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic):  # type: ignore[no-untyped-def]
+    def render_seed(self, spec, recipe, *, addressing, macs=(), build_nic, native_agent=None):  # type: ignore[no-untyped-def]
         return None
 
 
@@ -291,6 +301,14 @@ class MockDriver(HypervisorDriver):
 
     def volume_suffix(self, kind: str) -> str:
         return _SUFFIXES[kind]
+
+    def native_agent_provision(self) -> NativeAgentProvision:
+        # The reference backend models a QGA-style agent so the orchestrator
+        # unit suite exercises native-agent auto-injection end to end (CORE-90).
+        return NativeAgentProvision(
+            packages=(Apt("qemu-guest-agent"),),
+            enable_commands=("systemctl enable --now qemu-guest-agent",),
+        )
 
     def create_pool(self, pool: StoragePool, backend_name: str) -> Any:
         self._record("create_pool", backend_name, pool.name)

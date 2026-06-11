@@ -28,16 +28,13 @@ from testrange.communicators import NativeCommunicator
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
-from testrange.packages import Apt
 from testrange.vms import VMRecipe, VMSpec
 
 
 def _native_image() -> CloudInitBuilder:
-    return CloudInitBuilder(
-        base=CacheEntry("debian-13"),
-        packages=[Apt("qemu-guest-agent")],
-        post_install_commands=("systemctl enable --now qemu-guest-agent",),
-    )
+    # The NativeCommunicator's agent (qemu-guest-agent / open-vm-tools) is
+    # auto-provisioned per backend by the driver (CORE-90) — not declared here.
+    return CloudInitBuilder(base=CacheEntry("debian-13"))
 
 
 PLAN = Plan(

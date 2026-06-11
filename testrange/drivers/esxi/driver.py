@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
 from testrange._log import get_logger
+from testrange.builders.base import NativeAgentProvision
 from testrange.drivers import _diskconvert
 from testrange.drivers._registry import register
 from testrange.drivers.base import HypervisorDriver, VolumeRef
@@ -35,6 +36,7 @@ from testrange.drivers.esxi._client import EsxiClient, EsxiConn
 from testrange.exceptions import DriverError
 from testrange.gateways import SSHJumpGateway
 from testrange.hypervisor import Hypervisor
+from testrange.packages import Apt
 from testrange.preflight import (
     HostCapacity,
     PreflightCheck,
@@ -183,6 +185,17 @@ class ESXiDriver(HypervisorDriver):
 
     def volume_suffix(self, kind: str) -> str:
         return _naming.volume_suffix(kind)
+
+    def native_agent_provision(self) -> NativeAgentProvision:
+        # ESXi's NativeCommunicator speaks VMware Tools guest-ops, which needs
+        # open-vm-tools running in the guest (its base package already ships the
+        # vix guest-ops plugin — open-vm-tools-plugins-all does NOT exist on
+        # Debian, ESXI-20). The per-call guest credential is orthogonal (the
+        # native_guest_credential path). CORE-90.
+        return NativeAgentProvision(
+            packages=(Apt("open-vm-tools"),),
+            enable_commands=("systemctl enable --now open-vm-tools",),
+        )
 
     @_translates
     def preflight(

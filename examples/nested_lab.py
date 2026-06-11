@@ -58,8 +58,8 @@ def _inner_vm(name: str, *packages: str, post: tuple[str, ...] = ()) -> VMRecipe
         ),
         builder=CloudInitBuilder(
             base=CacheEntry("debian-13"),
-            packages=[Apt("qemu-guest-agent"), *(Apt(p) for p in packages)],
-            post_install_commands=("systemctl enable --now qemu-guest-agent", *post),
+            packages=[Apt(p) for p in packages],
+            post_install_commands=tuple(post),
         ),
         communicator=NativeCommunicator(),
     )
