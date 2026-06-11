@@ -184,7 +184,11 @@ def upload_to_pool(client: EsxiClient, target_ref: VolumeRef, source_path: Path)
 
     stage_rel = f"{ds_path.rsplit('.', 1)[0]}-stage.vmdk"
     stage_ref = f"[{client.datastore_name}] {stage_rel}"
-    with tempfile.TemporaryDirectory(prefix="tr_esxi_ingest_") as tmp:
+    # Stage on the cache filesystem (next to the qcow2 source), not the default
+    # tempdir: the monolithicSparse conversion is disk-sized (multi-GiB) and /tmp
+    # is a small tmpfs on most hosts — a parallel ingest would overflow it
+    # ([Errno 28]). Same-fs staging also keeps the qemu-img convert single-device.
+    with tempfile.TemporaryDirectory(prefix="tr_esxi_ingest_", dir=source_path.parent) as tmp:
         local_vmdk = Path(tmp) / "stage.vmdk"
         _diskconvert.qcow2_to_vmdk(source_path, local_vmdk, subformat="monolithicSparse")
         client.folder_put(local_vmdk, stage_rel)
@@ -217,7 +221,11 @@ def download_from_pool(client: EsxiClient, vol_ref: VolumeRef, dest_path: Path) 
     ds_path = _ds_path(client, str(vol_ref))
     descriptor_rel = ds_path
     flat_rel = f"{ds_path.rsplit('.', 1)[0]}-flat.vmdk"
-    with tempfile.TemporaryDirectory(prefix="tr_esxi_export_") as tmp:
+    # Stage on the cache filesystem (next to the qcow2 destination), not the
+    # default tempdir: the exported -flat extent is disk-sized (multi-GiB) and a
+    # parallel export into a tmpfs /tmp overflows it ([Errno 28]). Same-fs staging
+    # also keeps the qemu-img convert single-device. (ESXI-31)
+    with tempfile.TemporaryDirectory(prefix="tr_esxi_export_", dir=dest_path.parent) as tmp:
         local_desc = Path(tmp) / Path(ds_path).name
         local_flat = Path(tmp) / f"{local_desc.stem}-flat.vmdk"
         client.folder_get(descriptor_rel, local_desc)

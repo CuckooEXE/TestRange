@@ -91,6 +91,74 @@ def test_upload_ingests_and_cleans_staging(monkeypatch: pytest.MonkeyPatch, tmp_
     assert not any("stage" in k for k in client.files), "staging vmdk not cleaned up"
 
 
+def test_upload_stages_on_cache_filesystem(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # ESXI-31: the multi-GiB qcow2->vmdk staging must land on the cache filesystem
+    # (next to the source), not the default tempdir — /tmp is a small tmpfs on most
+    # hosts and three concurrent 8 GiB flat-vmdk stages overflow it ([Errno 28]).
+    client = FakeEsxiClient()
+    d = _driver(client)
+    ref = _ref(client, "os.qcow2")
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    src = cache_dir / "src.qcow2"
+    src.write_bytes(b"qcow2-source")
+
+    put_sources: list[Path] = []
+    real_put = client.folder_put
+
+    def _spy_put(source_path: Path, ds_path: str) -> None:
+        put_sources.append(Path(source_path))
+        real_put(source_path, ds_path)
+
+    monkeypatch.setattr(client, "folder_put", _spy_put)
+    monkeypatch.setattr(
+        "testrange.drivers._diskconvert.qcow2_to_vmdk",
+        lambda source, dst, *, subformat="": Path(dst).write_bytes(b"vmdk-stage"),
+    )
+
+    d.upload_to_pool(ref, src)
+    assert put_sources, "upload never staged a local file for /folder PUT"
+    for staged in put_sources:
+        assert cache_dir.resolve() in staged.resolve().parents, (
+            f"upload staged {staged} outside the cache filesystem {cache_dir}"
+        )
+
+
+def test_download_stages_on_cache_filesystem(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ESXI-31: the multi-GiB descriptor+flat-vmdk export must land next to the cache
+    # destination, not the default tempdir (tmpfs /tmp), or it overflows under --jobs.
+    client = FakeEsxiClient()
+    d = _driver(client)
+    ref = _ref(client, "os.qcow2")
+    client.files["pool1/os.vmdk"] = b"descriptor"
+    client.files["pool1/os-flat.vmdk"] = b"flat-extent"
+
+    get_dests: list[Path] = []
+    real_get = client.folder_get
+
+    def _spy_get(ds_path: str, dest_path: Path) -> None:
+        get_dests.append(Path(dest_path))
+        real_get(ds_path, dest_path)
+
+    monkeypatch.setattr(client, "folder_get", _spy_get)
+    monkeypatch.setattr(
+        "testrange.drivers._diskconvert.vmdk_to_qcow2",
+        lambda desc, dst, *a, **k: Path(dst).write_bytes(b"qcow2-out"),
+    )
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    dest = cache_dir / "os.qcow2"
+    d.download_from_pool(ref, dest)
+    assert get_dests, "download never fetched a local staging file"
+    for staged in get_dests:
+        assert cache_dir.resolve() in staged.resolve().parents, (
+            f"download staged {staged} outside the cache filesystem {cache_dir}"
+        )
+
+
 def test_delete_volume_disk_and_iso_tolerant() -> None:
     client = FakeEsxiClient()
     d = _driver(client)

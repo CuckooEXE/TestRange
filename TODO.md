@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (12)
+## Doing (13)
 
 ### CORE
 
@@ -46,6 +46,10 @@ on 2026-06-06.
 - [ ] **ESXI-30** · `bugfix` — ESXi guest_gateway SSH-jump to internal run VMs fails `Connect failed` (PROXY-1)
 
   > Found running the generic corpus against a nested ESXi node (after the AllowTcpForwarding block was lifted): the SSHCommunicator plans (`build_cache`/`preflight`/`snapshots`/`users_credentials`) now get past `Administratively prohibited` but fail `communicator not ready … SSH connect to <guest>:22 … ChannelException(2, 'Connect failed')`. So forwarding is permitted, but the ESXi host (the guest_gateway jump host) cannot open a `direct-tcpip` channel to the run VM's `:22` on the internal lab segment. Needs live diagnosis: is the guest's sshd up + leased at the polled IP, and is the node's mgmt vmk on the same L2 / routable to the guest portgroup? The ESXi cert's primary transport is VMware Tools/pyVmomi, so this SSH-jump path (PROXY-1) was never validated end-to-end. Created 2026-06-10.
+
+- [ ] **ESXI-31** · `bugfix` — ESXi disk-staging temp dirs default to `/tmp` (tmpfs) → multi-GiB build-cache I/O overflows it (`[Errno 28]`)
+
+  > Found running `tests/plans/generic/switch_isolation.py` against the unmanaged ESXi node (NET-18 cross-backend cert): the build phase for 3 VMs succeeded on-host, but the post-build **cache download** crashed `OSError: [Errno 28] No space left on device` in `esxi/_client.py:426 folder_get`, re-raised through `build_phase`'s `parallel_map`. NOT the datastore (datastore1 had 94 GiB free) — the **local** filesystem: `_storage.download_from_pool` (`_storage.py:220`) and `upload_to_pool` (`:187`) stage the multi-GiB `-flat.vmdk` / `monolithicSparse` conversions in `tempfile.TemporaryDirectory()` **with no `dir=`**, so they land in `gettempdir()` → `/tmp`, which on this host (and most systemd distros) is a **12 GiB tmpfs**. Three concurrent 8 GiB flat-vmdk exports (24 GiB, the default `--jobs` build fan-out) overflow it. Egress-topology-independent, reproduces on any host with a small/tmpfs `/tmp`. Fix (idiomatic — mirrors `cache/local.py:401`'s `dir=path.parent`): anchor the staging temp dir to the cache filesystem each function already holds a path on — `download_from_pool` → `dir=dest_path.parent`, `upload_to_pool` → `dir=source_path.parent`. Same-filesystem staging also makes the qemu-img convert read+write on one device (no cross-device copy). Unit regression in `test_esxi_storage.py` (staging path is under the cache dir, not the default tempdir); end-to-end proof is the now-green ESXi `switch_isolation` run. Follow-up (noted, lower-risk): `write_to_pool`'s `NamedTemporaryFile` (`:131`) has the same default-tempdir staging for seed/boot-ISO bytes but no in-signature cache anchor — small for seeds, only large for boot ISOs. Created 2026-06-11.
 - [ ] **ESXI-20** · `test` — finish ESXiKickstartBuilder + stand up/leak a nested ESXi node on libvirt + certify `tests/plans/` against it
 
   > `feature/VMBuild`. Un-shelves ESXI-16/18 locally and advances ESXI-12/13/15:
