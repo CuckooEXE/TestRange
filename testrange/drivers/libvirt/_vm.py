@@ -26,13 +26,14 @@ map, crash-safe teardown.
   (``build_nic`` set, ADR-0017) the declared NICs are replaced by a single
   build-NIC interface — emulated as the guest's declared model (``_build_nic_model``)
   so an ESXi-shaped guest installs over a NIC it can drive.
-- **serial build-result sink** — a **build VM** (the one with a ``build_nic``,
-  ADR-0017) gets a ``<serial type='unix' mode='connect'>`` pointing at a socket
-  the driver already listens on (see ``_conn``); its serial is tailed by
-  ``read_build_result_sink``. Sidecars and run VMs get a throwaway ``pty`` console
-  (no back-pressure, nothing to drain) — a sidecar carries a seed but is monitored
-  via QGA, and binding it a unix socket breaks against a remote daemon (the socket
-  is on the orchestrator host, not the daemon's — ADR-0021's nested inner run).
+- **serial console** — every guest gets a ``<serial type='pty'>``. The build
+  phase live-tails the build VM's console host-side via ``virDomainOpenConsole``
+  over the libvirt connection (``read_build_result_sink``, see ``_serial``), so
+  no host-local socket path is baked into the XML and the same XML boots on a
+  local *and* a remote ``qemu+ssh://`` daemon (BACKEND-5 — the former
+  orchestrator-local unix-socket listener failed ``virDomainCreate`` remotely).
+  Sidecars and run VMs keep the identical pty so cloud images still find a
+  console; nothing drains it, which is harmless (a pty has no back-pressure).
 - **QGA channel** — an unconditional ``org.qemu.guest_agent.0`` virtio channel
   (``mode='bind'``, the daemon owns that socket) so ``_guest`` can drive the QEMU
   Guest Agent.
@@ -191,21 +192,11 @@ def _interface_xml(mac: str, network: str, *, model: str = "virtio") -> str:
     )
 
 
-def _serial_xml(serial_sock: str | None) -> str:
-    """A unix-socket serial (seed VMs, read by the sink) or a throwaway pty.
-
-    The unix variant is ``mode='connect'``: QEMU connects to the socket the
-    driver already listens on (``mode='bind'`` is not connectable non-root). A run
-    VM gets a ``pty`` so cloud images still find a console, with nothing to drain.
-    """
-    if serial_sock is None:
-        return "<serial type='pty'><target port='0'/></serial>"
-    return (
-        "<serial type='unix'>"
-        f"<source mode='connect' path={quoteattr(serial_sock)}/>"
-        "<target port='0'/>"
-        "</serial>"
-    )
+# Every guest — build VM, sidecar, run VM — gets the same pty serial: the
+# build-result sink reads it via virDomainOpenConsole over the connection
+# (BACKEND-5), so the XML carries no host-local path, and on a non-build guest
+# an undrained pty is harmless (cloud images still find a console).
+_SERIAL_PTY = "<serial type='pty'><target port='0'/></serial>"
 
 
 _QGA_CHANNEL = (
@@ -260,7 +251,6 @@ def _domain_xml(
     seed_path: str | None,
     boot_media_path: str | None = None,
     nics: Sequence[tuple[str, str, str]],
-    serial_sock: str | None,
 ) -> str:
     installer = boot_media_path is not None
     # Dev names are allocated per bus prefix (vd*/sd*/hd*) so a non-virtio OS disk
@@ -310,7 +300,7 @@ def _domain_xml(
             )
         )
     devices.extend(_interface_xml(mac, net, model=model) for mac, net, model in nics)
-    devices.append(_serial_xml(serial_sock))
+    devices.append(_SERIAL_PTY)
     devices.append(_QGA_CHANNEL)
     # A VGA adapter is REQUIRED even though the VM is headless: libvirt emits
     # ``-nodefaults`` (no implicit devices), and the Debian cloud image's GRUB
@@ -361,14 +351,11 @@ def create_vm(
     and the installer ISO is attached as a bootable CDROM (see :func:`_os_xml`
     for the fall-through boot order). ``spec.firmware`` picks BIOS vs OVMF.
 
-    The unix-socket serial sink is opened for a boot whose TESTRANGE-RESULT the
-    orchestrator reads off serial: a **build VM** (``build_nic`` set, ADR-0017)
-    or an installer-origin boot (``boot_media_ref`` set). Its listener is opened
-    here so the socket exists when ``start_vm`` boots QEMU. Sidecars carry a seed
-    too but are monitored via QGA, never the serial sink: the socket we bind
-    lives on the orchestrator host, so on a *remote* daemon (the inner qemu+ssh
-    connection of a nested run, ADR-0021) the remote security driver can't stat
-    it. Sidecars and run VMs get a throwaway pty.
+    Every domain gets the same ``<serial type='pty'>`` console — there is no
+    per-boot serial wiring here. A boot whose TESTRANGE-RESULT the orchestrator
+    reads off serial (a build VM or an installer-origin boot) is tailed via
+    ``virDomainOpenConsole`` by ``read_build_result_sink`` (BACKEND-5), which
+    needs nothing pre-arranged in the XML.
 
     When ``build_nic`` is set (build phase, ADR-0017) the domain gets a *single*
     ``<interface>`` for the build NIC and the declared ``spec.nics`` are not
@@ -386,17 +373,6 @@ def create_vm(
             (_compose_mac(plan_name, spec.name, idx), network_refs[nic.network], _nic_model(nic))
             for idx, nic in enumerate(spec.nics)
         ]
-    # The unix-socket serial sink is opened for a boot whose TESTRANGE-RESULT the
-    # orchestrator reads off serial: a build VM (build_nic set, ADR-0017) or an
-    # installer-origin boot with no separate seed (ESXi single-CDROM: ks.cfg lives
-    # in the boot media and %firstboot writes the result to the same serial).
-    # Sidecars carry a seed too but are monitored via QGA, never the serial sink:
-    # giving one a socket is dead weight locally and, on a *remote* daemon (the
-    # inner qemu+ssh connection of a nested run, ADR-0021), outright broken — the
-    # socket we bind lives on the orchestrator host, not the remote daemon's, so
-    # its security driver can't stat it. Seed-only (sidecar) and run boots get a pty.
-    is_provisioning_boot = build_nic is not None or boot_media_ref is not None
-    serial_sock = client.open_serial_listener(backend_name) if is_provisioning_boot else None
     xml = _domain_xml(
         backend_name,
         spec,
@@ -405,7 +381,6 @@ def create_vm(
         seed_path=seed_path,
         boot_media_path=boot_media_path,
         nics=nics,
-        serial_sock=serial_sock,
     )
     client.raw.defineXML(xml)
     _log.info("defined libvirt domain %s", backend_name)
@@ -446,13 +421,12 @@ def shutdown_vm(client: LibvirtClient, backend_name: str, *, timeout: float = 12
 def destroy_vm(client: LibvirtClient, backend_name: str) -> None:
     """Stop (if running) then undefine the domain. Tolerant of absence.
 
-    Releases the serial listener too. Undefine clears snapshot/checkpoint
-    metadata and any NVRAM so a snapshotted VM (e.g. ``keybox``) tears down clean.
+    Undefine clears snapshot/checkpoint metadata and any NVRAM so a snapshotted
+    VM (e.g. ``keybox``) tears down clean.
     """
     libvirt = _import_libvirt()
     dom = client.lookup_domain(backend_name)
     if dom is None:
-        client.close_serial_listener(backend_name)
         _log.debug("destroy_vm(%s): not present (already gone)", backend_name)
         return
     if dom.isActive():
@@ -464,7 +438,6 @@ def destroy_vm(client: LibvirtClient, backend_name: str) -> None:
         | libvirt.VIR_DOMAIN_UNDEFINE_NVRAM
     )
     dom.undefineFlags(flags)
-    client.close_serial_listener(backend_name)
     _log.info("destroyed libvirt domain %s", backend_name)
 
 

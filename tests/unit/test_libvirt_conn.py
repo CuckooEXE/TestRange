@@ -8,10 +8,8 @@ registers a handler that routes them through Python logging instead.
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import socket
-import stat
+import threading
+import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -76,6 +74,29 @@ def test_registration_is_idempotent() -> None:
     assert len(calls) == 1  # registered once; re-imports are no-ops
 
 
+def test_event_loop_registers_once_and_pumps(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Nonblocking virStream I/O (the BACKEND-5 console sink) is deaf without a
+    # registered + running event loop: stream data and the power-off EOF arrive
+    # only through it (live-found: remote builds sat would-blocked for the whole
+    # build timeout). Registration must happen exactly once per process.
+    monkeypatch.setattr(_conn, "_event_loop_running", False)
+    registered: list[bool] = []
+    pumped = threading.Event()
+
+    def _run_impl() -> None:
+        pumped.set()
+        time.sleep(0.05)  # keep the daemon thread tame while the test asserts
+
+    fake = SimpleNamespace(
+        virEventRegisterDefaultImpl=lambda: registered.append(True),
+        virEventRunDefaultImpl=_run_impl,
+    )
+    _conn._ensure_event_loop(fake)
+    _conn._ensure_event_loop(fake)
+    assert registered == [True], "event impl must register exactly once"
+    assert pumped.wait(2.0), "pump thread never ran virEventRunDefaultImpl"
+
+
 class TestTeardownUri:
     """``to_uri``/``from_uri`` is the state.json round-trip that `testrange
     cleanup` reaches a torn-down run by — a regression silently breaks cleanup."""
@@ -93,40 +114,3 @@ class TestTeardownUri:
 
         with pytest.raises(DriverError, match="teardown URI"):
             _conn.LibvirtConn.from_uri("qemu:///system")
-
-
-class TestSerialListener:
-    """The build-result serial socket's hardening (CORE-91)."""
-
-    def test_serial_dir_is_not_world_listable(self) -> None:
-        # The daemon only needs to *traverse* the dir (connect to a known path),
-        # not *list* it; dropping o+r denies a co-tenant cheap enumeration.
-        client = _conn.LibvirtClient(_conn.LibvirtConn())
-        d = client._ensure_serial_dir()
-        try:
-            assert stat.S_IMODE(d.stat().st_mode) == 0o711
-        finally:
-            shutil.rmtree(d, ignore_errors=True)
-
-    def test_allowed_peer_uids_include_self_and_root(self) -> None:
-        uids = _conn._allowed_serial_peer_uids()
-        assert os.getuid() in uids
-        assert 0 in uids
-
-    def test_accept_serial_accepts_an_allowed_peer(self) -> None:
-        # A connection from this same process has peer uid == our uid (allowed),
-        # so the SO_PEERCRED filter lets it through — the legit-QEMU path.
-        client = _conn.LibvirtClient(_conn.LibvirtConn())
-        path = client.open_serial_listener("tr-vm-x")
-        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            peer.connect(path)  # lands in the listen backlog
-            conn = client.accept_serial("tr-vm-x", timeout=2.0)
-            assert conn is not None
-            assert _conn._peer_uid(conn) == os.getuid()
-            conn.close()
-        finally:
-            peer.close()
-            client.close_serial_listener("tr-vm-x")
-            if client._serial_dir is not None:
-                shutil.rmtree(client._serial_dir, ignore_errors=True)

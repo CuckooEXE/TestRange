@@ -758,7 +758,9 @@ flow). It abstracts the per-backend *host read* of the serial console:
   [[project_testrange_proxmox_transport]] disk fallback (ephemeral result disk
   over `download_from_pool`) stays *documented* in `RESEARCH.md` → "PVE-16
   spike" but is **not built** unless the websocket path proves unworkable.
-- **libvirt** (future) — serial pty / unix-socket / file; live-tail.
+- **libvirt** — every guest's `<serial type='pty'>` live-tailed via
+  `virDomainOpenConsole` + a non-blocking `virStream` over the existing
+  connection — one code path local and remote (BACKEND-5).
 - **Mock** — yields a canned stream; unit tests inject `ok` / `fail` records to
   drive both the success and the (live-untestable) failure path end-to-end in
   the unit suite.
@@ -1490,7 +1492,7 @@ out-of-band) and by the decisions below.
 - **1.A** — storage: per-run pools + stream volume I/O (TDD against a faked
   `LibvirtClient`).
 - **1.B** — VM + serial build-result sink + QGA, **no network**: domain XML
-  (qcow2 disks, stable-MAC NICs, `<serial type='unix'>`, an
+  (qcow2 disks, stable-MAC NICs, `<serial type='pty'>`, an
   `org.qemu.guest_agent.0` virtio channel, seed CD-ROM); lifecycle; the serial
   sink live-tail; `native_guest_*` over `libvirt_qemu.qemuAgentCommand`. First
   real end-to-end green: a no-net VM builds (serial `ok`) and runs over
@@ -1519,11 +1521,15 @@ execute the build/run, all now baked into the driver:
   `gfxterm` loops forever ("Booting `Debian GNU/Linux'") with no adapter — the
   kernel never starts. The domain XML carries `<video><model type='vga'/></video>`
   (no `<graphics>` backend; we still drive the console over the serial sink).
-- **The serial build-result sink is `mode='connect'`, not `mode='bind'`.** A
-  qemu-owned bind socket (`0775 libvirt-qemu`) is not connect-able by uid 1000,
-  so the driver *listens* (socket pre-bound in `create_vm`, under a `/tmp`-rooted
-  0755 dir the daemon can traverse) and QEMU connects in. Run VMs get a throwaway
-  `<serial type='pty'>` (nothing to drain).
+- **The serial build-result sink reads the guest's pty via
+  `virDomainOpenConsole` (BACKEND-5).** The first cut listened on an
+  orchestrator-local unix socket QEMU connected into (`mode='connect'`), which
+  baked a runner-local `/tmp` path into the domain XML — a remote `qemu+ssh://`
+  daemon's QEMU cannot stat it, so `virDomainCreate` failed on fresh remote
+  builds. Now every guest gets `<serial type='pty'>` and the sink live-tails the
+  console over the existing connection (non-blocking `virStream`) — one code
+  path local and remote, and it deleted the world-connectable socket surface the
+  CORE-91 uid filter had to guard.
 - **`Switch(mgmt=True)` is implemented (the `.2` host adapter); the network is
   otherwise fully isolated.** A non-mgmt Switch's network has no host `<ip>` — it
   is a pure guest segment (the host is not on it). A `mgmt=True` Switch adds the
