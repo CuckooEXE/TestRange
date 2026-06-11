@@ -80,6 +80,7 @@ def run_tests(
     jobs: int | None = None,
     build_timeout_s: float = 600.0,
     lease_timeout_s: float = 120.0,
+    ready_timeout_s: float = 120.0,
     dashboard: DashboardState | None = None,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
@@ -94,9 +95,11 @@ def run_tests(
 
     ``build_timeout_s`` bounds how long a build VM may take to report its result
     over serial (default 600s). ``lease_timeout_s`` bounds how long a run VM may
-    take to acquire its DHCP lease (default 120s). Slow guests — notably a nested
-    ESXi node, whose install and whose cold boot to a vmk0 DHCP lease are both
-    slow under nested KVM — need larger values.
+    take to acquire its DHCP lease (default 120s). ``ready_timeout_s`` bounds how
+    long a bound communicator may take to answer its first probe (default 120s).
+    Slow guests — notably a nested ESXi node, whose install is slow under nested
+    KVM and whose sshd only comes up via ``local.sh`` after hostd, minutes past
+    its DHCP lease — need larger values.
     """
     results: list[TestResult] = []
     o = Orchestrator(
@@ -107,6 +110,7 @@ def run_tests(
         jobs=jobs,
         build_timeout_s=build_timeout_s,
         lease_timeout_s=lease_timeout_s,
+        agent_ready_timeout_s=ready_timeout_s,
         dashboard=dashboard,
     )
     with o as orch:

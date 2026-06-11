@@ -280,6 +280,7 @@ def _run(args: argparse.Namespace) -> int:
                 jobs=args.jobs,
                 build_timeout_s=args.build_timeout,
                 lease_timeout_s=args.lease_timeout,
+                ready_timeout_s=args.ready_timeout,
                 dashboard=dashboard,
             )
     except DriverError as e:
@@ -919,6 +920,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=120.0,
         metavar="SECONDS",
         help="max seconds a run VM may take to acquire its DHCP lease (default 120)",
+    )
+    p_run.add_argument(
+        "--ready-timeout",
+        type=float,
+        default=120.0,
+        metavar="SECONDS",
+        help="max seconds a communicator may take to answer its first probe (default 120)",
     )
     _add_jobs_arg(p_run)
     _add_connect_arg(p_run)
