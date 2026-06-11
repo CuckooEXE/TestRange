@@ -27,6 +27,7 @@ from testrange import Hypervisor, OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import NativeCommunicator
+from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
@@ -65,8 +66,12 @@ PLAN = Plan(
                         NetworkIface("lab-net", addr=DHCPAddr()),
                     ],
                 ),
-                # NativeCommunicator agent auto-provisioned per backend (CORE-90).
-                builder=CloudInitBuilder(base=CacheEntry("debian-13")),
+                # NativeCommunicator agent auto-provisioned per backend (CORE-90);
+                # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[PosixCred("admin", password="testrange", admin=True)],
+                ),
                 communicator=NativeCommunicator(),
             ),
         ],

@@ -25,6 +25,7 @@ from testrange import Hypervisor, OrchestratorHandle, Plan, run_tests
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import NativeCommunicator
+from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
@@ -34,7 +35,12 @@ from testrange.vms import VMRecipe, VMSpec
 def _native_image() -> CloudInitBuilder:
     # The NativeCommunicator's agent (qemu-guest-agent / open-vm-tools) is
     # auto-provisioned per backend by the driver (CORE-90) — not declared here.
-    return CloudInitBuilder(base=CacheEntry("debian-13"))
+    # The PosixCred is for ESXi VMware Tools guest-ops, which authenticate per
+    # call (CORE-60); QGA backends ignore it.
+    return CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+    )
 
 
 PLAN = Plan(
