@@ -52,6 +52,10 @@ tests/plans/
 | `generic/switch_isolation.py` | the three switch tiers (uplinked / air-gapped / `mgmt` host adapter) + a provenance-pinned directional reach/isolation matrix (default route via the sidecar, mgmt reached over the `c1` leg not the NAT path, isolation by IP-literal + curl-exit-7 with a positive control); static-on-NAT sidecar-derived egress; triple-homed single-default-route |
 | `generic/build_cache.py` | multi-data-disk content integrity (build→cache→run, no swap), `apt` + `pip`, post-install command ordering |
 | `generic/snapshots.py` | disk snapshot create/list/restore/delete, memory snapshot restores running tmpfs state |
+| `generic/snapshot_chain.py` | two-snapshot chain taken shut-off (oldest-first listing, restore-to-middle/forward, delete-oldest chain integrity), data-disk + second-pool revert coverage, duplicate-name/missing-name contract edges, memory restore onto a shutoff VM |
+| `generic/routed_segments.py` | a dual-homed guest forwarding between two air-gapped switches: baked `ip_forward`, guest-side routes, one-hop TTL provenance, an on-link probe proving the segments are distinct L2 domains, toggle-severs/restores, `addr=None` NIC exists but stays addressless |
+| `generic/sidecar_flags.py` | the dhcp-only sidecar tier: leases in-pool/distinct/stable across a power cycle, no router option (nat off), no resolver option (dns off), peer-to-peer positive control |
+| `generic/guest_io.py` | SSH transport contract: 4 MiB SFTP round-trip, `execute(cwd=)`, nonzero-exit/stderr capture, non-terminal `close()`, hung-command timeout raises, file errors wrapped as `CommunicatorError` (SSH ⇒ not applicable on ESXi, ESXI-30) |
 | `generic/concurrency.py` | independent multi-VM fan-out; run with `--jobs N` to stress parallel bring-up + teardown |
 
 ### Backend-specific plans
