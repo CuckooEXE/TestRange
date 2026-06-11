@@ -357,3 +357,79 @@ class TestTestsValidation:
             cli.main(["describe", str(f)])
         assert exc.value.code == 2
         assert "one argument" in capsys.readouterr().err
+
+
+class TestErrorContainment:
+    """The verbs map the TestRangeError families to exit codes, never a raw traceback."""
+
+    def _profile(self, tmp_path: Path) -> str:
+        prof = tmp_path / "connect.toml"
+        prof.write_text('[p]\ndriver = "mock"\n')
+        return f"{prof}:p"
+
+    def test_build_builder_error_is_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # CORE-92: a BuilderError (e.g. a missing optional builder dep) must map to
+        # Exit.FAILURE with a clean diagnostic, not escape as a Python traceback.
+        from testrange.exceptions import BuilderError
+
+        plan_path = _write_generic_plan(tmp_path)
+
+        def boom(*_a: object, **_k: object) -> str:
+            raise BuilderError("pycdlib is not installed; install with pip install -e .[cloudinit]")
+
+        monkeypatch.setattr(cli, "build_range", boom)
+        rc = cli.main(["build", plan_path, "--profile", self._profile(tmp_path)])
+        assert rc == 1  # Exit.FAILURE
+        assert "build failed" in capsys.readouterr().err
+
+    def test_run_builder_error_is_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from testrange.exceptions import BuildNotReadyError
+
+        plan_path = _write_generic_plan(tmp_path)
+
+        def boom(*_a: object, **_k: object) -> list[object]:
+            raise BuildNotReadyError("vm never reached ready")
+
+        monkeypatch.setattr(cli, "run_tests", boom)
+        rc = cli.main(["run", plan_path, "--profile", self._profile(tmp_path)])
+        assert rc == 1  # Exit.FAILURE, not a traceback
+
+    def test_repl_driver_error_on_connect_is_usage(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # CORE-93: __init__ only resolves the backend; connect() happens in
+        # __enter__, so a connect-time DriverError must be caught there too.
+        from testrange.exceptions import DriverError
+        from testrange.orchestrator import runtime
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        plan_path = _write_generic_plan(tmp_path)
+
+        def boom_enter(_self: object) -> object:
+            raise DriverError("backend unreachable")
+
+        monkeypatch.setattr(runtime.Orchestrator, "__enter__", boom_enter)
+        rc = cli.main(["repl", plan_path, "--profile", self._profile(tmp_path)])
+        assert rc == 2  # Exit.USAGE
+
+    def test_describe_contains_cache_error(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # CORE-96: with a shared cache configured, a 5xx / unreachable tier raises
+        # a non-miss CacheError during the passive resolve; describe must render it
+        # rather than crash with a raw traceback.
+        from testrange.cache.manager import CacheManager
+        from testrange.exceptions import CacheError
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+
+        def boom(self: object, entry: object, fetch: bool = False) -> object:
+            raise CacheError("cache server returned 503")
+
+        monkeypatch.setattr(CacheManager, "resolve", boom)
+        rc = cli.main(["describe", str(EXAMPLES / "hello_world.py")])
+        assert rc == 0  # passive read-only check stays clean

@@ -8,6 +8,10 @@ registers a handler that routes them through Python logging instead.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import socket
+import stat
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
@@ -89,3 +93,40 @@ class TestTeardownUri:
 
         with pytest.raises(DriverError, match="teardown URI"):
             _conn.LibvirtConn.from_uri("qemu:///system")
+
+
+class TestSerialListener:
+    """The build-result serial socket's hardening (CORE-91)."""
+
+    def test_serial_dir_is_not_world_listable(self) -> None:
+        # The daemon only needs to *traverse* the dir (connect to a known path),
+        # not *list* it; dropping o+r denies a co-tenant cheap enumeration.
+        client = _conn.LibvirtClient(_conn.LibvirtConn())
+        d = client._ensure_serial_dir()
+        try:
+            assert stat.S_IMODE(d.stat().st_mode) == 0o711
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_allowed_peer_uids_include_self_and_root(self) -> None:
+        uids = _conn._allowed_serial_peer_uids()
+        assert os.getuid() in uids
+        assert 0 in uids
+
+    def test_accept_serial_accepts_an_allowed_peer(self) -> None:
+        # A connection from this same process has peer uid == our uid (allowed),
+        # so the SO_PEERCRED filter lets it through — the legit-QEMU path.
+        client = _conn.LibvirtClient(_conn.LibvirtConn())
+        path = client.open_serial_listener("tr-vm-x")
+        peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            peer.connect(path)  # lands in the listen backlog
+            conn = client.accept_serial("tr-vm-x", timeout=2.0)
+            assert conn is not None
+            assert _conn._peer_uid(conn) == os.getuid()
+            conn.close()
+        finally:
+            peer.close()
+            client.close_serial_listener("tr-vm-x")
+            if client._serial_dir is not None:
+                shutil.rmtree(client._serial_dir, ignore_errors=True)

@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from testrange.builders._proxmox_prepare import PREPARE_ISO_RECIPE, prepare_iso
-from testrange.builders.base import Builder, NativeAgentProvision
+from testrange.builders.base import Builder, NativeAgentProvision, materialize_prepared
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
@@ -219,11 +219,14 @@ class ProxmoxAnswerBuilder(Builder):
         ).hexdigest()[:16]
         prepared = media_path.parent / f"{media_path.stem}-prepared-{digest}.iso"
         if not prepared.exists():
-            prepare_iso(
-                media_path,
+            materialize_prepared(
                 prepared,
-                partition_label=self.partition_label,
-                first_boot_script=script,
+                lambda tmp: prepare_iso(
+                    media_path,
+                    tmp,
+                    partition_label=self.partition_label,
+                    first_boot_script=script,
+                ),
             )
         return prepared
 
@@ -586,13 +589,21 @@ def _pip_install_lines(pips: Sequence[Pip]) -> list[str]:
 
 
 def _toml_str(value: str) -> str:
-    """Render *value* as a TOML basic string literal (escapes ``\\`` and ``"``).
+    """Render *value* as a TOML basic string literal.
+
+    Escapes ``\\`` and ``"``; the common control chars as their short forms
+    (``\\n \\r \\t``); and every *other* control character (U+0000-U+001F and
+    U+007F, which TOML basic strings forbid raw) as ``\\uXXXX``. Without the last
+    step a root password carrying e.g. a vertical tab would land raw inside the
+    quoted string and the PVE auto-installer's TOML parser would reject the whole
+    answer.toml, failing the unattended install (BUILD-27).
 
     Enough for the values answer.toml takes (country codes, FQDNs, SSH keys,
     passwords); avoids a TOML library for the only TOML the project emits.
     """
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     escaped = escaped.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    escaped = "".join(c if c >= " " and c != "\x7f" else f"\\u{ord(c):04x}" for c in escaped)
     return f'"{escaped}"'
 
 

@@ -96,6 +96,17 @@ def test_close_releases_the_jump(fake_paramiko: _FakeJumpClient) -> None:
     gw.close()  # idempotent
 
 
+def test_use_after_close_is_refused(fake_paramiko: _FakeJumpClient) -> None:
+    # A local-forward _serve thread can win the accept() race against close() and
+    # re-dial _channel_to -> _ensure_jump; without the _closed guard it would
+    # resurrect a brand-new, untracked bastion client (use-after-close, PROXY-2).
+    gw = SSHJumpGateway(host="bastion", username="root", password="pw")
+    gw.open_socket("10.30.0.41", 22)
+    gw.close()
+    with pytest.raises(GatewayError, match="closed"):
+        gw.open_socket("10.30.0.41", 22)
+
+
 def test_missing_credentials_raises_gateway_error(fake_paramiko: _FakeJumpClient) -> None:
     gw = SSHJumpGateway(host="bastion", username="root")  # no password, no pkey
     with pytest.raises(GatewayError):

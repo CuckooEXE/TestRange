@@ -262,6 +262,11 @@ def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
             for s in inner_plan.hypervisor.all_switches
             for n in s.networks
         },
+        # Honor the operator's worker cap on the inner build too; without this the
+        # inner build_phase falls back to RunContext.jobs=None (8-way default) and
+        # silently ignores `--jobs 1` exactly where heavy nested-virt builds make
+        # throttling most relevant (ORCH-35).
+        jobs=ctx.jobs,
         # Share the outer dashboard so a nested host's inner-VM builds report
         # their serial/stage into the same panes (ADR-0029).
         dashboard=ctx.dashboard,

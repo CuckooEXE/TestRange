@@ -186,7 +186,11 @@ def create_vm(
         "serial0": "socket",  # cloud images expect a serial console
         "boot": "order=scsi0",  # the seed ISO is data, not bootable
         "scsi0": (
-            f"{storage}:{spec.os_drive.size_gb}"  # installer-origin: blank, sized
+            # installer-origin: blank, sized. format=qcow2 for the same reason the
+            # blank data disks below carry it — on a dir store a bare `<storage>:N`
+            # allocates RAW, which the build then captures into a .qcow2-named cache
+            # file whose content disagrees with its format label (PVE-59).
+            f"{storage}:{spec.os_drive.size_gb},format=qcow2"
             if installer_origin
             else f"{storage}:0,import-from={os_disk_ref}"  # image-origin: import base
         ),

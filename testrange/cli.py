@@ -29,6 +29,7 @@ from testrange.connect import BackendProfile, load_profile
 from testrange.devices.network import DHCPAddr, StaticAddr
 from testrange.drivers import scheme_for_hypervisor
 from testrange.exceptions import (
+    BuilderError,
     BuildFailedError,
     BuildRequiredError,
     CacheError,
@@ -242,6 +243,12 @@ def _build(args: argparse.Namespace) -> int:
     except BuildFailedError as e:
         _err(f"build failed: {e}")
         return Exit.FAILURE
+    except BuilderError as e:
+        # Parent of BuildFailedError/BuildNotReadyError; also a bare BuilderError
+        # (e.g. a missing optional builder dep raised from a lazy-import helper).
+        # Without this it would escape the verb as a raw traceback (CORE-92).
+        _err(f"build failed: {e}")
+        return Exit.FAILURE
     except OrchestratorError as e:
         _err(f"build failed: {e}")
         return Exit.FAILURE
@@ -291,6 +298,11 @@ def _run(args: argparse.Namespace) -> int:
         _err(f"cache error: {e}")
         return Exit.FAILURE
     except BuildFailedError as e:
+        _err(f"build failed: {e}")
+        return Exit.FAILURE
+    except BuilderError as e:
+        # Parent of BuildFailedError/BuildNotReadyError plus a bare BuilderError
+        # (e.g. a missing optional builder dep): otherwise a raw traceback (CORE-92).
         _err(f"build failed: {e}")
         return Exit.FAILURE
     except OrchestratorError as e:
@@ -344,9 +356,21 @@ def _repl(args: argparse.Namespace) -> int:
                 local={"orch": orch, "plan": plan, "tests": tests},
                 exitmsg="",
             )
+    except DriverError as e:
+        # __init__ only resolves the backend; the actual driver.connect() happens
+        # in __enter__ above, so a connect-time failure (host down, bad creds,
+        # refused connection) lands here, not at construction. Mirror _run/_build
+        # rather than escaping as a raw traceback (CORE-93).
+        _err(f"error: {e}")
+        return Exit.USAGE
     except PreflightError as e:
         _err(f"preflight failed:\n{e}")
         return Exit.USAGE
+    except BuilderError as e:
+        # repl auto-builds on a cache miss (no --require-cache), so the build phase
+        # can raise BuilderError/BuildFailedError here too (CORE-92).
+        _err(f"build failed: {e}")
+        return Exit.FAILURE
     except OrchestratorError as e:
         _err(f"orchestrator failed: {e}")
         return Exit.FAILURE
@@ -581,6 +605,12 @@ def _print_describe(
                     )
                 except CacheMissError:
                     node.add(Text(f"{label}:   {entry!r}  (!) not in cache"))
+                except CacheError as e:
+                    # describe is a passive read-only check; with --cache URL a
+                    # 5xx / unreachable tier raises a non-miss CacheError, which
+                    # must not crash the verb with a raw traceback (CORE-96). The
+                    # HTTP tier translates its own transport errors to CacheError.
+                    node.add(Text(f"{label}:   {entry!r}  (!) cache error: {e}"))
             if creds := getattr(builder, "credentials", ()):
                 names = ", ".join(c.username + ("(admin)" if c.admin else "") for c in creds)
                 node.add(Text(f"creds:  {names}"))

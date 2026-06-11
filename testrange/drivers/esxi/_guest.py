@@ -86,11 +86,19 @@ def make_execute(client: EsxiClient, backend_name: str, credential: Credential |
             workingDirectory=cwd or "",
         )
         try:
-            pid = pm.StartProgramInGuest(vm=vm, auth=auth, spec=spec)
+            # Serialize each discrete guest-ops SOAP call on the client's call_lock
+            # (ADR-0023): the I/O phases drive ONE shared pyVmomi stub concurrently,
+            # and its session/ticket-refresh state is not thread-safe. Held per-op
+            # and released before the poll sleep (and before the byte transfers in
+            # _read) so concurrent guests still overlap — mirrors proxmox/libvirt
+            # _guest.py, which honor the same contract (ESXI-32).
+            with client.call_lock:
+                pid = pm.StartProgramInGuest(vm=vm, auth=auth, spec=spec)
         except Exception as e:
             raise GuestAgentError(f"VMware Tools exec failed on {backend_name!r}: {e}") from e
         while True:
-            procs = pm.ListProcessesInGuest(vm=vm, auth=auth, pids=[pid])
+            with client.call_lock:
+                procs = pm.ListProcessesInGuest(vm=vm, auth=auth, pids=[pid])
             info = procs[0] if procs else None
             if info is not None and info.exitCode is not None:
                 break
@@ -104,7 +112,7 @@ def make_execute(client: EsxiClient, backend_name: str, credential: Credential |
         stderr = _read(client, fm, vm, auth, err)
         rc_raw = _read(client, fm, vm, auth, rc).strip()
         for path in (out, err, rc):
-            _delete(fm, vm, auth, path)
+            _delete(client, fm, vm, auth, path)
         return ExecResult(
             exit_code=int(rc_raw) if rc_raw.isdigit() else int(info.exitCode),
             stdout=stdout,
@@ -116,13 +124,16 @@ def make_execute(client: EsxiClient, backend_name: str, credential: Credential |
 
 
 def _read(client: EsxiClient, fm: Any, vm: Any, auth: Any, path: str) -> bytes:
-    info = fm.InitiateFileTransferFromGuest(vm=vm, auth=auth, guestFilePath=path)
+    # Lock the SOAP call; release before the (slow) HTTP byte transfer (ESXI-32).
+    with client.call_lock:
+        info = fm.InitiateFileTransferFromGuest(vm=vm, auth=auth, guestFilePath=path)
     return client.guest_file_get(info.url)
 
 
-def _delete(fm: Any, vm: Any, auth: Any, path: str) -> None:
+def _delete(client: EsxiClient, fm: Any, vm: Any, auth: Any, path: str) -> None:
     try:
-        fm.DeleteFileInGuest(vm=vm, auth=auth, filePath=path)
+        with client.call_lock:
+            fm.DeleteFileInGuest(vm=vm, auth=auth, filePath=path)
     except Exception as e:  # best-effort temp cleanup; a leaked /tmp file is harmless
         _log.debug("guest temp cleanup of %s failed: %s", path, e)
 
@@ -136,7 +147,8 @@ def make_read_file(
 
     def _read_file(path: str) -> bytes:
         try:
-            info = fm.InitiateFileTransferFromGuest(vm=vm, auth=auth, guestFilePath=path)
+            with client.call_lock:
+                info = fm.InitiateFileTransferFromGuest(vm=vm, auth=auth, guestFilePath=path)
             return client.guest_file_get(info.url)
         except Exception as e:
             raise GuestAgentError(
@@ -156,14 +168,15 @@ def make_write_file(
 
     def _write_file(path: str, data: bytes) -> None:
         try:
-            url = fm.InitiateFileTransferToGuest(
-                vm=vm,
-                auth=auth,
-                guestFilePath=path,
-                fileAttributes=vim.vm.guest.FileManager.FileAttributes(),
-                fileSize=len(data),
-                overwrite=True,
-            )
+            with client.call_lock:
+                url = fm.InitiateFileTransferToGuest(
+                    vm=vm,
+                    auth=auth,
+                    guestFilePath=path,
+                    fileAttributes=vim.vm.guest.FileManager.FileAttributes(),
+                    fileSize=len(data),
+                    overwrite=True,
+                )
             client.guest_file_put(url, data)
         except Exception as e:
             raise GuestAgentError(

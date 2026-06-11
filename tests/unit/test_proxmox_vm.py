@@ -6,12 +6,17 @@ exercised against a tiny duck-typed fake client — no proxmoxer, no real PVE.
 
 from __future__ import annotations
 
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
+from testrange.devices import CPU, DHCPAddr, Memory, OSDrive
+from testrange.devices.network import NetworkIface
+from testrange.drivers.base import VolumeRef
 from testrange.drivers.proxmox import _naming, _vm
 from testrange.exceptions import DriverError
+from testrange.vms import VMSpec
 
 
 class _FakeNodes:
@@ -99,3 +104,36 @@ class TestResolveDisk:
         c = _client((100, "tr-vm-x-web"))
         with pytest.raises(DriverError, match="no PVE VM owns disk ref"):
             _vm.resolve_disk(c, _disk_ref("tr-vm-x-ghost.qcow2"))
+
+
+class TestCreateVmDiskFormat:
+    def test_installer_origin_os_disk_is_qcow2(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # PVE-59: an installer-origin OS disk must carry ,format=qcow2 like the
+        # sibling blank data disks; a bare `local:8` allocates RAW on a dir store,
+        # which the build then caches under a .qcow2 name (format/label mismatch).
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(
+            _vm, "_post_new_vm", lambda _client, config, **_kw: captured.update(config) or 100
+        )
+        monkeypatch.setattr(_vm, "_wait_unlocked", lambda *_a, **_k: None)
+        client = SimpleNamespace(storage="local")
+        spec = VMSpec(
+            name="web",
+            devices=[
+                CPU(1),
+                Memory(512),
+                OSDrive("pool1", 8),
+                NetworkIface("netA", addr=DHCPAddr()),
+            ],
+        )
+        _vm.create_vm(
+            cast(Any, client),
+            "tr-vm-x-web",
+            spec,
+            "plan",
+            os_disk_ref=VolumeRef("unused"),
+            seed_iso_ref=None,
+            network_refs={"netA": "vmbr0"},
+            boot_media_ref=VolumeRef("local:iso/pve.iso"),
+        )
+        assert captured["scsi0"] == "local:8,format=qcow2"

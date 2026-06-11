@@ -126,6 +126,25 @@ class TestWriteKeyfile:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_unlinks_temp_file_on_write_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # ORCH-37: mkstemp creates the file on disk; if os.write fails the caller
+        # never learns the path, so _write_keyfile must reclaim it itself or it
+        # orphans a temp file holding SSH key material in $TMPDIR.
+        import os
+        import tempfile
+        from pathlib import Path
+
+        tmpdir = Path(tempfile.gettempdir())
+        before = set(tmpdir.glob("tr-inner-key-*"))
+
+        def _boom(*_a: Any, **_k: Any) -> int:
+            raise OSError("ENOSPC")
+
+        monkeypatch.setattr(os, "write", _boom)
+        with pytest.raises(OSError, match="ENOSPC"):
+            _write_keyfile(_KEY.priv)
+        assert set(tmpdir.glob("tr-inner-key-*")) == before  # no orphan left behind
+
 
 class TestNestedHandle:
     def test_forwards_to_inner(self) -> None:

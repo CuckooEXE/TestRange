@@ -205,9 +205,16 @@ def render_dnsmasq_conf(
         else:
             lines.append("dhcp-option=6")
 
-    if sidecar.dns:
-        for net in switch.networks:
-            lines.append(f"domain={net.name},{switch.cidr}")
+    if sidecar.dns and switch.networks:
+        # Every Network on a Switch shares one subnet (switch.cidr), but dnsmasq
+        # assigns exactly one DNS domain per address-range. Emitting one `domain=`
+        # per Network produced conflicting directives for the *same* range: dnsmasq
+        # prepends each and first-matches, so only the last-declared label ever
+        # took effect, and some strict builds reject the duplicate outright. Emit a
+        # single canonical domain for the subnet — the last Network's label, i.e.
+        # the one already winning — so the config is honest and deterministic and
+        # the live DHCP-auto-FQDN behavior is unchanged (NET-19).
+        lines.append(f"domain={switch.networks[-1].name},{switch.cidr}")
 
     # VM and network names are interpolated raw below. Each driver enforces
     # its own name-charset rules at its boundary (dnsmasq-directive metachars

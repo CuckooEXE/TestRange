@@ -267,7 +267,12 @@ class Orchestrator:
         except BaseException:
             # Same rationale: an interrupt during preflight/initialize (before the
             # inner try) or the inner handler's re-raise must still release the
-            # driver connection rather than leak it.
+            # driver connection rather than leak it. Because __enter__ raised,
+            # Python never calls __exit__, so this is the only place the signal
+            # handlers installed above get restored — mirror build()'s finally so
+            # a failed entry (e.g. a routine PreflightError) does not leave
+            # SIGTERM/SIGHUP rewired to our handler for the rest of the process.
+            self._restore_signal_handlers()
             self.ctx.driver.disconnect()
             raise
 

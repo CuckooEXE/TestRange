@@ -131,6 +131,29 @@ class TestCleanupRun:
         with pytest.raises(StateError):
             cleanup_run("nonexistent")
 
+    def test_drained_run_reclaimed_without_backend(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        fake_driver: _FakeDriver,
+    ) -> None:
+        # ORCH-36: a drained (empty-resource) run has nothing to destroy, so
+        # finalizing it is pure local file I/O. cleanup_run must NOT connect to the
+        # backend for it — otherwise a backend-down run can never be reclaimed,
+        # defeating the recovery tool in the exact failure mode it exists for.
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        store = StateStore(tmp_path / "testrange" / "runs" / "r-drained")
+        store.initialize(
+            run_id="r-drained", plan_name="x", driver_class="FakeDriver", driver_uri="fake:///x"
+        )
+        store.release()  # owner exited; no resources recorded → drained
+        fake_driver.fail_connect = True  # backend is unreachable
+        result = cleanup_run("r-drained")
+        assert result.destroyed == ()
+        assert result.errors == ()
+        assert fake_driver.connected is False  # never connected
+        assert not store.exists()  # dir fully reclaimed
+
     def test_partial_failure_keeps_state(
         self,
         populated_state: tuple[str, StateStore],

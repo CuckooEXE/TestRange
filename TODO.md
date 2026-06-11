@@ -559,9 +559,41 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (334)
+## Done (358)
 
 ### CORE
+
+- [x] **CORE-91** · `bugfix` — libvirt build-result serial socket is world-connectable (cache-poison vector)
+
+  > Adversarial-review sweep (2026-06-11). The `mode='connect'` serial socket sat `0o777` in a `0o755` (world-listable) `/tmp` dir with no peer check, so a local co-tenant could connect ahead of QEMU and write a forged `TESTRANGE-RESULT: ok`. Orchestrator runs unprivileged (can't chown to libvirt-qemu), so: dir → `0o711` (traversable, not listable) and an `SO_PEERCRED` filter in `accept_serial` (allow self/root/libvirt-qemu/qemu). Tests in `test_libvirt_conn.py`. _(done: 2026-06-11)_
+
+- [x] **CORE-92** · `bugfix` — `build`/`run`/`repl` leak `BuilderError`/`BuildNotReadyError` as a raw traceback
+
+  > Adversarial-review sweep (2026-06-11). The verbs caught `BuildFailedError` but not its parent `BuilderError` (nor `BuildNotReadyError`), so e.g. running without the `[cloudinit]` extra dumped a Python stack trace instead of a clean `Exit.FAILURE`. Added an `except BuilderError` to `_build`/`_run`/`_repl`. _(done: 2026-06-11)_
+
+- [x] **CORE-93** · `bugfix` — `repl` doesn't catch `DriverError` around `connect()` in `__enter__`
+
+  > Adversarial-review sweep (2026-06-11). `__init__` only resolves the backend; the real `driver.connect()` runs in `__enter__`, but the `with o as orch:` block caught `PreflightError`/`OrchestratorError`, not `DriverError`. A host-down/bad-creds connect escaped as a traceback (unlike `_run`/`_build`). Added `except DriverError → Exit.USAGE`. _(done: 2026-06-11)_
+
+- [x] **CORE-94** · `bugfix` — ProgressReporter leaks the rich `Live` on a failed download
+
+  > Adversarial-review sweep (2026-06-11). `esxi/_client.folder_get` and `proxmox/_client.sftp_get` only called `finish()` on success, so a mid-transfer exception left the operator's terminal in live mode (hidden cursor, stale bar). Made `ProgressReporter` a context manager with an idempotent `finish()`; the download sites now release it on every exit path. _(done: 2026-06-11)_
+
+- [x] **CORE-95** · `bugfix` — `StaticAddr` char-splits a bare-string `dns`
+
+  > Adversarial-review sweep (2026-06-11). `dns="8.8.8.8"` (a str is an iterable of chars) normalized to `('8','.',…)` and failed with the misleading "entry '8' is not a valid IPv4". Reject a bare str at the boundary with an actionable "wrap it in a tuple" message. _(done: 2026-06-11)_
+
+- [x] **CORE-96** · `bugfix` — `describe`/`repl` leak a raw traceback on an HTTP cache-tier error
+
+  > Adversarial-review sweep (2026-06-11). `_print_describe` only guarded `CacheMissError`; with `--cache URL`, a 5xx/unreachable tier raised a non-miss `CacheError` (or a raw `requests` exception) out of the passive verb. Contained `CacheError` in describe and translated transport-layer `requests` errors to `CacheError` in `HttpCache._get/_put/_delete`. _(done: 2026-06-11)_
+
+- [x] **CORE-97** · `bugfix` — libvirt guest exec-status poll leaks a raw error past the GuestAgentError contract
+
+  > Adversarial-review sweep (2026-06-11). The `guest-exec-status` poll loop sat outside the `try`→`GuestAgentError`, so a mid-poll `libvirtError` (or a `None` reply → `AttributeError`) escaped un-normalized, breaking callers that catch `GuestAgentError`. Wrapped the poll body; the timeout raise stays outside so it isn't double-wrapped. _(done: 2026-06-11)_
+
+- [x] **CORE-98** · `bugfix` — `Credential.username` unvalidated → guest-shell injection surface
+
+  > Adversarial-review sweep (2026-06-11). The username is interpolated into guest-side shell (e.g. nested `usermod -aG … <username>`) but was only checked non-empty. Constrain it to a POSIX-safe charset (`^[a-zA-Z_][a-zA-Z0-9_-]*$`) at the trust boundary. _(done: 2026-06-11)_
 
 - [x] **CORE-89** · `test` — smoke-test every `examples/*.py` via `describe` (a structural-regression net for the example set) (review fix) _(done: 2026-06-09)_
 
@@ -594,6 +626,26 @@ on 2026-06-06.
   > Two run-phase bugs, both confirmed by mounting/booting the captured disk (qemu-nbd + a serial-forced overlay). (1) `vmbr0` binds `bridge-ports enp1s0`, a PCI-slot-derived name; the build NIC and run NIC sit at different slots, so the run NIC came up under a different name and vmbr0's port was missing → static unreachable (same class as ESXI-18). (2) PVE's first-boot service is gated on the sentinel `/var/lib/proxmox-first-boot/pending-first-boot-setup`, removed in `ExecStartPost` AFTER our script — but our `systemctl poweroff` pre-empts it, so the sentinel survived and first-boot RE-RAN at run, powering the node off ~10s in. FIX: first-boot bakes `/etc/systemd/network/10-testrange-mgmt.link` (`Driver=virtio_net` → `Name=network_interface`, slot-independent rename) AND `rm -f`s the PVE sentinel before poweroff so first-boot runs once. answer.toml untouched (an earlier interface-name-pinning attempt was reverted — the PVE 9.2 installer chokes on it). config_hash folds the first-boot digest (cache-busts). Live-confirmed: node stays up, NIC enp0s2→enp1s0, vmbr0 UP 10.50.0.100/24, full run green (user-confirmed).
 
 ### ORCH
+
+- [x] **ORCH-34** · `bugfix` — signal handlers leaked (never restored) on the `__enter__` bring-up failure path
+
+  > Adversarial-review sweep (2026-06-11). `__enter__` installs SIGTERM/SIGHUP handlers before bring-up; on any failure (notably a routine `PreflightError`) Python never calls `__exit__`, so the prior handlers were never restored — the process was left with SIGTERM rewired to raise `KeyboardInterrupt`. Restore on the outer failure path too, mirroring `build()`'s finally. _(done: 2026-06-11)_
+
+- [x] **ORCH-35** · `bugfix` — nested inner-VM build/run drops the `--jobs` worker cap
+
+  > Adversarial-review sweep (2026-06-11). `_inner_build_ctx` (and the inner run-phase `Orchestrator`) didn't pass `jobs=ctx.jobs`, so a nested GuestHypervisor's inner build/run fell back to the 8-way default and silently ignored `--jobs 1`. Thread `jobs` through both. _(done: 2026-06-11)_
+
+- [x] **ORCH-36** · `bugfix` — `cleanup_run` needs a reachable backend to reclaim a drained run
+
+  > Adversarial-review sweep (2026-06-11). `cleanup_run` connected to the backend before checking for anything to destroy, so a drained (empty-resource) `state.json` could never be reclaimed while the backend was down — the exact failure mode cleanup exists for. Short-circuit: an empty resource set finalizes with local file I/O only. _(done: 2026-06-11)_
+
+- [x] **ORCH-37** · `bugfix` — nested `_write_keyfile` orphans the temp keyfile on `os.write`/`chmod` failure
+
+  > Adversarial-review sweep (2026-06-11). `mkstemp` creates the file; the `finally` only closed the fd, so a failing write/chmod left a `0600` temp file holding SSH key material in `$TMPDIR` (the path is never returned, so no caller could clean it). Unlink on any failure between mkstemp and return. _(done: 2026-06-11)_
+
+- [x] **ORCH-38** · `bugfix` — `StateStore.remove` leaves a phantom run dir when a stale `.partial` is present
+
+  > Adversarial-review sweep (2026-06-11). `remove()` unlinked `state.json/.pid/.lock` but not its own atomic-write temp files; a leftover `state.json.partial` (crash mid-write) made the `rmdir` silently fail, phantoming the dir in `cleanup --list` forever. Also unlink the `.partial` temps. _(done: 2026-06-11)_
 
 - [x] **ORCH-33** · `bugfix` — build-phase Ctrl-C / SIGTERM bypasses teardown (BaseException not caught) _(done: 2026-06-08)_
 
@@ -1357,6 +1409,10 @@ on 2026-06-06.
 
 ### PVE
 
+- [x] **PVE-59** · `bugfix` — installer-origin OS disk allocated without `format=qcow2` (qcow2 cache-contract break)
+
+  > Adversarial-review sweep (2026-06-11). The installer-origin `scsi0` was a bare `{storage}:{size}` — on a `dir` store PVE allocates that RAW, which the build then caches under a `.qcow2` name (content/label mismatch). The sibling data-disk branch was already fixed; mirror it: append `,format=qcow2`. _(done: 2026-06-11)_
+
 - [x] **PVE-57** · `feat` — `examples/pve_node.py`: stand up + leak a live PVE node via `ProxmoxAnswerBuilder` on libvirt _(done: 2026-06-09)_
 
   > Live-certified the Proxmox *builder* end-to-end on `libvirt-local`: builds PVE 9.2.2 installer-origin (UEFI/q35, blank `vda` + prepared installer ISO + `PROXMOX-AIS` answer seed + serial build-result), reboots into the installed system, run boot comes up reachable at `10.55.0.100` and `leak()`s. Unique resource names + a private `10.55.0.0/24` mgmt subnet keep it robust against other same-day leaked labs. Surfaced + fixed F1 (pmxcfs offline during first-boot → storage config moved to the run phase) and the libvirt **Secure-Boot** fix (F3 — UEFI domains now select a non-SB OVMF so the captured disk's removable-media bootloader runs). Closes the FULL-build slice of **BUILD-13** and stands up the **REL-12** `pve-live` host.
@@ -1703,6 +1759,14 @@ on 2026-06-06.
 
 ### ESXI
 
+- [x] **ESXI-32** · `bugfix` — `EsxiClient.call_lock` created + documented but never acquired
+
+  > Adversarial-review sweep (2026-06-11). The lock (ADR-0023) was declared but no esxi module ever held it, so under `--jobs>1` guest-ops ran unserialized on the shared pyVmomi stub (session/ticket-refresh race) — while libvirt/proxmox siblings honor the same contract. Wrap each guest-ops SOAP call in `_guest.py` with `call_lock`, released before the poll sleep and byte transfers. _(done: 2026-06-11)_
+
+- [x] **ESXI-33** · `bugfix` — `EsxiClient.connect` leaks the SOAP session on inventory-resolution failure
+
+  > Adversarial-review sweep (2026-06-11). `SmartConnect` opens an authenticated session; if `RetrieveContent`/`_resolve_inventory` then fails (e.g. a datastore not yet mounted during a nested-ESXi boot), the session was never `Disconnect()`ed — and `wait_esxi_ready`'s retry loop leaked one per poll. Close on failure before re-raising. _(done: 2026-06-11)_
+
 - [x] **ESXI-24** · `chore` — trim the public `allow_tcp_forwarding` docstring to consumer altitude; drop the dead `_firstboot` default (review fix) _(done: 2026-06-09)_
 
 - [x] **ESXI-23** · `test` — mixed NAT + non-NAT uplink preflight regression (only the NAT switch demands a pNIC) (review fix) _(done: 2026-06-09)_
@@ -2048,6 +2112,18 @@ on 2026-06-06.
 
 ### BUILD
 
+- [x] **BUILD-25** · `bugfix` — proxmox `prepare_iso` never unlinks `out_path` before xorriso
+
+  > Adversarial-review sweep (2026-06-11). xorriso's `-outdev` refuses to clobber an existing image (exits non-zero); the docstring promised overwrite but the ESXi sibling's pre-`unlink` was missing on the PVE path. Added `out_path.unlink(missing_ok=True)`. _(done: 2026-06-11)_
+
+- [x] **BUILD-26** · `bugfix` — `prepare_boot_media` ISO cache is not concurrency-safe (TOCTOU)
+
+  > Adversarial-review sweep (2026-06-11). Two same-config build misses derive the same `prepared` path and can both pass `if not prepared.exists()`, then race on the output file → torn ISO (ESXi) / build abort (PVE). New `materialize_prepared` helper builds into a fresh temp dir and `Path.replace`s atomically (last-writer-wins); both builders route through it. Also subsumes BUILD-25's clobber. _(done: 2026-06-11)_
+
+- [x] **BUILD-27** · `bugfix` — `_toml_str` doesn't escape control chars other than `\n\r\t`
+
+  > Adversarial-review sweep (2026-06-11). A root password carrying e.g. a vertical tab (or DEL) landed raw in a TOML basic string, which the PVE auto-installer parser rejects. Escape every U+0000–U+001F and U+007F as `\uXXXX`. _(done: 2026-06-11)_
+
 - [x] **BUILD-24** · `test` — harden the b64 build-log decode tests (distinct-byte truncation, lone-trailing-char `rem==1`) (review fix) _(done: 2026-06-09)_
 
 - [x] **BUILD-23** · `bugfix` — decode the base64 build-log tail before printing; tolerate interleaved serial chatter so a corrupt block never dumps a raw blob _(done: 2026-06-09)_
@@ -2203,6 +2279,10 @@ on 2026-06-06.
   > Live-found 2026-06-02: render_kickstart indented the %firstboot subshell body incl. the cat<<'KEYEOF' heredoc terminator ('  KEYEOF'). busybox plain heredoc only closes on column-0 'KEYEOF', so it swallowed the rest of the script (chmod/poweroff/TESTRANGE-RESULT echo) -> install completes to DCUI but never reports/poweroffs. Never caught (full install never run before). Fix: flat (un-indented) subshell body in _esxi_prepare.render_kickstart; also fixes leading-space-in-authorized_keys. Regression test added. DONE.
 
 ### NET
+
+- [x] **NET-19** · `bugfix` — `render_dnsmasq_conf` emits duplicate per-subnet `domain=` for a multi-Network DNS switch
+
+  > Adversarial-review sweep (2026-06-11). All Networks on a Switch share one CIDR, but dnsmasq assigns one domain per address-range — one `domain=` per Network produced conflicting directives (only the last took effect; some strict builds reject the duplicate). Emit a single canonical `domain=` (the last/previously-winning label), behavior-preserving for the live cert. _(done: 2026-06-11)_
 
 - [x] **NET-8** · `feat` — per-switch uplink static address (generalize build_uplink_addr)
   _(blocks: PVE-51; done: 2026-05-31)_
@@ -2645,6 +2725,10 @@ on 2026-06-06.
 
 ### CACHE
 
+- [x] **CACHE-8** · `bugfix` — `HttpCache.fetch` doesn't close the streamed response on the error paths
+
+  > Adversarial-review sweep (2026-06-11). On the 404 / non-ok early returns the `stream=True` response was never closed, holding the connection checked out (a `ResourceWarning` against the project's own convention). Wrap the streamed `_get` in `contextlib.closing`. _(done: 2026-06-11)_
+
 - [x] **CACHE-7** · `bugfix` — durability docstring vs missing fsync; perm + manager lock-bypass
   _(done: 2026-06-01)_
 
@@ -2682,7 +2766,21 @@ on 2026-06-06.
 
   > WON'T DO (2026-05-24): the local-cache eviction story is being absorbed into BACKEND-6/ADR-0011's content-addressed image cache (list_images/evict_image GC + cross-backend cascade-on-local-eviction); a standalone LRU+size-cap is not pursued separately. Original: Bound the local cache; evict least-recently-used entries past a size cap.
 
+### PROXY
+
+- [x] **PROXY-2** · `bugfix` — `SSHJumpGateway.close` can be defeated by an in-flight local-forward connection
+
+  > Adversarial-review sweep (2026-06-11). A `_serve` thread that wins the accept() race against `close()` re-dials `_ensure_jump`, which (seeing `_client is None`) reconnects a brand-new, untracked bastion client (use-after-close). Added a `_closed` flag set first in `close()` and checked in `_ensure_jump`. Latent today (no production caller of `open_local_forward`). _(done: 2026-06-11)_
+
 ### COMM
+
+- [x] **COMM-6** · `bugfix` — `SSHCommunicator.execute` can hang forever on `recv_exit_status`
+
+  > Adversarial-review sweep (2026-06-11). paramiko's `recv_exit_status()` ignores the channel timeout and blocks forever if the peer sends EOF (read returns) but never delivers an exit status (half-open channel) — no run/test-phase watchdog covers it. Bound it: poll `exit_status_ready()` against the deadline and raise `CommunicatorError` on a miss. _(done: 2026-06-11)_
+
+- [x] **COMM-7** · `bugfix` — gateway socket leaked on every failed connect attempt in the SSH retry loop
+
+  > Adversarial-review sweep (2026-06-11). paramiko doesn't close a user-supplied `sock` on connect failure, so a slow-booting guest piled up open `direct-tcpip` channels on the bastion across retries. Close the spent gateway sock on each failed attempt. _(done: 2026-06-11)_
 
 - [x] **COMM-5** · `bugfix` — SSH write_file unverified + stderr drain wedge
   _(done: 2026-06-01)_

@@ -73,8 +73,16 @@ class SSHJumpGateway(GuestGateway):
     port: int = 22
     _client: Any = field(default=None, init=False, repr=False)
     _listeners: list[socket.socket] = field(default_factory=list, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def _ensure_jump(self) -> Any:
+        if self._closed:
+            # A local-forward _serve thread can win the accept() race against
+            # close() and dial _channel_to -> _ensure_jump after teardown; without
+            # this guard it would reconnect a brand-new, untracked bastion client
+            # that nothing ever tears down (use-after-close). Refuse instead
+            # (PROXY-2); _serve catches this and unwinds on the next accept().
+            raise GatewayError(f"SSHJumpGateway({self.username}@{self.host}) is closed")
         if self._client is not None:
             return self._client
         paramiko = _import_paramiko()
@@ -167,6 +175,9 @@ class SSHJumpGateway(GuestGateway):
             right.close()
 
     def close(self) -> None:
+        # Set first so a _serve thread mid-dial can't reconnect through
+        # _ensure_jump after we've torn the client down (PROXY-2).
+        self._closed = True
         for listener in self._listeners:
             listener.close()  # unblocks the accept() loop; pumps unwind on channel close
         self._listeners.clear()

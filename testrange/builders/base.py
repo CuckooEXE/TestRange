@@ -33,8 +33,10 @@ hypervisor type.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -64,6 +66,32 @@ class NativeAgentProvision:
 
     packages: tuple[Apt, ...]
     enable_commands: tuple[str, ...]
+
+
+def materialize_prepared(prepared: Path, build: Callable[[Path], None]) -> None:
+    """Race-safe, atomic materialization of a prepared boot medium.
+
+    An installer-origin builder caches its transformed ISO at a content-keyed
+    path behind a check-then-act ``if not prepared.exists()`` guard (see
+    :meth:`Builder.prepare_boot_media`). Under the parallel build phase, two
+    workers building VMs with an *identical* builder config derive the **same**
+    ``prepared`` path and can both pass that guard, then race on the output file
+    — yielding a torn ISO, or (xorriso's ``-outdev`` refuses to clobber an
+    existing image) a hard build abort.
+
+    ``build`` writes the ISO to a fresh, unique temp path on the same filesystem;
+    we then ``os.replace`` it onto ``prepared``. The rename is atomic and
+    last-writer-wins, so a concurrent miss never observes a partial file, and the
+    temp path being fresh means ``build`` always writes from nothing — which also
+    removes the proxmox-prepare clobber failure (BUILD-25/26).
+    """
+    tmpdir = Path(tempfile.mkdtemp(dir=prepared.parent, prefix=".tr-prep-"))
+    try:
+        tmp = tmpdir / prepared.name
+        build(tmp)
+        tmp.replace(prepared)  # atomic on the same filesystem (os.replace under the hood)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class Builder(ABC):

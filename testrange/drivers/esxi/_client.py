@@ -150,11 +150,14 @@ class EsxiClient:
         self._resource_pool: Any | None = None
         self._datacenter: Any | None = None
         self._datastore: Any | None = None
-        # Serializes mutation of the SOAP session's shared state across the I/O
-        # phases' worker threads (ADR-0023): pyVmomi's stub is not guaranteed
-        # thread-safe under a session-ticket refresh, and the host network-system
-        # reconfigure (AddVirtualSwitch/AddPortGroup) is a host-global mutation.
-        # Held per-op, never across a task wait, so slow transfers still overlap.
+        # Serializes each discrete guest-ops SOAP call across the I/O phases'
+        # worker threads (ADR-0023): pyVmomi's stub is not guaranteed thread-safe
+        # under a session-ticket refresh. Acquired in _guest.py around the
+        # StartProgram/ListProcesses/InitiateFileTransfer/DeleteFile calls (the
+        # siblings honor the same contract); held per-op and released before the
+        # poll sleep and the byte transfers, so concurrent guests still overlap.
+        # Host network-system reconfigure (AddVirtualSwitch/AddPortGroup) is a
+        # separate concern guarded by the driver's _state_lock, not this lock.
         self.call_lock = threading.RLock()
 
     @property
@@ -238,8 +241,18 @@ class EsxiClient:
                 f"ESXi connect to {self._conn.host}:{self._conn.port} as "
                 f"{self._conn.user!r} failed: {e}"
             ) from e
-        self._content = self._si.RetrieveContent()
-        self._resolve_inventory()
+        try:
+            self._content = self._si.RetrieveContent()
+            self._resolve_inventory()
+        except Exception:
+            # SmartConnect already opened an authenticated server-side session. If
+            # RetrieveContent / inventory resolution then fails (vCenter target,
+            # host count, or a datastore not yet mounted during a nested-ESXi
+            # boot), close it before propagating — otherwise wait_esxi_ready's
+            # retry loop leaks one ESXi session per poll until the host's session
+            # limit is hit (ESXI-33).
+            self.close()
+            raise
         _log.info(
             "connected to ESXi %s (%s) datastore %s",
             self._conn.host,
@@ -419,14 +432,16 @@ class EsxiClient:
             ) as resp:
                 resp.raise_for_status()
                 total = int(resp.headers.get("Content-Length", 0))
-                reporter = ProgressReporter(total, f"download {dest_path.name}", log=_log)
-                done = 0
-                with dest_path.open("wb") as fh:
-                    for chunk in resp.iter_content(chunk_size=_CHUNK):
-                        fh.write(chunk)
-                        done += len(chunk)
-                        reporter.update(done)
-                reporter.finish()
+                # `with` so a mid-stream write/iter failure still releases the rich
+                # Live (cursor, live region) instead of corrupting the terminal on
+                # the way out to the except below (CORE-94).
+                with ProgressReporter(total, f"download {dest_path.name}", log=_log) as reporter:
+                    done = 0
+                    with dest_path.open("wb") as fh:
+                        for chunk in resp.iter_content(chunk_size=_CHUNK):
+                            fh.write(chunk)
+                            done += len(chunk)
+                            reporter.update(done)
         except Exception as e:
             raise DriverError(
                 f"datastore download of {Path(ds_path).name} from {self._conn.host} failed: {e}"

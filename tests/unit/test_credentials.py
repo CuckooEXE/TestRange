@@ -32,6 +32,18 @@ class TestPosixCred:
         with pytest.raises(ValueError):
             PosixCred("", password="x")
 
+    def test_metacharacter_username_rejected(self) -> None:
+        # The username is interpolated into guest-side shell (e.g. the nested
+        # `usermod -aG ... <username>` command); a metacharacter username must be
+        # rejected at the boundary so it can't inject a command (CORE-98).
+        for bad in ("foo; rm -rf /", "a b", "x$(id)", "u`whoami`", "-bad"):
+            with pytest.raises(ValueError, match="POSIX-safe"):
+                PosixCred(bad, password="x")
+
+    def test_ordinary_usernames_accepted(self) -> None:
+        for name in ("root", "ubuntu", "svc-1", "_build", "Admin0"):
+            assert PosixCred(name, password="x").username == name
+
 
 class TestSSHKeyGenerate:
     def test_returns_three_views(self) -> None:

@@ -163,6 +163,17 @@ def cleanup_run(
             errors=(),
         )
 
+    # A drained run (teardown forgot every resource but its final bookkeeping
+    # failed, leaving an empty state.json — see teardown.py) has nothing to
+    # destroy, so finalizing it is pure local file I/O. Do NOT connect: cleanup
+    # is the recovery path, and demanding a reachable backend to reclaim an
+    # empty ledger means a backend-down run can never be cleared, defeating the
+    # tool in the exact failure mode it exists for (ORCH-36).
+    if not state.resources:
+        store.set_phase(PHASE_DONE)
+        store.remove()
+        return CleanupResult(run_id=run_id, destroyed=(), skipped=(), errors=())
+
     driver = _instantiate_driver(state.driver_class, state.driver_uri)
     driver.connect()
     try:

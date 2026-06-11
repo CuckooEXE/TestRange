@@ -38,7 +38,7 @@ from testrange.builders._esxi_prepare import (
     prepare_iso,
     render_kickstart,
 )
-from testrange.builders.base import Builder, NativeAgentProvision
+from testrange.builders.base import Builder, NativeAgentProvision, materialize_prepared
 from testrange.cache.entry import CacheEntry
 from testrange.credentials.base import Credential
 from testrange.credentials.posix import PosixCred
@@ -208,7 +208,9 @@ class ESXiKickstartBuilder(Builder):
         ).hexdigest()[:16]
         prepared = media_path.parent / f"{media_path.stem}-esxi-{digest}.iso"
         if not prepared.exists():
-            prepare_iso(media_path, prepared, kickstart=kickstart)
+            materialize_prepared(
+                prepared, lambda tmp: prepare_iso(media_path, tmp, kickstart=kickstart)
+            )
         return prepared
 
     def render_seed(

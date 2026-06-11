@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from time import monotonic
+from types import TracebackType
 from typing import Protocol
 
 from rich.console import Console
@@ -76,6 +77,7 @@ class ProgressReporter:
         self._last_emit = self._start
         self._last_bytes = 0
         self._transferred = 0
+        self._finished = False
         # The rich bar owns the terminal path; off a terminal it stays None and
         # update()/finish() fall through to the periodic-INFO log instead.
         self._progress: Progress | None = None
@@ -106,8 +108,29 @@ class ProgressReporter:
         if now - self._last_emit >= self._interval:
             self._emit(now, final=False)
 
+    def __enter__(self) -> ProgressReporter:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        # Always release the terminal — __init__ already called Progress.start()
+        # (cursor hidden, live region active), so a transfer that raises must still
+        # tear that down or it leaves the operator's terminal corrupted (CORE-94).
+        self.finish()
+
     def finish(self) -> None:
-        """Close the bar (TTY) or emit the final summary line (non-TTY), unconditionally."""
+        """Close the bar (TTY) or emit the final summary line (non-TTY).
+
+        Idempotent: safe to call again (e.g. an explicit call plus the context
+        manager exit) — a second call is a no-op.
+        """
+        if self._finished:
+            return
+        self._finished = True
         if self._progress is not None and self._task is not None:
             self._progress.update(self._task, completed=self._transferred, refresh=True)
             self._progress.stop()

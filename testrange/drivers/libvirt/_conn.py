@@ -24,9 +24,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import os
+import pwd
 import socket
+import struct
 import tempfile
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +40,32 @@ from testrange._log import get_logger
 from testrange.exceptions import DriverError
 
 _log = get_logger(__name__)
+
+
+def _peer_uid(conn: socket.socket) -> int:
+    """The uid of the process on the other end of a connected AF_UNIX socket."""
+    creds = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+    _pid, uid, _gid = struct.unpack("3i", creds)
+    return int(uid)
+
+
+def _allowed_serial_peer_uids() -> set[int]:
+    """The uids permitted to connect to a build-result serial socket.
+
+    The socket sits 0o777 in a world-traversable ``/tmp`` because the
+    orchestrator runs unprivileged and cannot chown it to the qemu service
+    account, so an SO_PEERCRED filter — not the filesystem mode — is what stops a
+    local co-tenant connecting ahead of QEMU and spoofing a ``TESTRANGE-RESULT:
+    ok`` to poison the build cache (CORE-91). Allowed: ourselves
+    (``qemu:///session`` runs QEMU as us), root, and the system qemu service
+    account (``qemu:///system`` — ``libvirt-qemu`` on Debian, ``qemu`` on RHEL).
+    """
+    uids = {os.getuid(), 0}
+    for name in ("libvirt-qemu", "qemu"):
+        with contextlib.suppress(KeyError):
+            uids.add(pwd.getpwnam(name).pw_uid)
+    return uids
+
 
 # The wrapper scheme TestRange persists into state.json. The libvirt connect URI
 # is itself a URI (with its own scheme/query), so it is url-quoted *inside* this
@@ -255,7 +285,11 @@ class LibvirtClient:
         with self.call_lock:
             if self._serial_dir is None:
                 d = Path(tempfile.mkdtemp(prefix="tr-lv-serial-", dir="/tmp"))
-                d.chmod(0o755)
+                # 0o711, not 0o755: the daemon connects to a known exact socket
+                # path (from the domain XML) and only needs to *traverse* the dir,
+                # not *list* it. Dropping o+r denies a local co-tenant the cheap
+                # enumeration of our socket filenames (CORE-91).
+                d.chmod(0o711)
                 self._serial_dir = d
             return self._serial_dir
 
@@ -289,9 +323,32 @@ class LibvirtClient:
         if entry is None:
             raise DriverError(f"no serial listener open for {backend_name!r}")
         srv, _path = entry
-        srv.settimeout(timeout)
-        conn, _ = srv.accept()
-        return conn
+        # Filter on the peer's uid: a local co-tenant can connect to the 0o777
+        # socket ahead of QEMU and sit in the listen backlog, then write a forged
+        # `TESTRANGE-RESULT: ok` the build phase would trust. Drop any connection
+        # whose peer isn't QEMU (or us/root) and keep waiting within the deadline
+        # so the spoof can't poison the cache (CORE-91).
+        allowed = _allowed_serial_peer_uids()
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"no serial connection from an allowed uid for {backend_name!r} "
+                    f"within {timeout:.0f}s"
+                )
+            srv.settimeout(remaining)
+            conn, _ = srv.accept()
+            uid = _peer_uid(conn)
+            if uid in allowed:
+                return conn
+            _log.warning(
+                "serial %r: rejecting connection from unexpected uid %d (allowed: %s)",
+                backend_name,
+                uid,
+                sorted(allowed),
+            )
+            conn.close()
 
     def close_serial_listener(self, backend_name: str) -> None:
         """Close + unlink ``backend_name``'s serial listener. Tolerant of absence."""
