@@ -107,11 +107,13 @@ def reboot_persists_on_disk_state(orch: OrchestratorHandle) -> None:
     vm = orch.vms["churn"]
     driver = orch.driver
     com = vm.communicator
-    com.write_file("/root/persist", b"survives\n")
+    # admin-writable path: ESXi guest-ops run as the declared admin, not root
+    # (CORE-60); QGA roots can write here just as well (ESXI-38).
+    com.write_file("/home/admin/persist", b"survives\n")
     driver.shutdown_vm(vm.backend_name, timeout=120.0)
     driver.start_vm(vm.backend_name)
     com.close()
-    assert com.read_file("/root/persist") == b"survives\n", "on-disk state lost across reboot"
+    assert com.read_file("/home/admin/persist") == b"survives\n", "on-disk state lost across reboot"
 
 
 def oversized_os_drive_grew_on_first_boot(orch: OrchestratorHandle) -> None:
@@ -126,8 +128,8 @@ def native_write_handles_payload_over_the_agent_cap(orch: OrchestratorHandle) ->
     # native channel — exercises the driver's chunked write (REL-33).
     com = orch.vms["churn"].communicator
     blob = bytes(i % 256 for i in range(256 * 1024))  # 256 KiB, every byte value
-    com.write_file("/root/big.bin", blob)
-    readback = com.read_file("/root/big.bin")
+    com.write_file("/home/admin/big.bin", blob)
+    readback = com.read_file("/home/admin/big.bin")
     assert readback == blob, (
         f"large native write corrupted: wrote {len(blob)} bytes, read {len(readback)}"
     )
