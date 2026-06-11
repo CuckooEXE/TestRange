@@ -53,6 +53,7 @@ from testrange.preflight import PreflightCheck, PreflightReport
 from testrange.state.cleanup import (
     cleanup_all,
     cleanup_run,
+    forget_run,
     format_cleanup_results,
     format_run_list,
     list_runs,
@@ -383,6 +384,23 @@ def _repl(args: argparse.Namespace) -> int:
 
 def _cleanup(args: argparse.Namespace) -> int:
     try:
+        if args.forget:
+            # Forgetting drops bookkeeping without touching a backend — an
+            # explicitly per-run act, so it never combines with the sweeping or
+            # destructive modes.
+            if args.all or args.list or args.dry_run:
+                _err("error: --forget takes a single <run-id> and no other mode flags")
+                return Exit.USAGE
+            if not args.run_id:
+                _err("error: --forget requires <run-id>")
+                return Exit.USAGE
+            forgotten = forget_run(args.run_id)
+            names = f": {', '.join(forgotten)}" if forgotten else ""
+            _out(
+                f"forgot run {args.run_id}: {len(forgotten)} ledger entr"
+                f"{'y' if len(forgotten) == 1 else 'ies'} dropped, backend untouched{names}"
+            )
+            return Exit.OK
         if args.list:
             # Read-only: enumerate runs and their status, tear down nothing.
             _out(format_run_list(list_runs()))
@@ -865,6 +883,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="print what would be destroyed without touching the backend",
+    )
+    p_cleanup.add_argument(
+        "--forget",
+        action="store_true",
+        help="drop <run-id>'s ledger without touching any backend (for a backend that is permanently gone)",
     )
     p_cleanup.set_defaults(func=_cleanup)
 

@@ -204,6 +204,41 @@ def cleanup_run(
     )
 
 
+def forget_run(run_id: str, *, root: Path | None = None) -> tuple[str, ...]:
+    """Drop a run's ledger WITHOUT touching its backend (ORCH-40).
+
+    The explicit escape hatch for a run whose backend is permanently gone —
+    typically a nested hypervisor whose outer teardown already destroyed the
+    host, taking every inner resource with it (``nested_phase`` relies on
+    exactly that reclamation). :func:`cleanup_run` demands a reachable backend
+    before it will finalize a non-empty ledger, so such a run dir lingers
+    forever. Forgetting is deliberate (per-run, never swept by ``--all``) and
+    loud: every dropped ledger entry is logged and returned so the operator
+    sees exactly what bookkeeping they vouched for.
+
+    Tolerant of a corrupt or missing ``state.json`` — disposing of broken
+    bookkeeping is part of the point — but the run dir itself must exist, and
+    a live owner still refuses (its own ``__exit__`` owns teardown).
+    """
+    run_dir = (root or default_state_root()) / "runs" / run_id
+    if not run_dir.is_dir():
+        raise StateError(f"no run dir at {run_dir}")
+    store = StateStore(run_dir)
+    store.require_dead()
+    forgotten: list[str] = []
+    if store.exists():
+        try:
+            state = store.read()
+        except StateError as e:
+            _log.warning("forgetting run %s with an unreadable state.json: %s", run_id, e)
+        else:
+            for r in state.resources:
+                _log.warning("forgetting %s %s (backend untouched)", r.kind, r.backend_name)
+                forgotten.append(r.backend_name)
+    store.remove()
+    return tuple(forgotten)
+
+
 def cleanup_all(
     *,
     root: Path | None = None,

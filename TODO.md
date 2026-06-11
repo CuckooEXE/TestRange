@@ -74,7 +74,7 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (55)
+## Ready (54)
 
 ### CORE
 
@@ -159,10 +159,6 @@ on 2026-06-06.
   > Once ESXi is certified working against the generic corpus, add `tests/plans/esxi/` coverage for ESXi-specific behavior (controller-bus selection, VMXNET3, datastore specifics) that a generic plan can't express — the per-driver additive tier, mirroring PVE-46. Depends ESXI-13. Created 2026-06-01. _(repointed off the deleted `examples/capabilities-esxi.py` — REL-40.)_
 
 ### ORCH
-
-- [ ] **ORCH-40** · `feat` — `cleanup` cannot finalize a run whose backend is permanently gone
-
-  > Found sweeping stray run dirs (2026-06-11): four ledgers pointed at DEAD nested ESXi hosts (a guest of an already-destroyed lab, and the deleted esxi-manager node) — their resources died with their hypervisors, but `cleanup` insists on connecting the recorded driver before finalizing, so it errors forever (`ESXi connect ... timed out`) and the dirs linger. Disposed of manually (`rm -rf` of the four run dirs after verifying each `driver_uri` targeted a dead host: 3× 10.50.0.85, 1× 192.168.199.206). Product gap: a `cleanup --forget <run-id>` (explicit, per-run, loud) that drops the ledger without touching a backend — for exactly the nested case where the outer teardown already reclaimed everything (nested_phase relies on this; the dirs are pure bookkeeping). Created 2026-06-11.
 
 - [ ] **ORCH-39** · `chore` — board/PLAN say multi-hypervisor islands (ORCH-1) are DONE; the code at HEAD disagrees
 
@@ -418,7 +414,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (384)
+## Done (385)
 
 ### CORE
 
@@ -489,6 +485,10 @@ on 2026-06-06.
   > Two run-phase bugs, both confirmed by mounting/booting the captured disk (qemu-nbd + a serial-forced overlay). (1) `vmbr0` binds `bridge-ports enp1s0`, a PCI-slot-derived name; the build NIC and run NIC sit at different slots, so the run NIC came up under a different name and vmbr0's port was missing → static unreachable (same class as ESXI-18). (2) PVE's first-boot service is gated on the sentinel `/var/lib/proxmox-first-boot/pending-first-boot-setup`, removed in `ExecStartPost` AFTER our script — but our `systemctl poweroff` pre-empts it, so the sentinel survived and first-boot RE-RAN at run, powering the node off ~10s in. FIX: first-boot bakes `/etc/systemd/network/10-testrange-mgmt.link` (`Driver=virtio_net` → `Name=network_interface`, slot-independent rename) AND `rm -f`s the PVE sentinel before poweroff so first-boot runs once. answer.toml untouched (an earlier interface-name-pinning attempt was reverted — the PVE 9.2 installer chokes on it). config_hash folds the first-boot digest (cache-busts). Live-confirmed: node stays up, NIC enp0s2→enp1s0, vmbr0 UP 10.50.0.100/24, full run green (user-confirmed).
 
 ### ORCH
+
+- [x] **ORCH-40** · `feat` — `cleanup` cannot finalize a run whose backend is permanently gone
+
+  > Found sweeping stray run dirs (2026-06-11): four ledgers pointed at DEAD nested ESXi hosts (a guest of an already-destroyed lab, and the deleted esxi-manager node) — their resources died with their hypervisors, but `cleanup` insists on connecting the recorded driver before finalizing, so it errors forever (`ESXi connect ... timed out`) and the dirs linger. Disposed of manually (`rm -rf` of the four run dirs after verifying each `driver_uri` targeted a dead host: 3× 10.50.0.85, 1× 192.168.199.206). Product gap: a `cleanup --forget <run-id>` (explicit, per-run, loud) that drops the ledger without touching a backend — for exactly the nested case where the outer teardown already reclaimed everything (nested_phase relies on this; the dirs are pure bookkeeping). Created 2026-06-11. IMPLEMENTED 2026-06-11 as `cleanup --forget <run-id>`: per-run only (rejects --all/--list/--dry-run combos), refuses a live owner, never instantiates a driver, tolerates a corrupt state.json (disposing of broken bookkeeping is the point), and reports every dropped ledger entry by name. Unit-covered in test_cleanup_cli.TestForget; running-tests.md updated. _(done: 2026-06-11)_
 
 - [x] **ORCH-34** · `bugfix` — signal handlers leaked (never restored) on the `__enter__` bring-up failure path
 
