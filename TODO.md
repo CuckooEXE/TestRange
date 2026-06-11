@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (8)
+## Doing (7)
 
 ### CORE
 
@@ -73,12 +73,6 @@ on 2026-06-06.
   > Three pillars: (1) a certification & regression corpus in `tests/plans/{generic,libvirt,proxmox,esxi}/` — one portable PLAN + a few TESTS per file (docstring states WHAT it stresses + WHY), run via `testrange run --profile <name> tests/plans/<tier>/<plan>.py` and NOT collected/executed by pytest (named without a `test_` prefix, no `__init__.py`); generic tier runs on every backend, per-driver tiers pin the driver Hypervisor + that backend's concrete device types. This IS the new backend certification (it supersedes examples/capabilities.py, which is slated for deletion). (2) Unmanaged, scripted nested host fleet in `tools/hypervisor-hosts/` — each hypervisor stood up as a RAW libvirt VM (virt-install + kickstart/answer), independent of TestRange (no GuestHypervisor — validating TestRange with TestRange is circular); tr-egress NAT gives build VMs egress, SUPERSEDING the env-block on ESXI-11/12/13 + BUILD-13. (3) 1.0.0 = all three backends green on the full e2e suite (hard gate) + public-API freeze (flip major_version_zero=false, /api-diff baseline).
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
-
-### PVE
-
-- [ ] **PVE-60** · `test` — nested-PVE cert leg: resurrect the pve_node standup, leak a PVE 9 node; corpus runs against it
-
-  > Cross-backend nested-cert sweep, PVE leg (siblings BACKEND-15, ESXI-34). `px-cloud` (40.160.34.83) is no longer PVE — the host was re-imaged to ESXi — so the proxmox driver currently has NO live cert target. Resurrect `examples/pve_node.py` (deleted in fafae9c; the ProxmoxAnswerBuilder installer-origin standup with the load-bearing knobs: uefi/q35 NIC naming, EFI removable-media fallback, run switch `mgmt=True` + static `.100`, run-phase `pvesm set local --content ...,images,import`) as `tools/standup/pve_node.py`, leak the node, point a `pve-nested` proxmox profile at its static mgmt addr, run `tests/plans/generic/*` + `tests/plans/proxmox/*` against it, file + fix findings, `testrange cleanup` the leaked run. Created 2026-06-11.
 
 ## Ready (54)
 
@@ -420,7 +414,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (383)
+## Done (384)
 
 ### CORE
 
@@ -1273,6 +1267,10 @@ on 2026-06-06.
   > ESXi-on-KVM installer-origin builds (install+reboot+%firstboot) exceed the 600s default build-VM serial-result timeout. Added --build-timeout SECONDS to run, threaded run_tests(build_timeout_s=) -> Orchestrator. DONE 2026-06-02.
 
 ### PVE
+
+- [x] **PVE-60** · `test` — nested-PVE cert leg: resurrect the pve_node standup, leak a PVE 9 node; corpus runs against it
+
+  > Cross-backend nested-cert sweep, PVE leg (siblings BACKEND-15, ESXI-34). `px-cloud` (40.160.34.83) is no longer PVE — the host was re-imaged to ESXi — so the proxmox driver currently has NO live cert target. Resurrect `examples/pve_node.py` (deleted in fafae9c; the ProxmoxAnswerBuilder installer-origin standup with the load-bearing knobs: uefi/q35 NIC naming, EFI removable-media fallback, run switch `mgmt=True` + static `.100`, run-phase `pvesm set local --content ...,images,import`) as `tools/standup/pve_node.py`, leak the node, point a `pve-nested` proxmox profile at its static mgmt addr, run `tests/plans/generic/*` + `tests/plans/proxmox/*` against it, file + fix findings, `testrange cleanup` the leaked run. Created 2026-06-11. DONE 2026-06-11: tools/standup/pve_node.py (resurrected, corpus-duty sizing) leaked a PVE 9 node at 10.55.0.100 on the FIRST attempt — the answer-builder pipeline held, including under the new ESXI-18 build-NIC MAC selection (the answer file filters by NIC NAME, unaffected). Corpus 14/14 GREEN against `pve-nested` (all 13 generic incl. the SSH plans through the always-on SSHJumpGateway — PROXY-3's close()-reopen live-proven gateway-bound — plus proxmox/devices); snapshot_chain exercised the PVE-61 shutdown-after-vmstate lock-retry in its hot path. ZERO new findings. Leaked resources cleaned up post-cert. _(done: 2026-06-11)_
 
 - [x] **PVE-61** · `bugfix` — `shutdown_vm` has no config-flock retry: a `mem=True` snapshot's lingering vmstate flock fails the next shutdown
 
