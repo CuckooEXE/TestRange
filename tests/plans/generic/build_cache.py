@@ -79,11 +79,19 @@ PLAN = Plan(
                     credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
                     packages=[Apt("nginx"), Apt("python3-pip"), Pip("cowsay")],
                     post_install_commands=(
-                        "mkfs.ext4 -F -L data-b /dev/vdb",
-                        "mkfs.ext4 -F -L data-c /dev/vdc",
+                        # Portable data-disk setup. The generic HardDrive enumerates as
+                        # /dev/vd* on virtio backends (libvirt, proxmox) but /dev/sd* on
+                        # ESXi (no virtio), so discover the two non-root whole disks
+                        # instead of hardcoding a node — these run as lines in one shared
+                        # bash script, so `set --` carries to the mkfs/mount lines. mkfs by
+                        # label; the run boot mounts by LABEL= (fstab below), node-agnostic.
+                        'os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1)',
+                        'set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)',
+                        'mkfs.ext4 -F -L data-b "/dev/$1"',
+                        'mkfs.ext4 -F -L data-c "/dev/$2"',
                         "mkdir -p /srv/b /srv/c",
-                        "mount /dev/vdb /srv/b",
-                        "mount /dev/vdc /srv/c",
+                        'mount "/dev/$1" /srv/b',
+                        'mount "/dev/$2" /srv/c',
                         "sh -c 'echo disk-b > /srv/b/which'",
                         "sh -c 'echo disk-c > /srv/c/which'",
                         "sh -c 'echo \"LABEL=data-b /srv/b ext4 defaults 0 2\" >> /etc/fstab'",
