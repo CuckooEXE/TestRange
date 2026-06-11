@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (9)
+## Doing (10)
 
 ### CORE
 
@@ -30,6 +30,14 @@ on 2026-06-06.
   > Module layout mirrors drivers/proxmox/: _client/_profile/_naming/_net/_storage/_vm/devices/_guest/_serial/driver.
   >
   > Children: CORE-60 (credential kwarg prereq), spikes ESXI-S1/S2/S3, core ESXI-1..9, ADR + cert tail ESXI-10..15. Pairs with COMM-2 (VMware Tools communicator) and PROXY-1 (console proxy = guest_gateway). Created 2026-06-01.
+
+- [ ] **ESXI-26** · `bugfix` — ESXi VM NICs bind to the network backend name, not the realized `trp-*` portgroup
+
+  > Found running `tests/plans/` against a nested ESXi node: `tests/plans/esxi/devices.py` fails its build phase with `apt: Temporary failure resolving 'deb.debian.org'`. Root cause is NOT egress (the sidecar's uplink NIC leases + resolves fine) and NOT an env limit — it's a portgroup-name mismatch. The orchestrator threads the network **backend name** (`tr-build_network-<run>-build-net`) into `create_vm`'s `network_refs` (`provision.py:115`, kept as the backend name because teardown recomputes `trp-*` from it), but `_net.create_network` realizes the Network as a portgroup named `trp-<hash>` (`_naming.portgroup_name`). So the build VM + sidecar internal NICs bind to a portgroup that does not exist → ESXi `connected=False, status=unrecoverableError` → guest `NO-CARRIER` → no DHCP lease → no resolver. Libvirt is immune (realized name == backend name); the ESXi uplink NIC works because it carries the realized `trx-*` ref. Fix: `ESXiDriver.create_vm` resolves each `network_refs` value through the `_portgroup_by_network` map it already builds in `create_network` (`.get(ref, ref)` — uplink ref passes through). Unit regression in `test_esxi_vm.py`; end-to-end proof is the now-green `tests/plans/esxi/devices.py`. _(done: 2026-06-10)_
+
+- [ ] **ESXI-27** · `test` — generic plans hardcode virtio `/dev/vd*` device nodes; not portable to ESXi (scsi → `/dev/sd*`)
+
+  > Found running the generic corpus against a nested ESXi node: `tests/plans/generic/build_cache.py` (lines 82-85) does `mkfs.ext4 -F -L data-b /dev/vdb` / `mount /dev/vdb`, which fails on ESXi with `The file /dev/vdb does not exist` → `BuildFailedError` — note egress is fine here (apt + pip + build-essential + cowsay install cleanly). ESXi has no virtio, so the generic `HardDrive` enumerates as `/dev/sd*`, not `/dev/vd*`. The plan only ever ran on virtio backends (libvirt + proxmox both present `HardDrive` as `/dev/vd*`), so the hardcoded node was latent non-portability that violates the "a generic plan must run on every backend" contract (CLAUDE.md §4). Fix: discover the data-disk nodes portably — `os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1); set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)` then mkfs/mount `/dev/$1`,`/dev/$2` (shared bash script, so `set --` carries); run-mount already by `LABEL=`. Works on vd*/sd*/nvme. (Only build_cache hardcoded a device node; the other generic plans fail on the agent, CORE-90.) Created 2026-06-10.
 
 - [ ] **ESXI-20** · `test` — finish ESXiKickstartBuilder + stand up/leak a nested ESXi node on libvirt + certify `tests/plans/` against it
 
@@ -138,13 +146,17 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (53)
+## Ready (54)
 
 ### CORE
 
 - [ ] **CORE-3** · `feat` — `pytest-testrange` plugin
 
   > Expose ranges + tests as pytest fixtures/items.
+
+- [ ] **CORE-90** · `feat` — `NativeCommunicator` auto-provisions the per-backend native agent (qemu-guest-agent vs open-vm-tools)
+
+  > Found running the generic corpus against a nested ESXi node: every generic plan using `NativeCommunicator` hardcodes `Apt("qemu-guest-agent")` + `systemctl enable --now qemu-guest-agent`, which fails on ESXi (no virtio-serial; ESXi's native agent is open-vm-tools), so the whole generic corpus only ever ran on virtio/QEMU backends. The runtime native channel is already backend-aware (each driver's `native_guest_*`); only the *install* is plan-authored and non-portable. **Design (Option A, stovepipe-preserving):** a driver hook `native_agent_provision() -> NativeAgentProvision | None` (sibling of `native_guest_execute`; ABC default `None`; libvirt/proxmox → qemu-guest-agent, esxi → open-vm-tools), brokered by the orchestrator's build phase into the builder **only when `vm.communicator` is a `NativeCommunicator`** — the orchestrator is the one component allowed to know both the driver (agent identity) and the communicator (agent wanted). Builder gains an opaque `native_agent` kwarg (never learns the backend), exactly as it already brokers `addressing`; agent installs/enables fold into `config_hash` (per-backend cache key) ahead of the plan's own packages. Generic + backend plans then DROP the hardcoded agent lines and certify identically on all three backends. Reverses the now-stale PLAN.md §20 "don't auto-inject" note (stovepipe still held — orchestrator brokers, builder never peeks). Full design + diff sketch on file (workflow, 2026-06-10). Created 2026-06-10.
 
 ### PVE
 
