@@ -65,6 +65,71 @@ def test_guest_op_serializes_soap_call_but_not_transfer() -> None:
     assert seen["transfer"] == 0  # transfer ran with the lock released
 
 
+def _fake_client(pm: Any, fm: Any, guest_file_get: Any = None) -> Any:
+    return SimpleNamespace(
+        call_lock=_RecordingLock(),
+        vim=MagicMock(),
+        content=SimpleNamespace(
+            guestOperationsManager=SimpleNamespace(processManager=pm, fileManager=fm)
+        ),
+        require_vm=lambda _name: SimpleNamespace(),
+        guest_file_get=guest_file_get,
+    )
+
+
+class _ExitedPM:
+    """Process manager whose program starts and immediately reports exit 0."""
+
+    def StartProgramInGuest(self, *, vm: Any, auth: Any, spec: Any) -> int:
+        return 1234
+
+    def ListProcessesInGuest(self, *, vm: Any, auth: Any, pids: Any) -> Any:
+        return [SimpleNamespace(exitCode=0)]
+
+
+def test_exec_poll_fault_is_translated_to_guest_agent_error() -> None:
+    # ESXI-35: NativeCommunicator's reconnect loop retries only GuestAgentError
+    # (communicators/native.py), so a raw pyVmomi fault from the
+    # ListProcessesInGuest poll must surface as GuestAgentError, not escape raw.
+    class _PM(_ExitedPM):
+        def ListProcessesInGuest(self, *, vm: Any, auth: Any, pids: Any) -> Any:
+            raise RuntimeError("vix fault: VMware Tools is not running")
+
+    client = _fake_client(_PM(), MagicMock())
+    execute = _guest.make_execute(cast(Any, client), "tr-vm-x", PosixCred("u", password="p"))
+    with pytest.raises(GuestAgentError, match="exec poll failed on 'tr-vm-x'"):
+        execute(("true",))
+
+
+def test_exec_output_transfer_fault_is_translated_to_guest_agent_error() -> None:
+    # ESXI-35: same contract for the exec-output temp-file reads — a raw fault
+    # from InitiateFileTransferFromGuest must surface as GuestAgentError.
+    class _FM:
+        def InitiateFileTransferFromGuest(self, *, vm: Any, auth: Any, guestFilePath: str) -> Any:
+            raise RuntimeError("vim.fault.GuestOperationsUnavailable")
+
+    client = _fake_client(_ExitedPM(), _FM())
+    execute = _guest.make_execute(cast(Any, client), "tr-vm-x", PosixCred("u", password="p"))
+    with pytest.raises(GuestAgentError, match="failed on 'tr-vm-x'"):
+        execute(("true",))
+
+
+def test_exec_output_http_get_fault_is_translated_to_guest_agent_error() -> None:
+    # ESXI-35: the HTTPS byte transfer is the second leg of _read; a raw
+    # requests-level failure must also surface as GuestAgentError.
+    class _FM:
+        def InitiateFileTransferFromGuest(self, *, vm: Any, auth: Any, guestFilePath: str) -> Any:
+            return SimpleNamespace(url="http://host/x")
+
+    def _guest_file_get(_url: str) -> bytes:
+        raise RuntimeError("connection reset by peer")
+
+    client = _fake_client(_ExitedPM(), _FM(), _guest_file_get)
+    execute = _guest.make_execute(cast(Any, client), "tr-vm-x", PosixCred("u", password="p"))
+    with pytest.raises(GuestAgentError, match="failed on 'tr-vm-x'"):
+        execute(("true",))
+
+
 def test_auth_requires_a_credential() -> None:
     with pytest.raises(GuestAgentError, match="require a guest credential"):
         _guest._auth(cast(Any, None), None, "tr-vm-x")

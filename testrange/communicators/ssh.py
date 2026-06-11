@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any
 from testrange._log import get_logger
 from testrange.communicators.base import Communicator, ExecResult
 from testrange.credentials.posix import PosixCred
-from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError
+from testrange.exceptions import CommunicatorAlreadyBoundError, CommunicatorError, GatewayError
 
 if TYPE_CHECKING:
     from testrange.gateways.base import GuestGateway
@@ -216,7 +216,16 @@ class SSHCommunicator(Communicator):
                 # ourselves on failure so a slow-booting guest can't exhaust the
                 # bastion's channel window over many warmup attempts (COMM-7).
                 if self._gateway is not None:
-                    sock = self._gateway.open_socket(self._host, self._port)
+                    try:
+                        sock = self._gateway.open_socket(self._host, self._port)
+                    except GatewayError as e:
+                        # A GatewayError is a configuration fault (missing creds,
+                        # unparseable key), not a booting guest — retrying cannot
+                        # help. Fail loud as the one boundary exception type
+                        # callers are promised (PROXY-3).
+                        raise CommunicatorError(
+                            f"SSH gateway to {self._host}:{self._port} failed: {e}"
+                        ) from e
                     kwargs["sock"] = sock
                 client.connect(**kwargs)
                 self._client = client
@@ -338,6 +347,11 @@ class SSHCommunicator(Communicator):
             with sftp.open(path, "rb") as f:
                 data: bytes = f.read()
                 return data
+        except OSError as e:
+            # Mirror write_file: a missing path or permission failure arrives as
+            # paramiko's raw OSError subclasses — wrap them so callers see one
+            # exception type (CommunicatorError), not transport internals.
+            raise CommunicatorError(f"SFTP read of {path!r} on {self._host} failed: {e}") from e
         finally:
             sftp.close()
 

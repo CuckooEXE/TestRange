@@ -78,6 +78,9 @@ class _FakeSFTP:
 
     def open(self, path: str, mode: str) -> _FakeSFTPFile:
         self.opened.append((path, mode))
+        if "r" in mode and path not in self.files:
+            # paramiko raises FileNotFoundError (an OSError) for a missing path.
+            raise FileNotFoundError(path)
         return self.files.setdefault(path, _FakeSFTPFile())
 
     def putfo(self, fl: Any, path: str, confirm: bool = True) -> None:
@@ -325,6 +328,42 @@ class TestGateway:
         assert client.connect_args["hostname"] == "10.30.0.41"
         assert gw.opened == [("10.30.0.41", 22)]
 
+    def test_close_then_execute_redials_through_the_gateway(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # The ABC close() contract is non-terminal: the next call reconnects —
+        # THROUGH the gateway on a gatewayed backend. The real SSHJumpGateway is
+        # reopenable after close() (PROXY-3); this pins the communicator side:
+        # a fresh gateway dial, not a ride on the supposedly-closed session.
+        _, client = fake_paramiko
+        gw = _FakeGateway()
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=gw)
+        c.execute(["true"])
+        assert gw.closed is False
+        c.close()
+        assert gw.closed is True
+        assert c.execute(["true"]).ok
+        assert len(gw.opened) == 2, "reconnect did not redial the gateway"
+        assert client.connect_args["sock"] is gw.socks[-1]
+
+    def test_gateway_config_fault_raises_communicator_error(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # A GatewayError is a config fault, not a booting guest: it must not be
+        # retried for 180s, and it must surface as the single boundary exception
+        # type (PROXY-3), not leak as a raw GatewayError.
+        from testrange.exceptions import GatewayError
+
+        class _BrokenGateway(_FakeGateway):
+            def open_socket(self, host: str, port: int) -> Any:
+                raise GatewayError("no creds")
+
+        c = SSHCommunicator("u")
+        c.bind(host="10.30.0.41", credential=PosixCred("u", password="p"), gateway=_BrokenGateway())
+        with pytest.raises(CommunicatorError, match="gateway"):
+            c.execute(["true"])
+
     def test_no_gateway_means_direct_connect(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         _, client = fake_paramiko
         c = SSHCommunicator("u")
@@ -380,6 +419,16 @@ class TestSFTP:
         c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
         c.write_file("/tmp/foo", b"data")
         assert client.sftp.files["/tmp/foo"].written == b"data"
+
+    def test_read_file_missing_raises_communicator_error(
+        self, fake_paramiko: tuple[Any, _FakeClient]
+    ) -> None:
+        # paramiko's FileNotFoundError must be wrapped like write_file's errors,
+        # so callers see one exception type instead of transport internals (COMM-9).
+        c = SSHCommunicator("u")
+        c.bind(host="10.0.0.1", credential=PosixCred("u", password="p"))
+        with pytest.raises(CommunicatorError, match="SFTP read"):
+            c.read_file("/no/such/file")
 
     def test_write_file_truncated_raises(self, fake_paramiko: tuple[Any, _FakeClient]) -> None:
         # A short transfer (remote size != source size) must fail loud, not be

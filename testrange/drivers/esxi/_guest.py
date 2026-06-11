@@ -97,8 +97,17 @@ def make_execute(client: EsxiClient, backend_name: str, credential: Credential |
         except Exception as e:
             raise GuestAgentError(f"VMware Tools exec failed on {backend_name!r}: {e}") from e
         while True:
-            with client.call_lock:
-                procs = pm.ListProcessesInGuest(vm=vm, auth=auth, pids=[pid])
+            try:
+                # Like every per-call site here, translate raw pyVmomi faults to
+                # GuestAgentError: NativeCommunicator's reconnect loop retries
+                # only GuestAgentError (communicators/native.py), so a raw fault
+                # would escape execute() instead of being retried (ESXI-35).
+                with client.call_lock:
+                    procs = pm.ListProcessesInGuest(vm=vm, auth=auth, pids=[pid])
+            except Exception as e:
+                raise GuestAgentError(
+                    f"VMware Tools exec poll failed on {backend_name!r}: {e}"
+                ) from e
             info = procs[0] if procs else None
             if info is not None and info.exitCode is not None:
                 break
@@ -108,9 +117,9 @@ def make_execute(client: EsxiClient, backend_name: str, credential: Credential |
                     f"on {backend_name!r}"
                 )
             time.sleep(_POLL_INTERVAL_S)
-        stdout = _read(client, fm, vm, auth, out)
-        stderr = _read(client, fm, vm, auth, err)
-        rc_raw = _read(client, fm, vm, auth, rc).strip()
+        stdout = _read(client, fm, vm, auth, out, backend_name)
+        stderr = _read(client, fm, vm, auth, err, backend_name)
+        rc_raw = _read(client, fm, vm, auth, rc, backend_name).strip()
         for path in (out, err, rc):
             _delete(client, fm, vm, auth, path)
         return ExecResult(
@@ -123,11 +132,19 @@ def make_execute(client: EsxiClient, backend_name: str, credential: Credential |
     return _execute
 
 
-def _read(client: EsxiClient, fm: Any, vm: Any, auth: Any, path: str) -> bytes:
-    # Lock the SOAP call; release before the (slow) HTTP byte transfer (ESXI-32).
-    with client.call_lock:
-        info = fm.InitiateFileTransferFromGuest(vm=vm, auth=auth, guestFilePath=path)
-    return client.guest_file_get(info.url)
+def _read(client: EsxiClient, fm: Any, vm: Any, auth: Any, path: str, backend_name: str) -> bytes:
+    try:
+        # Lock the SOAP call; release before the (slow) HTTP byte transfer
+        # (ESXI-32). Both legs translate to GuestAgentError — the only exception
+        # NativeCommunicator's reconnect loop retries (communicators/native.py)
+        # (ESXI-35).
+        with client.call_lock:
+            info = fm.InitiateFileTransferFromGuest(vm=vm, auth=auth, guestFilePath=path)
+        return client.guest_file_get(info.url)
+    except Exception as e:
+        raise GuestAgentError(
+            f"VMware Tools exec-output read of {path!r} failed on {backend_name!r}: {e}"
+        ) from e
 
 
 def _delete(client: EsxiClient, fm: Any, vm: Any, auth: Any, path: str) -> None:
