@@ -210,16 +210,49 @@ class TestKickstart:
         assert "vim-cmd hostsvc/enable_ssh" in ks
         assert "--ruleset-id sshServer" in ks
 
-    def test_allow_tcp_forwarding_appends_sshd_config_when_requested(self) -> None:
-        # ESXI-22: the guest_gateway SSH-jumps to guests over a direct-tcpip
-        # channel, which ESXi's sshd refuses unless AllowTcpForwarding is on. When
-        # requested (and SSH is the transport) %firstboot appends the directive
-        # idempotently to /etc/ssh/sshd_config (persisted by the MAC block's
-        # auto-backup.sh).
+    def test_allow_tcp_forwarding_replaces_in_local_sh_when_requested(self) -> None:
+        # ESXI-22/36: the guest_gateway SSH-jumps to guests over a direct-tcpip
+        # channel, which ESXi's sshd refuses unless AllowTcpForwarding is on.
+        # The edit must (a) ride local.sh — ESXi regenerates sshd_config from
+        # the ConfigStore after %firstboot, reverting a firstboot edit — and
+        # (b) REPLACE the shipped 'AllowTcpForwarding no' line, since sshd
+        # takes the first match and an append would lose; sshd is restarted so
+        # the edit is live.
         ks = _builder(allow_tcp_forwarding=True)._render_kickstart()
-        assert "AllowTcpForwarding yes" in ks
-        assert "/etc/ssh/sshd_config" in ks
-        assert "grep -q" in ks  # idempotent: append only if not already present
+        lines = ks.splitlines()
+        rc_lo, rc_hi = (
+            lines.index("cat > /etc/rc.local.d/local.sh <<'RCEOF'"),
+            lines.index("RCEOF"),
+        )
+        block = lines[rc_lo:rc_hi]
+        assert "grep -vi '^AllowTcpForwarding' /etc/ssh/sshd_config > /etc/ssh/sshd_config.tr" in (
+            block
+        )
+        assert "echo 'AllowTcpForwarding yes' >> /etc/ssh/sshd_config.tr" in block
+        assert "mv /etc/ssh/sshd_config.tr /etc/ssh/sshd_config" in block
+        assert "/etc/init.d/SSH restart" in block
+        # REPLACE shape (ESXI-36): the stock local.sh ends with `exit 0`, so an
+        # append puts everything after it — dead on every boot. Own shebang +
+        # exit 0 + executable bit, mirroring esxi-manager.sh.
+        assert "cat >> /etc/rc.local.d/local.sh" not in ks
+        assert block[1] == "#!/bin/sh"
+        assert lines[rc_hi - 1] == "exit 0"
+        assert "chmod +x /etc/rc.local.d/local.sh" in lines
+
+    def test_firstboot_persists_etc_and_reboots_once(self) -> None:
+        # ESXI-36: /etc is a ramdisk overlay AND rc.local.d has already run by
+        # the time %firstboot fires — so the key/local.sh must be auto-backed-up
+        # and the node rebooted exactly once for local.sh (sshd enable) to
+        # execute. Order is load-bearing: sentinel -> backup -> reboot, all
+        # after the RCEOF heredoc closes.
+        ks = _builder()._render_kickstart()
+        lines = ks.splitlines()
+        guard = lines.index("if [ ! -f /etc/vmware/.tr-rebooted ]; then")
+        assert lines.index("RCEOF") < guard
+        sentinel = lines.index("touch /etc/vmware/.tr-rebooted")
+        backup = guard + 1 + lines[guard + 1 :].index("/sbin/auto-backup.sh")
+        reboot = guard + 1 + lines[guard + 1 :].index("reboot")
+        assert guard < sentinel < backup < reboot < lines.index("fi")
 
     def test_no_tcp_forwarding_by_default(self) -> None:
         # Opt-in (minimal/secure default): the default builder does not widen sshd.
@@ -248,53 +281,44 @@ class TestKickstart:
         assert _KEY.auth_line in lines  # key written without leading whitespace
 
     def test_no_ssh_block_without_key(self) -> None:
-        # A keyless root is legal only for a non-SSH transport (enable_ssh=False);
-        # %firstboot still carries the vmk0 MAC-follow fix (ESXI-18/19: it rides the
-        # image, not the transport). enable_ssh=True with no key is rejected at
-        # construction — see TestConstruction.test_keyless_root_with_ssh_rejected.
+        # A keyless root is legal only for a non-SSH transport (enable_ssh=False).
+        # enable_ssh=True with no key is rejected at construction — see
+        # TestConstruction.test_keyless_root_with_ssh_rejected.
         b = _builder(credentials=[PosixCred("root", password="VMware1!")], enable_ssh=False)
         ks = b._render_kickstart()
         assert "%firstboot --interpreter=busybox" in ks
-        assert "/Net/FollowHardwareMac" in ks
         assert "enable_ssh" not in ks
         assert "/etc/ssh/keys-root/authorized_keys" not in ks
         # the build-result emission lives in %post and is independent of the key.
         assert "vsish -e set /system/log" in ks
         assert "poweroff -f" in ks
 
-    def test_enable_ssh_false_omits_ssh_but_keeps_mac_fix(self) -> None:
+    def test_enable_ssh_false_omits_ssh_entirely(self) -> None:
         # ESXI-19: SSH is provisioned per *transport*, not credential shape. With a
         # keyed root cred but enable_ssh=False (non-SSH communicator), the key is
-        # NOT baked and sshd stays off — but the MAC-follow fix is still emitted.
+        # NOT baked, sshd stays off, and no local.sh block is emitted at all.
         ks = _builder(enable_ssh=False)._render_kickstart()
         assert "%firstboot --interpreter=busybox" in ks
-        assert "/Net/FollowHardwareMac" in ks
         assert _KEY.auth_line not in ks
         assert "/etc/ssh/keys-root/authorized_keys" not in ks
         assert "enable_ssh" not in ks
+        assert "rc.local.d" not in ks
 
-    def test_follow_hardware_mac_one_shot_reboot_in_local_sh(self) -> None:
-        # ESXI-18: vmk0 follows the run NIC's hardware MAC on the second boot.
-        # FollowHardwareMac is read at vmk0 creation and a live down/up won't move
-        # it, so local.sh sets the flag, persists (auto-backup.sh), and reboots —
-        # guarded by a sentinel so it fires exactly once. Ordering is load-bearing.
+    def test_no_mac_follow_block_in_local_sh(self) -> None:
+        # ESXI-18 is solved at the BUILD NIC (the install boot wears the run
+        # NIC's MAC — orchestrator/build_phase._build_nic_for), so the
+        # live-disproven FollowHardwareMac block must be gone: a reboot restores
+        # vmk0's pinned MAC from esx.conf instead of re-creating it. (The
+        # one-shot %firstboot reboot that remains exists for local.sh/sshd
+        # activation — ESXI-36 — not for the MAC.)
         ks = _builder()._render_kickstart()
         lines = ks.splitlines()
-        i = lines.index
-        assert "if [ ! -f /etc/vmware/.trfollowhwmac ]; then" in lines
-        set_i = i("esxcli system settings advanced set -o /Net/FollowHardwareMac -i 1")
-        touch_i = i("touch /etc/vmware/.trfollowhwmac")
-        backup_i = i("/sbin/auto-backup.sh")
-        # the *local.sh* reboot — the first one after the flag set, NOT the
-        # top-level install-directive `reboot` near the top of the ks.cfg.
-        reboot_i = set_i + 1 + lines[set_i + 1 :].index("reboot")
-        # set the flag -> drop the sentinel -> persist -> reboot, in that order.
-        assert set_i < touch_i < backup_i < reboot_i < i("fi")
-        # the guarded reboot precedes the sshd enable: boot 1 reboots before it,
-        # boot 2 (sentinel present) skips the block and enables sshd.
-        assert reboot_i < i("vim-cmd hostsvc/enable_ssh")
-        # whole thing rides local.sh inside %firstboot, never the %post build result.
-        assert ks.index("%post") < ks.index("FollowHardwareMac")
+        assert "FollowHardwareMac" not in ks
+        assert ".trfollowhwmac" not in ks
+        # local.sh carries the key-gated sshd enable.
+        assert "vim-cmd hostsvc/enable_ssh" in lines
+        # the local.sh block rides %firstboot, never the %post build result.
+        assert ks.index("%post") < ks.index("vim-cmd hostsvc/enable_ssh")
 
 
 class TestLicense:

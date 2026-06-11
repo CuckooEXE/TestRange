@@ -271,7 +271,8 @@ class TestEsxiInner:
         ks = guest.builder.build_kickstart()
         assert "enable_ssh" not in ks
         assert "/etc/ssh/keys-root/authorized_keys" not in ks
-        assert "/Net/FollowHardwareMac" in ks  # MAC fix is transport-independent
+        # ESXI-18 lives at the build NIC now; no guest-side MAC block remains.
+        assert "/Net/FollowHardwareMac" not in ks
 
     def test_synthesize_binding_picks_esxi_profile_no_keyfile(
         self, monkeypatch: pytest.MonkeyPatch
