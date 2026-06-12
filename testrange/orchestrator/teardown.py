@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from testrange._log import get_logger
-from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.context import GraphContext
 from testrange.state.schema import PHASE_CLEANUP, PHASE_DONE
 
 _log = get_logger(__name__)
 
 
-def teardown(ctx: RunContext) -> None:
+def teardown(ctx: GraphContext) -> None:
     """LIFO teardown using state.json as the source of truth."""
     # Marking the phase is best-effort bookkeeping; if it fails (disk full,
     # perms) we must STILL attempt the destroys below, or in-flight resources

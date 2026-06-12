@@ -26,7 +26,6 @@ from __future__ import annotations
 import threading
 import urllib.parse
 from collections.abc import Generator, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -88,7 +87,6 @@ if TYPE_CHECKING:  # pragma: no cover
     from testrange.vms.spec import VMSpec
 
 
-@dataclass(frozen=True)
 class LibvirtHypervisor(Hypervisor):
     """Topology-only scheme marker selecting the ``libvirt`` backend (CORE-19).
 
@@ -244,7 +242,7 @@ class LibvirtDriver(HypervisorDriver):
         cannot verify nesting — we ``warning``-log the gap rather than skip it
         silently, because that is precisely the case an inner VM degrades to TCG.
         """
-        if not any(vm.spec.cpu.nested for vm in plan.hypervisor.vms):
+        if not any(vm.spec.cpu.nested for vm in plan.hypervisor.declared_vms):
             return ()
         host = urllib.parse.urlparse(self._conn.libvirt_uri).hostname
         if host not in (None, "", "localhost"):

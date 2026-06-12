@@ -1,4 +1,4 @@
-"""testrange — declarative Python plans for VM test-ranges."""
+"""testrange — Python plans for VM test-ranges, built as explicit dependency graphs."""
 
 from __future__ import annotations
 

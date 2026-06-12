@@ -1,9 +1,11 @@
-"""Run-phase bring-up runs VMs concurrently (ADR-0023, ORCH-18).
+"""Realize-walk bring-up runs VMs concurrently (ADR-0023, ORCH-18, ADR-0030).
 
-Drives :func:`run_phase` directly against a bare (sidecar-less, static-IP)
-multi-VM plan so the only work is the per-VM disk upload + create + start. A
-mock driver whose ``upload_to_pool`` sleeps proves the uploads overlap, and the
-state ledger is asserted complete + uncorrupted under the thread pool.
+Drives :func:`realize_graph` directly against a bare (sidecar-less, static-IP)
+multi-VM plan: the VM wave's work is the per-VM disk upload + create + start,
+followed by each node's own readiness gates (SSH execute is stubbed to a
+success no-op). A mock driver whose ``upload_to_pool`` sleeps proves the
+uploads overlap, and the state ledger is asserted complete + uncorrupted under
+the thread pool.
 """
 
 from __future__ import annotations
@@ -11,13 +13,14 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from testrange import Plan
 from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry, CacheManager, LocalCache
-from testrange.communicators import SSHCommunicator
+from testrange.communicators import ExecResult, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StaticAddr, StoragePool
 from testrange.devices.network import NetworkIface
@@ -26,14 +29,35 @@ from testrange.exceptions import DriverError
 from testrange.networks import Network, Switch
 from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import ResolvedBackend
-from testrange.orchestrator.context import RunContext
-from testrange.orchestrator.run_phase import run_phase
+from testrange.orchestrator.context import GraphContext
+from testrange.orchestrator.executor import realize_graph
 from testrange.orchestrator.teardown import teardown
 from testrange.state.store import StateStore, run_dir_for
 from testrange.vms import VMRecipe, VMSpec
 from tests.mock_driver import MockDriver, MockHypervisor
 
 _UPLOAD_DELAY_S = 0.05
+
+
+@pytest.fixture(autouse=True)
+def stub_ssh_execute(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default SSHCommunicator.execute to a success no-op.
+
+    A VM node's realize gates on communicator + builder readiness inside the
+    node (ADR-0030); the stub lets those gates clear without real SSH.
+    """
+
+    def fake_execute(
+        self: SSHCommunicator,
+        argv: Any,
+        *,
+        timeout: float = 60.0,
+        cwd: str | None = None,
+    ) -> ExecResult:
+        del self, argv, timeout, cwd
+        return ExecResult(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
+
+    monkeypatch.setattr(SSHCommunicator, "execute", fake_execute)
 
 
 class _SlowUploadDriver(MockDriver):
@@ -72,43 +96,39 @@ class _FailingUploadDriver(MockDriver):
 
 def _bare_plan(n_vms: int) -> Plan:
     """``n_vms`` static-IP VMs on one sidecar-less switch + one pool."""
-    vms = [
-        VMRecipe(
-            spec=VMSpec(
-                name=f"vm{i}",
-                devices=[
-                    CPU(1),
-                    Memory(256),
-                    OSDrive("pool1", 8),
-                    NetworkIface("netA", addr=StaticAddr(f"10.0.1.{100 + i}")),
-                ],
-            ),
-            builder=CloudInitBuilder(
-                base=CacheEntry("debian-13"),
-                credentials=[PosixCred("u", password="p")],
-            ),
-            communicator=SSHCommunicator("u"),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 256))
+    hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.1.0/24"))
+    for i in range(n_vms):
+        hyp.add_vm(
+            VMRecipe(
+                spec=VMSpec(
+                    name=f"vm{i}",
+                    devices=[
+                        CPU(1),
+                        Memory(256),
+                        OSDrive(hyp.pools["pool1"], 8),
+                        NetworkIface(hyp.networks["netA"], addr=StaticAddr(f"10.0.1.{100 + i}")),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[PosixCred("u", password="p")],
+                ),
+                communicator=SSHCommunicator("u"),
+            )
         )
-        for i in range(n_vms)
-    ]
-    return Plan(
-        "p",
-        MockHypervisor(
-            networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24")],
-            pools=[StoragePool("pool1", 256)],
-            vms=vms,
-        ),
-    )
+    return Plan("p", hyp)
 
 
-def _ctx(plan: Plan, driver: MockDriver, tmp_path: Path) -> RunContext:
+def _ctx(plan: Plan, driver: MockDriver, tmp_path: Path) -> GraphContext:
     run_id = "r1"
     store = StateStore(run_dir_for(run_id, root=tmp_path / "state"))
     store.initialize(run_id=run_id, plan_name="p", driver_class="MockDriver", driver_uri="")
     built = tmp_path / "built.qcow2"
     built.write_bytes(b"BUILT-OS-DISK")
-    switches = plan.hypervisor.networks
-    return RunContext(
+    switches = plan.hypervisor.declared_switches
+    return GraphContext(
         plan=plan,
         resolved=ResolvedBackend(driver=driver, driver_uri=""),
         store=store,
@@ -118,15 +138,15 @@ def _ctx(plan: Plan, driver: MockDriver, tmp_path: Path) -> RunContext:
         build_timeout_s=60.0,
         lease_timeout_s=60.0,
         addressing={n.name: NetworkAddressing.from_switch(s) for s in switches for n in s.networks},
-        built_disk_paths={vm.name: {"os": built} for vm in plan.hypervisor.vms},
+        built_disk_paths={vm.name: {"os": built} for vm in plan.hypervisor.declared_vms},
     )
 
 
-class TestRunPhaseParallel:
+class TestRealizeParallel:
     def test_all_vms_brought_up(self, tmp_path: Path) -> None:
         driver = _SlowUploadDriver(pool_root=tmp_path / "pools")
         plan = _bare_plan(4)
-        run_phase(_ctx(plan, driver, tmp_path))
+        realize_graph(_ctx(plan, driver, tmp_path), plan.graph)
 
         started = {c[1][0] for c in driver.calls if c[0] == "start_vm"}
         assert started == {driver.compose_resource_name("r1", "vm", f"vm{i}") for i in range(4)}
@@ -136,9 +156,9 @@ class TestRunPhaseParallel:
         plan = _bare_plan(4)
         ctx = _ctx(plan, driver, tmp_path)
 
-        run_phase(ctx)
+        realize_graph(ctx, plan.graph)
         # Structural overlap assertion (not wall-clock): at least two per-VM
-        # uploads were in flight simultaneously, proving the phase parallelized
+        # uploads were in flight simultaneously, proving the VM wave parallelized
         # rather than ran serially. Robust on a loaded/throttled CI box.
         assert driver.max_in_flight >= 2, (
             f"expected overlapped uploads, peak in-flight was {driver.max_in_flight}"
@@ -148,7 +168,7 @@ class TestRunPhaseParallel:
         driver = _SlowUploadDriver(pool_root=tmp_path / "pools")
         plan = _bare_plan(6)
         ctx = _ctx(plan, driver, tmp_path)
-        run_phase(ctx)
+        realize_graph(ctx, plan.graph)
 
         resources = {r.backend_name: r for r in ctx.store.read().resources}
         # Every VM, its run disk, the pool, switch and network are recorded, and
@@ -168,8 +188,8 @@ class TestRunPhaseParallel:
         ctx = _ctx(plan, driver, tmp_path)
 
         with pytest.raises(DriverError, match="vm2"):
-            run_phase(ctx)
-        # State is still readable (not torn) after the aborted phase.
+            realize_graph(ctx, plan.graph)
+        # State is still readable (not torn) after the aborted walk.
         assert ctx.store.read().resources is not None
 
     def test_partial_failure_leaves_no_leak_after_teardown(self, tmp_path: Path) -> None:
@@ -179,10 +199,11 @@ class TestRunPhaseParallel:
         # the failure, then run the ledger-driven teardown and assert the mock
         # backend holds nothing live.
         driver = _FailingUploadDriver(pool_root=tmp_path / "pools")
-        ctx = _ctx(_bare_plan(4), driver, tmp_path)
+        plan = _bare_plan(4)
+        ctx = _ctx(plan, driver, tmp_path)
 
         with pytest.raises(DriverError, match="vm2"):
-            run_phase(ctx)
+            realize_graph(ctx, plan.graph)
 
         # Every resource the surviving siblings created is recorded (record-
         # before-create), so it is reachable for teardown — nothing leaks

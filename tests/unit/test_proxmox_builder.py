@@ -23,6 +23,7 @@ from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
 from testrange.devices.network import NetworkIface
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.base import BuildNic
 from testrange.packages import Apt, Pip
@@ -58,12 +59,16 @@ def _build_nic() -> BuildNic:
     )
 
 
+_POOL = PoolHandle("p1")
+_NETA = NetworkHandle("netA", switch="swA")
+
+
 def _spec(*, static: bool = True, name: str = "pve") -> VMSpec:
     addr = StaticAddr("10.0.5.20") if static else DHCPAddr()
     return VMSpec(
         name=name,
         firmware="uefi",
-        devices=[CPU(2), Memory(2048), OSDrive("p1", 16), NetworkIface("netA", addr=addr)],
+        devices=[CPU(2), Memory(2048), OSDrive(_POOL, 16), NetworkIface(_NETA, addr=addr)],
     )
 
 
@@ -156,9 +161,9 @@ class TestAnswerToml:
             devices=[
                 CPU(2),
                 Memory(2048),
-                OSDrive("p1", 16),
+                OSDrive(_POOL, 16),
                 NetworkIface(
-                    "netA", addr=StaticAddr("10.0.5.20", gw="10.0.5.254", dns=("9.9.9.9",))
+                    _NETA, addr=StaticAddr("10.0.5.20", gw="10.0.5.254", dns=("9.9.9.9",))
                 ),
             ],
         )
@@ -174,7 +179,7 @@ class TestAnswerToml:
     def test_dhcp_fallback_when_no_nic(self) -> None:
         # A spec with zero NICs is valid; _network_block falls back to DHCP.
         spec = VMSpec(
-            name="pve", firmware="uefi", devices=[CPU(2), Memory(2048), OSDrive("p1", 16)]
+            name="pve", firmware="uefi", devices=[CPU(2), Memory(2048), OSDrive(_POOL, 16)]
         )
         a = _answer(_builder(), spec)
         assert 'source = "from-dhcp"' in a
@@ -274,8 +279,8 @@ class TestConfigHash:
             devices=[
                 CPU(2),
                 Memory(2048),
-                OSDrive("p1", 16),
-                NetworkIface("netA", addr=StaticAddr("10.0.5.20")),
+                OSDrive(_POOL, 16),
+                NetworkIface(_NETA, addr=StaticAddr("10.0.5.20")),
             ],
         )
         spec_b = VMSpec(
@@ -284,8 +289,8 @@ class TestConfigHash:
             devices=[
                 CPU(2),
                 Memory(2048),
-                OSDrive("p1", 16),
-                NetworkIface("netA", addr=StaticAddr("10.0.5.99")),
+                OSDrive(_POOL, 16),
+                NetworkIface(_NETA, addr=StaticAddr("10.0.5.99")),
             ],
         )
         assert _config_hash(b, spec_a, base_sha="x") != _config_hash(b, spec_b, base_sha="x")

@@ -208,7 +208,7 @@ def create_vm(
     # backend probe (PVE-27). A build/sidecar create carries a cloud-init/config
     # seed and attaches every writable disk as a BLANK for the guest to populate
     # (ADR-0010 §4); a run create has ``seed_iso_ref=None`` and IMPORTs each disk
-    # from the cached staging volume run_phase already uploaded. This is the same
+    # from the cached staging volume the VM node's realize already uploaded. This is the same
     # seed-presence signal the OS-disk grow below keys on, so the two never
     # disagree — and it can't be fooled by a stale staging file left behind by a
     # crashed prior build (which the old "does the volume exist?" probe would have

@@ -1,9 +1,11 @@
-"""Parallel build pass: concurrent VM builds with distinct build IPs (ORCH-4).
+"""Parallel materialize walk: concurrent VM builds with distinct build IPs (ORCH-4).
 
 Covers the deterministic per-VM build-switch address allocation
-(:func:`_build_ip_offset`) and an end-to-end multi-miss build on the mock
-driver: all disks captured, capture downloads overlap, and a single VM's build
-failure aborts the run.
+(:func:`_build_ip_offset`) and an end-to-end multi-miss materialize on the mock
+driver. MVP graphs carry only ordering edges, so every VM node lands in the
+first content wave and all cache-missing VMs build concurrently: all disks
+captured, capture downloads overlap, and a single VM's build failure aborts
+the walk.
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ from testrange.exceptions import BuildFailedError, OrchestratorError
 from testrange.networks import Network, Sidecar, Switch
 from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import ResolvedBackend
-from testrange.orchestrator.build_phase import _BUILD_IP_SLOTS, _build_ip_offset, build_phase
-from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.context import GraphContext
+from testrange.orchestrator.executor import materialize_graph
+from testrange.orchestrator.vm_build import _BUILD_IP_SLOTS, _build_ip_offset
 from testrange.state.store import StateStore, new_run_id, run_dir_for
 from testrange.vms import VMRecipe, VMSpec
 from tests.mock_driver import MockDriver, MockHypervisor
@@ -88,37 +91,31 @@ class _FailOneBuildDriver(MockDriver):
 
 
 def _multi_plan(n_vms: int) -> Plan:
-    vms = [
-        VMRecipe(
-            spec=VMSpec(
-                name=f"vm{i}",
-                devices=[
-                    CPU(1),
-                    Memory(512),
-                    OSDrive("pool1", 8),
-                    NetworkIface("netA", addr=DHCPAddr()),
-                ],
-            ),
-            builder=CloudInitBuilder(
-                base=CacheEntry("debian-13"),
-                credentials=[PosixCred("u", password="p")],
-            ),
-            communicator=SSHCommunicator("u"),
-        )
-        for i in range(n_vms)
-    ]
-    return Plan(
-        "multi",
-        MockHypervisor(
-            networks=[
-                Switch(
-                    "sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)
-                )
-            ],
-            pools=[StoragePool("pool1", 256)],
-            vms=vms,
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 256))
+    hyp.add_switch(
+        Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))
     )
+    for i in range(n_vms):
+        hyp.add_vm(
+            VMRecipe(
+                spec=VMSpec(
+                    name=f"vm{i}",
+                    devices=[
+                        CPU(1),
+                        Memory(512),
+                        OSDrive(hyp.pools["pool1"], 8),
+                        NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"),
+                    credentials=[PosixCred("u", password="p")],
+                ),
+                communicator=SSHCommunicator("u"),
+            )
+        )
+    return Plan("multi", hyp)
 
 
 def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, driver: MockDriver) -> CacheManager:
@@ -135,12 +132,12 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, driver: MockDriver) ->
     return CacheManager(local=cache)
 
 
-def _ctx(plan: Plan, driver: MockDriver, cache: CacheManager) -> RunContext:
+def _ctx(plan: Plan, driver: MockDriver, cache: CacheManager) -> GraphContext:
     run_id = new_run_id()
     store = StateStore(run_dir_for(run_id))
     store.initialize(run_id=run_id, plan_name=plan.name, driver_class="MockDriver", driver_uri="")
-    switches = plan.hypervisor.networks
-    return RunContext(
+    switches = plan.hypervisor.declared_switches
+    return GraphContext(
         plan=plan,
         resolved=ResolvedBackend(driver=driver, driver_uri=""),
         store=store,
@@ -153,14 +150,15 @@ def _ctx(plan: Plan, driver: MockDriver, cache: CacheManager) -> RunContext:
     )
 
 
-class TestParallelBuild:
+class TestParallelMaterialize:
     def test_all_vms_captured_with_distinct_keys(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         driver = MockDriver(pool_root=tmp_path / "pools")
         cache = _env(tmp_path, monkeypatch, driver)
-        ctx = _ctx(_multi_plan(4), driver, cache)
-        build_phase(ctx)
+        plan = _multi_plan(4)
+        ctx = _ctx(plan, driver, cache)
+        materialize_graph(ctx, plan.graph)
 
         # Every VM produced a captured OS disk path...
         assert set(ctx.built_disk_paths) == {f"vm{i}" for i in range(4)}
@@ -174,32 +172,17 @@ class TestParallelBuild:
         )
         assert len(built_os) == 4
 
-    def test_inner_build_ctx_honors_jobs(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # ORCH-35: a nested GuestHypervisor's inner build must inherit the outer
-        # --jobs cap; without it the inner build_phase falls back to the 8-way
-        # default and silently ignores `--jobs 1`.
-        import dataclasses
-
-        from testrange.orchestrator.build_phase import _inner_build_ctx
-
-        driver = MockDriver(pool_root=tmp_path / "pools")
-        cache = _env(tmp_path, monkeypatch, driver)
-        ctx = dataclasses.replace(_ctx(_multi_plan(1), driver, cache), jobs=1)
-        inner = _inner_build_ctx(ctx, _multi_plan(2))
-        assert inner.jobs == 1
-
     def test_capture_downloads_overlap(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         driver = _SlowDownloadDriver(pool_root=tmp_path / "pools")
         cache = _env(tmp_path, monkeypatch, driver)
-        ctx = _ctx(_multi_plan(4), driver, cache)
+        plan = _multi_plan(4)
+        ctx = _ctx(plan, driver, cache)
 
-        build_phase(ctx)
+        materialize_graph(ctx, plan.graph)
         # Structural overlap (not wall-clock): at least two capture downloads ran
-        # at once, proving the parallel build pass overlapped them.
+        # at once, proving the materialize wave overlapped them.
         assert driver.max_in_flight >= 2, (
             f"expected overlapped capture, peak in-flight was {driver.max_in_flight}"
         )
@@ -209,7 +192,8 @@ class TestParallelBuild:
     ) -> None:
         driver = _FailOneBuildDriver(pool_root=tmp_path / "pools")
         cache = _env(tmp_path, monkeypatch, driver)
-        ctx = _ctx(_multi_plan(4), driver, cache)
+        plan = _multi_plan(4)
+        ctx = _ctx(plan, driver, cache)
 
         with pytest.raises(BuildFailedError, match="vm2"):
-            build_phase(ctx)
+            materialize_graph(ctx, plan.graph)

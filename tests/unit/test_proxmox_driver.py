@@ -24,6 +24,7 @@ from testrange.drivers.base import HypervisorDriver, VolumeRef
 from testrange.drivers.proxmox import ProxmoxDriver, ProxmoxHypervisor, ProxmoxProfile
 from testrange.drivers.proxmox._client import ProxmoxConn
 from testrange.exceptions import DriverError
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, Sidecar, Switch
 from testrange.orchestrator.build import resolve_build_switch
 from testrange.vms import VMRecipe, VMSpec
@@ -190,29 +191,29 @@ def _driver(
     )
 
 
-def _vm(name: str = "web", *, addr: _Addr = None, comm: Communicator | None = None) -> VMRecipe:
-    return VMRecipe(
-        spec=VMSpec(
-            name=name,
-            devices=[CPU(1), Memory(512), OSDrive("pool1", 8), NetworkIface("netA", addr=addr)],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("u", password="p")],
-        ),
-        communicator=comm or SSHCommunicator("u"),
-    )
-
-
 def _plan(switch: Switch, *, addr: _Addr = None, comm: Communicator | None = None) -> Plan:
-    return Plan(
-        "t",
-        ProxmoxHypervisor(
-            networks=[switch],
-            pools=[StoragePool("pool1", 8)],
-            vms=[_vm(addr=addr, comm=comm)],
-        ),
+    hyp = ProxmoxHypervisor()
+    hyp.add_switch(switch)
+    hyp.add_pool(StoragePool("pool1", 8))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="web",
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(hyp.pools["pool1"], 8),
+                    NetworkIface(hyp.networks["netA"], addr=addr),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"),
+                credentials=[PosixCred("u", password="p")],
+            ),
+            communicator=comm or SSHCommunicator("u"),
+        )
     )
+    return Plan("t", hyp)
 
 
 class TestConstruction:
@@ -531,7 +532,13 @@ class TestL2:
         captured: dict[str, Any] = {}
         monkeypatch.setattr(vm_mod, "create_vm", lambda *a, **kw: captured.update(kw) or "vm:1")
         spec = VMSpec(
-            name="v", devices=[CPU(1), Memory(512), OSDrive("pool1", 8), NetworkIface("a")]
+            name="v",
+            devices=[
+                CPU(1),
+                Memory(512),
+                OSDrive(PoolHandle("pool1"), 8),
+                NetworkIface(NetworkHandle("a", switch="sw1")),
+            ],
         )
         d.create_vm(
             "tr-vm",

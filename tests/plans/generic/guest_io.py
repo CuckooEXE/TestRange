@@ -45,47 +45,46 @@ from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-guest-io")
 
-PLAN = Plan(
-    "guest-io",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.65.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 16)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="iobox",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface("lab-net", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-                ),
-                communicator=SSHCommunicator("admin"),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+hyp.add_pool(StoragePool("pool1", 16))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.65.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="iobox",
+            devices=[
+                CPU(1),
+                Memory(512),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
+            ],
+        ),
+        builder=CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+        ),
+        communicator=SSHCommunicator("admin"),
+    )
+)
+
+PLAN = Plan("guest-io", hyp)
 
 
 def sftp_round_trips_a_multimegabyte_payload(orch: OrchestratorHandle) -> None:

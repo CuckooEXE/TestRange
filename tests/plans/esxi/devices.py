@@ -39,44 +39,43 @@ from testrange.drivers.esxi.devices import ESXiHardDrive
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "esxi-devices",
-    ESXiHypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="buses",
-                    devices=[
-                        CPU(1),
-                        Memory(1024),
-                        # OS disk on the ESXi default (scsi) -> /dev/sda.
-                        OSDrive("pool1", 8),
-                        # scsi + sata data disks present to the guest as /dev/sd*.
-                        ESXiHardDrive("pool1", 1, bus="scsi"),
-                        ESXiHardDrive("pool1", 1, bus="sata"),
-                        # nvme data disk presents as /dev/nvme*.
-                        ESXiHardDrive("pool1", 1, bus="nvme"),
-                    ],
-                ),
-                # open-vm-tools auto-provisioned by the ESXi driver (CORE-90); the
-                # PosixCred stays — VMware Tools guest-ops authenticates per call.
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", password="TestRangeEsxi2026!", admin=True)],
-                ),
-                communicator=NativeCommunicator(),
-            ),
-        ],
+hyp = ESXiHypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="buses",
+            devices=[
+                CPU(1),
+                Memory(1024),
+                # OS disk on the ESXi default (scsi) -> /dev/sda.
+                OSDrive(hyp.pools["pool1"], 8),
+                # scsi + sata data disks present to the guest as /dev/sd*.
+                ESXiHardDrive(hyp.pools["pool1"], 1, bus="scsi"),
+                ESXiHardDrive(hyp.pools["pool1"], 1, bus="sata"),
+                # nvme data disk presents as /dev/nvme*.
+                ESXiHardDrive(hyp.pools["pool1"], 1, bus="nvme"),
+            ],
+        ),
+        # open-vm-tools auto-provisioned by the ESXi driver (CORE-90); the
+        # PosixCred stays — VMware Tools guest-ops authenticates per call.
+        builder=CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            credentials=[PosixCred("admin", password="TestRangeEsxi2026!", admin=True)],
+        ),
+        communicator=NativeCommunicator(),
+    )
+)
+
+PLAN = Plan("esxi-devices", hyp)
 
 
 def _disk_names(orch: OrchestratorHandle) -> list[str]:

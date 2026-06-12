@@ -1,8 +1,8 @@
-"""CORE-66: run-phase lookup_credential works for any Builder, not just CloudInit.
+"""CORE-66: bring-up lookup_credential works for any Builder, not just CloudInit.
 
 An SSHCommunicator only needs the matching PosixCred from the builder's baked
 credentials; the builder *type* is irrelevant. Regression guard for the
-installer-origin run phase (ProxmoxAnswerBuilder, ESXiKickstartBuilder).
+installer-origin bring-up (ProxmoxAnswerBuilder, ESXiKickstartBuilder).
 """
 
 from __future__ import annotations
@@ -15,13 +15,16 @@ from testrange.communicators import NativeCommunicator, SSHCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.exceptions import OrchestratorError
-from testrange.orchestrator.run_phase import lookup_credential
+from testrange.handles import PoolHandle
+from testrange.orchestrator.vm_run import lookup_credential
 from testrange.utils import SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
 
 def _spec() -> VMSpec:
-    return VMSpec(name="g", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)], firmware="uefi")
+    return VMSpec(
+        name="g", devices=[CPU(1), Memory(512), OSDrive(PoolHandle("pool1"), 8)], firmware="uefi"
+    )
 
 
 def _proxmox_recipe(communicator: object) -> VMRecipe:

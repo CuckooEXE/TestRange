@@ -90,88 +90,95 @@ def _web_image(content: str) -> CloudInitBuilder:
     )
 
 
-PLAN = Plan(
-    "switch_isolation",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "sw-a",
-                Network("a1"),
-                cidr="10.50.0.0/24",
-                uplink="egress",
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-            Switch(
-                "sw-b",
-                Network("b1"),
-                cidr="10.51.0.0/24",
-            ),
-            Switch(
-                "sw-c",
-                Network("c1"),
-                cidr="10.52.0.0/24",
-                mgmt=True,
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="web-a",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface("a1", addr=StaticAddr(_WEB_A_IP)),
-                    ],
-                ),
-                builder=_web_image("WEB-A-OK"),
-                communicator=NativeCommunicator(),
-            ),
-            VMRecipe(
-                spec=VMSpec(
-                    name="web-b",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface("b1", addr=StaticAddr(_WEB_B_IP)),
-                    ],
-                ),
-                builder=_web_image("WEB-B-OK"),
-                communicator=NativeCommunicator(),
-            ),
-            VMRecipe(
-                spec=VMSpec(
-                    name="client",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface("a1", addr=DHCPAddr()),
-                        NetworkIface("b1", addr=StaticAddr(_CLIENT_B_IP)),
-                        NetworkIface("c1", addr=StaticAddr(_CLIENT_C_IP)),
-                    ],
-                ),
-                # NativeCommunicator agent auto-provisioned per backend (CORE-90);
-                # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", password="testrange", admin=True)],
-                    packages=[Apt("curl")],
-                ),
-                communicator=NativeCommunicator(),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(
+    Switch(
+        "sw-a",
+        Network("a1"),
+        cidr="10.50.0.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+hyp.add_switch(
+    Switch(
+        "sw-b",
+        Network("b1"),
+        cidr="10.51.0.0/24",
+    )
+)
+hyp.add_switch(
+    Switch(
+        "sw-c",
+        Network("c1"),
+        cidr="10.52.0.0/24",
+        mgmt=True,
+    )
+)
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="web-a",
+            devices=[
+                CPU(1),
+                Memory(512),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["a1"], addr=StaticAddr(_WEB_A_IP)),
+            ],
+        ),
+        builder=_web_image("WEB-A-OK"),
+        communicator=NativeCommunicator(),
+    )
+)
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="web-b",
+            devices=[
+                CPU(1),
+                Memory(512),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["b1"], addr=StaticAddr(_WEB_B_IP)),
+            ],
+        ),
+        builder=_web_image("WEB-B-OK"),
+        communicator=NativeCommunicator(),
+    )
+)
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="client",
+            devices=[
+                CPU(1),
+                Memory(512),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["a1"], addr=DHCPAddr()),
+                NetworkIface(hyp.networks["b1"], addr=StaticAddr(_CLIENT_B_IP)),
+                NetworkIface(hyp.networks["c1"], addr=StaticAddr(_CLIENT_C_IP)),
+            ],
+        ),
+        # NativeCommunicator agent auto-provisioned per backend (CORE-90);
+        # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
+        builder=CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            credentials=[PosixCred("admin", password="testrange", admin=True)],
+            packages=[Apt("curl")],
+        ),
+        communicator=NativeCommunicator(),
+    )
+)
+
+PLAN = Plan("switch_isolation", hyp)
 
 
 def client_default_route_via_a1_sidecar(orch: OrchestratorHandle) -> None:

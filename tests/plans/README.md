@@ -46,7 +46,7 @@ tests/plans/
 
 | Plan | WHAT it certifies |
 |------|-------------------|
-| `generic/lifecycle.py` | power-cycle churn, graceful shutdown → shutoff, reboot persistence, oversized OS-drive first-boot growth, NIC-less native-agent under churn |
+| `generic/lifecycle.py` | power-cycle churn, graceful shutdown → shutoff, reboot persistence, oversized OS-drive first-boot growth, NIC-less native-agent under churn, the explicit ordering edge (`web.needs(db)`) end-to-end — db realizes in an earlier wave and is already serving at web's first test |
 | `generic/users_credentials.py` | SSH key vs password auth, multi-user privilege boundary (non-admin sudo denied), group membership, explicit per-NIC resolver |
 | `generic/networking.py` | multi-`Network`-per-`Switch`, air-gap reachability matrix, NAT egress on/off, DHCP pool-boundary lease, exactly-one-default-route, cross-label DNS |
 | `generic/switch_isolation.py` | the three switch tiers (uplinked / air-gapped / `mgmt` host adapter) + a provenance-pinned directional reach/isolation matrix (default route via the sidecar, mgmt reached over the `c1` leg not the NAT path, isolation by IP-literal + curl-exit-7 with a positive control); static-on-NAT sidecar-derived egress; triple-homed single-default-route |
@@ -72,6 +72,16 @@ tests/plans/
 - **One `PLAN` per file**, a handful of `TESTS` functions, a `TESTS = [...]`
   list, and the `if __name__ == "__main__": sys.exit(...)` runner block — mirror
   the shape of `examples/hello_world.py`.
+- **2.0 construction shape (ADR-0030)** — build the topology imperatively, then
+  freeze it: `hyp = Hypervisor(build_switch=...)` (or the backend-pinned
+  subclass), then `add_pool` → `add_switch` → `add_vm` **in that order** (a
+  handle must exist before a spec references it). Devices take **typed handles
+  from the registries**, never bare strings: `OSDrive(hyp.pools["pool1"], 8)`,
+  `NetworkIface(hyp.networks["netA"], addr=DHCPAddr())`. Explicit inter-VM
+  ordering rides the `VMHandle`s `add_vm` returns —
+  `web.needs(db)` — and `PLAN = Plan(name, hyp)` seals the container and
+  assembles the validated build graph (inspect it with
+  `testrange graph <plan> --order`).
 - **Module docstring states WHAT it stresses and WHY** that edge is failure-prone
   (the two paragraphs at the top of every plan here).
 - **Inline anything used once**; only hoist a module-level var/helper (a shared

@@ -66,11 +66,14 @@ For a typical install you'll want `'.[all,dev]'`.
 ```sh
 testrange --version
 testrange describe examples/hello_world.py
+testrange graph examples/hello_world.py --order
 ```
 
-`describe` runs without touching any backend. The `CacheEntry` references will
-show "⚠ not in cache" until you populate the cache. That's the next step
-in the per-driver setup pages.
+`describe` and `graph` run without touching any backend (`graph --order`
+prints the plan's execution waves — see
+[thinking in build graphs](thinking-in-build-graphs.md)). The `CacheEntry`
+references will show "⚠ not in cache" until you populate the cache. That's
+the next step in the per-driver setup pages.
 
 ## Storage locations
 

@@ -19,20 +19,17 @@ from tests.mock_driver import MockDriver, MockHypervisor
 
 
 def _plan() -> Plan:
-    return Plan(
-        "pf",
-        MockHypervisor(
-            networks=[Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
-            pools=[StoragePool("pool1", 16)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(name="vm", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)]),
-                    builder=CloudInitBuilder(base=CacheEntry("debian-13")),
-                    communicator=SSHCommunicator("u"),
-                )
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 16))
+    hyp.add_switch(Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(name="vm", devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8)]),
+            builder=CloudInitBuilder(base=CacheEntry("debian-13")),
+            communicator=SSHCommunicator("u"),
+        )
     )
+    return Plan("pf", hyp)
 
 
 def _bind(monkeypatch: pytest.MonkeyPatch, driver: MockDriver) -> None:

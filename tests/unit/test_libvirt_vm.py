@@ -21,8 +21,12 @@ from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.libvirt import _serial, _vm
 from testrange.exceptions import DriverError
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks.base import BuildNic, NetworkAddressing
 from testrange.vms.spec import VMSpec
+
+_POOL = PoolHandle("pool1")
+_LAB = NetworkHandle("lab", switch="sw1")
 
 
 class _FakeLibvirtError(Exception):
@@ -150,9 +154,9 @@ class FakeClient:
 
 
 def _spec(name: str = "web", *, nics: int = 0, data: int = 0) -> VMSpec:
-    devs: list[Any] = [CPU(2), Memory(1024), OSDrive("pool1", 8)]
-    devs += [HardDrive("pool1", 2) for _ in range(data)]
-    devs += [NetworkIface(f"net{i}") for i in range(nics)]
+    devs: list[Any] = [CPU(2), Memory(1024), OSDrive(_POOL, 8)]
+    devs += [HardDrive(_POOL, 2) for _ in range(data)]
+    devs += [NetworkIface(NetworkHandle(f"net{i}", switch="sw1")) for i in range(nics)]
     return VMSpec(name=name, devices=devs)
 
 
@@ -210,8 +214,8 @@ class TestLibvirtDeviceVariants:
             devices=[
                 CPU(4, nested=True),
                 Memory(8192),
-                LibvirtOSDrive("pool1", 33, bus="sata"),
-                LibvirtNetworkIface("lab", model="e1000e"),
+                LibvirtOSDrive(_POOL, 33, bus="sata"),
+                LibvirtNetworkIface(_LAB, model="e1000e"),
             ],
         )
         xml = _vm._domain_xml(
@@ -237,7 +241,7 @@ class TestLibvirtDeviceVariants:
     def test_ide_os_disk_uses_hd_prefix(self) -> None:
         spec = VMSpec(
             name="esxi",
-            devices=[CPU(2), Memory(4096), LibvirtOSDrive("pool1", 33, bus="ide")],
+            devices=[CPU(2), Memory(4096), LibvirtOSDrive(_POOL, 33, bus="ide")],
         )
         xml = _vm._domain_xml(
             "tr-vm-x-esxi",
@@ -262,7 +266,7 @@ class TestLibvirtDeviceVariants:
         spec = VMSpec(
             name="pve",
             firmware="uefi",
-            devices=[CPU(2), Memory(2048), OSDrive("pool1", 16)],
+            devices=[CPU(2), Memory(2048), OSDrive(_POOL, 16)],
         )
         xml = _vm._domain_xml(
             "tr-vm-x-pve",
@@ -282,8 +286,8 @@ class TestLibvirtDeviceVariants:
             devices=[
                 CPU(2),
                 Memory(1024),
-                OSDrive("pool1", 8),  # plain -> virtio (vda)
-                LibvirtDataDrive("pool1", 4, bus="sata"),
+                OSDrive(_POOL, 8),  # plain -> virtio (vda)
+                LibvirtDataDrive(_POOL, 4, bus="sata"),
             ],
         )
         xml = _vm._domain_xml(
@@ -342,8 +346,8 @@ class TestCreateVM:
             devices=[
                 CPU(4, nested=True),
                 Memory(8192),
-                LibvirtOSDrive("pool1", 33, bus="sata"),
-                LibvirtNetworkIface("lab", model="e1000e"),
+                LibvirtOSDrive(_POOL, 33, bus="sata"),
+                LibvirtNetworkIface(_LAB, model="e1000e"),
             ],
         )
         _vm.create_vm(

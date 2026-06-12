@@ -16,6 +16,7 @@ from testrange.devices.network import NetworkIface
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.proxmox import _naming, _vm
 from testrange.exceptions import DriverError
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.vms import VMSpec
 
 
@@ -122,8 +123,8 @@ class TestCreateVmDiskFormat:
             devices=[
                 CPU(1),
                 Memory(512),
-                OSDrive("pool1", 8),
-                NetworkIface("netA", addr=DHCPAddr()),
+                OSDrive(PoolHandle("pool1"), 8),
+                NetworkIface(NetworkHandle("netA", switch="sw1"), addr=DHCPAddr()),
             ],
         )
         _vm.create_vm(

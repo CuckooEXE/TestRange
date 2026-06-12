@@ -20,6 +20,184 @@ lessons-learned repository (anti-patterns to avoid, a small set of
 high-level concepts that proved valuable). No code or structural design
 ports from `.bak`.
 
+## TestRange 2.0 — the build graph (DAG)
+
+**Status:** IMPLEMENTED 2026-06-12 (EPIC `DAG`, ADR-0030; DAG-1..20). The
+hard break landed: the v0 declarative `Plan(*hypervisors)` form factor (§2,
+the "v0 example", "v0 phases", and "CLI surface (v0)" sections below are all
+SUPERSEDED) is deleted and the public surface is the imperative builder ->
+frozen `BuildGraph` below. `examples/` and the `tests/plans/` corpus are
+rebuilt on the new API; the authoritative construction shape is
+`examples/hello_world.py` (and `examples/multi_tier_app.py` for an explicit
+`.needs()` edge). Nested virtualization (the v0 `GuestHypervisor`) is removed
+from the MVP and returns post-MVP as a `HypervisorNode` kind (seam held by
+the DAG-20 check in `tests/unit/test_seam_checks.py`).
+
+Implementation notes that refined the ADR during the cut (all seam-true):
+
+- **Handles are `str` subclasses** carrying kind + wiring: a handle IS the
+  plan-level name, so every downstream consumer (builders, drivers, sidecar
+  rendering, `config_hash`) reads names byte-identically to v0 — which makes
+  the DAG-5 "MVP keys match v0 keys" requirement structural (regression-pinned
+  in `tests/unit/test_nodes.py::TestV0KeyParity`).
+- **`Node.cache_key(ctx, dependency_keys)`** — key computation is contextual
+  (base shas resolve against the cache, MACs against the bound driver), which
+  is exactly why `graph --cache` requires `--profile`.
+- **Materialize gates on the *content* sub-DAG** (`BuildGraph.content_waves`):
+  ordering edges sequence the run, not the build, so MVP builds stay fully
+  concurrent (v0 behavior). Realize gates on the full waves, and each node's
+  realize returns only when the node is *ready* — the v0 global barriers
+  (sidecar-ready, communicator-ready, leases, builder-ready) became per-node
+  gates, which is what makes `.needs()` mean "after it is genuinely up".
+- **Same-endpoint edges with conflicting cacheability collapse strongest-wins**
+  (the DAG-2 open policy, decided in DAG-5).
+- **Node names are kind-qualified** (`pool:p`, `network:sw`, `vm:web`); one
+  graph node per Switch (fabric + networks + sidecar realize as a unit).
+- **Per-disk pool placement is now real**: v0 silently placed data disks in
+  the OS drive's pool; typed `PoolHandle` references made the declared
+  placement enforceable, so each disk uploads to its own pool's backend.
+- **state.json gained an additive per-node completion ledger** (`nodes`,
+  no schema bump) backing `testrange run --resume <run_id>`.
+
+**Why.** A range is a *dependency graph*, not a flat list under one host: a VM
+needs its pool and network first; a client needs its server up; (post-MVP) a
+vCenter must be deployed onto a running ESXi and that ESXi attached to it before
+Aria can be configured. The v0 model hardcodes a fixed 5-phase pipeline
+(preflight → build → run → test → cleanup) over a frozen
+`Hypervisor(vms=[...], pools=[...], networks=[...])`, which cannot express
+inter-node ordering or per-node caching of provisioned/related state. 2.0 makes
+the graph first-class and lets a single executor walk it.
+
+### The model
+
+- **`BuildGraph`** — a frozen, validated DAG produced by the construction API.
+  Owns topo-sort, cycle detection, dangling-dependency and name-uniqueness
+  checks. The executor consumes only this.
+- **`Node`** (kinded ABC) — a unit of materializable state with (a) a typed
+  handle, (b) a content-addressed cache key, (c) `materialize` (build/cache the
+  disk-set) and `realize` (bring up) hooks. MVP kinds: `PoolNode`,
+  `NetworkNode` (carries the sidecar), `VMNode` (built by a `Builder`).
+  *Deferred kinds (seams only):* `ApplianceNode` (deploy-through-an-endpoint),
+  `HypervisorNode` (nested — recurses an inner `BuildGraph`).
+- **`Edge`** (kinded) — a directed dependency `B → A` ("B needs A"). MVP edge
+  kind: `ordering`. Each edge declares a **cacheability**
+  (`ordering` | future `bake` | `replay`) so post-MVP relationship edges
+  (`manage`, `collect_from`) drop in without reshaping the executor. Ordering
+  edges affect *scheduling*, not cache keys.
+
+### Construction: imperative builder → frozen graph
+
+Mutable while you build it, frozen at rest. `add_pool`/`add_switch`/`add_vm`
+register a node and return a **typed handle**, and every added node is also
+reachable through a typed registry on the hypervisor — `hyp.pools["pool1"]`,
+`hyp.networks["netA"]`, `hyp.vms["web"]` (each a `Mapping[str, <Handle>]`).
+Devices and edges reference those handles, never bare strings: `OSDrive` takes a
+`PoolHandle`, `NetworkIface` takes a `NetworkHandle`, `.needs()` takes a
+`VMHandle`. So a miswire is a *type* error (you cannot pass a network where a
+pool belongs) and a bad name is a loud `KeyError` at plan-construction
+(`no pool 'pool11'; known: pool1`) — not a string silently stored for a
+preflight failure later. **No `Any` on the public surface.** Use the `["name"]`
+mapping form, NOT attribute access (`hyp.pools.pool1`): runtime-added names
+can't be statically known, so an attribute accessor would have to type as
+`PoolHandle` for *any* name and defeat mypy. `Plan(name, hyp)` finalizes into the
+frozen `BuildGraph`. (Sketch, not a runnable copy — DAG-15 rebuilds the
+`examples/` as the authoritative shape.)
+
+```python
+hyp = Hypervisor()
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(Switch("switch1", Network("netA"), cidr="172.31.0.0/24",
+                      mgmt=True, sidecar=Sidecar(dhcp=True, dns=True)))
+
+hyp.add_vm(VMRecipe(
+    spec=VMSpec(name="db", devices=[CPU(2), Memory(2048),
+                                    OSDrive(hyp.pools["pool1"], 16),
+                                    NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.10"))]),
+    builder=CloudInitBuilder(base=CacheEntry("debian-13"),
+                             credentials=[PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True)],
+                             packages=[Apt("postgresql")]),
+    communicator=SSHCommunicator("myuser"),
+))
+
+hyp.add_vm(VMRecipe(
+    spec=VMSpec(name="web", devices=[CPU(2), Memory(1024),
+                                     OSDrive(hyp.pools["pool1"], 8),
+                                     NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.20"))]),
+    builder=CloudInitBuilder(base=CacheEntry("debian-13"),
+                             credentials=[PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True)],
+                             packages=[Apt("nginx")]),
+    communicator=SSHCommunicator("myuser"),
+))
+
+hyp.vms["web"].needs(hyp.vms["db"])
+
+PLAN = Plan("two-tier", hyp)
+```
+
+The `hyp.vms["web"].needs(hyp.vms["db"])` edge is the point: even with plain
+Debian VMs and no appliances, the executor orders `db` before `web` and the
+graph is real. `add_pool`/`add_switch`/`add_vm` create nodes plus the implicit
+infra edges (VM → its pool, VM → its network, inferred from the handle
+references in its devices); `.needs()` adds explicit ones. `add_switch` registers
+an L2 `Switch` into `hyp.switches[...]` and flattens its bindable `Network`s into
+`hyp.networks[...]` (§10). `Hypervisor()` pins no backend — bind one at run time
+with `--profile`; the MVP wires only libvirt.
+
+### The executor
+
+Replaces the fixed phase pipeline with a **graph walk**: topo-sort into waves,
+dispatch ready nodes onto the existing bounded I/O thread pool
+(`orchestrator/_parallel.py`), gate each node on its dependencies' readiness
+(generalizes `wait_ready`). `build` materializes (cache-aware, per node);
+`run` realizes + runs tests; **teardown is the reverse topo-sort** (generalizes
+the LIFO teardown). A per-node completion ledger backs `--resume` (ORCH-3).
+
+### Cache: per node, transitive hash
+
+Every node is content-addressed — the existing `builder.config_hash`
+generalizes to a **node key = hash(node's own inputs + the keys of its *content*
+dependencies)**. The cached artifact stays a **disk-set** (unchanged).
+Crucially, **ordering edges are not invalidation edges**: a node that merely
+runs *after* another (placement/sequence) does not fold that dependency's hash
+into its key; only an edge that bakes a dependency's identity into the disk
+does. MVP has only ordering edges, so node keys match v0 keys for equivalent
+VMs; the transitive-hash machinery exists from day one so post-MVP `bake` edges
+fold correctly.
+
+### Inspecting the graph (first-class, for juniors)
+
+DAGs are the conceptual cost of this model, so understanding one must be
+trivial:
+
+- `testrange graph <plan.py>` — nodes, edges, node kinds.
+- `testrange graph <plan.py> --order` — the topo-sorted **execution waves**
+  (what runs, in what order, what runs in parallel).
+- `testrange graph <plan.py> --dot` — Graphviz export.
+- `testrange graph <plan.py> --cache --profile <p>` — per-node cache hit/miss
+  (what would clone vs build).
+- `testrange why <plan.py> <node>` — why a node runs: its dependencies and its
+  dependents.
+- `preflight` validates the graph (cycles, dangling deps, duplicate names)
+  before any backend call.
+
+### MVP scope and the deferred seams
+
+**In:** libvirt backend only; `CloudInitBuilder` / Debian VMs; ordering edges;
+the builder API, executor, per-node cache, and inspection commands above.
+
+**Out (seams reserved, explicitly NOT built):** appliances /
+deploy-through-an-endpoint (`ApplianceNode`); relationship edges with
+bake/replay (`manage`, `collect_from`); nested hypervisors (`HypervisorNode`
+recursion); backends other than libvirt. The `Node`/`Edge` ABCs, the edge
+cacheability field, the transitive-hash key, and the backend-agnostic executor
+are designed so these land as **new node/edge kinds, not a reshape**. The end
+state remains nested hypervisors running appliances across backends; the MVP
+just doesn't wire them. Forward-compat is held by DAG-19 / DAG-20.
+
+Supersedes/extends ADR-0008 (driver ABC), ADR-0010 (build/run phases — they
+become a graph walk), ADR-0021 (nested recursion — becomes a `HypervisorNode`
+kind). Full rationale: ADR-0030 (DAG-1).
+
 ## Design Decisions
 
 ### 1. VM type: split into `VMSpec` + `VMRecipe`
@@ -54,6 +232,11 @@ VMRecipe(
 ```
 
 ### 2. `Plan(*hypervisors)`
+
+> **SUPERSEDED by TestRange 2.0** (the build graph). The v0 declarative
+> `Plan` / `Hypervisor(vms=..., pools=..., networks=...)` form factor is dropped
+> in the 2.0 hard cut; see "TestRange 2.0 — the build graph (DAG)" above and
+> EPIC `DAG`. Retained for history.
 
 Variadic from day 1; v0 enforces exactly one at runtime. Multi-hypervisor
 is a long-term TODO that does not break the call shape.
@@ -918,6 +1101,9 @@ CORE-5, BUILD-3, and ORCH-6 are **done** against the mock; PVE-17 (the Proxmox
 
 ## v0 example (target shape)
 
+> **SUPERSEDED by TestRange 2.0** — the imperative build-graph example replaces
+> this; see the 2.0 section above (DAG-15 rebuilds `examples/`).
+
 Canonical source: [`examples/hello_world.py`](examples/hello_world.py). Keep
 that file as the authoritative shape — this section sketches the *structure*,
 not a runnable copy. Per §19, plan-side tests do **not** carry a
@@ -1008,6 +1194,9 @@ Key shape invariants this demonstrates:
 
 ## v0 phases
 
+> **SUPERSEDED by TestRange 2.0** — the fixed 5-phase pipeline becomes a single
+> topo-sorting DAG walk; see the 2.0 section above and ADR-0030 (DAG-6).
+
 Each phase has explicit state transitions so that an interrupted run can
 be cleaned up via state-file-driven `testrange cleanup`.
 
@@ -1062,6 +1251,10 @@ be cleaned up via state-file-driven `testrange cleanup`.
 
 ## CLI surface (v0)
 
+> **SUPERSEDED by TestRange 2.0** — verbs are re-pointed at the build graph and
+> gain `graph` / `graph --order` / `graph --dot` / `graph --cache` / `why`; see
+> the 2.0 section above (DAG-10..13).
+
 ```
 testrange --log-level {debug,info,warn,error}
 testrange --cache https://… <subcommand>          # HTTP cache injection
@@ -1101,7 +1294,7 @@ guest needs sata/ide + e1000e). The orchestrator is split into per-phase modules
 docs/
     user/                       # user-facing guides (+ user/drivers/)
     dev/                        # contributor docs (+ dev/extending/)
-    adr/                        # architecture decision records (0001–0029)
+    adr/                        # architecture decision records (0001–0030)
     index.md, conf.py           # Sphinx site
 examples/
     hello_world.py  native_agent.py  connect.toml.example

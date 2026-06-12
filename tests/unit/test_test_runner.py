@@ -59,33 +59,28 @@ def setup_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> CacheManager:
 
 
 def _plan() -> Plan:
-    return Plan(
-        "hello",
-        MockHypervisor(
-            networks=[
-                Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True))
-            ],
-            pools=[StoragePool("pool1", 32)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="web",
-                        devices=[
-                            CPU(1),
-                            Memory(512),
-                            OSDrive("pool1", 8),
-                            NetworkIface("netA", addr=DHCPAddr()),
-                        ],
-                    ),
-                    builder=CloudInitBuilder(
-                        base=CacheEntry("debian-13"),
-                        credentials=[PosixCred("u", password="p")],
-                    ),
-                    communicator=SSHCommunicator("u"),
-                ),
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 32))
+    hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True)))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="web",
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(hyp.pools["pool1"], 8),
+                    NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"),
+                credentials=[PosixCred("u", password="p")],
+            ),
+            communicator=SSHCommunicator("u"),
+        )
     )
+    return Plan("hello", hyp)
 
 
 def _install_fake_driver(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Any:

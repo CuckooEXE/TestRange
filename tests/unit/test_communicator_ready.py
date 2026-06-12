@@ -1,6 +1,6 @@
-"""Unit tests for wait_communicators_ready (the user-VM agent-readiness gate).
+"""Unit tests for wait_communicator_ready (the per-VM agent-readiness gate).
 
-At run-phase boot the native guest agent comes up a few seconds after power-on;
+At realize boot the native guest agent comes up a few seconds after power-on;
 the first exec must not race it (PVE returns "QEMU guest agent is not running").
 These drive the poll loop with a fake clock — no sleeps, no live backend.
 """
@@ -13,8 +13,7 @@ from typing import Any
 import pytest
 
 from testrange.exceptions import CommunicatorError, GuestAgentError, OrchestratorError
-from testrange.orchestrator import run_phase
-from testrange.orchestrator.dashboard_state import DashboardState
+from testrange.orchestrator import vm_run
 
 
 class _Clock:
@@ -43,43 +42,41 @@ class _Comm:
         return SimpleNamespace(exit_code=0, stdout=b"", stderr=b"", duration=0.0)
 
 
-def _ctx(comm: _Comm, *, timeout: float = 6.0) -> Any:
-    vm = SimpleNamespace(name="web", communicator=comm)
-    return SimpleNamespace(
-        plan=SimpleNamespace(hypervisor=SimpleNamespace(vms=[vm])),
-        agent_ready_timeout_s=timeout,
-        jobs=1,  # single fake VM; keep the readiness poll on the calling thread
-        dashboard=DashboardState(),  # the per-VM guard tags failures here
-    )
+def _vm(comm: _Comm) -> Any:
+    return SimpleNamespace(name="web", communicator=comm)
+
+
+def _ctx(*, timeout: float = 6.0) -> Any:
+    return SimpleNamespace(agent_ready_timeout_s=timeout)
 
 
 @pytest.fixture(autouse=True)
 def _fake_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     clock = _Clock()
-    monkeypatch.setattr(run_phase, "time", clock)
+    monkeypatch.setattr(vm_run, "time", clock)
     return clock
 
 
 def test_ready_on_first_try() -> None:
     comm = _Comm(fail_times=0)
-    run_phase.wait_communicators_ready(_ctx(comm))
+    vm_run.wait_communicator_ready(_ctx(), _vm(comm))
     assert comm.calls == 1
 
 
 def test_ready_after_transient_agent_errors() -> None:
     comm = _Comm(fail_times=2)  # fails at t=0,2 then answers at t=4 (< 6s budget)
-    run_phase.wait_communicators_ready(_ctx(comm))
+    vm_run.wait_communicator_ready(_ctx(), _vm(comm))
     assert comm.calls == 3
 
 
 def test_communicator_error_is_also_transient() -> None:
     comm = _Comm(fail_times=1, exc=CommunicatorError)
-    run_phase.wait_communicators_ready(_ctx(comm))
+    vm_run.wait_communicator_ready(_ctx(), _vm(comm))
     assert comm.calls == 2
 
 
 def test_never_ready_fails_loud_with_last_error() -> None:
     comm = _Comm(fail_times=999)
     with pytest.raises(OrchestratorError, match="communicator not ready"):
-        run_phase.wait_communicators_ready(_ctx(comm, timeout=6.0))
+        vm_run.wait_communicator_ready(_ctx(timeout=6.0), _vm(comm))
     assert comm.calls >= 3  # polled across the whole budget before giving up

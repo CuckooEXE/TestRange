@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import base64
 
-from testrange.orchestrator.build_phase import BuildResult, parse_build_result
+from testrange.orchestrator.vm_build import BuildResult, parse_build_result
 
 
 def _fail_bytes(rc: int, cmd: str, log: bytes) -> bytes:

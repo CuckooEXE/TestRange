@@ -91,7 +91,7 @@ def _uplink_network_name(switch: Switch) -> str:
     """Hidden network name the orchestrator uses for the sidecar's uplink NIC.
 
     Shared with ``orchestrator.provision`` (which registers the uplink network
-    backend under this key) and ``orchestrator.build_phase`` (which pops it at
+    backend under this key) and ``orchestrator.vm_build`` (which pops it at
     teardown), so the ``__uplink__<switch>`` convention lives in one place.
     """
     return f"__uplink__{switch.name}"

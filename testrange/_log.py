@@ -63,7 +63,7 @@ def configure(level: str = "INFO") -> None:
 def _quiesce_firehose() -> None:
     """Pin the streaming-firehose loggers above the operator's log level (CORE-50).
 
-    The build serial mirror (``…build_phase.console``, emits DEBUG) and the
+    The build serial mirror (``…vm_build.console``, emits DEBUG) and the
     per-test stdout tee (``…runner.testout``, emits INFO) are a high-volume
     firehose of *raw guest output*. They are meant to be surfaced only on demand
     — through the dashboard's Serial pane or as ``--verbose`` log lines, both of

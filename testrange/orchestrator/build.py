@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks.base import (
     Network,
     Sidecar,
@@ -62,14 +63,19 @@ def _sidecar_spec(switch: Switch, pool_name: str) -> VMSpec:
     """
     nic_specs = sidecar_nic_specs(switch)
     # eth0 is the static sidecar address; eth1 (uplink, when nat) DHCPs from
-    # the upstream LAN — both are run-phase address modes now.
+    # the upstream LAN — both are run-phase address modes now. The handles are
+    # minted directly: synthesized internal specs resolve against the run
+    # ledgers, not a user Hypervisor's registries.
     nics = [
-        NetworkIface(name, addr=StaticAddr(ip) if ip is not None else DHCPAddr())
+        NetworkIface(
+            NetworkHandle(name, switch=switch.name),
+            addr=StaticAddr(ip) if ip is not None else DHCPAddr(),
+        )
         for (name, ip) in nic_specs
     ]
     return VMSpec(
         name=f"__sidecar_{switch.name}",
-        devices=[CPU(1), Memory(256), OSDrive(pool_name, 2), *nics],
+        devices=[CPU(1), Memory(256), OSDrive(PoolHandle(pool_name), 2), *nics],
     )
 
 

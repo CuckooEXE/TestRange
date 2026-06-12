@@ -23,7 +23,7 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 from testrange._ansi import scrub_terminal_control
 
-CONSOLE_LOGGER = "testrange.orchestrator.build_phase.console"
+CONSOLE_LOGGER = "testrange.orchestrator.vm_build.console"
 TESTOUT_LOGGER = "testrange.orchestrator.runner.testout"
 
 

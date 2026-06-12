@@ -35,6 +35,8 @@ class TestDescribe:
         out = capsys.readouterr().out
         assert "Plan (Hypervisor)" in out  # portable plan (ADR-0015)
         assert "backend: UNBOUND" in out
+        assert "graph:" in out  # the build-graph summary line (ADR-0030)
+        assert "node(s)" in out
         assert "switch1" in out
         assert "netA" in out
         assert "pool1" in out
@@ -162,22 +164,19 @@ from testrange.devices.network import NetworkIface
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "portable",
-    Hypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive("pool1", 8),
-                                                 NetworkIface("netA")]),
-                builder=CloudInitBuilder(base=CacheEntry("debian-13"),
-                                         credentials=[PosixCred("u", password="p")]),
-                communicator=SSHCommunicator("u"),
-            ),
-        ],
-    ),
+hyp = Hypervisor()
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)))
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8),
+                                         NetworkIface(hyp.networks["netA"])]),
+        builder=CloudInitBuilder(base=CacheEntry("debian-13"),
+                                 credentials=[PosixCred("u", password="p")]),
+        communicator=SSHCommunicator("u"),
+    )
 )
+PLAN = Plan("portable", hyp)
 
 def t(orch):
     pass

@@ -31,6 +31,7 @@ from testrange.exceptions import StateError, StateLockedError
 from testrange.state.schema import (
     PHASE_PREFLIGHT,
     SCHEMA_VERSION,
+    NodeRecord,
     Resource,
     State,
 )
@@ -139,6 +140,23 @@ class StateStore:
         self._write_pid_atomic(os.getpid())
         self._write_state_atomic(state)
         _log.info("state initialized for run %s at %s", run_id, self.run_dir)
+        return state
+
+    def reopen(self) -> State:
+        """Take ownership of an existing run's state (``run --resume``, DAG-9).
+
+        The prior owner must be dead (its advisory lock released by the
+        kernel); a live owner raises :class:`StateLockedError`. Re-acquires the
+        lock and refreshes the pid breadcrumb, leaving the resource and node
+        ledgers exactly as the prior process recorded them.
+        """
+        if not self.state_path.exists():
+            raise StateError(f"no state to resume at {self.state_path}")
+        self.require_dead()
+        self._acquire_lock()
+        self._write_pid_atomic(os.getpid())
+        state = self.read()
+        _log.info("state reopened for run %s at %s", state.run_id, self.run_dir)
         return state
 
     def release(self) -> None:
@@ -301,6 +319,22 @@ class StateStore:
     def set_phase(self, phase: str) -> None:
         with self._rmw_lock:
             self._write_state_atomic(replace(self.read(), phase=phase))
+
+    def mark_node_materialized(self, name: str) -> None:
+        """Stamp one node's materialize completion in the ledger (DAG-9)."""
+        with self._rmw_lock:
+            state = self.read()
+            prior = state.node_record(name) or NodeRecord(name=name)
+            record = replace(prior, materialized_at=_now_utc_iso())
+            self._write_state_atomic(state.with_node_record(record))
+
+    def mark_node_realized(self, name: str) -> None:
+        """Stamp one node's realize completion in the ledger (DAG-9)."""
+        with self._rmw_lock:
+            state = self.read()
+            prior = state.node_record(name) or NodeRecord(name=name)
+            record = replace(prior, realized_at=_now_utc_iso())
+            self._write_state_atomic(state.with_node_record(record))
 
     def _write_state_atomic(self, state: State) -> None:
         text = json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n"

@@ -42,10 +42,13 @@ from testrange.exceptions import (
     StateLockedError,
     TestRangeError,
 )
-from testrange.networks.base import Network, Switch
+from testrange.graph.build_graph import BuildGraph
+from testrange.graph.keys import compute_cache_keys
+from testrange.networks.base import Network, NetworkAddressing, Switch
 from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
 from testrange.orchestrator.backend import compatibility_findings, resolve_backend
 from testrange.orchestrator.build import resolve_build_switch
+from testrange.orchestrator.context import GraphContext
 from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.runner import build_range, run_tests
 from testrange.plan import Plan
@@ -58,6 +61,7 @@ from testrange.state.cleanup import (
     format_run_list,
     list_runs,
 )
+from testrange.state.store import StateStore, run_dir_for
 from testrange.vms.recipe import VMRecipe
 
 # A subcommand handler: takes the parsed args, returns a process exit code.
@@ -283,12 +287,21 @@ def _run(args: argparse.Namespace) -> int:
                 lease_timeout_s=args.lease_timeout,
                 ready_timeout_s=args.ready_timeout,
                 dashboard=dashboard,
+                resume_run_id=args.resume,
             )
     except DriverError as e:
         _err(f"error: {e}")
         return Exit.USAGE
     except BuildRequiredError as e:
         _err(f"cache miss: {e}")
+        return Exit.USAGE
+    except StateLockedError as e:
+        # --resume on a run whose owner is still alive.
+        _err(f"error: {e}")
+        return Exit.FAILURE
+    except StateError as e:
+        # --resume on a missing/foreign run id, or a state bookkeeping failure.
+        _err(f"error: {e}")
         return Exit.USAGE
     except PreflightError as e:
         _err(f"preflight failed:\n{e}")
@@ -445,6 +458,152 @@ def _describe(args: argparse.Namespace) -> int:
     return Exit.OK if binding_ok else Exit.USAGE
 
 
+def _inspect_ctx(plan: Plan, profile: BackendProfile, mgr: CacheManager) -> GraphContext:
+    """A read-only GraphContext for cache-key inspection (``graph --cache``).
+
+    ``probe_fetch=False`` keeps every cache resolve a metadata read, and the
+    state store under it is never initialized — nothing touches the backend
+    or the disk.
+    """
+    resolved = resolve_backend(plan, profile)
+    return GraphContext(
+        plan=plan,
+        resolved=resolved,
+        store=StateStore(run_dir_for("inspect")),
+        cache=mgr,
+        run_id="inspect",
+        plan_name=plan.name,
+        build_timeout_s=0.0,
+        lease_timeout_s=0.0,
+        addressing={
+            n.name: NetworkAddressing.from_switch(s)
+            for s in plan.hypervisor.declared_switches
+            for n in s.networks
+        },
+        probe_fetch=False,
+    )
+
+
+def _graph(args: argparse.Namespace) -> int:
+    """``testrange graph <plan>`` — render the plan's build graph (DAG-10..12).
+
+    Default: every node (name, kind) and every edge. ``--order`` prints the
+    execution waves (realize schedule). ``--dot`` emits Graphviz. ``--cache``
+    (with ``--profile``) annotates each VM node with its cache key and
+    hit/miss. Read-only: no backend resource is touched.
+    """
+    plan, _tests = _load_plan_module(args.plan)
+    g = plan.graph
+
+    if args.dot:
+        _out(_render_dot(g))
+        return Exit.OK
+
+    if args.order:
+        tree = Tree(Text(f"{g.name}: {len(g.waves())} wave(s)"))
+        for i, wave in enumerate(g.waves()):
+            node = tree.add(Text(f"wave {i} (parallel)"))
+            for n in wave:
+                node.add(Text(n.name))
+        out_console().print(tree)
+        return Exit.OK
+
+    keys: dict[str, str] = {}
+    misses: set[str] = set()
+    if args.cache_keys:
+        profile = _load_profile_arg(args)
+        if profile is None:
+            _err(
+                "error: graph --cache requires --profile <name> "
+                "(cache keys depend on the bound backend)"
+            )
+            return Exit.USAGE
+        mgr = _build_manager(args)
+        try:
+            ctx = _inspect_ctx(plan, profile, mgr)
+            keys = compute_cache_keys(g, ctx)
+            misses = {f"vm:{p.vm.name}" for p in ctx.vm_probes.values() if p.cached_paths is None}
+        except DriverError as e:
+            _err(f"error: {e}")
+            return Exit.USAGE
+        except (CacheMissError, CacheError) as e:
+            _err(f"cache error: {e}")
+            return Exit.FAILURE
+
+    table = Table(box=None, pad_edge=False)
+    table.add_column("NODE", no_wrap=True)
+    table.add_column("KIND")
+    table.add_column("DEPENDS ON")
+    if args.cache_keys:
+        table.add_column("KEY", no_wrap=True)
+        table.add_column("CACHE")
+    for n in g.topological_order():
+        deps = ", ".join(d.name for d in g.dependencies_of(n.name)) or "-"
+        row = [Text(n.name), Text(n.kind), Text(deps)]
+        if args.cache_keys:
+            row.append(Text(keys.get(n.name, "-")))
+            if n.kind == "vm":
+                row.append(Text("MISS (would build)" if n.name in misses else "hit (would clone)"))
+            else:
+                row.append(Text("-"))
+        table.add_row(*row)
+    out_console().print(table)
+    _out(f"{len(g)} node(s), {len(g.edges)} edge(s), {len(g.waves())} wave(s)")
+    return Exit.OK
+
+
+def _why(args: argparse.Namespace) -> int:
+    """``testrange why <plan> <node>`` — explain one node (DAG-12)."""
+    plan, _tests = _load_plan_module(args.plan)
+    g = plan.graph
+    name = args.node
+    if name not in g:
+        # Accept the bare plan-level name too ("web" for "vm:web").
+        qualified = [n.name for n in g.nodes if n.name.split(":", 1)[1] == name]
+        if len(qualified) == 1:
+            name = qualified[0]
+        else:
+            _err(f"error: no node {args.node!r}; known: {', '.join(g.names)}")
+            return Exit.USAGE
+    node = g.node(name)
+    wave_idx = next(i for i, wave in enumerate(g.waves()) if any(n.name == name for n in wave))
+    tree = Tree(Text(f"{name} ({node.kind})"))
+    deps = g.dependencies_of(name)
+    dep_node = tree.add(
+        Text(f"depends on ({len(deps)})" if deps else "depends on: nothing (a root)")
+    )
+    for d in deps:
+        dep_node.add(Text(d.name))
+    dependents = g.dependents_of(name)
+    rev_node = tree.add(
+        Text(f"needed by ({len(dependents)})" if dependents else "needed by: nothing (a leaf)")
+    )
+    for d in dependents:
+        rev_node.add(Text(d.name))
+    tree.add(
+        Text(
+            f"runs in wave {wave_idx} of {len(g.waves())} — after every dependency "
+            "is ready, in parallel with the rest of its wave"
+        )
+    )
+    out_console().print(tree)
+    return Exit.OK
+
+
+def _render_dot(g: BuildGraph) -> str:
+    """Graphviz text for ``graph --dot``. An edge ``A -> B`` reads "A needs B"."""
+    shapes = {"pool": "cylinder", "network": "diamond", "vm": "box"}
+    lines = [f'digraph "{g.name}" {{']
+    lines.append("  rankdir=BT;  // dependencies below their dependents")
+    for n in g.topological_order():
+        shape = shapes.get(n.kind, "ellipse")
+        lines.append(f'  "{n.name}" [shape={shape}];')
+    for e in sorted(g.edges, key=lambda e: (e.dependent, e.dependency)):
+        lines.append(f'  "{e.dependent}" -> "{e.dependency}";')
+    lines.append("}")
+    return "\n".join(lines)
+
+
 def _preflight(args: argparse.Namespace) -> int:
     """Run every read-only preflight check against the bound backend and print
     each result. Exits non-zero (USAGE) if any check blocks; touches no resources.
@@ -541,7 +700,15 @@ def _print_describe(
     tree = Tree(Text(f"Plan ({type(hyp).__name__})"))
     binding_ok = _add_binding(tree, plan, profile)
 
-    if switches := getattr(hyp, "networks", ()):
+    g = plan.graph
+    tree.add(
+        Text(
+            f"graph: {len(g)} node(s), {len(g.edges)} edge(s), {len(g.waves())} wave(s) "
+            "(see `testrange graph <plan>`)"
+        )
+    )
+
+    if switches := hyp.declared_switches:
         sw_node = tree.add(Text("Switches"))
         for sw in switches:
             assert isinstance(sw, Switch)
@@ -567,13 +734,13 @@ def _print_describe(
                 assert isinstance(n, Network)
                 switch.add(Text(n.name))
 
-    if pools := getattr(hyp, "pools", ()):
+    if pools := hyp.declared_pools:
         pool_node = tree.add(Text("Storage pools"))
         for pool in pools:
             pool_node.add(Text(f"{pool.name}: {pool.size_gb} GB"))
 
     cache_refs: list[CacheEntry] = []
-    if vms := getattr(hyp, "vms", ()):
+    if vms := hyp.declared_vms:
         vm_node = tree.add(Text("VMs"))
         for vm in vms:
             assert isinstance(vm, VMRecipe)
@@ -582,12 +749,12 @@ def _print_describe(
             node.add(Text(f"memory: {vm.spec.memory.size_mb} MB"))
             node.add(
                 Text(
-                    f"os:     {type(vm.spec.os_drive).__name__}({vm.spec.os_drive.pool!r}, "
+                    f"os:     {type(vm.spec.os_drive).__name__}({str(vm.spec.os_drive.pool)!r}, "
                     f"{vm.spec.os_drive.size_gb} GB)"
                 )
             )
             for d in vm.spec.data_drives:
-                node.add(Text(f"disk:   {d.pool!r}, {d.size_gb} GB"))
+                node.add(Text(f"disk:   {str(d.pool)!r}, {d.size_gb} GB"))
             for nic in vm.spec.nics:
                 extra = []
                 if isinstance(nic.addr, StaticAddr):
@@ -819,6 +986,37 @@ def build_parser() -> argparse.ArgumentParser:
     _add_connect_arg(p_preflight)
     p_preflight.set_defaults(func=_preflight)
 
+    p_graph = sub.add_parser(
+        "graph",
+        help="print a plan's build graph (nodes, edges, execution order)",
+        description=(
+            "Render the plan's frozen build graph: every node (name, kind) and "
+            "every dependency edge. --order shows the execution waves (what runs "
+            "in parallel, in what order); --dot emits Graphviz; --cache (with "
+            "--profile) annotates each node with its cache key and hit/miss. "
+            "Read-only: touches no backend resources."
+        ),
+    )
+    p_graph.add_argument("plan", help="path to the plan file (.py)")
+    p_graph.add_argument("--order", action="store_true", help="print the execution waves")
+    p_graph.add_argument("--dot", action="store_true", help="emit Graphviz dot text")
+    p_graph.add_argument(
+        "--cache",
+        dest="cache_keys",
+        action="store_true",
+        help="annotate nodes with cache key + hit/miss (requires --profile)",
+    )
+    _add_connect_arg(p_graph)
+    p_graph.set_defaults(func=_graph)
+
+    p_why = sub.add_parser(
+        "why",
+        help="explain one graph node: dependencies, dependents, when it runs",
+    )
+    p_why.add_argument("plan", help="path to the plan file (.py)")
+    p_why.add_argument("node", help="node name (e.g. vm:web, or just web)")
+    p_why.set_defaults(func=_why)
+
     p_cache = sub.add_parser("cache", help="manage the local cache")
     cache_sub = p_cache.add_subparsers(dest="cache_subcommand", required=True)
 
@@ -929,6 +1127,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-cache",
         action="store_true",
         help="fail fast if any artifact is missing instead of auto-building it first",
+    )
+    p_run.add_argument(
+        "--resume",
+        metavar="RUN_ID",
+        default=None,
+        help="continue a previous (dead) run: skip graph nodes already completed "
+        "in its ledger, reattach to its live resources",
     )
     p_run.add_argument(
         "--build-timeout",

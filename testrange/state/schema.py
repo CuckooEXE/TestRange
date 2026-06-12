@@ -80,6 +80,37 @@ class Resource:
 
 
 @dataclass(frozen=True)
+class NodeRecord:
+    """Per-graph-node completion ledger entry (ADR-0030, DAG-9).
+
+    ``materialized_at`` / ``realized_at`` are ISO-8601 stamps written *after*
+    the node's hook ran to completion — ``None`` means not done (or in
+    flight). ``testrange run --resume`` skips a node whose stamp for the
+    requested walk is present; the per-resource ledger above remains the
+    teardown source of truth.
+    """
+
+    name: str
+    materialized_at: str | None = None
+    realized_at: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "materialized_at": self.materialized_at,
+            "realized_at": self.realized_at,
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> NodeRecord:
+        return cls(
+            name=data["name"],
+            materialized_at=data.get("materialized_at"),
+            realized_at=data.get("realized_at"),
+        )
+
+
+@dataclass(frozen=True)
 class State:
     """Run-level state envelope."""
 
@@ -91,6 +122,10 @@ class State:
     phase: str = PHASE_PREFLIGHT
     created_at: str = ""
     resources: tuple[Resource, ...] = ()
+    # Per-node completion ledger (DAG-9). Additive and optional on disk, so a
+    # v1 state.json written before the ledger existed still loads (and an older
+    # testrange reading a newer file simply ignores the key) — no version bump.
+    nodes: tuple[NodeRecord, ...] = ()
 
     def with_resource(self, r: Resource) -> State:
         return replace(self, resources=(*self.resources, r))
@@ -109,6 +144,17 @@ class State:
             resources=tuple(r for r in self.resources if r.backend_name != backend_name),
         )
 
+    def with_node_record(self, record: NodeRecord) -> State:
+        """Upsert one node's ledger entry (keyed by node name)."""
+        rest = tuple(n for n in self.nodes if n.name != record.name)
+        return replace(self, nodes=(*rest, record))
+
+    def node_record(self, name: str) -> NodeRecord | None:
+        for n in self.nodes:
+            if n.name == name:
+                return n
+        return None
+
     def to_json(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -119,6 +165,7 @@ class State:
             "phase": self.phase,
             "created_at": self.created_at,
             "resources": [r.to_json() for r in self.resources],
+            "nodes": [n.to_json() for n in self.nodes],
         }
 
     @classmethod
@@ -142,4 +189,5 @@ class State:
             phase=data.get("phase", PHASE_PREFLIGHT),
             created_at=data.get("created_at", ""),
             resources=tuple(Resource.from_json(r) for r in data.get("resources", [])),
+            nodes=tuple(NodeRecord.from_json(n) for n in data.get("nodes", [])),
         )

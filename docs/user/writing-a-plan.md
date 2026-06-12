@@ -2,7 +2,12 @@
 
 A `testrange` plan is a Python file that declares a top-level
 ``PLAN = Plan(...)`` and a ``TESTS = [...]`` list. The CLI imports
-the file and uses both.
+the file and uses both. You build the topology imperatively — register
+pools, switches, and VMs on a `Hypervisor`, referencing them through the
+typed handles registration returns — and ``Plan(...)`` freezes the result
+into a validated build graph.
+[Thinking in build graphs](thinking-in-build-graphs.md) is the conceptual
+on-ramp for that model; this page is the practical reference.
 
 ```{note}
 A plan's Hypervisor entry can be **portable** (the generic `Hypervisor`, which
@@ -32,53 +37,55 @@ from testrange.vms import VMRecipe, VMSpec
 # cache hits on subsequent invocations. Insecure by design; test-only.
 _KEY = SSHKey.generate(comment="hello")
 
-PLAN = Plan(
-    "hello",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "sw1",
-                Network("netA"),
-                cidr="10.0.1.0/24",
-                uplink="egress",
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="web",
-                    devices=[
-                        CPU(2),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
-                        NetworkIface("netA", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[
-                        PosixCred(
-                            "alice",
-                            ssh_key=_KEY,
-                            admin=True,
-                        ),
-                    ],
-                    packages=[Apt("nginx")],
-                ),
-                communicator=SSHCommunicator("alice"),
-            ),
-        ],
-    ),
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
 )
+
+hyp.add_pool(StoragePool("pool1", 32))
+
+hyp.add_switch(
+    Switch(
+        "sw1",
+        Network("netA"),
+        cidr="10.0.1.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="web",
+            devices=[
+                CPU(2),
+                Memory(1024),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+            ],
+        ),
+        builder=CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            credentials=[
+                PosixCred(
+                    "alice",
+                    ssh_key=_KEY,
+                    admin=True,
+                ),
+            ],
+            packages=[Apt("nginx")],
+        ),
+        communicator=SSHCommunicator("alice"),
+    )
+)
+
+PLAN = Plan("hello", hyp)
 
 def nginx_is_running(orch: OrchestratorHandle) -> None:
     r = orch.vms["web"].communicator.execute(["systemctl", "is-active", "nginx"])
@@ -93,11 +100,42 @@ Then:
 testrange cache add https://cloud.debian.org/.../debian-13-generic-amd64.qcow2 \
     --name debian-13
 testrange describe path/to/plan.py --profile libvirt-local
+testrange graph path/to/plan.py --order
 testrange run path/to/plan.py --profile libvirt-local
 ```
 
 The generic `Hypervisor` above takes its backend from the `--profile` connection
 profile; see [Connecting to a backend](connecting-to-a-backend.md).
+
+## Handles, edges, and the frozen graph
+
+Three rules govern the construction surface:
+
+- **`add_pool` / `add_switch` / `add_vm` register a node and return its typed
+  handle**; every registered node is also reachable through the typed
+  registries `hyp.pools` / `hyp.networks` / `hyp.switches` / `hyp.vms`.
+  Devices take handles, never strings — `OSDrive(hyp.pools["pool1"], 8)`,
+  `NetworkIface(hyp.networks["netA"], ...)`. A typo'd name is a loud
+  `KeyError` at construction (listing the names that exist); a wrong handle
+  kind fails both mypy and the constructor.
+- **Every handle reference becomes a dependency edge** (a VM depends on its
+  pool and its switch). `.needs()` adds the ordering the executor cannot
+  infer:
+
+  ```python
+  db = hyp.add_vm(VMRecipe(...))
+  web = hyp.add_vm(VMRecipe(...))
+  web.needs(db)        # db is fully ready before web boots
+  ```
+
+- **`Plan(name, hyp)` validates and freezes everything** into the plan's
+  build graph; later `add_*` calls raise. One executor walks that graph in
+  topological waves — `testrange graph plan.py --order` shows them, and
+  `testrange why plan.py <node>` explains a single node.
+
+[Thinking in build graphs](thinking-in-build-graphs.md) is the full
+conceptual tour, including how ordering edges interact (and don't) with the
+build cache.
 
 ## Networking
 
@@ -108,7 +146,9 @@ decisions live: `cidr`, `uplink`, `mgmt`. The services a sidecar VM serves at
 `.1` (`dhcp`, `dns`, `nat`) are bundled into an optional `Sidecar` the Switch
 carries, not flags on the Switch itself ([ADR-0013](../adr/0013-switch-sidecar-split.md)).
 A `Network` is a logical label (port-group) within a Switch —
-VMs attach by name, and the orchestrator resolves which Switch owns it.
+`add_switch` flattens a switch's Networks into `hyp.networks`, NICs attach
+through the handle (`NetworkIface(hyp.networks["netA"], ...)`), and the
+orchestrator resolves which Switch owns it.
 All Networks on one Switch share `switch.cidr` (multiple Networks =
 organizational labels on one wire).
 
@@ -137,9 +177,9 @@ A NIC's run-phase address mode is set with `addr=`, which takes one of
 three values:
 
 ```python
-NetworkIface("netA", addr=StaticAddr("172.31.0.150"))  # static
-NetworkIface("netA", addr=DHCPAddr())                  # DHCP lease
-NetworkIface("netA")                                   # addr=None: unconfigured
+NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.150"))  # static
+NetworkIface(hyp.networks["netA"], addr=DHCPAddr())                  # DHCP lease
+NetworkIface(hyp.networks["netA"])                                   # addr=None: unconfigured
 ```
 
 The default is `addr=None` — **unconfigured**, *not* DHCP. The guest's
@@ -148,8 +188,8 @@ its own client, or nothing). Use `DHCPAddr()` to request a lease (the
 Switch needs a `Sidecar(dhcp=True)` for anything to answer) and `StaticAddr(...)`
 to pin an address.
 
-Plan-time validation runs at Hypervisor construction and reports every
-problem at once. For a `StaticAddr`:
+Plan-time validation runs when `Plan(...)` freezes the topology and reports
+every problem at once. For a `StaticAddr`:
 
 - the address must be inside the owning Switch's CIDR.
 - it cannot equal the subnet's network or broadcast address.
@@ -171,12 +211,11 @@ there is **no default uplink**, so without a `build_switch` the build network
 is isolated (no egress):
 
 ```python
-Hypervisor(
+hyp = Hypervisor(
     build_switch=Switch(
         "build", Network("build"), cidr="10.97.99.0/24", uplink="egress",
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-    ),
-    ...
+    )
 )
 ```
 
@@ -207,9 +246,9 @@ place.
 VMSpec(
     name="fileserver",
     devices=[
-        CPU(2), Memory(1024), OSDrive("pool1", 8),
-        HardDrive("pool1", 16),   # /dev/vdb on the guest; built once, served at run
-        NetworkIface("netA", addr=StaticAddr("172.31.0.150")),
+        CPU(2), Memory(1024), OSDrive(hyp.pools["pool1"], 8),
+        HardDrive(hyp.pools["pool1"], 16),   # /dev/vdb on the guest; built once, served at run
+        NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.150")),
     ],
 )
 ```
@@ -248,11 +287,11 @@ is the NIC's position in the device list.
 VMSpec(
     name="multihomed",
     devices=[
-        CPU(2), Memory(1024), OSDrive("pool1", 8),
+        CPU(2), Memory(1024), OSDrive(hyp.pools["pool1"], 8),
         # Communicator binds to this address (first addressed NIC):
-        NetworkIface("mgmt", addr=StaticAddr("10.0.0.10")),
+        NetworkIface(hyp.networks["mgmt"], addr=StaticAddr("10.0.0.10")),
         # Also up on the guest, but not used by the communicator:
-        NetworkIface("data", addr=DHCPAddr()),
+        NetworkIface(hyp.networks["data"], addr=DHCPAddr()),
     ],
 )
 ```
@@ -331,9 +370,11 @@ testrange cache list
 testrange cache push <sha-or-name> --cache <url>   # publish to an HTTP cache
 testrange cache pull <sha-or-name> --cache <url>   # fetch from an HTTP cache
 testrange describe plan.py
+testrange graph plan.py [--order|--dot]            # the build graph / execution waves
+testrange why plan.py <node>                       # one node: dependencies + dependents
 testrange preflight plan.py --profile <name>       # read-only backend checks
 testrange build plan.py                            # warm the cache only; no tests
-testrange run plan.py [--fail-fast] [--leak-on-failure] [--require-cache]
+testrange run plan.py [--fail-fast] [--leak-on-failure] [--require-cache] [--resume RUN_ID]
 testrange repl plan.py
 testrange cleanup <run_id>
 testrange cleanup --all [--dry-run]
@@ -344,7 +385,8 @@ VM to completion and captures its disks into the cache (warming a shared HTTP
 tier when `--cache` is set), running no tests. `run` brings the range up from
 those cached disks and runs tests — auto-building anything not yet cached, or,
 with `--require-cache`, failing fast on a miss so build and run stay distinct,
-auditable steps. See [build vs run](build-vs-run.md).
+auditable steps. `run --resume <run_id>` continues a dead run from its ledger.
+See [build vs run](build-vs-run.md).
 
 ## Tips
 

@@ -12,6 +12,7 @@ from testrange.cache.entry import CacheEntry
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
 from testrange.devices.network import NetworkIface
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import (
     Network,
     NetworkAddressing,
@@ -196,57 +197,69 @@ def _vm(name: str, *nics: NetworkIface) -> VMRecipe:
     return VMRecipe(
         spec=VMSpec(
             name=name,
-            devices=[CPU(1), Memory(512), OSDrive("p1", 8), *nics],
+            devices=[CPU(1), Memory(512), OSDrive(PoolHandle("p1"), 8), *nics],
         ),
         builder=CloudInitBuilder(base=CacheEntry("base")),
         communicator=SSHCommunicator("root"),
     )
 
 
+def _nic(
+    network: str, *, switch: str = "sw", addr: DHCPAddr | StaticAddr | None = None
+) -> NetworkIface:
+    """A NIC on ``network`` via a hand-minted handle.
+
+    ``validate_addressing`` is exercised directly against Switch/VMRecipe values
+    (no Hypervisor registry in play), so the typed handle is minted by hand —
+    the same shape ``hyp.networks[network]`` would return.
+    """
+    return NetworkIface(NetworkHandle(network, switch=switch), addr=addr)
+
+
 class TestValidateAddressing:
     def test_dhcp_clean(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True))
-        vms = [_vm("v1", NetworkIface("netA", addr=DHCPAddr()))]
+        vms = [_vm("v1", _nic("netA", addr=DHCPAddr()))]
         validate_addressing([sw], vms)
 
     def test_static_clean(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.100")))]
         validate_addressing([sw], vms)
 
     def test_ipv4_out_of_cidr(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("10.0.0.5")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("10.0.0.5")))]
         with pytest.raises(ValueError, match="not in subnet"):
             validate_addressing([sw], vms)
 
     def test_ipv4_is_network_address(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.0")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.0")))]
         with pytest.raises(ValueError, match="network address"):
             validate_addressing([sw], vms)
 
     def test_ipv4_is_broadcast(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.255")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.255")))]
         with pytest.raises(ValueError, match="broadcast"):
             validate_addressing([sw], vms)
 
     def test_ipv4_collides_with_sidecar(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True))
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.1")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.1")))]
         with pytest.raises(ValueError, match="sidecar"):
             validate_addressing([sw], vms)
 
     def test_ipv4_collides_with_mgmt(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", mgmt=True)
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.2")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.2")))]
         with pytest.raises(ValueError, match="mgmt"):
             validate_addressing([sw], vms)
 
     def test_ipv4_in_dhcp_pool(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True))
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.50")))]
         with pytest.raises(ValueError, match="DHCP pool"):
             validate_addressing([sw], vms)
 
@@ -257,7 +270,7 @@ class TestValidateAddressing:
         from testrange.networks._addressing_consts import USER_STATIC_HI, USER_STATIC_LO
 
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True))
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.50")))]
         with pytest.raises(ValueError) as ei:
             validate_addressing([sw], vms)
         msg = str(ei.value)
@@ -265,20 +278,23 @@ class TestValidateAddressing:
 
     def test_ipv4_in_dhcp_pool_ok_when_dhcp_off(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.50")))]
+        vms = [_vm("v1", _nic("netA", addr=StaticAddr("172.31.0.50")))]
         validate_addressing([sw], vms)
 
     def test_unknown_network(self) -> None:
+        # Under typed handles a NIC on an undeclared network is only
+        # expressible with a hand-minted NetworkHandle (the registry would
+        # KeyError); validate_addressing still reports it loudly.
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netB", addr=StaticAddr("172.31.0.100")))]
+        vms = [_vm("v1", _nic("netB", addr=StaticAddr("172.31.0.100")))]
         with pytest.raises(ValueError, match="unknown network"):
             validate_addressing([sw], vms)
 
     def test_duplicate_ipv4_same_network(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
         vms = [
-            _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
-            _vm("v2", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
+            _vm("v1", _nic("netA", addr=StaticAddr("172.31.0.100"))),
+            _vm("v2", _nic("netA", addr=StaticAddr("172.31.0.100"))),
         ]
         with pytest.raises(ValueError, match="duplicate"):
             validate_addressing([sw], vms)
@@ -289,8 +305,8 @@ class TestValidateAddressing:
         # Switch, not the Network name.
         sw = Switch("sw", Network("netA"), Network("netB"), cidr="172.31.0.0/24")
         vms = [
-            _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.100"))),
-            _vm("v2", NetworkIface("netB", addr=StaticAddr("172.31.0.100"))),
+            _vm("v1", _nic("netA", addr=StaticAddr("172.31.0.100"))),
+            _vm("v2", _nic("netB", addr=StaticAddr("172.31.0.100"))),
         ]
         with pytest.raises(ValueError, match="duplicate"):
             validate_addressing([sw], vms)
@@ -299,14 +315,14 @@ class TestValidateAddressing:
         # No DHCP and no static IP is fine: the NIC's behavior is the guest
         # OS's call, not the plan validator's. Must not raise.
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24")
-        vms = [_vm("v1", NetworkIface("netA"))]
+        vms = [_vm("v1", _nic("netA"))]
         validate_addressing([sw], vms)
 
     def test_accumulates_multiple_problems(self) -> None:
         sw = Switch("sw", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True))
         vms = [
-            _vm("v1", NetworkIface("netA", addr=StaticAddr("172.31.0.1"))),
-            _vm("v2", NetworkIface("netA", addr=StaticAddr("10.0.0.5"))),
+            _vm("v1", _nic("netA", addr=StaticAddr("172.31.0.1"))),
+            _vm("v2", _nic("netA", addr=StaticAddr("10.0.0.5"))),
         ]
         with pytest.raises(ValueError) as ei:
             validate_addressing([sw], vms)
@@ -320,8 +336,8 @@ class TestValidateAddressing:
         vms = [
             _vm(
                 "v1",
-                NetworkIface("netA", addr=StaticAddr("172.31.0.100")),
-                NetworkIface("netB", addr=DHCPAddr()),
+                _nic("netA", switch="swA", addr=StaticAddr("172.31.0.100")),
+                _nic("netB", switch="swB", addr=DHCPAddr()),
             ),
         ]
         validate_addressing([sw_a, sw_b], vms)

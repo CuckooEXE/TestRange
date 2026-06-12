@@ -64,7 +64,6 @@ _SUFFIXES = {
 }
 
 
-@dataclass(frozen=True)
 class MockHypervisor(Hypervisor):
     """Topology-only scheme marker selecting the in-memory ``mock`` backend (CORE-19).
 

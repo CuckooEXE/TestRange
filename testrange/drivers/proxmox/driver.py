@@ -28,7 +28,6 @@ import functools
 import secrets
 import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
@@ -110,7 +109,6 @@ def _translates(
     return cast("Callable[Concatenate[ProxmoxDriver, _P], _R]", wrapper)
 
 
-@dataclass(frozen=True)
 class ProxmoxHypervisor(Hypervisor):
     """Topology-only scheme marker selecting the ``proxmox`` backend (CORE-19).
 

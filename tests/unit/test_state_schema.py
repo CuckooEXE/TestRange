@@ -7,6 +7,7 @@ import pytest
 from testrange.exceptions import StateError
 from testrange.state.schema import (
     PHASE_DONE,
+    NodeRecord,
     Resource,
     State,
 )
@@ -93,3 +94,31 @@ class TestState:
         )
         again = State.from_json(s.to_json())
         assert again == s
+
+
+class TestNodeLedger:
+    """The per-node completion ledger (DAG-9) — additive, no schema bump."""
+
+    def test_node_record_roundtrip(self) -> None:
+        s = State(run_id="r1", plan_name="p")
+        s = s.with_node_record(NodeRecord(name="vm:web", materialized_at="2026-06-12T00:00:00Z"))
+        again = State.from_json(s.to_json())
+        assert again == s
+        record = again.node_record("vm:web")
+        assert record is not None
+        assert record.materialized_at == "2026-06-12T00:00:00Z"
+        assert record.realized_at is None
+
+    def test_with_node_record_upserts_by_name(self) -> None:
+        s = State(run_id="r1", plan_name="p")
+        s = s.with_node_record(NodeRecord(name="vm:web", materialized_at="t1"))
+        s = s.with_node_record(NodeRecord(name="vm:web", materialized_at="t1", realized_at="t2"))
+        assert len(s.nodes) == 1
+        record = s.node_record("vm:web")
+        assert record is not None and record.realized_at == "t2"
+
+    def test_pre_ledger_state_json_still_loads(self) -> None:
+        # A v1 state.json written before the ledger existed has no "nodes" key.
+        data = State(run_id="r1", plan_name="p").to_json()
+        del data["nodes"]
+        assert State.from_json(data).nodes == ()

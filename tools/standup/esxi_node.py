@@ -1,9 +1,9 @@
 """esxi_node: stand up a TestRange-BUILT nested ESXi node on libvirt, then leak it.
 
-The certification vehicle for the managed-ESXi path (ESXI-34): a
-``GuestHypervisor.esxi`` guest with an *empty* inner topology — the
-``ESXiKickstartBuilder`` performs the unattended install (installer-origin,
-serial build-result), the nested machinery proves the pyVmomi bind, and the
+The certification vehicle for the managed-ESXi path (ESXI-34): an ESXi guest
+whose ``ESXiKickstartBuilder`` performs the unattended install
+(installer-origin, serial build-result; the v0 ``GuestHypervisor.esxi``
+bring-up, inlined — the nested machinery is removed in 2.0, ADR-0030), and the
 corpus is then run by pointing an ``esxi-nested`` profile at the leaked node
 (``tests/plans/generic/*`` Native plans + ``tests/plans/esxi/*``; the SSH
 generic plans are not applicable on ESXi, ESXI-30).
@@ -38,6 +38,7 @@ import sys
 from collections.abc import Callable
 
 from testrange import Hypervisor, OrchestratorHandle, Plan, run_tests
+from testrange.builders import ESXiKickstartBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
@@ -47,7 +48,7 @@ from testrange.devices.network import DHCPAddr
 from testrange.devices.network.libvirt import LibvirtNetworkIface
 from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import EcdsaKey
-from testrange.vms import GuestHypervisor, VMSpec
+from testrange.vms import VMRecipe, VMSpec
 
 # ESXi 8 sshd is FIPS-constrained and silently rejects Ed25519 — ECDSA keypair
 # (deterministic, re-materializable from the comment). The password is what the
@@ -58,47 +59,54 @@ _ROOT = PosixCred(
     ssh_key=EcdsaKey.generate(comment="testrange-standup-esxi"),
 )
 
-PLAN = Plan(
-    "esxi-node",
-    Hypervisor(
-        build_switch=Switch(
-            "esxbuild",
-            Network("esxbuild-net"),
-            cidr="10.97.67.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "esxlab",
-                Network("esxlab-net"),
-                cidr="10.67.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("esxpool", 140)],
-        vms=[
-            GuestHypervisor.esxi(
-                spec=VMSpec(
-                    name="esxi1",
-                    firmware="bios",
-                    devices=[
-                        CPU(4, nested=True),
-                        Memory(10240),
-                        LibvirtOSDrive("esxpool", 120, bus="sata"),
-                        LibvirtNetworkIface("esxlab-net", model="e1000e", addr=DHCPAddr()),
-                        LibvirtNetworkIface("esxlab-net", model="e1000e", addr=None),
-                    ],
-                ),
-                root=_ROOT,
-                installer_iso=CacheEntry("esxi-installer"),
-                license=os.environ.get("TESTRANGE_ESXI_LICENSE") or None,
-            ),
-        ],
-    ),
+hyp = Hypervisor(
+    build_switch=Switch(
+        "esxbuild",
+        Network("esxbuild-net"),
+        cidr="10.97.67.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
 )
+
+hyp.add_pool(StoragePool("esxpool", 140))
+
+hyp.add_switch(
+    Switch(
+        "esxlab",
+        Network("esxlab-net"),
+        cidr="10.67.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="esxi1",
+            firmware="bios",
+            devices=[
+                CPU(4, nested=True),
+                Memory(10240),
+                LibvirtOSDrive(hyp.pools["esxpool"], 120, bus="sata"),
+                LibvirtNetworkIface(hyp.networks["esxlab-net"], model="e1000e", addr=DHCPAddr()),
+                LibvirtNetworkIface(hyp.networks["esxlab-net"], model="e1000e", addr=None),
+            ],
+        ),
+        # The v0 GuestHypervisor.esxi pairing, inlined: SSH is the transport, so
+        # the builder bakes the root key + sshd (enable_ssh defaults True).
+        builder=ESXiKickstartBuilder(
+            installer_iso=CacheEntry("esxi-installer"),
+            credentials=[_ROOT],
+            license=os.environ.get("TESTRANGE_ESXI_LICENSE") or None,
+        ),
+        communicator=SSHCommunicator("root"),
+    )
+)
+
+PLAN = Plan("esxi-node", hyp)
 
 
 def node_answers_over_ssh(orch: OrchestratorHandle) -> None:

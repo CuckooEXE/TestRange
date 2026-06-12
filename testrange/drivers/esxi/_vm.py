@@ -99,7 +99,7 @@ def _data_disk_devices(vim: Any, spec: VMSpec, data_disk_refs: Sequence[VolumeRe
     """Device-add specs for the data disks, honoring each disk's ESXi controller bus.
 
     ``data_disk_refs`` is parallel to ``spec.data_drives`` (the orchestrator builds
-    it in that order, run_phase.py), so the bus is read off the matching
+    it in that order, vm_run.py), so the bus is read off the matching
     :class:`~testrange.drivers.esxi.devices.ESXiHardDrive` — keeping the per-disk
     bus knob ESXi-internal (the ABC's ``create_vm`` carries no bus; ESXI-20). Each
     bus has its own controller and unit-number space: scsi continues after the OS

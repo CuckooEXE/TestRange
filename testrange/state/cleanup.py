@@ -208,9 +208,8 @@ def forget_run(run_id: str, *, root: Path | None = None) -> tuple[str, ...]:
     """Drop a run's ledger WITHOUT touching its backend (ORCH-40).
 
     The explicit escape hatch for a run whose backend is permanently gone —
-    typically a nested hypervisor whose outer teardown already destroyed the
-    host, taking every inner resource with it (``nested_phase`` relies on
-    exactly that reclamation). :func:`cleanup_run` demands a reachable backend
+    typically a hypervisor host that was itself torn down or rebuilt, taking
+    every resource the ledger records with it. :func:`cleanup_run` demands a reachable backend
     before it will finalize a non-empty ledger, so such a run dir lingers
     forever. Forgetting is deliberate (per-run, never swept by ``--all``) and
     loud: every dropped ledger entry is logged and returned so the operator

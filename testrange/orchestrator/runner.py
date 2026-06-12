@@ -7,6 +7,7 @@ import traceback
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from testrange._log import get_logger
 from testrange._tui import capture_test_output
@@ -14,7 +15,9 @@ from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile
 from testrange.orchestrator.dashboard_state import DashboardState
 from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
-from testrange.plan import Plan
+
+if TYPE_CHECKING:  # pragma: no cover
+    from testrange.plan import Plan
 
 _log = get_logger(__name__)
 
@@ -82,6 +85,7 @@ def run_tests(
     lease_timeout_s: float = 120.0,
     ready_timeout_s: float = 120.0,
     dashboard: DashboardState | None = None,
+    resume_run_id: str | None = None,
 ) -> list[TestResult]:
     """Bring the range up, execute the tests, tear it down.
 
@@ -100,6 +104,10 @@ def run_tests(
     Slow guests — notably a nested ESXi node, whose install is slow under nested
     KVM and whose sshd only comes up via ``local.sh`` after hostd, minutes past
     its DHCP lease — need larger values.
+
+    ``resume_run_id`` continues a previous (dead) run instead of starting a
+    fresh one (DAG-9): the run's state is reopened and nodes whose completion
+    is already stamped are skipped/reattached rather than re-created.
     """
     results: list[TestResult] = []
     o = Orchestrator(
@@ -108,6 +116,8 @@ def run_tests(
         require_cache=require_cache,
         profile=profile,
         jobs=jobs,
+        run_id=resume_run_id,
+        resume=resume_run_id is not None,
         build_timeout_s=build_timeout_s,
         lease_timeout_s=lease_timeout_s,
         agent_ready_timeout_s=ready_timeout_s,

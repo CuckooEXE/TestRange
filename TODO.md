@@ -5,7 +5,7 @@ is in flight; it replaces the `ktui` (kanban-tui) board, migrated out of ktui
 on 2026-06-06.
 
 - **Status sections:** Doing (in progress) · Ready (backlog + to-do) · Done · Archive (older history).
-- **Categories** (swimlanes): PVE · BACKEND · NET · CACHE · ORCH · BUILD · COMM · PROXY · CORE · CI · DOCS · ESXI · PROV · REL.
+- **Categories** (swimlanes): PVE · BACKEND · NET · CACHE · ORCH · BUILD · COMM · PROXY · CORE · CI · DOCS · ESXI · PROV · REL · DAG.
 - **Ticket shape:** `<type> | <ID>: description` — `type` ∈ feat/bugfix/chore/ci/test/docs/EPIC; `ID` uses the swimlane prefix.
 
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
@@ -414,7 +414,97 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (385)
+## Done (406)
+
+### DAG
+
+- [x] **DAG** · `EPIC` — TestRange 2.0: convert the codebase to an explicit build graph (DAG) _(done: 2026-06-12)_
+
+  > Umbrella for the hard 2.0 cut. Replace the v0 declarative `Plan(*hypervisors)` form factor (frozen `Hypervisor(vms=[...], pools=[...], networks=[...])` + the fixed 5-phase pipeline) with an imperative builder that produces a frozen `BuildGraph` of typed `Node`s and kinded `Edge`s, walked by ONE topo-sorting executor with per-node content-addressed caching. NO backward compatibility — the old Plan surface, the phase modules, examples, and the tests/plans corpus are all rebuilt on the new API. Design of record: PLAN.md "TestRange 2.0 — the build graph (DAG)" + ADR-0030 (DAG-1).
+  >
+  > Hard constraints from the user: (1) it MUST stay simple for junior devs — crystal-clear mypy types (NO `Any` on the public surface; concrete typed handles) and first-class graph-inspection commands so execution order is never a mystery; (2) MVP = libvirt backend + CloudInitBuilder/Debian VMs + ordering edges ONLY; (3) do NOT build into a hole — appliances (deploy-through-endpoint), relationship edges (manage/collect_from with bake|replay caching), nested hypervisors, and multi-backend are DEFERRED, but the Node/Edge ABCs, the edge-cacheability field, the transitive-hash cache key, and the backend-agnostic executor are designed so they land as new node/edge KINDS, not a reshape.
+  >
+  > Supersedes/extends ADR-0008 (driver ABC), ADR-0010 (build/run phases), ADR-0021 (nested recursion). Children DAG-1..20. Created 2026-06-12. COMPLETE 2026-06-12: the whole cut (DAG-3..20) landed in one session on feature/dag — all hard constraints held (junior surface: typed handles + `graph`/`why` CLI + user guide; MVP scope: libvirt + cloud-init + ordering edges; seams proven additive by DAG-19/20 checks). Gates green (ruff / format / mypy --strict 249 files / pytest 1347) + hello_world live smoke + 15/15 corpus re-cert on libvirt-local. Net -1.8k lines.
+
+- [x] **DAG-3** · `feat` — MVP node kinds: `PoolNode`, `NetworkNode`, `VMNode` _(done: 2026-06-12)_
+
+  > Landed 2026-06-12 with the full 2.0 cut (feature/dag). `testrange/nodes.py`: `PoolNode`/`NetworkNode` (one node per Switch — fabric+networks+sidecar realize as a unit)/`VMNode` over the DAG-2 ABCs; `testrange/handles.py` typed handles (`PoolHandle`/`NetworkHandle`/`SwitchHandle`/`VMHandle`) — **str subclasses**: a handle IS the plan-level name, so every downstream name consumer (builders, drivers, dnsmasq records, config_hash) stays byte-identical with v0, while mypy + runtime checks reject a bare string or a miswired kind at the device boundary. Implicit infra edges inferred from spec handle refs (VM→pools incl. per-data-disk, VM→NIC switches, sidecar-switch→first pool). Node names kind-qualified (`vm:web`).
+
+- [x] **DAG-4** · `feat` — imperative builder surface (replaces `Plan(*hypervisors)`) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `Hypervisor` rewritten as the mutable node container: `add_pool`/`add_switch`/`add_vm` register + return typed handles; `hyp.pools/.networks/.switches/.vms` are `Mapping[str, Handle]` registries with teaching KeyErrors; `declared_*` tuples preserve registration order; `handle.needs()` records explicit ordering edges; `Plan(name, hyp)` validates (whole-plan checks moved here from Hypervisor construction), freezes the container, and assembles the frozen `BuildGraph`. Scheme markers (Mock/Libvirt/Proxmox/ESXi) ride the new base. No `Any` on the public surface.
+
+- [x] **DAG-5** · `feat` — per-node content-addressed cache key (transitive hash) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `graph/keys.py::compute_cache_keys` — serial topo walk routing content-dependency keys into `Node.cache_key(ctx, dependency_keys)` (signature widened: keys are contextual — base shas from the cache, MACs from the bound driver — which is why `graph --cache` needs `--profile`). Ordering edges excluded (placement ≠ invalidation); same-endpoint conflicting cacheability resolved **strongest-wins** (the DAG-2 open policy). **v0 parity regression-pinned** (`test_nodes.py::TestV0KeyParity`: walk key == byte-identical v0 `config_hash`) and proven live: the 2.0 key walk HIT v0-built `_built_*` cache entries on the re-cert.
+
+- [x] **DAG-6** · `feat` — DAG executor (topo walk replacing the phase pipeline) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `orchestrator/executor.py`: one kind-agnostic executor — serial key walk (`prepare_keys`, fills `ctx.vm_probes`), then `materialize_graph` over **content waves** (ordering edges don't gate builds → MVP builds stay fully concurrent, v0 behavior) and `realize_graph` over full waves on the bounded pool (ADR-0023 substrate reused verbatim); per-node readiness folded into realize (the v0 global barriers became per-node gates, making `.needs()` mean "after genuinely ready"). `build_phase.py`/`run_phase.py`/`nested_phase.py` deleted; per-resource mechanics live on as `vm_build.py`/`vm_run.py`; `RunContext`→`GraphContext` widens the (still-empty) `NodeContext` protocol.
+
+- [x] **DAG-7** · `feat` — wire libvirt into node materialize/realize _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. Node hook bodies drive the unchanged driver ABC: VMNode materialize = probe + build-on-miss via the lazily-created shared build infra (`ensure_build_infra`, lock-guarded, torn down at walk end); realize = upload disks (per-disk declared pool — v0 silently used the OS pool), create+start, bind communicator, leases, builder-ready. LIVE-validated on libvirt-local: hello_world smoke green (cache hit + snapshot lifecycle) and the full corpus re-cert (DAG-16).
+
+- [x] **DAG-8** · `chore` — graph teardown + cleanup + per-node state ledger _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. Record-before-create + LIFO state-driven teardown carry over unchanged (creation order respects wave order, so reversed(state.resources) IS reverse-topo); the materialize walk reclaims build infra on the failure path too; `cleanup`/`--leak-on-failure`/`cleanup --all` unchanged on per-node state.
+
+- [x] **DAG-9** · `feat` — per-node completion ledger + `--resume` foundation _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `state.json` gained an additive `nodes` completion ledger (`NodeRecord{materialized_at,realized_at}`, no schema bump — pre-ledger files still load); executor stamps after each hook; `StateStore.reopen()` takes over a dead run (advisory-lock gated). `testrange run --resume <run_id>`: realized nodes reattach idempotently (deterministic backend names rebuild the in-memory ledgers; VMs skip create and re-bind fresh communicators; sidecars re-verified serving). End-to-end resume test on MockDriver (`test_executor.py::TestResume`).
+
+- [x] **DAG-10** · `feat` — `testrange graph <plan>` (nodes / edges / kinds) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `testrange graph <plan>`: every node (name/kind/depends-on) in topo order + totals; read-only, no backend.
+
+- [x] **DAG-11** · `feat` — `graph --order` (execution waves) + `--dot` (Graphviz) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `graph --order` prints the execution waves (tree); `graph --dot` emits Graphviz (kind-shaped nodes, deterministic ordering).
+
+- [x] **DAG-12** · `feat` — `graph --cache` + `testrange why <node>` _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `graph --cache --profile <p>` annotates each node with its key + VM hit/miss via metadata-only probes (`probe_fetch=False` — never pulls an artifact to print a line); `testrange why <plan> <node>` (bare names accepted) shows dependencies, dependents, and the node's wave.
+
+- [x] **DAG-13** · `chore` — port describe/preflight/build/run/repl onto the graph _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `describe` gained a graph summary line (topology tree retained); `preflight` validates the graph at plan import (GraphError ⊂ PlanError → existing exit-2 path); `build`/`run`/`repl` drive the executor walks; `run --resume RUN_ID` added; exit-code contract (0/1/2/3/130) preserved and pinned by the CLI suite.
+
+- [x] **DAG-14** · `chore` — delete the v0 form factor (hard 2.0 break) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. Deleted: v0 frozen `Hypervisor(networks=/pools=/vms=)` kwargs, `Plan(name, *hypervisors)` varargs, `build_phase.py`/`run_phase.py` orchestration, and the whole nested-virt surface (`GuestHypervisor`, `nested_phase.py`, `drivers/*/_nested.py`, `OrchestratorHandle.nested`, examples/nested_lab.py) per ADR-0030 — returns post-MVP as `HypervisorNode`. Runtime view renamed `VMHandle`→`RunningVM` (the handle name now belongs to the construction surface). No shim. Gates green after removal.
+
+- [x] **DAG-15** · `docs` — rebuild `examples/` on the builder API _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. hello_world/multi_tier_app/native_agent rebuilt on the builder API (comment-free); multi_tier_app carries the explicit `web.needs(db)` edge; nested_lab deleted with the feature; tools/standup/*.py ported (GuestHypervisor front-doors inlined as plain recipes); PLAN's canonical-example reference holds (hello_world).
+
+- [x] **DAG-16** · `test` — rebuild tests/plans corpus + libvirt re-cert _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. Corpus rebuilt on the new API (13 generic + 2 libvirt + proxmox/esxi tiers typecheck-clean); `generic/lifecycle.py` gained the end-to-end ordering-edge certification (db/web + `web.needs(db)`: web's first test finds db already serving; wave placement pinned). LIVE re-certified on libvirt-local via `testrange run` — LIVE re-cert 2026-06-12: 15/15 plans green on libvirt-local (13 generic + 2 libvirt; log libvirt-recert-2.0.log), heavy cache-hit traffic against v0-built artifacts confirming key parity in production.
+
+- [x] **DAG-17** · `test` — migrate the unit suite (MockDriver) onto the executor _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. Unit suite migrated onto the executor: test_orchestrator.py drives the full lifecycle through the walks; test_build_phase.py→test_vm_build.py, parallel suites→test_materialize_parallel/test_realize_parallel; new test_handles/test_nodes (v0 key parity)/test_executor (ordering, ledger, resume)/test_seam_checks; construction surface re-pinned in test_hypervisor/test_plan. Gates: ruff ✓ ruff format ✓ mypy --strict (249 files) ✓ pytest 1347 passed / 0 failed ✓.
+
+- [x] **DAG-18** · `docs` — "thinking in build graphs" user guide (for juniors) _(done: 2026-06-12)_
+
+  > Landed 2026-06-12. `docs/user/thinking-in-build-graphs.md` — plan→graph, handles-are-edges, waves + per-node readiness, reading `graph`/`--order`/`--cache`/`why`, key semantics (placement ≠ invalidation), common errors decoded. User docs + README swept onto the 2.0 surface (writing-a-plan, running-tests, build-vs-run, connecting, drivers/esxi nested-removal note).
+
+- [x] **DAG-19** · `chore` — DEFERRED seam check: `ApplianceNode` + relationship edges _(done: 2026-06-12)_
+
+  > Seam check landed 2026-06-12 (`tests/unit/test_seam_checks.py::TestApplianceSeam`): an `ApplianceNode` stand-in + bake/replay relationship edges flow through the UNMODIFIED graph model, transitive key walk (bake chain folds + invalidates transitively), content-wave gating, and executor dispatch — new kinds, zero reshape.
+
+- [x] **DAG-20** · `chore` — DEFERRED seam check: `HypervisorNode` (nested) + multi-backend _(done: 2026-06-12)_
+
+  > Seam check landed 2026-06-12 (`TestHypervisorSeam`): a `HypervisorNode` stand-in recursing an inner `BuildGraph` realizes through one outer hook (no executor branch); second-backend portability reduces to swapping the ABC-shaped driver on the context; unknown kind tags never perturb validation.
+
+- [x] **DAG-1** · `docs` — ADR-0030: the build graph (2.0 design of record) _(done: 2026-06-12)_
+
+  > Wrote `docs/adr/0030-build-graph-dag.md` capturing the 2.0 decisions: imperative-builder → frozen `BuildGraph`; `Node`/`Edge` kinded ABCs; node key = transitive hash (ordering edges excluded); executor = topo walk replacing the ADR-0010 phases; teardown = reverse topo; hard break (no back-compat); MVP scope (libvirt + cloud-init + ordering edges); deferred seams (appliances, bake/replay relationship edges, nested `HypervisorNode`, multi-backend). Supersedes/extends ADR-0008/0010/0021. **Renumbered 0029 → 0030**: 0029 was already taken by `rich-terminal-output` (Accepted 2026-06-08); fixed the stale `ADR-0029` DAG refs in PLAN.md + TODO.md and added 0030 to the ADR index. Grounded by a 6-reader subsystem contract-map of cache/config_hash, the phase pipeline, the parallel substrate, state/ledger, the driver ABC, and the nested seam.
+
+- [x] **DAG-2** · `feat` — `BuildGraph` + `Node`/`Edge` ABCs (pure model, no backend) _(done: 2026-06-12)_
+
+  > New `testrange/graph/` package: `Node` kinded ABC (name/kind/cache_key contract + materialize/realize hooks over an empty `NodeContext` protocol the executor widens in DAG-6), `Edge` + `EdgeKind`/`Cacheability` enums, and a genuinely-immutable validated `BuildGraph` (wave-based topo-sort via Kahn-by-levels, iterative cycle finder reporting a concrete path, dangling-dep + dup-name + self-edge checks). Graph errors added to `exceptions.py` as `PlanError` subclasses (so a malformed graph flows through the invalid-plan exit path, DAG-13). NO `Any`; zero driver imports. 46 table-driven unit tests (cycles incl. a 1500-node deep cycle, diamonds, disconnected components, determinism under input reordering, immutability, forward-compat seam evidence). Hardened via a 4-dimension adversarial review workflow (33 agents): fixed a real immutability hole (`__setattr__` seal) and a recursive-cycle-finder `RecursionError` escape, strengthened the cycle/determinism/component tests. Gates green: ruff, ruff format, mypy --strict (248 files), pytest 1322-test suite.
 
 ### CORE
 

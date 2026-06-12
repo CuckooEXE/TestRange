@@ -8,7 +8,7 @@ arrives at run time via a connection profile.
 ## Writing a portable plan
 
 Use the generic `Hypervisor` as your Plan entry. It carries only topology —
-networks, pools, and VMs — and pins no backend:
+the pools, switches, and VMs you register on it — and pins no backend:
 
 ```python
 from testrange import Hypervisor, Plan
@@ -18,17 +18,13 @@ from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 # ... builder / communicator imports ...
 
-PLAN = Plan(
-    "hello-world",
-    Hypervisor(
-        networks=[
-            Switch("switch1", Network("netA"), cidr="172.31.0.0/24",
-                   sidecar=Sidecar(dhcp=True, dns=True)),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[...],
-    ),
-)
+hyp = Hypervisor()
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(Switch("switch1", Network("netA"), cidr="172.31.0.0/24",
+                      sidecar=Sidecar(dhcp=True, dns=True)))
+hyp.add_vm(VMRecipe(...))
+
+PLAN = Plan("hello-world", hyp)
 ```
 
 A portable plan carries no host address and no password — those move into the
@@ -117,19 +113,19 @@ Plan (Hypervisor)
 When a test genuinely depends on a specific backend (a PVE-specific CPU type
 or SDN feature, a libvirt-specific NIC model), use that backend's concrete
 `*Hypervisor` as the Plan entry. Under CORE-19 it is a **topology-only scheme
-marker** — same shape as the generic `Hypervisor`, but it asserts *this
-topology MUST run against backend X*:
+marker** — the same `add_*` builder surface as the generic `Hypervisor`, but it
+asserts *this topology MUST run against backend X*:
 
 ```python
 from testrange import Plan
 from testrange.drivers.proxmox import ProxmoxHypervisor
 
-PLAN = Plan(
-    "pve-smoke",
-    ProxmoxHypervisor(
-        networks=[...], pools=[...], vms=[...],
-    ),
-)
+hyp = ProxmoxHypervisor()
+hyp.add_pool(...)
+hyp.add_switch(...)
+hyp.add_vm(...)
+
+PLAN = Plan("pve-smoke", hyp)
 ```
 
 `tests/plans/proxmox/devices.py` is a scheme-pinned-Proxmox plan (`ProxmoxHypervisor`).

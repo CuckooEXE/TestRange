@@ -14,7 +14,7 @@ transport multiplex concurrent requests/channels — so the slow transfers
 overlap on one connection. The drivers' in-memory resource maps stay consistent
 because there is one driver instance, and agent commands serialize on the
 driver's own ``call_lock``. Shared bookkeeping (``StateStore`` RMW, the
-``RunContext`` ledger) is mutated only under its own lock, held briefly.
+``GraphContext`` ledger) is mutated only under its own lock, held briefly.
 
 Per-worker connections were considered and rejected: the drivers cache
 cross-call resource-name resolution in per-instance maps (libvirt

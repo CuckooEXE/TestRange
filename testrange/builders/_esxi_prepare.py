@@ -187,7 +187,7 @@ def _firstboot(ssh_key: str | None, allow_tcp_forwarding: bool) -> list[str]:
     to emit was live-disproven — a reboot restores the pinned MAC rather than
     re-creating ``vmk0``). The fix lives upstream: an installer-origin build's
     dedicated build NIC wears the MAC of the VM's first *declared* NIC
-    (``_build_nic_for``, orchestrator/build_phase.py), so the install pins
+    (``build_nic_for``, orchestrator/vm_build.py), so the install pins
     ``vmk0`` to exactly the identity the run-phase VM wakes up with and the
     orchestrator's lease discovery polls. One boot, no guest-side surgery.
 

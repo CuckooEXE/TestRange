@@ -22,7 +22,6 @@ from __future__ import annotations
 import functools
 import threading
 from collections.abc import Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Concatenate, ParamSpec, TypeVar, cast
 
@@ -113,7 +112,6 @@ def _translates(
     return cast("Callable[Concatenate[ESXiDriver, _P], _R]", wrapper)
 
 
-@dataclass(frozen=True)
 class ESXiHypervisor(Hypervisor):
     """Topology-only scheme marker selecting the ``esxi`` backend (CORE-19).
 
@@ -296,7 +294,7 @@ class ESXiDriver(HypervisorDriver):
 
     def _datastore_capacity_findings(self, plan: Plan) -> tuple[PreflightFinding, ...]:
         """The datastore's free space must cover the declared pools' minimum sizes."""
-        needed_gb = sum(p.size_gb for p in plan.hypervisor.pools)
+        needed_gb = sum(p.size_gb for p in plan.hypervisor.declared_pools)
         free_gb = self._client.datastore.summary.freeSpace / (1024**3)
         if free_gb >= needed_gb:
             return ()
@@ -337,8 +335,8 @@ class ESXiDriver(HypervisorDriver):
         builds land a blank VMFS disk and need no conversion.
         """
         needs_convert = any(
-            vm.builder.os_disk_base() is not None for vm in plan.hypervisor.vms
-        ) or any(sw.needs_sidecar for sw in plan.hypervisor.all_switches)
+            vm.builder.os_disk_base() is not None for vm in plan.hypervisor.declared_vms
+        ) or any(sw.needs_sidecar for sw in plan.hypervisor.declared_switches)
         if not needs_convert or _diskconvert.qemu_img_path() is not None:
             return ()
         return (

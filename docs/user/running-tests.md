@@ -23,10 +23,14 @@ for the same table.
 
 ```
 testrange describe <plan.py>            # passive structure summary, no backend writes
+testrange graph <plan.py> [--order|--dot]  # the plan's build graph; --order = execution waves
+  --cache --profile <name>              #   annotate each node with cache key + hit/miss
+testrange why <plan.py> <node>          # one node: dependencies, dependents, its wave
 testrange preflight <plan.py>           # read-only backend checks; print each result
 testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
   --leak-on-failure                     #   skip teardown if any test fails
+  --resume RUN_ID                       #   continue a dead run; skip nodes its ledger completed
   --jobs N                              #   cap I/O-phase workers (default 8; 0 or 1 = serial)
   --no-dashboard                        #   disable the live dashboard; emit plain log lines
   --verbose                             #   (global) surface the build serial console / test output
@@ -35,8 +39,7 @@ testrange cleanup --list                # list runs + status, tear down nothing
 testrange cleanup <run_id>              # tear down a leaked / crashed run
 testrange cleanup --all [--dry-run]     # all stale runs at once
 testrange cleanup --forget <run_id>     # drop a run's ledger; backend untouched
-                                        #   (for a backend that is permanently gone,
-                                        #   e.g. a torn-down nested node)
+                                        #   (for a backend that is permanently gone)
 testrange cache add <path-or-url>       # cache subcommands:
 testrange cache list                    #   add / list / del / rename / forget-name / purge / push / pull
 testrange cache del <sha-or-name>
@@ -63,10 +66,15 @@ all tests run sequentially and the runner continues on failure; pass
 `--fail-fast` to stop on the first failed assertion.
 
 Test *execution* is always sequential — your tests share one range. What
-parallelizes is the bring-up plumbing underneath: per-VM disk uploads,
-build-disk captures, and readiness waits run on a bounded thread pool so a
+parallelizes is the bring-up underneath: one executor walks the plan's build
+graph in topological waves, and the nodes within a wave — per-VM disk uploads,
+build-disk captures, readiness waits — run on a bounded thread pool, so a
 multi-VM range comes up in roughly the time of its slowest VM instead of the
-sum. `--jobs N` caps that pool (default 8); `--jobs 0` or `--jobs 1` forces it
+sum. A node's wave doesn't complete until the node is *ready* (sidecar
+serving, communicator answering), and an explicit `web.needs(db)` edge pushes
+`web` into a later wave — `testrange graph plan.py --order` shows the waves,
+and [thinking in build graphs](thinking-in-build-graphs.md) explains the
+model. `--jobs N` caps the pool (default 8); `--jobs 0` or `--jobs 1` forces it
 serial, which is handy when a backend misbehaves under concurrency or you want
 deterministic single-threaded logs while debugging.
 
@@ -216,7 +224,7 @@ testrange cleanup --list
 ```
 RUN ID                    STATUS    PHASE       PLAN                RES  CREATED
 20260608-141102-9af3c1    running   run         hello                 6  2026-06-08T14:11:02Z
-20260608-093344-1b7e02    stopped   run         nested-esxi           9  2026-06-08T09:33:44Z
+20260608-093344-1b7e02    stopped   run         multi-tier-app        9  2026-06-08T09:33:44Z
 ```
 
 (`PLAN` is the plan's name; the source `.py` file that spawned the run is not
@@ -225,6 +233,21 @@ recorded in state.)
 `testrange cleanup --all` walks every retained run under
 `$XDG_STATE_HOME/testrange/runs/` and tears each down. Lock-gated:
 refuses to act on a run whose owning process is still alive.
+
+## Resuming a dead run
+
+A run that died — crashed process, dropped SSH session, power cut — does not
+have to start over. `--resume` continues it:
+
+```sh
+testrange run --resume 20260608-093344-1b7e02 plan.py --profile <name>
+```
+
+The new process takes ownership of the run, skips every graph node the run's
+ledger records as completed, reattaches to the resources that are still live,
+and carries on from the first incomplete node. `testrange cleanup --list`
+shows the candidate run ids; for a run you don't want to continue,
+`testrange cleanup <run_id>` remains the teardown path.
 
 ## What `examples/hello_world.py` shows
 

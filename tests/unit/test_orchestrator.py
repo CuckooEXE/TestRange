@@ -38,70 +38,60 @@ from tests.mock_driver import MockDriver, MockHypervisor
 
 
 def _plan(name: str = "hello") -> Plan:
-    return Plan(
-        name,
-        MockHypervisor(
-            networks=[
-                Switch(
-                    "sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)
-                ),
-            ],
-            pools=[StoragePool("pool1", 32)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="web",
-                        devices=[
-                            CPU(1),
-                            Memory(512),
-                            OSDrive("pool1", 8),
-                            NetworkIface("netA", addr=DHCPAddr()),
-                        ],
-                    ),
-                    builder=CloudInitBuilder(
-                        base=CacheEntry("debian-13"),
-                        credentials=[PosixCred("u", password="p")],
-                        packages=[Apt("nginx")],
-                    ),
-                    communicator=SSHCommunicator("u"),
-                ),
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 32))
+    hyp.add_switch(
+        Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))
     )
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="web",
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(hyp.pools["pool1"], 8),
+                    NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"),
+                credentials=[PosixCred("u", password="p")],
+                packages=[Apt("nginx")],
+            ),
+            communicator=SSHCommunicator("u"),
+        )
+    )
+    return Plan(name, hyp)
 
 
 def _qga_plan(name: str = "hello") -> Plan:
     """Same shape as ``_plan`` but the VM talks over a NativeCommunicator."""
-    return Plan(
-        name,
-        MockHypervisor(
-            networks=[
-                Switch(
-                    "sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)
-                ),
-            ],
-            pools=[StoragePool("pool1", 32)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="web",
-                        devices=[
-                            CPU(1),
-                            Memory(512),
-                            OSDrive("pool1", 8),
-                            NetworkIface("netA", addr=DHCPAddr()),
-                        ],
-                    ),
-                    builder=CloudInitBuilder(
-                        base=CacheEntry("debian-13"),
-                        credentials=[PosixCred("u", password="p")],
-                        packages=[Apt("nginx")],
-                    ),
-                    communicator=NativeCommunicator(),
-                ),
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 32))
+    hyp.add_switch(
+        Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))
     )
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="web",
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(hyp.pools["pool1"], 8),
+                    NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"),
+                credentials=[PosixCred("u", password="p")],
+                packages=[Apt("nginx")],
+            ),
+            communicator=NativeCommunicator(),
+        )
+    )
+    return Plan(name, hyp)
 
 
 @pytest.fixture
@@ -208,23 +198,28 @@ class TestEnterAndExit:
         final = {v.name: v.stage for v in o.ctx.dashboard.snapshot().vms}
         assert final["web"] is VMStage.READY
 
-    def test_dashboard_guard_attributes_a_step_failure_to_its_vm(self) -> None:
-        """``_guard_vm`` tags the failing VM FAILED with the error, then re-raises (ADR-0029)."""
+    def test_executor_attributes_a_node_failure_to_its_vm(self) -> None:
+        """The executor's hook guard tags the failing VM node FAILED with the
+        error, then re-raises (ADR-0029) — so the dashboard names the culprit
+        before the fail-fast wave unwinds."""
         from types import SimpleNamespace
 
-        from testrange.orchestrator import run_phase
+        from testrange.orchestrator import executor
         from testrange.orchestrator.dashboard_state import DashboardState
 
         dash = DashboardState()
         dash.seed_vms(["web"])
         ctx = SimpleNamespace(dashboard=dash)
-        vm = SimpleNamespace(name="web")
 
-        def _boom(_ctx: object, _vm: object) -> None:
-            raise RuntimeError("boom")
+        class _BoomNode:
+            name = "vm:web"
+            kind = "vm"
+
+            def realize(self, _ctx: object) -> None:
+                raise RuntimeError("boom")
 
         with pytest.raises(RuntimeError, match="boom"):
-            run_phase._guard_vm(ctx, vm, _boom)  # type: ignore[arg-type]
+            executor._run_hook(ctx, _BoomNode(), "realize")  # type: ignore[arg-type]
 
         web = {v.name: v for v in dash.snapshot().vms}["web"]
         assert web.stage is VMStage.FAILED
@@ -428,67 +423,57 @@ class TestHandleLeak:
 
 
 def _static_plan(ipv4: str) -> Plan:
-    return Plan(
-        "hello",
-        MockHypervisor(
-            networks=[
-                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)),
-            ],
-            pools=[StoragePool("pool1", 32)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="web",
-                        devices=[
-                            CPU(1),
-                            Memory(512),
-                            OSDrive("pool1", 8),
-                            NetworkIface("netA", addr=StaticAddr(ipv4)),
-                        ],
-                    ),
-                    builder=CloudInitBuilder(
-                        base=CacheEntry("debian-13"),
-                        credentials=[PosixCred("u", password="p")],
-                    ),
-                    communicator=SSHCommunicator("u"),
-                ),
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 32))
+    hyp.add_switch(Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="web",
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(hyp.pools["pool1"], 8),
+                    NetworkIface(hyp.networks["netA"], addr=StaticAddr(ipv4)),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"),
+                credentials=[PosixCred("u", password="p")],
+            ),
+            communicator=SSHCommunicator("u"),
+        )
     )
+    return Plan("hello", hyp)
 
 
 def _two_static_nic_plan(nic_idx: int | None) -> Plan:
     # Two NICs on the SAME network — the case where "by network" is ambiguous
     # and only an index disambiguates the SSH target.
     comm = SSHCommunicator("u", nic_idx=nic_idx) if nic_idx is not None else SSHCommunicator("u")
-    return Plan(
-        "hello",
-        MockHypervisor(
-            networks=[
-                Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)),
-            ],
-            pools=[StoragePool("pool1", 32)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="web",
-                        devices=[
-                            CPU(1),
-                            Memory(512),
-                            OSDrive("pool1", 8),
-                            NetworkIface("netA", addr=StaticAddr("172.31.0.150")),
-                            NetworkIface("netA", addr=StaticAddr("172.31.0.151")),
-                        ],
-                    ),
-                    builder=CloudInitBuilder(
-                        base=CacheEntry("debian-13"),
-                        credentials=[PosixCred("u", password="p")],
-                    ),
-                    communicator=comm,
-                ),
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 32))
+    hyp.add_switch(Switch("sw1", Network("netA"), cidr="172.31.0.0/24", sidecar=Sidecar(dhcp=True)))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="web",
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(hyp.pools["pool1"], 8),
+                    NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.150")),
+                    NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.151")),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"),
+                credentials=[PosixCred("u", password="p")],
+            ),
+            communicator=comm,
+        )
     )
+    return Plan("hello", hyp)
 
 
 class TestNicIdxSelection:

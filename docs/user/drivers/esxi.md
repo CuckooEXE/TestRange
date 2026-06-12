@@ -35,11 +35,12 @@ The **full `tests/plans/` certification sweep** is not yet green. On the physica
 host it is blocked by environment egress — a build VM needs internet for `apt`,
 and a single-public-IP host with no internet-connected pNIC and no host-NAT
 provides no VM-egress path (not a driver defect; it needs an egress path
-provisioned). On a **nested** ESXi it is a lab path shelved post-1.0.0: the
-unattended install runs to a bootable DCUI on the libvirt L0, but `%firstboot`
-does not take effect on the installed guest (ESXI-17), so the standing ESXi cert
-instead runs on a raw-kickstart host per the REL epic (REL-11). vCenter / DVS /
-dvportgroup are out of scope ([ADR-0025](../../adr/0025-esxi-standalone-driver.md)).
+provisioned). A nested-ESXi lab path was shelved in 1.x (`%firstboot` does not
+take effect on the installed guest under nested KVM, ESXI-17), and the
+nested-virtualization surface it rode was removed in 2.0 (see "Nested ESXi"
+below); the standing ESXi cert instead runs on a raw-kickstart host per the REL
+epic (REL-11). vCenter / DVS / dvportgroup are out of scope
+([ADR-0025](../../adr/0025-esxi-standalone-driver.md)).
 
 A **non-free vSphere license is required** (see Prerequisites): the free
 *vSphere Hypervisor* edition makes the API read-only, so every write fails.
@@ -133,10 +134,9 @@ to reach the guest. `NativeCommunicator` VMs need none of this — VMware Tools
 guest-ops ride the SOAP control plane.
 
 When the node is itself built by TestRange, you don't edit `sshd_config` by
-hand: pass `allow_tcp_forwarding=True` to `ESXiKickstartBuilder` (or to
-`GuestHypervisor.esxi(...)` for a nested host) and the unattended install bakes
-that line for you — the easy path for SSH jump-host testing. On a pre-existing
-host you set it manually.
+hand: pass `allow_tcp_forwarding=True` to `ESXiKickstartBuilder` and the
+unattended install bakes that line for you — the easy path for SSH jump-host
+testing. On a pre-existing host you set it manually.
 
 VMware Tools VMs (sidecar + `NativeCommunicator` guests) require the guest-ops
 plugin: on Alpine that is `open-vm-tools` **plus `open-vm-tools-plugins-all`**
@@ -144,30 +144,10 @@ plugin: on Alpine that is `open-vm-tools` **plus `open-vm-tools-plugins-all`**
 `GuestComponentsOutOfDate`); on Debian the monolithic `open-vm-tools` package
 already includes it.
 
-## Nested ESXi (lab setup)
+## Nested ESXi
 
-Because the physical host can't give build VMs internet egress, the portable
-`tests/plans/` corpus can be run against a **nested ESXi** instead — an ESXi node
-installed unattended (kickstart, with `license=` applied via `serialnum`) as a
-guest on the libvirt backend, which *does* have NAT egress. This is a
-lab path: per the REL epic the standing ESXi cert runs on a raw-kickstart host
-(REL-11), and this nested approach is shelved post-1.0.0. The
-[nested-virtualization model](../../adr/0021-nested-virtualization.md) builds the
-inner (L2) VM disks on the L0 with real egress and then only *boots* them on the
-nested ESXi, so no VM-egress path is needed on the ESXi node itself. The guest
-declares ESXi-compatible hardware via the libvirt-concrete device types (a
-`LibvirtOSDrive(bus="sata")` + `LibvirtNetworkIface(model="e1000e")`,
-[ADR-0026](../../adr/0026-libvirt-concrete-device-types.md)) since ESXi has no
-virtio drivers, and `CPU(nested=True)` so the L0 exposes VMX for the guest's own
-VMs. The installer CD-ROM is attached on **IDE** (not sata): on BIOS/i440fx,
-weasel's `ks=cdrom:` scan only enumerates an IDE optical unit. The cert plan is
-a bespoke `GuestHypervisor.esxi` topology (not a shipped example), run against
-the libvirt profile with a raised build timeout:
-
-```sh
-export TESTRANGE_ESXI_LICENSE=XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-testrange run --build-timeout 1800 --profile libvirt-local <nested-esxi-plan>.py
-```
-
-`--build-timeout` is raised from the 600s default because an ESXi install +
-reboot + `%firstboot` under nested KVM takes well over ten minutes.
+The 1.x nested-ESXi lab path — an ESXi node installed unattended as a guest on
+the libvirt backend via `GuestHypervisor.esxi` — was removed along with the
+rest of the nested-virtualization surface in 2.0; nesting returns later as a
+build-graph node kind. The standing ESXi certification runs on a raw-kickstart
+physical host instead (REL-11).

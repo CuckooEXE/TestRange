@@ -37,47 +37,46 @@ from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-snapshots")
 
-PLAN = Plan(
-    "snapshots",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.40.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="snapbox",
-                    devices=[
-                        CPU(2),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
-                        NetworkIface("lab-net", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-                ),
-                communicator=SSHCommunicator("admin"),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.40.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="snapbox",
+            devices=[
+                CPU(2),
+                Memory(1024),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
+            ],
+        ),
+        builder=CloudInitBuilder(
+            base=CacheEntry("debian-13"),
+            credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+        ),
+        communicator=SSHCommunicator("admin"),
+    )
+)
+
+PLAN = Plan("snapshots", hyp)
 
 
 def disk_snapshot_lifecycle(orch: OrchestratorHandle) -> None:

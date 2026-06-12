@@ -29,38 +29,37 @@ from testrange.drivers.proxmox import ProxmoxHardDrive, ProxmoxHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "proxmox-devices",
-    ProxmoxHypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="buses",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        # OS disk on the PVE default (scsi) -> /dev/sda.
-                        OSDrive("pool1", 8),
-                        # scsi data disk -> /dev/sdb; virtio data disk -> /dev/vda.
-                        ProxmoxHardDrive("pool1", 1, bus="scsi"),
-                        ProxmoxHardDrive("pool1", 1, bus="virtio"),
-                    ],
-                ),
-                # NativeCommunicator agent (qemu-guest-agent) auto-provisioned (CORE-90).
-                builder=CloudInitBuilder(base=CacheEntry("debian-13")),
-                communicator=NativeCommunicator(),
-            ),
-        ],
+hyp = ProxmoxHypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="buses",
+            devices=[
+                CPU(1),
+                Memory(512),
+                # OS disk on the PVE default (scsi) -> /dev/sda.
+                OSDrive(hyp.pools["pool1"], 8),
+                # scsi data disk -> /dev/sdb; virtio data disk -> /dev/vda.
+                ProxmoxHardDrive(hyp.pools["pool1"], 1, bus="scsi"),
+                ProxmoxHardDrive(hyp.pools["pool1"], 1, bus="virtio"),
+            ],
+        ),
+        # NativeCommunicator agent (qemu-guest-agent) auto-provisioned (CORE-90).
+        builder=CloudInitBuilder(base=CacheEntry("debian-13")),
+        communicator=NativeCommunicator(),
+    )
+)
+
+PLAN = Plan("proxmox-devices", hyp)
 
 
 def _disk_names(orch: OrchestratorHandle) -> list[str]:
