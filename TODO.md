@@ -11,7 +11,7 @@ on 2026-06-06.
 > Migrated 294 tickets out of `ktui` on 2026-06-06. Live counts are carried by
 > the `## Doing / Ready / Done / Archive` section headers below — not here.
 
-## Doing (7)
+## Doing (11)
 
 ### CORE
 
@@ -74,7 +74,24 @@ on 2026-06-06.
   >
   > Children: REL-1 (ADR/PLAN, done), REL-2 (tests/plans scaffolding + README, done 2026-06-07), REL-3..6 (generic plans, done 2026-06-07), REL-7..9 (per-driver plans, done 2026-06-07), REL-10..13 (host fleet), REL-14..16 (run + report, ESXi->PVE->libvirt order), REL-17..19 (docs/PLAN/TODO reconciliation), REL-20 (cut v1.0.0). NO LONGER gated on nested ESXi: ESXI-16/18 (ESXi-as-a-guest) SHELVED post-1.0.0 (2026-06-07); the ESXi backend is certified via REL-11's raw kickstart host (no GuestHypervisor), which was always the plan for the host fleet. Created 2026-06-06.
 
-## Ready (54)
+- [x] **REL-12** · `chore` — unmanaged Proxmox host (`proxmox-unmanaged` profile) _(done: 2026-06-14)_
+
+  > DONE 2026-06-14: stood up via `proxmox-manager.sh` (untracked local tooling, sibling of `esxi-manager.sh` — nested PVE 9.2 on libvirt L0, answer.toml auto-install, q35/UEFI, from-dhcp on tr-egress), bound as the `proxmox-unmanaged` profile in connect.toml (the ticket's `proxmox-e2e` alias). Egress out-of-band (tr-egress NAT). Node torn down after cert. Drove REL-15. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
+
+- [x] **REL-15** · `test` — run full e2e suite vs hosted Proxmox -> discrepancy report _(done: 2026-06-14)_
+
+  > DONE 2026-06-14: looped `testrange run --profile proxmox-unmanaged` over `tests/plans/generic/*.py` + `tests/plans/proxmox/*.py`. **76/76 tests across 14 plans GREEN, 0 failures, no bugs filed.** The driver (PVE-58, 33/33 vs the managed leaked node) reproduces a clean sweep against an independently-built unmanaged node — cross-build validation. No discrepancies; no driver changes required.
+
+- [x] **REL-11** · `chore` — unmanaged ESXi host (`esxi-unmanaged` profile) _(done: 2026-06-14)_
+
+  > DONE 2026-06-14: stood up via `esxi-manager.sh` (untracked local tooling — nested ESXi 8.0.3 on libvirt L0, kickstart auto-install, BIOS/i440fx), bound as the `esxi-unmanaged` profile in connect.toml (the ticket's `esxi-e2e` alias). Reuses install lessons BACKEND-13 (IDE installer CD on BIOS), BUILD-22 (heredoc), ESXI-17 (%firstboot). Egress out-of-band. Node torn down after cert. Drove REL-14. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
+
+- [x] **REL-14** · `test` — run full e2e suite vs hosted ESXi -> discrepancy report _(done: 2026-06-14)_
+  _(was blocked by: REL-11)_
+
+  > DONE 2026-06-14: looped `testrange run --profile esxi-unmanaged` over `tests/plans/generic/*.py` + `tests/plans/esxi/*.py`. **Certifiable set 53/53 GREEN across 9 plans** (8 NativeCommunicator generic + esxi/devices). The 5 SSH-based generic plans (build_cache/guest_io/preflight/snapshots/users_credentials) all fail with the identical `Connect failed` signature — the documented ESXI-30 WONTFIX (host sshd can't direct-tcpip into an internal guest), not new discrepancies. No bugs filed; no driver changes. Bonus: `generic/firmware.py` (ESXi UEFI guest) passed — exercising the previously-"accepted-but-unvalidated" `firmware="efi"` path. Matches the managed nested cert (ESXI-34) against an independently-built unmanaged node.
+
+## Ready (50)
 
 ### CORE
 
@@ -367,27 +384,9 @@ on 2026-06-06.
 
 ### REL
 
-- [ ] **REL-11** · `chore` — unmanaged ESXi host (`esxi-e2e` profile)
-
-  > Stand up a standalone ESXi host (operator-provided — raw kickstart, virt-install on L0 or bare metal; NOT via the driver/GuestHypervisor), reusing the install lessons from BACKEND-13 (IDE installer CD on BIOS), BUILD-22 (heredoc terminator), ESXI-17 (%firstboot). Egress out-of-band. Emit the `esxi-e2e` profile bound to the host. Supersedes the egress block on ESXI-11/12/13. First host (user's order: ESXi -> PVE -> libvirt). _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08; standing the host up is the operator's job.)_
-
-- [ ] **REL-12** · `chore` — unmanaged Proxmox host (`proxmox-e2e` profile)
-
-  > Stand up a single-node Proxmox VE host (operator-provided — PVE auto-installer answer.toml). Egress out-of-band. Emit the `proxmox-e2e` profile bound to the host. Unblocks the nested-PVE build (BUILD-13). Second host. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
-
 - [ ] **REL-13** · `chore` — unmanaged libvirt host (`libvirt-remote-e2e` profile)
 
   > Stand up a remote libvirt host (operator-provided — Debian + libvirtd), reachable over qemu+ssh. Emit the `libvirt-remote-e2e` profile bound to the host. Exercises the remote-libvirt path (BACKEND-5 egress / BACKEND-11 guest_gateway) — a remote backend rather than the local qemu:///system the reference cert uses. Third host. _(No shared in-repo scaffold — REL-10 WontDo 2026-06-08.)_
-
-- [ ] **REL-14** · `test` — run full e2e suite vs hosted ESXi -> discrepancy report
-  _(blocked by: REL-11)_
-
-  > Loop `testrange run --profile esxi-e2e` over `tests/plans/generic/*.py` + `tests/plans/esxi/*.py` against the hosted ESXi (REL-11) — the corpus runs via `testrange run`, NOT pytest. Record every discrepancy/bug/surprise in docs/dev/e2e-findings-esxi.md; file a bug ticket per finding in its swimlane (ESXI/CORE/ORCH/...). First in the run order. Report findings to the user before moving on.
-
-- [ ] **REL-15** · `test` — run full e2e suite vs hosted Proxmox -> discrepancy report
-  _(blocked by: REL-12)_
-
-  > Loop `testrange run --profile proxmox-e2e` over `tests/plans/generic/*.py` + `tests/plans/proxmox/*.py` against the hosted PVE (REL-12). Record findings in docs/dev/e2e-findings-proxmox.md; file a bug ticket per discrepancy. Second.
 
 - [ ] **REL-16** · `test` — run full e2e suite vs hosted libvirt -> discrepancy report
   _(blocked by: REL-13)_
