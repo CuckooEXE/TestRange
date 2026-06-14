@@ -32,7 +32,6 @@ from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-hello")
 
@@ -46,7 +45,7 @@ hyp = Hypervisor(
     )
 )
 
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 
 hyp.add_switch(
     Switch(
@@ -58,29 +57,24 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True),
     )
 )
+netA = hyp.networks["netA"]
 
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web",
-            devices=[
-                CPU(2),
-                Memory(1024),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.150")),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[
-                PosixCred("root", password="root"),
-                PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
-            ],
-            packages=[Apt("nginx")],
-            post_install_commands=("echo hi > /tmp/hi",),
-        ),
-        communicator=SSHCommunicator("myuser"),
-    )
+hyp.vm(
+    "web",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(netA, StaticAddr("172.31.0.150"))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[
+            PosixCred("root", password="root"),
+            PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
+        ],
+        packages=[Apt("nginx")],
+        post_install_commands=("echo hi > /tmp/hi",),
+    ),
+    communicator=SSHCommunicator("myuser"),
 )
 
 PLAN = Plan("hello-world", hyp)

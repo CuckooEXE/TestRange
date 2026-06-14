@@ -42,7 +42,6 @@ from testrange.devices import CPU, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.exceptions import DriverError
 from testrange.networks import Network, Sidecar, Switch
-from testrange.vms import VMRecipe, VMSpec
 
 hyp = Hypervisor(
     build_switch=Switch(
@@ -55,8 +54,8 @@ hyp = Hypervisor(
 )
 # Two pools on purpose: the OS disk and the data disk live in different
 # pools, so a revert that only walks the OS disk's pool shows up here.
-hyp.add_pool(StoragePool("os-pool", 24))
-hyp.add_pool(StoragePool("data-pool", 8))
+os_pool = hyp.add_pool(StoragePool("os-pool", 24))
+data_pool = hyp.add_pool(StoragePool("data-pool", 8))
 hyp.add_switch(
     Switch(
         "lab",
@@ -67,42 +66,37 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="chainbox",
-            devices=[
-                CPU(2),
-                Memory(1024),
-                OSDrive(hyp.pools["os-pool"], 8),
-                HardDrive(hyp.pools["data-pool"], 2),
-                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
-            ],
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "chainbox",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(os_pool, 8),
+    data_disks=[HardDrive(data_pool, 2)],
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        # The PosixCred is for ESXi VMware Tools guest-ops, which
+        # authenticate per call (CORE-60); QGA backends ignore it.
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        post_install_commands=(
+            # Portable data-disk setup (the ESXI-27 lesson): discover
+            # the one non-root whole disk instead of hardcoding a
+            # node — /dev/vd* on virtio backends, /dev/sd* on ESXi.
+            # These run as lines of one shared bash script, so
+            # `set --` carries to the mkfs line. chmod 0777 lands in
+            # the filesystem root so the run-phase guest user (ESXi
+            # guest-ops run as `admin`, not root) can write markers.
+            'os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1)',
+            'set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)',
+            'mkfs.ext4 -F -L chain-data "/dev/$1"',
+            "mkdir -p /data",
+            "mount LABEL=chain-data /data",
+            "chmod 0777 /data",
+            "sh -c 'echo \"LABEL=chain-data /data ext4 defaults 0 2\" >> /etc/fstab'",
         ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            # The PosixCred is for ESXi VMware Tools guest-ops, which
-            # authenticate per call (CORE-60); QGA backends ignore it.
-            credentials=[PosixCred("admin", password="testrange", admin=True)],
-            post_install_commands=(
-                # Portable data-disk setup (the ESXI-27 lesson): discover
-                # the one non-root whole disk instead of hardcoding a
-                # node — /dev/vd* on virtio backends, /dev/sd* on ESXi.
-                # These run as lines of one shared bash script, so
-                # `set --` carries to the mkfs line. chmod 0777 lands in
-                # the filesystem root so the run-phase guest user (ESXi
-                # guest-ops run as `admin`, not root) can write markers.
-                'os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1)',
-                'set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)',
-                'mkfs.ext4 -F -L chain-data "/dev/$1"',
-                "mkdir -p /data",
-                "mount LABEL=chain-data /data",
-                "chmod 0777 /data",
-                "sh -c 'echo \"LABEL=chain-data /data ext4 defaults 0 2\" >> /etc/fstab'",
-            ),
-        ),
-        communicator=NativeCommunicator(),
-    )
+    ),
+    communicator=NativeCommunicator(),
 )
 
 PLAN = Plan("snapshot-chain", hyp)

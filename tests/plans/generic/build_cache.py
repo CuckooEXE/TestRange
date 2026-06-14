@@ -36,7 +36,6 @@ from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt, Pip
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-build-cache")
 
@@ -49,7 +48,7 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 hyp.add_switch(
     Switch(
         "lab",
@@ -60,48 +59,42 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="fileserver",
-            devices=[
-                CPU(1),
-                Memory(1024),
-                OSDrive(hyp.pools["pool1"], 8),
-                HardDrive(hyp.pools["pool1"], 2),
-                HardDrive(hyp.pools["pool1"], 2),
-                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
-            ],
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "fileserver",
+    cpu=CPU(1),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    data_disks=[HardDrive(pool1, 2), HardDrive(pool1, 2)],
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+        packages=[Apt("nginx"), Apt("python3-pip"), Pip("cowsay")],
+        post_install_commands=(
+            # Portable data-disk setup. The generic HardDrive enumerates as
+            # /dev/vd* on virtio backends (libvirt, proxmox) but /dev/sd* on
+            # ESXi (no virtio), so discover the two non-root whole disks
+            # instead of hardcoding a node — these run as lines in one shared
+            # bash script, so `set --` carries to the mkfs/mount lines. mkfs by
+            # label; the run boot mounts by LABEL= (fstab below), node-agnostic.
+            'os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1)',
+            'set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)',
+            'mkfs.ext4 -F -L data-b "/dev/$1"',
+            'mkfs.ext4 -F -L data-c "/dev/$2"',
+            "mkdir -p /srv/b /srv/c",
+            'mount "/dev/$1" /srv/b',
+            'mount "/dev/$2" /srv/c',
+            "sh -c 'echo disk-b > /srv/b/which'",
+            "sh -c 'echo disk-c > /srv/c/which'",
+            "sh -c 'echo \"LABEL=data-b /srv/b ext4 defaults 0 2\" >> /etc/fstab'",
+            "sh -c 'echo \"LABEL=data-c /srv/c ext4 defaults 0 2\" >> /etc/fstab'",
+            "sh -c 'echo step-1 >> /srv/order'",
+            "sh -c 'echo step-2 >> /srv/order'",
+            "sh -c 'echo step-3 >> /srv/order'",
         ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-            packages=[Apt("nginx"), Apt("python3-pip"), Pip("cowsay")],
-            post_install_commands=(
-                # Portable data-disk setup. The generic HardDrive enumerates as
-                # /dev/vd* on virtio backends (libvirt, proxmox) but /dev/sd* on
-                # ESXi (no virtio), so discover the two non-root whole disks
-                # instead of hardcoding a node — these run as lines in one shared
-                # bash script, so `set --` carries to the mkfs/mount lines. mkfs by
-                # label; the run boot mounts by LABEL= (fstab below), node-agnostic.
-                'os=$(lsblk -no PKNAME "$(findmnt -no SOURCE /)" | head -1)',
-                'set -- $(lsblk -dno NAME --exclude 7,11 | grep -vx "$os" | sort)',
-                'mkfs.ext4 -F -L data-b "/dev/$1"',
-                'mkfs.ext4 -F -L data-c "/dev/$2"',
-                "mkdir -p /srv/b /srv/c",
-                'mount "/dev/$1" /srv/b',
-                'mount "/dev/$2" /srv/c',
-                "sh -c 'echo disk-b > /srv/b/which'",
-                "sh -c 'echo disk-c > /srv/c/which'",
-                "sh -c 'echo \"LABEL=data-b /srv/b ext4 defaults 0 2\" >> /etc/fstab'",
-                "sh -c 'echo \"LABEL=data-c /srv/c ext4 defaults 0 2\" >> /etc/fstab'",
-                "sh -c 'echo step-1 >> /srv/order'",
-                "sh -c 'echo step-2 >> /srv/order'",
-                "sh -c 'echo step-3 >> /srv/order'",
-            ),
-        ),
-        communicator=SSHCommunicator("admin"),
-    )
+    ),
+    communicator=SSHCommunicator("admin"),
 )
 
 PLAN = Plan("build-cache", hyp)

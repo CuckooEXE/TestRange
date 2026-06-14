@@ -30,7 +30,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 # Deterministic from `comment`; same comment -> same keypair across runs,
 # which keeps the rendered cloud-init seed byte-stable so the build
@@ -47,7 +46,7 @@ hyp = Hypervisor(
     )
 )
 
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 
 hyp.add_switch(
     Switch(
@@ -58,31 +57,20 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
+netA = hyp.networks["netA"]
 
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web",
-            devices=[
-                CPU(2),
-                Memory(1024),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[
-                PosixCred(
-                    "alice",
-                    ssh_key=_KEY,
-                    admin=True,
-                ),
-            ],
-            packages=[Apt("nginx")],
-        ),
-        communicator=SSHCommunicator("alice"),
-    )
+hyp.vm(
+    "web",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(netA, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("alice", ssh_key=_KEY, admin=True)],
+        packages=[Apt("nginx")],
+    ),
+    communicator=SSHCommunicator("alice"),
 )
 
 PLAN = Plan("hello", hyp)
@@ -109,29 +97,41 @@ profile; see [Connecting to a backend](connecting-to-a-backend.md).
 
 ## Handles, edges, and the frozen graph
 
-Three rules govern the construction surface:
+Four rules govern the construction surface:
 
-- **`add_pool` / `add_switch` / `add_vm` register a node and return its typed
-  handle**; every registered node is also reachable through the typed
-  registries `hyp.pools` / `hyp.networks` / `hyp.switches` / `hyp.vms`.
-  Devices take handles, never strings — `OSDrive(hyp.pools["pool1"], 8)`,
-  `NetworkIface(hyp.networks["netA"], ...)`. A typo'd name is a loud
-  `KeyError` at construction (listing the names that exist); a wrong handle
-  kind fails both mypy and the constructor.
+- **`add_pool` / `add_switch` register a node and return its typed handle**;
+  every registered node is also reachable through the typed registries
+  `hyp.pools` / `hyp.networks` / `hyp.switches` / `hyp.vms`. Capture the handle
+  in a local and reference it directly — `pool1 = hyp.add_pool(...)` then
+  `OSDrive(pool1, 8)`; `netA = hyp.networks["netA"]` then `NetworkIface(netA,
+  ...)`. Devices take handles, never strings: a typo'd name is a loud `KeyError`
+  at construction (listing the names that exist), and a wrong handle kind (a
+  network where a pool belongs) fails both mypy and the constructor.
+- **`hyp.vm(name, *, cpu, memory, os_drive, builder, communicator, nics=(),
+  data_disks=())` adds a VM** and returns its `VMHandle`. The exactly-one
+  devices are named params (so swapping a slot is a mypy error) and the
+  zero-or-more devices are the `nics` / `data_disks` sequences. It is sugar over
+  the explicit form `add_vm(VMRecipe(spec=VMSpec(devices=[...]), builder=...,
+  communicator=...))`, which stays available as the escape door for shapes
+  `vm()` does not model (for example a backend-concrete device variant, or a
+  parameterized recipe built by a helper — see
+  `tests/plans/generic/concurrency.py`).
 - **Every handle reference becomes a dependency edge** (a VM depends on its
   pool and its switch). `.needs()` adds the ordering the executor cannot
   infer:
 
   ```python
-  db = hyp.add_vm(VMRecipe(...))
-  web = hyp.add_vm(VMRecipe(...))
+  db = hyp.vm("db", cpu=CPU(1), memory=Memory(512), os_drive=OSDrive(pool1, 8),
+              builder=..., communicator=...)
+  web = hyp.vm("web", cpu=CPU(1), memory=Memory(512), os_drive=OSDrive(pool1, 8),
+               builder=..., communicator=...)
   web.needs(db)        # db is fully ready before web boots
   ```
 
 - **`Plan(name, hyp)` validates and freezes everything** into the plan's
-  build graph; later `add_*` calls raise. One executor walks that graph in
-  topological waves — `testrange graph plan.py --order` shows them, and
-  `testrange why plan.py <node>` explains a single node.
+  build graph; later `add_*` / `vm()` calls raise. One executor walks that
+  graph in topological waves — `testrange graph plan.py --order` shows them,
+  and `testrange why plan.py <node>` explains a single node.
 
 [Thinking in build graphs](thinking-in-build-graphs.md) is the full
 conceptual tour, including how ordering edges interact (and don't) with the
@@ -243,13 +243,15 @@ populated disk is pushed back, so the VM comes up with its data already in
 place.
 
 ```python
-VMSpec(
-    name="fileserver",
-    devices=[
-        CPU(2), Memory(1024), OSDrive(hyp.pools["pool1"], 8),
-        HardDrive(hyp.pools["pool1"], 16),   # /dev/vdb on the guest; built once, served at run
-        NetworkIface(hyp.networks["netA"], addr=StaticAddr("172.31.0.150")),
-    ],
+hyp.vm(
+    "fileserver",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    data_disks=[HardDrive(pool1, 16)],   # /dev/vdb on the guest; built once, served at run
+    nics=[NetworkIface(netA, StaticAddr("172.31.0.150"))],
+    builder=...,
+    communicator=...,
 )
 ```
 
@@ -284,15 +286,19 @@ regardless of order, pass `SSHCommunicator("user", nic_idx=N)` where `N`
 is the NIC's position in the device list.
 
 ```python
-VMSpec(
-    name="multihomed",
-    devices=[
-        CPU(2), Memory(1024), OSDrive(hyp.pools["pool1"], 8),
+hyp.vm(
+    "multihomed",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
         # Communicator binds to this address (first addressed NIC):
-        NetworkIface(hyp.networks["mgmt"], addr=StaticAddr("10.0.0.10")),
+        NetworkIface(hyp.networks["mgmt"], StaticAddr("10.0.0.10")),
         # Also up on the guest, but not used by the communicator:
-        NetworkIface(hyp.networks["data"], addr=DHCPAddr()),
+        NetworkIface(hyp.networks["data"], DHCPAddr()),
     ],
+    builder=...,
+    communicator=...,
 )
 ```
 

@@ -38,7 +38,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 _DB_IP = "10.40.0.200"
 
@@ -63,7 +62,7 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 64))
+pool1 = hyp.add_pool(StoragePool("pool1", 64))
 hyp.add_switch(
     Switch(
         "lab",
@@ -74,72 +73,53 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="churn",
-            devices=[
-                CPU(2),
-                Memory(1024),
-                OSDrive(hyp.pools["pool1"], 16),
-                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=_native_image(),
-        communicator=NativeCommunicator(),
-    )
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "churn",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 16),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=_native_image(),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="headless",
-            devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8)],
-        ),
-        builder=_native_image(),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "headless",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    builder=_native_image(),
+    communicator=NativeCommunicator(),
 )
-db = hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="db",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["lab-net"], addr=StaticAddr(_DB_IP)),
-            ],
+db = hyp.vm(
+    "db",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, StaticAddr(_DB_IP))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        packages=[Apt("nginx")],
+        post_install_commands=(
+            "sh -c 'echo db-online > /var/www/html/index.html'",
+            "systemctl enable --now nginx",
         ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", password="testrange", admin=True)],
-            packages=[Apt("nginx")],
-            post_install_commands=(
-                "sh -c 'echo db-online > /var/www/html/index.html'",
-                "systemctl enable --now nginx",
-            ),
-        ),
-        communicator=NativeCommunicator(),
-    )
+    ),
+    communicator=NativeCommunicator(),
 )
-web = hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", password="testrange", admin=True)],
-            packages=[Apt("curl")],
-        ),
-        communicator=NativeCommunicator(),
-    )
+web = hyp.vm(
+    "web",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        packages=[Apt("curl")],
+    ),
+    communicator=NativeCommunicator(),
 )
 web.needs(db)
 

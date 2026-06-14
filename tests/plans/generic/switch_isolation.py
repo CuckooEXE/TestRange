@@ -59,7 +59,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 _WEB_A_IP = "10.50.0.100"
 _WEB_B_IP = "10.51.0.100"
@@ -99,7 +98,7 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 hyp.add_switch(
     Switch(
         "sw-a",
@@ -124,58 +123,43 @@ hyp.add_switch(
         mgmt=True,
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web-a",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["a1"], addr=StaticAddr(_WEB_A_IP)),
-            ],
-        ),
-        builder=_web_image("WEB-A-OK"),
-        communicator=NativeCommunicator(),
-    )
+a1 = hyp.networks["a1"]
+b1 = hyp.networks["b1"]
+c1 = hyp.networks["c1"]
+hyp.vm(
+    "web-a",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(a1, StaticAddr(_WEB_A_IP))],
+    builder=_web_image("WEB-A-OK"),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web-b",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["b1"], addr=StaticAddr(_WEB_B_IP)),
-            ],
-        ),
-        builder=_web_image("WEB-B-OK"),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "web-b",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(b1, StaticAddr(_WEB_B_IP))],
+    builder=_web_image("WEB-B-OK"),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="client",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["a1"], addr=DHCPAddr()),
-                NetworkIface(hyp.networks["b1"], addr=StaticAddr(_CLIENT_B_IP)),
-                NetworkIface(hyp.networks["c1"], addr=StaticAddr(_CLIENT_C_IP)),
-            ],
-        ),
-        # NativeCommunicator agent auto-provisioned per backend (CORE-90);
-        # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", password="testrange", admin=True)],
-            packages=[Apt("curl")],
-        ),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "client",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(a1, DHCPAddr()),
+        NetworkIface(b1, StaticAddr(_CLIENT_B_IP)),
+        NetworkIface(c1, StaticAddr(_CLIENT_C_IP)),
+    ],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        packages=[Apt("curl")],
+    ),
+    communicator=NativeCommunicator(),
 )
 
 PLAN = Plan("switch_isolation", hyp)

@@ -16,7 +16,7 @@ from testrange.builders import CloudInitBuilder
 from testrange.cache import CacheEntry
 from testrange.communicators import SSHCommunicator
 from testrange.credentials import PosixCred
-from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices import CPU, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface
 from testrange.drivers import is_pinned, scheme_for_hypervisor
 from testrange.handles import NetworkHandle, PoolHandle, SwitchHandle, VMHandle
@@ -173,3 +173,167 @@ class TestSchemePin:
         hyp = _populated()
         assert is_pinned(hyp) is False
         assert scheme_for_hypervisor(hyp) is None
+
+
+class TestVmFacade:
+    """``Hypervisor.vm(...)`` — sugar over ``add_vm(VMRecipe(VMSpec(...)))`` (CORE-101).
+
+    Promotes the singleton devices to named typed params and splits the 0+
+    devices into ``nics``/``data_disks``, then delegates to the unchanged
+    ``add_vm``. The contract under test is that it is *pure sugar*: same
+    underlying VMSpec/VMRecipe, same registration order, builder/communicator
+    forwarded untouched.
+    """
+
+    def _hyp(self) -> tuple[Hypervisor, PoolHandle, NetworkHandle]:
+        hyp = Hypervisor()
+        pool1 = hyp.add_pool(StoragePool("pool1", 32))
+        hyp.add_switch(
+            Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+        )
+        return hyp, pool1, hyp.networks["netA"]
+
+    @staticmethod
+    def _builder() -> CloudInitBuilder:
+        return CloudInitBuilder(
+            base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+        )
+
+    def test_returns_registered_vmhandle(self) -> None:
+        hyp, pool1, netA = self._hyp()
+        web = hyp.vm(
+            "web",
+            cpu=CPU(1),
+            memory=Memory(512),
+            os_drive=OSDrive(pool1, 8),
+            nics=[NetworkIface(netA)],
+            builder=self._builder(),
+            communicator=SSHCommunicator("u"),
+        )
+        assert isinstance(web, VMHandle)
+        assert web.node_name == "vm:web"
+        assert hyp.vms["web"] is web
+
+    def test_equivalent_to_explicit_add_vm(self) -> None:
+        # Same builder/communicator INSTANCES on both paths: vm() forwards them
+        # unchanged (stovepipes intact) and VMSpec compares by value, so the
+        # registered recipe must equal the hand-built one. This is the byte-
+        # identical-build pin (DAG-5 key parity): same devices tuple in, same
+        # config_hash out.
+        hyp, pool1, netA = self._hyp()
+        builder, comm = self._builder(), SSHCommunicator("u")
+        cpu, mem, osd, nic = CPU(2), Memory(1024), OSDrive(pool1, 8), NetworkIface(netA)
+        explicit = VMRecipe(
+            spec=VMSpec(name="web", devices=[cpu, mem, osd, nic]),
+            builder=builder,
+            communicator=comm,
+        )
+        hyp.vm(
+            "web", cpu=cpu, memory=mem, os_drive=osd, nics=[nic], builder=builder, communicator=comm
+        )
+        registered = hyp.declared_vms[0]
+        assert registered.spec == explicit.spec
+        assert registered.builder is builder  # forwarded, not rebuilt
+        assert registered.communicator is comm
+        assert registered == explicit
+
+    def test_packs_devices_in_canonical_order(self) -> None:
+        # [cpu, memory, os_drive, *data_disks, *nics] — a fixed order so the
+        # order-sensitive config_hash channels (spec.data_drives, spec.nics)
+        # are deterministic.
+        hyp, pool1, netA = self._hyp()
+        cpu, mem, osd = CPU(1), Memory(512), OSDrive(pool1, 8)
+        d0, d1 = HardDrive(pool1, 4), HardDrive(pool1, 8)
+        nic = NetworkIface(netA)
+        hyp.vm(
+            "web",
+            cpu=cpu,
+            memory=mem,
+            os_drive=osd,
+            data_disks=[d0, d1],
+            nics=[nic],
+            builder=self._builder(),
+            communicator=SSHCommunicator("u"),
+        )
+        spec = hyp.declared_vms[0].spec
+        assert spec.devices == (cpu, mem, osd, d0, d1, nic)
+        assert spec.data_drives == (d0, d1)  # relative order preserved
+        assert spec.nics == (nic,)
+
+    def test_nics_and_data_disks_default_empty(self) -> None:
+        hyp, pool1, _ = self._hyp()
+        hyp.vm(
+            "headless",
+            cpu=CPU(1),
+            memory=Memory(512),
+            os_drive=OSDrive(pool1, 8),
+            builder=self._builder(),
+            communicator=SSHCommunicator("u"),
+        )
+        spec = hyp.declared_vms[0].spec
+        assert spec.nics == ()
+        assert spec.data_drives == ()
+        assert spec.devices == (spec.cpu, spec.memory, spec.os_drive)
+
+    def test_firmware_param_flows_to_spec(self) -> None:
+        hyp, pool1, _ = self._hyp()
+        hyp.vm(
+            "uefi-vm",
+            cpu=CPU(1),
+            memory=Memory(512),
+            os_drive=OSDrive(pool1, 8),
+            firmware="uefi",
+            builder=self._builder(),
+            communicator=SSHCommunicator("u"),
+        )
+        assert hyp.declared_vms[0].spec.firmware == "uefi"
+
+    def test_preserves_declared_registration_order(self) -> None:
+        hyp, pool1, _ = self._hyp()
+        for name in ("beta", "alpha"):
+            hyp.vm(
+                name,
+                cpu=CPU(1),
+                memory=Memory(512),
+                os_drive=OSDrive(pool1, 8),
+                builder=self._builder(),
+                communicator=SSHCommunicator("u"),
+            )
+        assert [r.name for r in hyp.declared_vms] == ["beta", "alpha"]
+
+    def test_handle_supports_needs_edge(self) -> None:
+        hyp, pool1, _ = self._hyp()
+        db = hyp.vm(
+            "db",
+            cpu=CPU(1),
+            memory=Memory(512),
+            os_drive=OSDrive(pool1, 8),
+            builder=self._builder(),
+            communicator=SSHCommunicator("u"),
+        )
+        web = hyp.vm(
+            "web",
+            cpu=CPU(1),
+            memory=Memory(512),
+            os_drive=OSDrive(pool1, 8),
+            builder=self._builder(),
+            communicator=SSHCommunicator("u"),
+        )
+        web.needs(db)
+        assert hyp.explicit_edges == (("vm:web", "vm:db"),)
+
+    def test_singleton_slot_miswire_rejected(self) -> None:
+        # mypy rejects a non-CPU in the cpu slot at the call site; the
+        # ``# type: ignore[arg-type]`` is load-bearing under warn_unused_ignores
+        # — if the param type ever loosens, the ignore goes unused and the gate
+        # fails. VMSpec's arity check is the runtime backstop.
+        hyp, pool1, _ = self._hyp()
+        with pytest.raises(ValueError, match="exactly one CPU"):
+            hyp.vm(
+                "bad",
+                cpu=Memory(512),  # type: ignore[arg-type]
+                memory=Memory(512),
+                os_drive=OSDrive(pool1, 8),
+                builder=self._builder(),
+                communicator=SSHCommunicator("u"),
+            )

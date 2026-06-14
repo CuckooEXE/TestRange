@@ -23,13 +23,20 @@ realized exactly like a run-phase one.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Generic, TypeVar
 
+from testrange.builders.base import Builder
+from testrange.communicators.base import Communicator
+from testrange.devices.cpu.base import CPU
+from testrange.devices.disk.base import HardDrive, OSDrive
+from testrange.devices.memory.base import Memory
+from testrange.devices.network.base import NetworkIface
 from testrange.devices.pool.base import StoragePool
 from testrange.handles import NetworkHandle, PoolHandle, SwitchHandle, VMHandle
 from testrange.networks.base import Switch
 from testrange.vms.recipe import VMRecipe
+from testrange.vms.spec import VMSpec
 
 _H = TypeVar("_H")
 
@@ -136,6 +143,50 @@ class Hypervisor:
         self._vms[recipe.name] = recipe
         self._vm_handles[recipe.name] = handle
         return handle
+
+    def vm(
+        self,
+        name: str,
+        *,
+        cpu: CPU,
+        memory: Memory,
+        os_drive: OSDrive,
+        builder: Builder,
+        communicator: Communicator,
+        nics: Sequence[NetworkIface] = (),
+        data_disks: Sequence[HardDrive] = (),
+        firmware: str = "bios",
+    ) -> VMHandle:
+        """Register a VM from its hardware parts; returns its :class:`VMHandle`.
+
+        Sugar over ``add_vm(VMRecipe(VMSpec(...)))``. The singleton devices
+        (``cpu`` / ``memory`` / ``os_drive``) are named typed params, so the
+        "exactly one of each" rule is enforced by the *signature* — a miswire
+        like ``memory=OSDrive(...)`` is a mypy error, stricter than the runtime
+        arity check the explicit path relies on — while the genuinely-plural
+        devices stay sequences (``nics`` / ``data_disks``).
+
+        Devices are packed in a fixed order, ``[cpu, memory, os_drive,
+        *data_disks, *nics]``, so the resulting node, its cache key, and the
+        frozen graph are byte-identical to the explicit
+        ``add_vm(VMRecipe(VMSpec(...)))`` form (config_hash depends only on the
+        relative order of NICs and of data disks, both preserved here). That
+        explicit form stays public as the escape door for shapes this façade
+        does not model.
+
+        Pass device *objects*, not bare ints: a backend's concrete device
+        subclasses (an :class:`OSDrive` subclass carrying extra backend knobs)
+        then fit the same ``os_drive`` / ``data_disks`` / ``nics`` slots through
+        this one method. ``builder`` and ``communicator`` are forwarded into the
+        unchanged three-slot :class:`VMRecipe` untouched — this façade learns
+        nothing about either.
+        """
+        spec = VMSpec(
+            name=name,
+            devices=[cpu, memory, os_drive, *data_disks, *nics],
+            firmware=firmware,
+        )
+        return self.add_vm(VMRecipe(spec=spec, builder=builder, communicator=communicator))
 
     def add_explicit_edge(self, dependent: str, dependency: str) -> None:
         """Record one explicit ordering edge (the :class:`EdgeSink` hook).

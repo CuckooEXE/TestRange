@@ -41,7 +41,6 @@ from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.exceptions import CommunicatorError
 from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-guest-io")
 
@@ -54,7 +53,7 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 16))
+pool1 = hyp.add_pool(StoragePool("pool1", 16))
 hyp.add_switch(
     Switch(
         "lab",
@@ -65,23 +64,18 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="iobox",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-        ),
-        communicator=SSHCommunicator("admin"),
-    )
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "iobox",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+    ),
+    communicator=SSHCommunicator("admin"),
 )
 
 PLAN = Plan("guest-io", hyp)

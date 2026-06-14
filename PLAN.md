@@ -143,6 +143,19 @@ an L2 `Switch` into `hyp.switches[...]` and flattens its bindable `Network`s int
 `hyp.networks[...]` (§10). `Hypervisor()` pins no backend — bind one at run time
 with `--profile`; the MVP wires only libvirt.
 
+A VM is most easily added with **`hyp.vm(...)`** (CORE-101) — a hardware façade
+that promotes the singleton devices to named, typed params (`cpu`, `memory`,
+`os_drive`) and takes the zero-or-more devices as `nics` / `data_disks`
+sequences, then packs them `[cpu, memory, os_drive, *data_disks, *nics]` and
+delegates to `add_vm`. It is pure construction sugar: the resulting node and its
+cache key are byte-identical to the explicit `add_vm(VMRecipe(VMSpec(devices=[…]),
+builder, communicator))`, which stays public as the escape door for shapes the
+façade does not model (a backend-concrete device variant, a parameterized recipe
+helper). Because the singletons are named params, swapping a slot
+(`memory=OSDrive(…)`) is a mypy error — stricter than the explicit path's runtime
+arity check. Pass device *objects*, not bare ints, so a backend's concrete device
+subclasses fit the same slots. See ADR-0030's CORE-101 addendum.
+
 ### The executor
 
 Replaces the fixed phase pipeline with a **graph walk**: topo-sort into waves,

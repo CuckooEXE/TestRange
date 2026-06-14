@@ -36,7 +36,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 # Statics referenced by both the PLAN and the TESTS (routes, curl targets).
 _ROUTER_A = "10.61.0.100"
@@ -58,77 +57,65 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 hyp.add_switch(Switch("seg-a", Network("a-net"), cidr="10.61.0.0/24"))
 hyp.add_switch(Switch("seg-b", Network("b-net"), cidr="10.62.0.0/24"))
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="router",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["a-net"], addr=StaticAddr(_ROUTER_A)),
-                NetworkIface(hyp.networks["b-net"], addr=StaticAddr(_ROUTER_B)),
-            ],
+a_net = hyp.networks["a-net"]
+b_net = hyp.networks["b-net"]
+hyp.vm(
+    "router",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(a_net, StaticAddr(_ROUTER_A)),
+        NetworkIface(b_net, StaticAddr(_ROUTER_B)),
+    ],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[_ADMIN],
+        post_install_commands=(
+            # Baked, not test-time: the first test asserts forwarding
+            # is on after a plain boot, proving the image carries it.
+            "sh -c 'echo net.ipv4.ip_forward=1 > /etc/sysctl.d/99-router.conf'",
         ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[_ADMIN],
-            post_install_commands=(
-                # Baked, not test-time: the first test asserts forwarding
-                # is on after a plain boot, proving the image carries it.
-                "sh -c 'echo net.ipv4.ip_forward=1 > /etc/sysctl.d/99-router.conf'",
-            ),
-        ),
-        communicator=NativeCommunicator(),
-    )
+    ),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="client",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["a-net"], addr=StaticAddr(_CLIENT_A)),
-                NetworkIface(hyp.networks["b-net"], addr=None),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[_ADMIN],
-            packages=[Apt("curl")],
-        ),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "client",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(a_net, StaticAddr(_CLIENT_A)),
+        NetworkIface(b_net),
+    ],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[_ADMIN],
+        packages=[Apt("curl")],
+    ),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="server",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                # Explicit-prefix StaticAddr form; the bare form derives
-                # its prefix from the Switch CIDR elsewhere in this plan.
-                NetworkIface(hyp.networks["b-net"], addr=StaticAddr(f"{_SERVER_B}/24")),
-            ],
+hyp.vm(
+    "server",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    # Explicit-prefix StaticAddr form; the bare form derives
+    # its prefix from the Switch CIDR elsewhere in this plan.
+    nics=[NetworkIface(b_net, StaticAddr(f"{_SERVER_B}/24"))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[_ADMIN],
+        packages=[Apt("nginx")],
+        post_install_commands=(
+            "sh -c 'echo routed-hello > /var/www/html/index.html'",
+            "systemctl enable --now nginx",
         ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[_ADMIN],
-            packages=[Apt("nginx")],
-            post_install_commands=(
-                "sh -c 'echo routed-hello > /var/www/html/index.html'",
-                "systemctl enable --now nginx",
-            ),
-        ),
-        communicator=NativeCommunicator(),
-    )
+    ),
+    communicator=NativeCommunicator(),
 )
 
 PLAN = Plan("routed-segments", hyp)

@@ -199,3 +199,43 @@ edges) and DAG-20 (`HypervisorNode` + second backend) seam-check tickets.
   it imports no driver and is fully unit-tested without a backend, so the
   foundation is mergeable and gate-green before any of the backend-coupled
   rewiring begins.
+
+## Addendum — `hyp.vm()` hardware façade (CORE-101, 2026-06-12)
+
+The construction surface above proved verbose in practice:
+`add_vm(VMRecipe(spec=VMSpec(devices=[…]), builder=…, communicator=…))` is three
+mandatory wrapper layers, and the singleton devices (CPU/Memory/OSDrive) sit in
+the same flat `devices=[]` list as the zero-or-more NICs and data disks. We add
+**one** method — `Hypervisor.vm(name, *, cpu, memory, os_drive, builder,
+communicator, nics=(), data_disks=(), firmware="bios") -> VMHandle` — as sugar
+over the unchanged `add_vm(VMRecipe(VMSpec(...)))`. Chosen via a design
+judge-panel; the load-bearing claims were verified against source.
+
+- **Pure sugar, byte-identical keys.** `vm()` packs `[cpu, memory, os_drive,
+  *data_disks, *nics]` into a `VMSpec` and delegates to `add_vm`. `config_hash`
+  depends only on the relative order of NICs and of data disks (`spec.nics` /
+  `spec.data_drives`, and `macs` in spec order), both preserved — so the cache
+  key (DAG-5 parity) is unchanged. The explicit `add_vm(VMRecipe)` form stays
+  public as the escape door.
+- **Device objects, not primitives.** `os_drive` / `data_disks` / `nics` are
+  typed as the generic device classes, so a backend's concrete subclasses (an
+  `OSDrive` subclass carrying extra knobs) fit the same slots through this one
+  method. A primitive `os_drive=int` would have hardcoded the generic `OSDrive`
+  and locked the backend-concrete corpus out.
+- **Structural singletons.** Naming `cpu` / `memory` / `os_drive` makes the
+  "exactly one of each" rule a signature property — `memory=OSDrive(…)` is a
+  mypy error — stricter than the explicit path's runtime arity check (which
+  remains the backstop for that path).
+- **Stovepipes untouched.** `builder` and `communicator` are forwarded into the
+  unchanged three-slot `VMRecipe`; the façade learns nothing about either.
+- **Rejected.** A bare-string address shortcut (`Nic(net, "10.0.0.5")`): a
+  handle is a `str` subclass and `StaticAddr.__post_init__` accepts any
+  IP-shaped string, so the shortcut would let an IP-named handle type-check — a
+  verified hole. `Nic()` / `OS()` / `Disk()` free-function aliases (dual-spelling,
+  no weight pulled). Widening `add_pool` to `(name, size)` (softens an existing
+  `TypeError`).
+
+`examples/` and the portable `tests/plans/generic/` corpus move to `hyp.vm()`;
+the backend-concrete plans (`tests/plans/{libvirt,proxmox,esxi}/`) and the
+parameterized-recipe-helper plans (`concurrency.py`, `sidecar_flags.py`) stay on
+the explicit form as the escape-door example.

@@ -414,7 +414,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (406)
+## Done (407)
 
 ### DAG
 
@@ -507,6 +507,10 @@ on 2026-06-06.
   > New `testrange/graph/` package: `Node` kinded ABC (name/kind/cache_key contract + materialize/realize hooks over an empty `NodeContext` protocol the executor widens in DAG-6), `Edge` + `EdgeKind`/`Cacheability` enums, and a genuinely-immutable validated `BuildGraph` (wave-based topo-sort via Kahn-by-levels, iterative cycle finder reporting a concrete path, dangling-dep + dup-name + self-edge checks). Graph errors added to `exceptions.py` as `PlanError` subclasses (so a malformed graph flows through the invalid-plan exit path, DAG-13). NO `Any`; zero driver imports. 46 table-driven unit tests (cycles incl. a 1500-node deep cycle, diamonds, disconnected components, determinism under input reordering, immutability, forward-compat seam evidence). Hardened via a 4-dimension adversarial review workflow (33 agents): fixed a real immutability hole (`__setattr__` seal) and a recursive-cycle-finder `RecursionError` escape, strengthened the cycle/determinism/component tests. Gates green: ruff, ruff format, mypy --strict (248 files), pytest 1322-test suite.
 
 ### CORE
+
+- [x] **CORE-101** · `feat` — `Hypervisor.vm()` structural-hardware façade over `add_vm(VMRecipe(VMSpec(...)))` _(done: 2026-06-12)_
+
+  > User feedback (feature/dag): the 2.0 construction API read verbose. Added ONE method `Hypervisor.vm(name, *, cpu, memory, os_drive, builder, communicator, nics=(), data_disks=(), firmware="bios") -> VMHandle` — promotes the singleton devices to named, concretely-typed params (device OBJECTS, so backend concretes fit the same slot and `memory=OSDrive(...)` is now a mypy error) and splits the 0+ devices into `nics=`/`data_disks=`, packing `[cpu, memory, os_drive, *data_disks, *nics]` into the SAME VMSpec/VMRecipe and delegating to the unchanged `add_vm`. Pure sugar: byte-identical config_hash proven across all 14 migrated plans via a golden-signature diff. `add_vm(VMRecipe)` stays the explicit escape door. Design chosen via a judge-panel; load-bearing claims verified in source (the str-subclass `StaticAddr` hole that ruled out bare-string addr sugar). Migrated 3 examples + 11 generic cert plans to `hyp.vm()` with captured handle locals; libvirt/proxmox/esxi `devices.py` + the recipe-factory plans (concurrency.py, sidecar_flags.py) stay explicit as the escape-door example. PLAN.md + ADR-0030 addendum + docs/user/writing-a-plan.md updated. Gates green (ruff / format / mypy --strict 249 / pytest 1355) + hello_world live libvirt smoke (3/3 tests, teardown 9 ok 0 failed).
 
 - [x] **CORE-100** · `feat` — expose the communicator-ready timeout on the run verb (`--ready-timeout`)
 

@@ -24,7 +24,6 @@ from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.drivers.proxmox import ProxmoxHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 hyp = ProxmoxHypervisor(
     build_switch=Switch(
@@ -36,7 +35,7 @@ hyp = ProxmoxHypervisor(
     )
 )
 
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 
 hyp.add_switch(
     Switch(
@@ -47,24 +46,16 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
+netA = hyp.networks["netA"]
 
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web",
-            devices=[
-                CPU(2),
-                Memory(1024),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            packages=[Apt("nginx")],
-        ),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "web",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(netA, DHCPAddr())],
+    builder=CloudInitBuilder(base=CacheEntry("debian-13"), packages=[Apt("nginx")]),
+    communicator=NativeCommunicator(),
 )
 
 PLAN = Plan("qga-demo", hyp)

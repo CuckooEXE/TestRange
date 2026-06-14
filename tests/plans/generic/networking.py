@@ -36,7 +36,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 _PRIVATE_WEB_IP = "10.20.0.100"
 _CLIENT_PRIVATE_IP = "10.20.0.101"
@@ -67,7 +66,7 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 hyp.add_switch(
     Switch(
         "pub-sw",
@@ -86,58 +85,43 @@ hyp.add_switch(
         cidr="10.20.0.0/24",
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="client",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["priv-net"], addr=StaticAddr(_CLIENT_PRIVATE_IP)),
-                NetworkIface(hyp.networks["pub-a"], addr=DHCPAddr()),
-                NetworkIface(hyp.networks["pub-b"]),
-            ],
-        ),
-        # NativeCommunicator agent auto-provisioned per backend (CORE-90);
-        # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", password="testrange", admin=True)],
-            packages=[Apt("curl")],
-        ),
-        communicator=NativeCommunicator(),
-    )
+priv_net = hyp.networks["priv-net"]
+pub_a = hyp.networks["pub-a"]
+pub_b = hyp.networks["pub-b"]
+hyp.vm(
+    "client",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(priv_net, StaticAddr(_CLIENT_PRIVATE_IP)),
+        NetworkIface(pub_a, DHCPAddr()),
+        NetworkIface(pub_b),
+    ],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        packages=[Apt("curl")],
+    ),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="private-web",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["priv-net"], addr=StaticAddr(_PRIVATE_WEB_IP)),
-            ],
-        ),
-        builder=_web_image("air-gapped"),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "private-web",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(priv_net, StaticAddr(_PRIVATE_WEB_IP))],
+    builder=_web_image("air-gapped"),
+    communicator=NativeCommunicator(),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="public-web",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["pub-b"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=_web_image("internet-connected"),
-        communicator=NativeCommunicator(),
-    )
+hyp.vm(
+    "public-web",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(pub_b, DHCPAddr())],
+    builder=_web_image("internet-connected"),
+    communicator=NativeCommunicator(),
 )
 
 PLAN = Plan("networking", hyp)

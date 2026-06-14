@@ -37,7 +37,6 @@ from testrange.devices import CPU, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 _DB_IP = "10.40.0.101"
 
@@ -51,7 +50,7 @@ hyp = Hypervisor(
     )
 )
 
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 
 hyp.add_switch(
     Switch(
@@ -63,49 +62,38 @@ hyp.add_switch(
     )
 )
 hyp.add_switch(Switch("backend", Network("backend-net"), cidr="10.40.0.0/24"))
+edge_net = hyp.networks["edge-net"]
+backend_net = hyp.networks["backend-net"]
 
-web = hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="web",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["edge-net"], addr=DHCPAddr()),
-                NetworkIface(hyp.networks["backend-net"], addr=StaticAddr("10.40.0.100")),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            packages=[Apt("curl")],
-        ),
-        communicator=NativeCommunicator(),
-    )
+web = hyp.vm(
+    "web",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(edge_net, DHCPAddr()),
+        NetworkIface(backend_net, StaticAddr("10.40.0.100")),
+    ],
+    builder=CloudInitBuilder(base=CacheEntry("debian-13"), packages=[Apt("curl")]),
+    communicator=NativeCommunicator(),
 )
 
-db = hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="db",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                HardDrive(hyp.pools["pool1"], 4),
-                NetworkIface(hyp.networks["backend-net"], addr=StaticAddr(_DB_IP)),
-            ],
+db = hyp.vm(
+    "db",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    data_disks=[HardDrive(pool1, 4)],
+    nics=[NetworkIface(backend_net, StaticAddr(_DB_IP))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        packages=[Apt("nginx")],
+        post_install_commands=(
+            "sh -c 'echo backend-tier-online > /var/www/html/index.html'",
+            "systemctl enable --now nginx",
         ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            packages=[Apt("nginx")],
-            post_install_commands=(
-                "sh -c 'echo backend-tier-online > /var/www/html/index.html'",
-                "systemctl enable --now nginx",
-            ),
-        ),
-        communicator=NativeCommunicator(),
-    )
+    ),
+    communicator=NativeCommunicator(),
 )
 
 web.needs(db)

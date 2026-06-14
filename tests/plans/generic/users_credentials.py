@@ -32,7 +32,6 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-creds")
 
@@ -45,7 +44,7 @@ hyp = Hypervisor(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
-hyp.add_pool(StoragePool("pool1", 32))
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
 hyp.add_switch(
     Switch(
         "lab",
@@ -56,48 +55,39 @@ hyp.add_switch(
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     )
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="keybox",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-        ),
-        communicator=SSHCommunicator("admin"),
-    )
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "keybox",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+    ),
+    communicator=SSHCommunicator("admin"),
 )
-hyp.add_vm(
-    VMRecipe(
-        spec=VMSpec(
-            name="pwbox",
-            devices=[
-                CPU(1),
-                Memory(512),
-                OSDrive(hyp.pools["pool1"], 8),
-                NetworkIface(
-                    hyp.networks["lab-net"],
-                    addr=StaticAddr("10.40.0.120", gw="10.40.0.1", dns=("9.9.9.9",)),
-                ),
-            ],
-        ),
-        builder=CloudInitBuilder(
-            base=CacheEntry("debian-13"),
-            credentials=[
-                PosixCred("root", password="root"),
-                PosixCred("ops", ssh_key=_KEY, admin=True),
-                PosixCred("viewer", password="viewer-pw", groups=("audit",)),
-            ],
-        ),
-        communicator=SSHCommunicator("viewer"),
-    )
+hyp.vm(
+    "pwbox",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(
+            lab_net,
+            StaticAddr("10.40.0.120", gw="10.40.0.1", dns=("9.9.9.9",)),
+        )
+    ],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[
+            PosixCred("root", password="root"),
+            PosixCred("ops", ssh_key=_KEY, admin=True),
+            PosixCred("viewer", password="viewer-pw", groups=("audit",)),
+        ],
+    ),
+    communicator=SSHCommunicator("viewer"),
 )
 
 PLAN = Plan("users-credentials", hyp)
