@@ -130,8 +130,8 @@ Four rules govern the construction surface:
 
 - **`Plan(name, hyp)` validates and freezes everything** into the plan's
   build graph; later `add_*` / `vm()` calls raise. One executor walks that
-  graph in topological waves — `testrange graph plan.py --order` shows them,
-  and `testrange why plan.py <node>` explains a single node.
+  graph in topological waves — `testrange graph plan.py` shows the dependency
+  tree and `testrange graph plan.py --order` shows the waves.
 
 [Thinking in build graphs](thinking-in-build-graphs.md) is the full
 conceptual tour, including how ordering edges interact (and don't) with the
@@ -376,8 +376,7 @@ testrange cache list
 testrange cache push <sha-or-name> --cache <url>   # publish to an HTTP cache
 testrange cache pull <sha-or-name> --cache <url>   # fetch from an HTTP cache
 testrange describe plan.py
-testrange graph plan.py [--order|--dot]            # the build graph / execution waves
-testrange why plan.py <node>                       # one node: dependencies + dependents
+testrange graph plan.py [--order|--dot]            # the build graph (tree) / execution waves
 testrange preflight plan.py --profile <name>       # read-only backend checks
 testrange build plan.py                            # warm the cache only; no tests
 testrange run plan.py [--fail-fast] [--leak-on-failure] [--require-cache] [--resume RUN_ID]

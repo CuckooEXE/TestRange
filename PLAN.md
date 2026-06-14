@@ -182,14 +182,14 @@ fold correctly.
 DAGs are the conceptual cost of this model, so understanding one must be
 trivial:
 
-- `testrange graph <plan.py>` — nodes, edges, node kinds.
+- `testrange graph <plan.py>` — the build graph as a **dependency tree**: each
+  final target with everything it is built from nested beneath it (a shared
+  sub-tree expanded once, then back-referenced).
 - `testrange graph <plan.py> --order` — the topo-sorted **execution waves**
   (what runs, in what order, what runs in parallel).
 - `testrange graph <plan.py> --dot` — Graphviz export.
 - `testrange graph <plan.py> --cache --profile <p>` — per-node cache hit/miss
   (what would clone vs build).
-- `testrange why <plan.py> <node>` — why a node runs: its dependencies and its
-  dependents.
 - `preflight` validates the graph (cycles, dangling deps, duplicate names)
   before any backend call.
 
@@ -1265,7 +1265,7 @@ be cleaned up via state-file-driven `testrange cleanup`.
 ## CLI surface (v0)
 
 > **SUPERSEDED by TestRange 2.0** — verbs are re-pointed at the build graph and
-> gain `graph` / `graph --order` / `graph --dot` / `graph --cache` / `why`; see
+> gain `graph` / `graph --order` / `graph --dot` / `graph --cache`; see
 > the 2.0 section above (DAG-10..13).
 
 ```

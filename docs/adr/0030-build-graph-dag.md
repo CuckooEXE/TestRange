@@ -158,11 +158,17 @@ machinery exists from day one so post-MVP `bake` edges fold correctly.
 ### Inspecting the graph (first-class, for juniors — DAG-10..12)
 
 DAGs are the conceptual cost of this model, so reading one must be trivial:
-`testrange graph <plan>` (nodes/edges/kinds), `graph --order` (the topo waves —
-what runs in parallel, in what order), `graph --dot` (Graphviz), `graph --cache
---profile <p>` (per-node hit/miss), `why <plan> <node>` (a node's dependencies
-and dependents). `preflight` validates the graph (cycles, dangling deps,
-duplicate names) before any backend call.
+`testrange graph <plan>` renders the graph as a **dependency tree** — each
+final target with everything it is built from nested beneath it (a shared
+sub-tree is expanded once then back-referenced), mirroring the `describe` tree
+idiom. `graph --order` shows the topo waves (what runs in parallel, in what
+order), `graph --dot` emits Graphviz, and `graph --cache --profile <p>`
+annotates each node with its key + hit/miss. `preflight` validates the graph
+(cycles, dangling deps, duplicate names) before any backend call.
+
+The original cut also shipped a `why <plan> <node>` command for a single node's
+dependencies/dependents/wave; it was removed (DAG-21/22, 2026-06-14) once the
+default `graph` tree made the same relationships visible at a glance.
 
 ### MVP scope and the deferred seams
 

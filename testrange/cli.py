@@ -44,6 +44,7 @@ from testrange.exceptions import (
 )
 from testrange.graph.build_graph import BuildGraph
 from testrange.graph.keys import compute_cache_keys
+from testrange.graph.node import Node
 from testrange.networks.base import Network, NetworkAddressing, Switch
 from testrange.orchestrator._parallel import DEFAULT_MAX_WORKERS
 from testrange.orchestrator.backend import compatibility_findings, resolve_backend
@@ -530,64 +531,67 @@ def _graph(args: argparse.Namespace) -> int:
             _err(f"cache error: {e}")
             return Exit.FAILURE
 
-    table = Table(box=None, pad_edge=False)
-    table.add_column("NODE", no_wrap=True)
-    table.add_column("KIND")
-    table.add_column("DEPENDS ON")
-    if args.cache_keys:
-        table.add_column("KEY", no_wrap=True)
-        table.add_column("CACHE")
-    for n in g.topological_order():
-        deps = ", ".join(d.name for d in g.dependencies_of(n.name)) or "-"
-        row = [Text(n.name), Text(n.kind), Text(deps)]
-        if args.cache_keys:
-            row.append(Text(keys.get(n.name, "-")))
-            if n.kind == "vm":
-                row.append(Text("MISS (would build)" if n.name in misses else "hit (would clone)"))
-            else:
-                row.append(Text("-"))
-        table.add_row(*row)
-    out_console().print(table)
+    out_console().print(_graph_tree(g, keys, misses, show_cache=args.cache_keys))
     _out(f"{len(g)} node(s), {len(g.edges)} edge(s), {len(g.waves())} wave(s)")
     return Exit.OK
 
 
-def _why(args: argparse.Namespace) -> int:
-    """``testrange why <plan> <node>`` — explain one node (DAG-12)."""
-    plan, _tests = _load_plan_module(args.plan)
-    g = plan.graph
-    name = args.node
-    if name not in g:
-        # Accept the bare plan-level name too ("web" for "vm:web").
-        qualified = [n.name for n in g.nodes if n.name.split(":", 1)[1] == name]
-        if len(qualified) == 1:
-            name = qualified[0]
-        else:
-            _err(f"error: no node {args.node!r}; known: {', '.join(g.names)}")
-            return Exit.USAGE
-    node = g.node(name)
-    wave_idx = next(i for i, wave in enumerate(g.waves()) if any(n.name == name for n in wave))
-    tree = Tree(Text(f"{name} ({node.kind})"))
-    deps = g.dependencies_of(name)
-    dep_node = tree.add(
-        Text(f"depends on ({len(deps)})" if deps else "depends on: nothing (a root)")
+def _graph_tree(g: BuildGraph, keys: dict[str, str], misses: set[str], *, show_cache: bool) -> Tree:
+    """Render the DAG as a dependency tree (mirrors the ``describe`` tree idiom).
+
+    Roots are the graph's **sink** nodes — the plan's final targets, the ones
+    nothing else depends on (``vm:web`` in a typical plan). Each node's direct
+    dependencies nest beneath it, so reading down a branch answers "what is this
+    built from": ``vm:web -> {pool, switch, vm:db} -> ...``. A DAG is not a tree
+    (a shared dependency has several dependents), so a sub-tree is expanded in
+    full the *first* time it is reached and shown as a back-reference on later
+    appearances — that keeps the render linear in the graph, not exponential.
+    Determinism: sinks and dependencies are both walked sorted by name.
+    """
+    root = Tree(
+        Text(f"{g.name}: {len(g)} node(s), {len(g.edges)} edge(s), {len(g.waves())} wave(s)")
     )
-    for d in deps:
-        dep_node.add(Text(d.name))
-    dependents = g.dependents_of(name)
-    rev_node = tree.add(
-        Text(f"needed by ({len(dependents)})" if dependents else "needed by: nothing (a leaf)")
-    )
-    for d in dependents:
-        rev_node.add(Text(d.name))
-    tree.add(
-        Text(
-            f"runs in wave {wave_idx} of {len(g.waves())} — after every dependency "
-            "is ready, in parallel with the rest of its wave"
-        )
-    )
-    out_console().print(tree)
-    return Exit.OK
+    sinks = sorted((n for n in g.nodes if not g.dependents_of(n.name)), key=lambda n: n.name)
+    expanded: set[str] = set()
+    for node in sinks:
+        _add_dep_node(root, g, node, expanded, keys, misses, show_cache)
+    return root
+
+
+def _add_dep_node(
+    parent: Tree,
+    g: BuildGraph,
+    node: Node,
+    expanded: set[str],
+    keys: dict[str, str],
+    misses: set[str],
+    show_cache: bool,
+) -> None:
+    """Add *node* under *parent*, recursing into its dependencies once each."""
+    deps = g.dependencies_of(node.name)
+    label = _node_label(node, keys, misses, show_cache)
+    if deps and node.name in expanded:
+        # Its full sub-tree is already printed above; back-reference, don't repeat.
+        label.append("  ⤴ (shown above)", style="dim")
+        parent.add(label)
+        return
+    branch = parent.add(label)
+    expanded.add(node.name)
+    for dep in deps:
+        _add_dep_node(branch, g, dep, expanded, keys, misses, show_cache)
+
+
+def _node_label(node: Node, keys: dict[str, str], misses: set[str], show_cache: bool) -> Text:
+    """One tree line for a node: its kind-qualified name, plus cache annotation."""
+    label = Text(node.name)
+    if show_cache:
+        label.append(f"  {keys.get(node.name, '-')}", style="dim")
+        if node.kind == "vm":
+            label.append(
+                "  MISS (would build)" if node.name in misses else "  hit (would clone)",
+                style="dim",
+            )
+    return label
 
 
 def _render_dot(g: BuildGraph) -> str:
@@ -990,10 +994,11 @@ def build_parser() -> argparse.ArgumentParser:
         "graph",
         help="print a plan's build graph (nodes, edges, execution order)",
         description=(
-            "Render the plan's frozen build graph: every node (name, kind) and "
-            "every dependency edge. --order shows the execution waves (what runs "
-            "in parallel, in what order); --dot emits Graphviz; --cache (with "
-            "--profile) annotates each node with its cache key and hit/miss. "
+            "Render the plan's frozen build graph as a dependency tree: each "
+            "final target with everything it is built from nested beneath it. "
+            "--order shows the execution waves (what runs in parallel, in what "
+            "order) instead; --dot emits Graphviz; --cache (with --profile) "
+            "annotates each node with its cache key and hit/miss. "
             "Read-only: touches no backend resources."
         ),
     )
@@ -1008,14 +1013,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_connect_arg(p_graph)
     p_graph.set_defaults(func=_graph)
-
-    p_why = sub.add_parser(
-        "why",
-        help="explain one graph node: dependencies, dependents, when it runs",
-    )
-    p_why.add_argument("plan", help="path to the plan file (.py)")
-    p_why.add_argument("node", help="node name (e.g. vm:web, or just web)")
-    p_why.set_defaults(func=_why)
 
     p_cache = sub.add_parser("cache", help="manage the local cache")
     cache_sub = p_cache.add_subparsers(dest="cache_subcommand", required=True)

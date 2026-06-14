@@ -86,18 +86,19 @@ created, in wave order, so cleanup unwinds the graph back-to-front.
 You never have to derive any of the above by hand:
 
 ```sh
-testrange graph plan.py            # every node, its kind, what it depends on
+testrange graph plan.py            # the dependency tree: each target with what it's built from
 testrange graph plan.py --order    # the waves: what runs, in what order, in parallel
 testrange graph plan.py --dot      # Graphviz (pipe into `dot -Tsvg`)
 testrange graph plan.py --cache --profile lab
                                    # + each node's cache key and hit/miss:
                                    #   what would clone vs what would build
-testrange why plan.py web          # one node: dependencies, dependents, its wave
 ```
 
-`testrange why` answers the two questions you will actually ask while
-debugging a plan: *why does this run so late?* (look at its dependencies) and
-*what breaks if I remove it?* (look at its dependents).
+The default `graph` view is a tree rooted at each final target (the nodes
+nothing else depends on), with everything that target is built from nested
+beneath it. That answers the two questions you will actually ask while
+debugging a plan: *why does this run so late?* — read its dependencies down
+the branch — and *what depends on it?* — every place the node appears nested.
 
 `preflight` validates the same graph (plus backend checks) without creating
 anything, and `describe` shows a one-line graph summary next to the topology.
@@ -106,8 +107,8 @@ anything, and `describe` shows a one-line graph summary next to the topology.
 
 Graph node names are kind-qualified so they can never collide across kinds:
 `pool:pool1`, `network:switch1` (one node per switch — its networks, fabric,
-and sidecar realize as a unit), `vm:web`. The CLI accepts the bare name too
-(`testrange why plan.py web`) when it is unambiguous.
+and sidecar realize as a unit), `vm:web`. Those are the names the `graph` tree
+prints on every line.
 
 ## Caching in one paragraph
 

@@ -414,7 +414,7 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (407)
+## Done (410)
 
 ### DAG
 
@@ -424,7 +424,7 @@ on 2026-06-06.
   >
   > Hard constraints from the user: (1) it MUST stay simple for junior devs — crystal-clear mypy types (NO `Any` on the public surface; concrete typed handles) and first-class graph-inspection commands so execution order is never a mystery; (2) MVP = libvirt backend + CloudInitBuilder/Debian VMs + ordering edges ONLY; (3) do NOT build into a hole — appliances (deploy-through-endpoint), relationship edges (manage/collect_from with bake|replay caching), nested hypervisors, and multi-backend are DEFERRED, but the Node/Edge ABCs, the edge-cacheability field, the transitive-hash cache key, and the backend-agnostic executor are designed so they land as new node/edge KINDS, not a reshape.
   >
-  > Supersedes/extends ADR-0008 (driver ABC), ADR-0010 (build/run phases), ADR-0021 (nested recursion). Children DAG-1..20. Created 2026-06-12. COMPLETE 2026-06-12: the whole cut (DAG-3..20) landed in one session on feature/dag — all hard constraints held (junior surface: typed handles + `graph`/`why` CLI + user guide; MVP scope: libvirt + cloud-init + ordering edges; seams proven additive by DAG-19/20 checks). Gates green (ruff / format / mypy --strict 249 files / pytest 1347) + hello_world live smoke + 15/15 corpus re-cert on libvirt-local. Net -1.8k lines.
+  > Supersedes/extends ADR-0008 (driver ABC), ADR-0010 (build/run phases), ADR-0021 (nested recursion). Children DAG-1..22 (DAG-21/22 are the 2026-06-14 graph-tree refinement). Created 2026-06-12. COMPLETE 2026-06-12: the whole cut (DAG-3..20) landed in one session on feature/dag — all hard constraints held (junior surface: typed handles + `graph` CLI + user guide; MVP scope: libvirt + cloud-init + ordering edges; seams proven additive by DAG-19/20 checks). Gates green (ruff / format / mypy --strict 249 files / pytest 1347) + hello_world live smoke + 15/15 corpus re-cert on libvirt-local. Net -1.8k lines.
 
 - [x] **DAG-3** · `feat` — MVP node kinds: `PoolNode`, `NetworkNode`, `VMNode` _(done: 2026-06-12)_
 
@@ -497,6 +497,14 @@ on 2026-06-06.
 - [x] **DAG-20** · `chore` — DEFERRED seam check: `HypervisorNode` (nested) + multi-backend _(done: 2026-06-12)_
 
   > Seam check landed 2026-06-12 (`TestHypervisorSeam`): a `HypervisorNode` stand-in recursing an inner `BuildGraph` realizes through one outer hook (no executor branch); second-backend portability reduces to swapping the ABC-shaped driver on the context; unknown kind tags never perturb validation.
+
+- [x] **DAG-21** · `feat` — `graph` renders the DAG as a dependency tree (replace the flat table) _(done: 2026-06-14)_
+
+  > `testrange graph <plan>` now renders a Rich Tree rooted at the sink nodes (the plan's final targets) with each node's dependencies nested beneath it; a shared sub-tree is expanded once then back-referenced (`⤴ (shown above)`) so the render stays linear in the graph. Mirrors the `describe` tree idiom (`_graph_tree`/`_add_dep_node`/`_node_label` in cli.py). `--order` (waves) / `--dot` (Graphviz) unchanged; `--cache --profile` annotates each line with its key + hit/miss. Added `TestGraph` CLI tests (default tree, sink-rooting, shared-subtree back-ref, --order, --dot) — the subcommand had no coverage before. Gates green (ruff / format / mypy --strict 249 / pytest 1361).
+
+- [x] **DAG-22** · `chore` — delete the `why` subcommand (subsumed by the graph tree) _(done: 2026-06-14)_
+
+  > Removed `testrange why <plan> <node>` (the `_why` handler + `why` subparser) and scrubbed every doc / PLAN / ADR reference: its job — a node's dependencies, dependents, and wave — is now visible in the DAG-21 dependency tree. ADR-0030 records the removal; `TestWhyRemoved` pins that `why` is no longer a valid subcommand.
 
 - [x] **DAG-1** · `docs` — ADR-0030: the build graph (2.0 design of record) _(done: 2026-06-12)_
 
@@ -2671,6 +2679,10 @@ on 2026-06-06.
   > Live-found 2026-06-02 (nested ESXi bring-up): ESXi weasel's ks=cdrom:/ks.cfg scan on i440fx/BIOS only enumerates an IDE optical unit; a sata(AHCI) installer CD fails 'cannot find kickstart file on cd-rom /ks.cfg' before touching disk (600s build timeout). Proven via direct qemu: same ISO sata=fail, IDE=installs. Fix: drivers/libvirt/_vm.py _cdrom_bus(firmware) -> ide for pc/BIOS, sata for q35/UEFI (q35 has no IDE). Case (lowercase ks.cfg) was a red herring. DONE.
 
 ### DOCS
+
+- [x] **DOCS-29** · `docs` — dev-facing `docs/dev/graph.md`: the build-graph DAG explained _(done: 2026-06-14)_
+
+  > New developer guide (`docs/dev/graph.md`, registered in the index toctree) explaining the 2.0 build graph end-to-end for onboarding: why a DAG (vs the v0 fixed-phase pipeline), what a DAG is (directed / acyclic / topo-sort), how TestRange builds one (reference-based construction via str-subclass handles -> frozen BuildGraph; kinded nodes; content vs ordering edges; the one topo-walking executor; the transitive-hash key), what it affords, where we are (EPIC DAG complete), and what's left (deferred kinds, multi-backend cert). Includes a map-of-the-code table; cross-links ADR-0030 + PLAN.md + the user-facing thinking-in-build-graphs.md.
 
 - [x] **DOCS-28** · `bugfix` — `nested_lab.py`: inner plan needs its own NAT `build_switch` so the inner VMs get apt egress during their L0 build (live-found) _(done: 2026-06-09)_
 

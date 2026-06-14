@@ -23,9 +23,8 @@ for the same table.
 
 ```
 testrange describe <plan.py>            # passive structure summary, no backend writes
-testrange graph <plan.py> [--order|--dot]  # the plan's build graph; --order = execution waves
+testrange graph <plan.py> [--order|--dot]  # the build graph as a dependency tree; --order = waves
   --cache --profile <name>              #   annotate each node with cache key + hit/miss
-testrange why <plan.py> <node>          # one node: dependencies, dependents, its wave
 testrange preflight <plan.py>           # read-only backend checks; print each result
 testrange run <plan.py> [flags]         # bring-up, run TESTS, tear down
   --fail-fast                           #   stop on first test failure
