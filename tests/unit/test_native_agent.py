@@ -3,7 +3,7 @@
 The orchestrator brokers ``HypervisorDriver.native_agent_provision()`` into the
 builder for a ``NativeCommunicator`` VM (see ``test_cloudinit`` for the builder
 injection + cache-key folding, and the gating ``isinstance`` in
-``orchestrator/build_phase._probe_vm``). Here we pin each backend's declared
+``orchestrator/vm_build``'s probe). Here we pin each backend's declared
 recipe: QGA backends install qemu-guest-agent, ESXi installs open-vm-tools.
 """
 

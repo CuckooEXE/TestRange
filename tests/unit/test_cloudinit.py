@@ -25,6 +25,7 @@ from testrange.devices import CPU, DHCPAddr, HardDrive, Memory, OSDrive, StaticA
 from testrange.devices.network import NetworkIface
 from testrange.exceptions import BuilderError, BuildNotReadyError
 from testrange.guest_io import ExecResult
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.base import BuildNic
 from testrange.packages import Apt, Pip
@@ -77,6 +78,18 @@ def _build_nic(mac: str = "02:00:00:aa:bb:cc") -> BuildNic:
     )
 
 
+# Builders are exercised directly (no Hypervisor registry in play), so the
+# typed NIC/pool handles are minted by hand — the same shape hyp.networks[...]
+# / hyp.pools[...] would return for the fixture switches above.
+_POOL = PoolHandle("p1")
+
+
+def _nic(network: str, *, addr: DHCPAddr | StaticAddr | None = None) -> NetworkIface:
+    return NetworkIface(
+        NetworkHandle(network, switch={"netA": "swA", "netB": "swB"}[network]), addr=addr
+    )
+
+
 def _macs(spec: VMSpec) -> tuple[str, ...]:
     """One deterministic declared-NIC MAC per NIC, in spec order."""
     return tuple(f"02:00:00:00:00:{i:02x}" for i in range(len(spec.nics)))
@@ -88,8 +101,8 @@ def _spec(name: str = "web") -> VMSpec:
         devices=[
             CPU(1),
             Memory(512),
-            OSDrive("p1", 8),
-            NetworkIface("netA", addr=DHCPAddr()),
+            OSDrive(_POOL, 8),
+            _nic("netA", addr=DHCPAddr()),
         ],
     )
 
@@ -379,7 +392,7 @@ class TestRenderNetworkConfig:
     def test_zero_nic_vm_still_has_build_nic(self) -> None:
         # ORCH-9: a NIC-less VM (no-net) builds with the dedicated build NIC.
         b = _basic_builder()
-        spec = VMSpec(name="no-net", devices=[CPU(1), Memory(512), OSDrive("p1", 8)])
+        spec = VMSpec(name="no-net", devices=[CPU(1), Memory(512), OSDrive(_POOL, 8)])
         body = yaml.safe_load(
             b.render_network_config(
                 spec, _recipe(b, spec), addressing=DEFAULT_ADDR, build_nic=_build_nic(), macs=()
@@ -431,7 +444,7 @@ class TestRenderNetworkConfig:
 def _static_spec(*nics: NetworkIface) -> VMSpec:
     return VMSpec(
         name="web",
-        devices=[CPU(1), Memory(512), OSDrive("p1", 8), *nics],
+        devices=[CPU(1), Memory(512), OSDrive(_POOL, 8), *nics],
     )
 
 
@@ -442,9 +455,9 @@ def _data_spec(*data_sizes: int) -> VMSpec:
         devices=[
             CPU(1),
             Memory(512),
-            OSDrive("p1", 8),
-            *(HardDrive("p1", s) for s in data_sizes),
-            NetworkIface("netA", addr=DHCPAddr()),
+            OSDrive(_POOL, 8),
+            *(HardDrive(_POOL, s) for s in data_sizes),
+            _nic("netA", addr=DHCPAddr()),
         ],
     )
 
@@ -454,7 +467,7 @@ class TestDeclaredNicNetplan:
 
     def test_static_nic_full_derivation(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec = _static_spec(_nic("netA", addr=StaticAddr("172.31.0.50")))
         eth = _netcfg(b, spec)["ethernets"]["id0"]
         assert eth["addresses"] == ["172.31.0.50/24"]
         assert eth["nameservers"] == {"addresses": ["172.31.0.1"]}
@@ -466,8 +479,8 @@ class TestDeclaredNicNetplan:
         # NIC's own route is independent (it is inert at run anyway).
         b = CloudInitBuilder(base=CacheEntry("x"))
         spec = _static_spec(
-            NetworkIface("netA", addr=StaticAddr("172.31.0.50")),
-            NetworkIface("netB", addr=StaticAddr("10.10.10.50")),
+            _nic("netA", addr=StaticAddr("172.31.0.50")),
+            _nic("netB", addr=StaticAddr("10.10.10.50")),
         )
         eths = _netcfg(b, spec)["ethernets"]
         assert "routes" in eths["id0"]
@@ -476,8 +489,8 @@ class TestDeclaredNicNetplan:
     def test_mixed_static_dhcp(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
         spec = _static_spec(
-            NetworkIface("netA", addr=StaticAddr("172.31.0.50")),
-            NetworkIface("netB", addr=DHCPAddr()),
+            _nic("netA", addr=StaticAddr("172.31.0.50")),
+            _nic("netB", addr=DHCPAddr()),
         )
         eths = _netcfg(b, spec)["ethernets"]
         assert eths["id0"]["addresses"] == ["172.31.0.50/24"]
@@ -487,7 +500,7 @@ class TestDeclaredNicNetplan:
         # addr=None: NIC present, no address. Must NOT emit dhcp4: true (the bug)
         # — leave it to the OS so boot doesn't block on a lease nothing serves.
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec = _static_spec(NetworkIface("netA", addr=None))
+        spec = _static_spec(_nic("netA", addr=None))
         eth = _netcfg(b, spec)["ethernets"]["id0"]
         assert eth["dhcp4"] is False
         assert eth["dhcp6"] is False
@@ -496,7 +509,7 @@ class TestDeclaredNicNetplan:
 
     def test_explicit_dhcp(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec = _static_spec(NetworkIface("netA", addr=DHCPAddr()))
+        spec = _static_spec(_nic("netA", addr=DHCPAddr()))
         eth = _netcfg(b, spec)["ethernets"]["id0"]
         assert eth["dhcp4"] is True
         assert eth["dhcp6"] is False
@@ -512,7 +525,7 @@ class TestDeclaredNicNetplan:
             )
         }
         spec = _static_spec(
-            NetworkIface(
+            _nic(
                 "netA",
                 addr=StaticAddr("192.168.5.124/24", gw="192.168.5.123", dns=("192.168.5.123",)),
             )
@@ -582,11 +595,11 @@ class TestConfigHash:
         b = _basic_builder()
         spec_small = VMSpec(
             name="web",
-            devices=[CPU(1), Memory(512), OSDrive("p1", 8), NetworkIface("netA", addr=DHCPAddr())],
+            devices=[CPU(1), Memory(512), OSDrive(_POOL, 8), _nic("netA", addr=DHCPAddr())],
         )
         spec_big = VMSpec(
             name="web",
-            devices=[CPU(1), Memory(512), OSDrive("p1", 64), NetworkIface("netA", addr=DHCPAddr())],
+            devices=[CPU(1), Memory(512), OSDrive(_POOL, 64), _nic("netA", addr=DHCPAddr())],
         )
         assert self._hash(b, spec_small) != self._hash(b, spec_big)
 
@@ -606,14 +619,14 @@ class TestConfigHash:
 
     def test_sensitive_to_declared_static_ipv4(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_a = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
-        spec_b = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.60")))
+        spec_a = _static_spec(_nic("netA", addr=StaticAddr("172.31.0.50")))
+        spec_b = _static_spec(_nic("netA", addr=StaticAddr("172.31.0.60")))
         assert self._hash(b, spec_a, base_sha="z") != self._hash(b, spec_b, base_sha="z")
 
     def test_static_vs_dhcp_differs(self) -> None:
         b = CloudInitBuilder(base=CacheEntry("x"))
-        spec_dhcp = _static_spec(NetworkIface("netA", addr=DHCPAddr()))
-        spec_static = _static_spec(NetworkIface("netA", addr=StaticAddr("172.31.0.50")))
+        spec_dhcp = _static_spec(_nic("netA", addr=DHCPAddr()))
+        spec_static = _static_spec(_nic("netA", addr=StaticAddr("172.31.0.50")))
         assert self._hash(b, spec_dhcp, base_sha="z") != self._hash(b, spec_static, base_sha="z")
 
 

@@ -6,11 +6,17 @@ import pytest
 
 from testrange.devices import CPU, Device, HardDrive, Memory, OSDrive
 from testrange.devices.network import NetworkIface
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.vms import VMSpec
 
 
 def _basic_devices() -> list[Device]:
-    return [CPU(2), Memory(1024), OSDrive("p1", 8), NetworkIface("netA")]
+    return [
+        CPU(2),
+        Memory(1024),
+        OSDrive(PoolHandle("p1"), 8),
+        NetworkIface(NetworkHandle("netA", switch="sw1")),
+    ]
 
 
 class TestVMSpec:
@@ -25,21 +31,28 @@ class TestVMSpec:
 
     def test_multiple_cpus(self) -> None:
         with pytest.raises(ValueError, match="exactly one CPU"):
-            VMSpec(name="x", devices=[CPU(1), CPU(2), Memory(512), OSDrive("p1", 4)])
+            VMSpec(name="x", devices=[CPU(1), CPU(2), Memory(512), OSDrive(PoolHandle("p1"), 4)])
 
     def test_no_cpu(self) -> None:
         with pytest.raises(ValueError, match="exactly one CPU"):
-            VMSpec(name="x", devices=[Memory(512), OSDrive("p1", 4)])
+            VMSpec(name="x", devices=[Memory(512), OSDrive(PoolHandle("p1"), 4)])
 
     def test_multiple_memory(self) -> None:
         with pytest.raises(ValueError, match="exactly one Memory"):
-            VMSpec(name="x", devices=[CPU(1), Memory(512), Memory(1024), OSDrive("p1", 4)])
+            VMSpec(
+                name="x", devices=[CPU(1), Memory(512), Memory(1024), OSDrive(PoolHandle("p1"), 4)]
+            )
 
     def test_multiple_osdrive(self) -> None:
         with pytest.raises(ValueError, match="exactly one OSDrive"):
             VMSpec(
                 name="x",
-                devices=[CPU(1), Memory(512), OSDrive("p1", 4), OSDrive("p2", 4)],
+                devices=[
+                    CPU(1),
+                    Memory(512),
+                    OSDrive(PoolHandle("p1"), 4),
+                    OSDrive(PoolHandle("p2"), 4),
+                ],
             )
 
     def test_multiple_data_drives_ok(self) -> None:
@@ -48,15 +61,15 @@ class TestVMSpec:
             devices=[
                 CPU(1),
                 Memory(512),
-                OSDrive("p1", 4),
-                HardDrive("p2", 100),
-                HardDrive("p2", 200),
+                OSDrive(PoolHandle("p1"), 4),
+                HardDrive(PoolHandle("p2"), 100),
+                HardDrive(PoolHandle("p2"), 200),
             ],
         )
         assert len(s.data_drives) == 2
 
     def test_no_nic_ok(self) -> None:
-        s = VMSpec(name="x", devices=[CPU(1), Memory(512), OSDrive("p1", 4)])
+        s = VMSpec(name="x", devices=[CPU(1), Memory(512), OSDrive(PoolHandle("p1"), 4)])
         assert s.nics == ()
 
     def test_empty_name(self) -> None:

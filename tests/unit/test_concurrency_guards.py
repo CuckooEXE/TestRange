@@ -27,6 +27,7 @@ from testrange.cli import _jobs_arg, build_parser
 from testrange.devices import CPU, Memory, OSDrive
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.proxmox.driver import ProxmoxDriver
+from testrange.handles import PoolHandle
 from testrange.networks import Network, Switch
 from testrange.orchestrator._parallel import parallel_map
 from testrange.vms import VMSpec
@@ -155,7 +156,7 @@ class _InstrumentedCreateApi(_FakeApi):
 def _run_spec() -> VMSpec:
     # No NICs: keeps network_refs empty so the create path exercises only the
     # storage critical section under test.
-    return VMSpec(name="web", devices=[CPU(2), Memory(1024), OSDrive("pool1", 8)])
+    return VMSpec(name="web", devices=[CPU(2), Memory(1024), OSDrive(PoolHandle("pool1"), 8)])
 
 
 class TestProxmoxStorageImportSerialization:

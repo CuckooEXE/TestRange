@@ -31,6 +31,7 @@ _Addr = DHCPAddr | StaticAddr | None
 
 
 def _vm(
+    hyp: MockHypervisor,
     name: str = "web",
     *,
     addr: _Addr = None,
@@ -44,8 +45,8 @@ def _vm(
             devices=[
                 CPU(cpus),
                 Memory(memory_mb),
-                OSDrive("pool1", 8),
-                NetworkIface("netA", addr=addr),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["netA"], addr=addr),
             ],
         ),
         builder=CloudInitBuilder(
@@ -62,17 +63,15 @@ def _plan(
     comm: Communicator | None = None,
     memory_mb: int = 512,
     cpus: int = 1,
+    switch: Switch | None = None,
 ) -> Plan:
-    return Plan(
-        "t",
-        MockHypervisor(
-            networks=[
-                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
-            ],
-            pools=[StoragePool("pool1", 32)],
-            vms=[_vm(addr=addr, comm=comm, memory_mb=memory_mb, cpus=cpus)],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_switch(
+        switch or Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
     )
+    hyp.add_pool(StoragePool("pool1", 32))
+    hyp.add_vm(_vm(hyp, addr=addr, comm=comm, memory_mb=memory_mb, cpus=cpus))
+    return Plan("t", hyp)
 
 
 class TestSwitchOwnership:
@@ -219,14 +218,7 @@ class TestMgmtGating:
     """``mgmt=True`` is gated at preflight until ADR-0009 settles its semantics."""
 
     def _mgmt_plan(self) -> Plan:
-        return Plan(
-            "t",
-            MockHypervisor(
-                networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", mgmt=True)],
-                pools=[StoragePool("pool1", 32)],
-                vms=[_vm()],
-            ),
-        )
+        return _plan(switch=Switch("sw1", Network("netA"), cidr="10.0.0.0/24", mgmt=True))
 
     def test_mgmt_switch_is_error(self) -> None:
         findings = mgmt_unsupported_findings(self._mgmt_plan())
@@ -251,50 +243,33 @@ class TestMgmtGating:
 class TestUnknownUplinkGating:
     """A Switch.uplink the bound profile doesn't map is preflight-rejected (ADR-0016)."""
 
+    @staticmethod
+    def _uplink_plan() -> Plan:
+        return _plan(
+            switch=Switch(
+                "sw1",
+                Network("netA"),
+                cidr="10.0.0.0/24",
+                uplink="egress",
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+            )
+        )
+
     def test_unmapped_uplink_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-        plan = Plan(
-            "t",
-            MockHypervisor(
-                networks=[
-                    Switch(
-                        "sw1",
-                        Network("netA"),
-                        cidr="10.0.0.0/24",
-                        uplink="egress",
-                        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-                    )
-                ],
-                pools=[StoragePool("pool1", 32)],
-                vms=[_vm()],
-            ),
-        )
         report = MockDriver().preflight(  # no uplinks mapped
-            plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)
+            self._uplink_plan(),
+            cache_manager=CacheManager(),
+            build_switch=resolve_build_switch(None),
         )
         assert bool(report) is False
         assert any(f.code == "unknown-uplink" for f in report.findings)
 
     def test_mapped_uplink_is_clean(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-        plan = Plan(
-            "t",
-            MockHypervisor(
-                networks=[
-                    Switch(
-                        "sw1",
-                        Network("netA"),
-                        cidr="10.0.0.0/24",
-                        uplink="egress",
-                        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-                    )
-                ],
-                pools=[StoragePool("pool1", 32)],
-                vms=[_vm()],
-            ),
-        )
+        plan = self._uplink_plan()
         report = MockDriver(uplinks={"egress": "br0"}).preflight(
             plan, cache_manager=CacheManager(), build_switch=resolve_build_switch(None)
         )

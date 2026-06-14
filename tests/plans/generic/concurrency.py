@@ -34,6 +34,27 @@ from testrange.vms import VMRecipe, VMSpec
 
 _NODES = ("node-1", "node-2", "node-3", "node-4")
 
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    ),
+)
+hyp.add_pool(StoragePool("pool1", 64))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.40.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+
 
 def _node(name: str) -> VMRecipe:
     return VMRecipe(
@@ -42,8 +63,8 @@ def _node(name: str) -> VMRecipe:
             devices=[
                 CPU(1),
                 Memory(512),
-                OSDrive("pool1", 8),
-                NetworkIface("lab-net", addr=DHCPAddr()),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["lab-net"], addr=DHCPAddr()),
             ],
         ),
         # NativeCommunicator agent auto-provisioned per backend (CORE-90); the
@@ -56,30 +77,10 @@ def _node(name: str) -> VMRecipe:
     )
 
 
-PLAN = Plan(
-    "concurrency",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.40.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 64)],
-        vms=[_node(name) for name in _NODES],
-    ),
-)
+for _name in _NODES:
+    hyp.add_vm(_node(_name))
+
+PLAN = Plan("concurrency", hyp)
 
 
 def every_node_came_up_reachable(orch: OrchestratorHandle) -> None:

@@ -213,8 +213,8 @@ testrange cache add tools/build-sidecar-image/testrange-sidecar.qcow2 \
 
 ## Plan-level rules (driver-agnostic)
 
-The validator applied at Hypervisor construction (`MockHypervisor` today,
-and any future hypervisor) enforces:
+The validator runs when `Plan(...)` freezes the declared topology —
+backend-agnostic, before any driver is bound — and enforces:
 
 - Static IP must be inside the owning Switch's CIDR.
 - Static IP can't equal network/broadcast.
@@ -271,17 +271,16 @@ A build switch is an ordinary `Switch`, realized identically to a run-phase one
 # 1. A NAT switch routing out a named, out-of-band uplink. The sidecar serves
 #    DHCP/DNS on the isolated build segment and MASQUERADEs eth1 out the `egress`
 #    host bridge (which already has NAT/route behind it — TestRange only attaches).
-Hypervisor(
+hyp = Hypervisor(
     build_switch=Switch(
         "build", Network("build"), cidr="10.97.99.0/24", uplink="egress",
         sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-    ),
-    networks=[...],
+    )
 )
 
 # 2. None (default): isolated build network, no egress. Only viable when every
 #    VM is already a cache hit (the full _built_<config_hash>__* disk set is cached).
-Hypervisor(networks=[...])
+hyp = Hypervisor()
 ```
 
 `uplink="egress"` resolves through the bound profile's `[uplinks]` map to a host

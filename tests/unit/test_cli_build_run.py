@@ -34,23 +34,20 @@ from tests.mock_driver import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "hello",
-    MockHypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))],
-        pools=[StoragePool("pool1", 32)],
-        vms=[VMRecipe(
-            spec=VMSpec(name="web", devices=[
-                CPU(1), Memory(512), OSDrive("pool1", 8),
-                NetworkIface("netA", addr=DHCPAddr()),
-            ]),
-            builder=CloudInitBuilder(
-                base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
-            ),
-            communicator=SSHCommunicator("u"),
-        )],
+hyp = MockHypervisor()
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)))
+hyp.add_vm(VMRecipe(
+    spec=VMSpec(name="web", devices=[
+        CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8),
+        NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+    ]),
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
     ),
-)
+    communicator=SSHCommunicator("u"),
+))
+PLAN = Plan("hello", hyp)
 
 def test_ok(orch):
     pass
@@ -73,23 +70,20 @@ from tests.mock_driver import MockHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "data-disk-mock",
-    MockHypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True))],
-        pools=[StoragePool("pool1", 64)],
-        vms=[VMRecipe(
-            spec=VMSpec(name="fileserver", devices=[
-                CPU(1), Memory(512), OSDrive("pool1", 8), HardDrive("pool1", 16),
-                NetworkIface("netA", addr=DHCPAddr()),
-            ]),
-            builder=CloudInitBuilder(
-                base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
-            ),
-            communicator=SSHCommunicator("u"),
-        )],
+hyp = MockHypervisor()
+hyp.add_pool(StoragePool("pool1", 64))
+hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.1.0/24", sidecar=Sidecar(dhcp=True, dns=True)))
+hyp.add_vm(VMRecipe(
+    spec=VMSpec(name="fileserver", devices=[
+        CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8), HardDrive(hyp.pools["pool1"], 16),
+        NetworkIface(hyp.networks["netA"], addr=DHCPAddr()),
+    ]),
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
     ),
-)
+    communicator=SSHCommunicator("u"),
+))
+PLAN = Plan("data-disk-mock", hyp)
 
 def test_ok(orch):
     pass

@@ -74,71 +74,73 @@ MGMT_ADDR = "10.55.0.100"
 # Root login for the node — also what a `proxmox` profile uses for API + SSH
 # auth. Inlined in the PosixCred below (lab credential, not a security boundary).
 
-PLAN = Plan(
-    "pve-node",
-    Hypervisor(
-        build_switch=Switch(
-            # Unique build-switch name (not "build") to avoid the date-scoped
-            # backend-name collision with other same-day runs' build switches.
-            "pvebuild",
-            Network("pvebuild-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                # Resource names are unique (not "mgmt"/"pool1") so they never
-                # collide with other same-day runs: the libvirt driver scopes
-                # backend names by run_id[:8] (the date), so two same-day plans
-                # declaring the same pool/switch name would stomp each other
-                # (ADR-0018 is single-instance; this keeps the lab robust anyway).
-                "pvemgmt",
-                Network("pvemgmt-net"),
-                cidr=MGMT_CIDR,
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pvepool", 128)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="pve1",
-                    firmware="uefi",
-                    devices=[
-                        CPU(6, nested=True),
-                        Memory(10240),
-                        OSDrive("pvepool", 100),
-                        NetworkIface("pvemgmt-net", addr=StaticAddr(f"{MGMT_ADDR}/24")),
-                    ],
-                ),
-                builder=ProxmoxAnswerBuilder(
-                    installer_iso=CacheEntry("pve-iso"),
-                    credentials=[
-                        PosixCred("root", password="tr-proxmox-lab", ssh_key=_ROOT_KEY),
-                    ],
-                    # Storage-widening (`local` -> images/import) is NOT done here: the
-                    # PVE cluster filesystem (pmxcfs, /etc/pve) isn't online during the
-                    # first-boot oneshot, so `pvesm set` fails ("cfs-lock ... not online").
-                    # It's done at run phase over SSH instead (see the TESTS below),
-                    # where PVE is fully booted. First-boot only needs the pmxcfs-
-                    # independent UEFI fallback.
-                    post_install_commands=(
-                        # UEFI run-boot robustness: the run phase boots fresh OVMF nvram,
-                        # so ensure the removable-media fallback exists for the captured
-                        # disk (no NVRAM boot entry survives the capture). Tolerant of the
-                        # /EFI/{proxmox,debian} layout split; no-op if grubx64.efi is absent.
-                        "src=$(find /boot/efi/EFI -name grubx64.efi 2>/dev/null | head -1); "
-                        'if [ -n "$src" ]; then install -D "$src" /boot/efi/EFI/BOOT/BOOTX64.EFI; fi',
-                    ),
-                ),
-                communicator=SSHCommunicator("root"),
-            ),
-        ],
-    ),
+hyp = Hypervisor(
+    build_switch=Switch(
+        # Unique build-switch name (not "build") to avoid the date-scoped
+        # backend-name collision with other same-day runs' build switches.
+        "pvebuild",
+        Network("pvebuild-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
 )
+
+hyp.add_pool(StoragePool("pvepool", 128))
+
+hyp.add_switch(
+    Switch(
+        # Resource names are unique (not "mgmt"/"pool1") so they never
+        # collide with other same-day runs: the libvirt driver scopes
+        # backend names by run_id[:8] (the date), so two same-day plans
+        # declaring the same pool/switch name would stomp each other
+        # (ADR-0018 is single-instance; this keeps the lab robust anyway).
+        "pvemgmt",
+        Network("pvemgmt-net"),
+        cidr=MGMT_CIDR,
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="pve1",
+            firmware="uefi",
+            devices=[
+                CPU(6, nested=True),
+                Memory(10240),
+                OSDrive(hyp.pools["pvepool"], 100),
+                NetworkIface(hyp.networks["pvemgmt-net"], addr=StaticAddr(f"{MGMT_ADDR}/24")),
+            ],
+        ),
+        builder=ProxmoxAnswerBuilder(
+            installer_iso=CacheEntry("pve-iso"),
+            credentials=[
+                PosixCred("root", password="tr-proxmox-lab", ssh_key=_ROOT_KEY),
+            ],
+            # Storage-widening (`local` -> images/import) is NOT done here: the
+            # PVE cluster filesystem (pmxcfs, /etc/pve) isn't online during the
+            # first-boot oneshot, so `pvesm set` fails ("cfs-lock ... not online").
+            # It's done at run phase over SSH instead (see the TESTS below),
+            # where PVE is fully booted. First-boot only needs the pmxcfs-
+            # independent UEFI fallback.
+            post_install_commands=(
+                # UEFI run-boot robustness: the run phase boots fresh OVMF nvram,
+                # so ensure the removable-media fallback exists for the captured
+                # disk (no NVRAM boot entry survives the capture). Tolerant of the
+                # /EFI/{proxmox,debian} layout split; no-op if grubx64.efi is absent.
+                "src=$(find /boot/efi/EFI -name grubx64.efi 2>/dev/null | head -1); "
+                'if [ -n "$src" ]; then install -D "$src" /boot/efi/EFI/BOOT/BOOTX64.EFI; fi',
+            ),
+        ),
+        communicator=SSHCommunicator("root"),
+    )
+)
+
+PLAN = Plan("pve-node", hyp)
 
 
 def node_is_proxmox_ve(orch: OrchestratorHandle) -> None:

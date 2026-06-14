@@ -1,27 +1,27 @@
-"""The top-level ``Plan`` declaration.
+"""The top-level ``Plan`` declaration: name + Hypervisor -> frozen build graph.
 
-A Plan currently wraps exactly one Hypervisor. The constructor shape
-``Plan(name, *hypervisors)`` is fixed so future multi-hypervisor support
-doesn't change the public call shape.
+``Plan(name, hyp)`` is the 2.0 finalizer (ADR-0030): it validates the
+declared topology, seals the mutable :class:`~testrange.hypervisor.Hypervisor`
+container against further registration, and assembles the validated
+:class:`~testrange.graph.build_graph.BuildGraph` the executor walks. Graph
+defects (duplicate node names, dangling handle references, cycles from
+``.needs()``) raise :class:`~testrange.exceptions.GraphError` — a
+``PlanError`` — right here at construction, so a plan file that imports
+cleanly carries a structurally-sound graph.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from testrange.graph.build_graph import BuildGraph
+from testrange.hypervisor import Hypervisor
+from testrange.networks.validate import validate_hypervisor_plan
+from testrange.nodes import assemble_graph
 
 
-@dataclass(frozen=True)
 class Plan:
-    """The top-level declaration: a name plus one or more Hypervisor entries."""
+    """The top-level declaration: a name plus one finalized Hypervisor."""
 
-    # No field defaults: the hand-written __init__ below owns construction
-    # (it requires a non-empty name and at least one hypervisor). These
-    # declarations exist only to drive the frozen dataclass's __eq__/__repr__.
-    name: str
-    hypervisors: tuple[Any, ...]
-
-    def __init__(self, name: str, *hypervisors: Any) -> None:
+    def __init__(self, name: str, hypervisor: Hypervisor) -> None:
         # The plan name namespaces every derived resource: stable MACs
         # (compose_mac), backend resource names, and build cache keys. An
         # unnamed plan would silently share that namespace with any other
@@ -32,16 +32,38 @@ class Plan:
                 "Plan(name, ...) requires a non-empty name; it namespaces stable "
                 "MACs, backend resource names, and the build cache"
             )
-        if len(hypervisors) == 0:
-            raise ValueError("Plan(name, ...) requires at least one hypervisor")
-        if len(hypervisors) > 1:
-            raise NotImplementedError(
-                f"Plan() currently supports exactly one hypervisor; got {len(hypervisors)}."
+        # User-facing trust boundary: catch a v0-style call shape or a stray
+        # value before it becomes an opaque attribute error downstream.
+        if not isinstance(hypervisor, Hypervisor):
+            raise TypeError(
+                f"Plan(name, hypervisor) takes a Hypervisor, got {type(hypervisor).__name__}"
             )
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "hypervisors", tuple(hypervisors))
+        validate_hypervisor_plan(
+            hypervisor.declared_switches,
+            hypervisor.declared_pools,
+            hypervisor.declared_vms,
+        )
+        hypervisor.freeze()
+        self._name = name
+        self._hypervisor = hypervisor
+        self._graph = assemble_graph(name, hypervisor)
 
     @property
-    def hypervisor(self) -> Any:
-        """The single hypervisor."""
-        return self.hypervisors[0]
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def hypervisor(self) -> Hypervisor:
+        """The finalized (frozen) topology container."""
+        return self._hypervisor
+
+    @property
+    def graph(self) -> BuildGraph:
+        """The frozen, validated dependency DAG the executor consumes."""
+        return self._graph
+
+    def __repr__(self) -> str:
+        return f"Plan(name={self._name!r}, graph={self._graph!r})"
+
+
+__all__ = ["Plan"]

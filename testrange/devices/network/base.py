@@ -6,6 +6,7 @@ import ipaddress
 from dataclasses import dataclass
 
 from testrange.devices.base import Device
+from testrange.handles import NetworkHandle
 
 
 @dataclass(frozen=True)
@@ -103,8 +104,10 @@ class StaticAddr:
 class NetworkIface(Device):
     """Generic NIC.
 
-    ``network`` references a :class:`~testrange.networks.Network` by name
-    (declared on the Hypervisor).
+    ``network`` is a :class:`~testrange.handles.NetworkHandle` — the typed
+    reference from ``hyp.networks["name"]`` (registered by ``hyp.add_switch``)
+    — never a bare string, so a NIC on an undeclared network cannot be
+    expressed (ADR-0030).
 
     ``addr`` is the NIC's run-phase address mode:
 
@@ -117,15 +120,20 @@ class NetworkIface(Device):
 
     Plan-wide validation (CIDR membership, gateway collision, DHCP-pool
     collision, duplicates across VMs) lives in
-    :mod:`testrange.networks.validate` and runs at Hypervisor construction.
+    :mod:`testrange.networks.validate` and runs when ``Plan(...)`` freezes the
+    graph.
     """
 
-    network: str
+    network: NetworkHandle
     addr: DHCPAddr | StaticAddr | None = None
 
     def __post_init__(self) -> None:
-        if not self.network:
-            raise ValueError("NetworkIface.network must be a non-empty string")
+        # User-facing trust boundary, same rationale as _Disk.pool.
+        if not isinstance(self.network, NetworkHandle):
+            raise TypeError(
+                "NetworkIface.network must be a NetworkHandle from "
+                f"hyp.networks['name'], got {type(self.network).__name__}"
+            )
         # User-facing trust boundary: reject anything that isn't an address mode
         # (mypy enforces this for typed callers; this catches dynamic misuse).
         if self.addr is not None and not isinstance(self.addr, DHCPAddr | StaticAddr):

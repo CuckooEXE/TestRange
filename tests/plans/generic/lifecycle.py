@@ -1,15 +1,23 @@
-"""generic/lifecycle: VM lifecycle, power-state churn, and first-boot disk growth.
+"""generic/lifecycle: VM lifecycle, power-state churn, disk growth, and bring-up order.
 
 WHAT: drives a guest through repeated power cycles, proves a graceful shutdown
 actually reaches the ``shutoff`` state, that on-disk state survives a
 reboot, and that an oversized OS drive grows to its declared size on first boot.
 A second NIC-less guest proves the native guest-agent path survives the same
-churn with no networking at all.
+churn with no networking at all. A ``db``/``web`` pair certifies the explicit
+inter-node ordering edge (ADR-0030) **end-to-end**: ``web.needs(db)`` must place
+``db`` in an earlier realize wave, and web's first test finds db's nginx already
+serving — the edge proven against a live backend, not just in the graph model.
 
 WHY: the orchestrator's power and readiness logic is where reconnect and
 off-by-one bugs hide — a communicator that does not re-bind after ``start_vm``,
 a ``shutdown_vm`` that returns before the guest is truly off, a rootfs that never
 grows past the base image. Every backend must hold these invariants identically.
+The ordering edge is the one 2.0 graph feature with no v0 equivalent: an
+executor that quietly ignored explicit edges and realized every VM in one wave
+would pass every other plan in the corpus, so this pair pins both the frozen
+graph (the edge exists and orders the waves) and the live consequence (the
+needed VM is up and serving before the dependent's tests run).
 
 Portable — bind a backend at run time::
 
@@ -27,9 +35,11 @@ from testrange.cache import CacheEntry
 from testrange.communicators import NativeCommunicator
 from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
-from testrange.devices.network import DHCPAddr, NetworkIface
+from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
-from testrange.vms import VMRecipe, VMSpec
+from testrange.packages import Apt
+
+_DB_IP = "10.40.0.200"
 
 
 def _native_image() -> CloudInitBuilder:
@@ -43,52 +53,103 @@ def _native_image() -> CloudInitBuilder:
     )
 
 
-PLAN = Plan(
-    "lifecycle",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.40.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 64)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="churn",
-                    devices=[
-                        CPU(2),
-                        Memory(1024),
-                        OSDrive("pool1", 16),
-                        NetworkIface("lab-net", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=_native_image(),
-                communicator=NativeCommunicator(),
-            ),
-            VMRecipe(
-                spec=VMSpec(
-                    name="headless",
-                    devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
-                ),
-                builder=_native_image(),
-                communicator=NativeCommunicator(),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+pool1 = hyp.add_pool(StoragePool("pool1", 64))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.40.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "churn",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 16),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=_native_image(),
+    communicator=NativeCommunicator(),
+)
+hyp.vm(
+    "headless",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    builder=_native_image(),
+    communicator=NativeCommunicator(),
+)
+db = hyp.vm(
+    "db",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, StaticAddr(_DB_IP))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        packages=[Apt("nginx")],
+        post_install_commands=(
+            "sh -c 'echo db-online > /var/www/html/index.html'",
+            "systemctl enable --now nginx",
+        ),
+    ),
+    communicator=NativeCommunicator(),
+)
+web = hyp.vm(
+    "web",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+        packages=[Apt("curl")],
+    ),
+    communicator=NativeCommunicator(),
+)
+web.needs(db)
+
+PLAN = Plan("lifecycle", hyp)
+
+
+def web_first_test_finds_db_already_serving(orch: OrchestratorHandle) -> None:
+    # First in TESTS on purpose: web.needs(db) promises db was realized (and
+    # its boot-time-enabled nginx serving) before web's tests run — probe that
+    # promise before anything else has had a chance to touch either guest.
+    r = orch.vms["web"].communicator.execute(
+        ["curl", "-sf", "--max-time", "10", f"http://{_DB_IP}/"], timeout=20.0
+    )
+    assert r.ok and b"db-online" in r.stdout, (
+        f"web.needs(db): db must already be serving at web's first test: {r}"
+    )
+
+
+def ordering_edge_places_db_in_an_earlier_wave(orch: OrchestratorHandle) -> None:
+    # The live probe above cannot discriminate ordering on its own (tests run
+    # after full bring-up), so pin the contract in the frozen graph too: the
+    # explicit edge must exist and must gate web's wave behind db's.
+    deps = {n.name for n in PLAN.graph.dependencies_of("vm:web")}
+    assert "vm:db" in deps, f"web.needs(db) edge missing from the frozen graph: {deps}"
+    wave_of = {n.name: i for i, wave in enumerate(PLAN.graph.waves()) for n in wave}
+    assert wave_of["vm:db"] < wave_of["vm:web"], (
+        f"db must realize in an earlier wave than web: "
+        f"db wave {wave_of['vm:db']}, web wave {wave_of['vm:web']}"
+    )
+    assert orch.vms["db"].communicator.execute(["true"]).ok, "db unreachable (positive control)"
 
 
 def churn_survives_repeated_power_cycles(orch: OrchestratorHandle) -> None:
@@ -157,6 +218,8 @@ def headless_survives_power_cycle(orch: OrchestratorHandle) -> None:
 
 
 TESTS: list[Callable[[OrchestratorHandle], None]] = [
+    web_first_test_finds_db_already_serving,
+    ordering_edge_places_db_in_an_earlier_wave,
     churn_survives_repeated_power_cycles,
     reboot_persists_on_disk_state,
     oversized_os_drive_grew_on_first_boot,

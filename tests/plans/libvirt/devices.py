@@ -42,51 +42,50 @@ from testrange.drivers.libvirt import LibvirtHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "libvirt-devices",
-    LibvirtHypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.40.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="buses",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        # virtio OS disk -> /dev/vda; a second virtio data disk -> /dev/vdb.
-                        LibvirtOSDrive("pool1", 8, bus="virtio"),
-                        LibvirtDataDrive("pool1", 1, bus="virtio"),
-                        # sata + scsi data disks both present to the guest as /dev/sd*.
-                        LibvirtDataDrive("pool1", 1, bus="sata"),
-                        LibvirtDataDrive("pool1", 1, bus="scsi"),
-                        # Emulated as an Intel e1000e card rather than virtio-net.
-                        LibvirtNetworkIface("lab-net", model="e1000e", addr=DHCPAddr()),
-                    ],
-                ),
-                # NativeCommunicator agent (qemu-guest-agent) auto-provisioned (CORE-90).
-                builder=CloudInitBuilder(base=CacheEntry("debian-13")),
-                communicator=NativeCommunicator(),
-            ),
-        ],
+hyp = LibvirtHypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.40.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(
+            name="buses",
+            devices=[
+                CPU(1),
+                Memory(512),
+                # virtio OS disk -> /dev/vda; a second virtio data disk -> /dev/vdb.
+                LibvirtOSDrive(hyp.pools["pool1"], 8, bus="virtio"),
+                LibvirtDataDrive(hyp.pools["pool1"], 1, bus="virtio"),
+                # sata + scsi data disks both present to the guest as /dev/sd*.
+                LibvirtDataDrive(hyp.pools["pool1"], 1, bus="sata"),
+                LibvirtDataDrive(hyp.pools["pool1"], 1, bus="scsi"),
+                # Emulated as an Intel e1000e card rather than virtio-net.
+                LibvirtNetworkIface(hyp.networks["lab-net"], model="e1000e", addr=DHCPAddr()),
+            ],
+        ),
+        # NativeCommunicator agent (qemu-guest-agent) auto-provisioned (CORE-90).
+        builder=CloudInitBuilder(base=CacheEntry("debian-13")),
+        communicator=NativeCommunicator(),
+    )
+)
+
+PLAN = Plan("libvirt-devices", hyp)
 
 
 def _disk_names(orch: OrchestratorHandle) -> list[str]:

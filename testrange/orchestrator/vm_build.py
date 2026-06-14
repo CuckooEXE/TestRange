@@ -1,20 +1,24 @@
-"""Build phase: warm the cache with each VM's built disk set.
+"""Per-VM disk-set build machinery (the *materialize* half of a VM node).
 
-For every VM the phase resolves its base, computes ``config_hash``, and probes
-the cache for the full per-role artifact set (OS disk + each data disk). Only
-if at least one VM misses does it stand up the ephemeral build pool / switch /
-sidecar (ADR-0010 §2). Each missing VM is provisioned as a unit — every
-writable disk attached — booted to completion, and every disk captured into the
-cache. The backend is left empty afterward: build VMs and their disks are
-deleted immediately after capture, and the build pool / switch / sidecar are
-torn down at phase end (ADR-0010 §3).
+For one VM this resolves its OS-disk origin, computes ``config_hash``, probes
+the cache for the full per-role artifact set (OS disk + each data disk), and —
+on a miss — provisions the VM as a unit on the shared ephemeral build infra,
+boots it to completion, and captures every writable disk into the cache. The
+backend is left empty afterward: build VMs and their disks are deleted
+immediately after capture (ADR-0010 §3).
+
+The ephemeral build pool / switch / sidecar are shared by every building VM
+(ADR-0010 §2/§9) and live in ``ctx.build_infra``: the first cache-missing VM
+node creates them (:func:`ensure_build_infra`, lock-guarded), the executor
+tears them down after the materialize walk (:func:`teardown_build_infra`).
+The wave orchestration itself lives in ``orchestrator/executor.py`` (DAG-6);
+this module is the per-VM mechanics it dispatches.
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import re
 import tempfile
 import time
@@ -48,26 +52,22 @@ from testrange.networks._addressing_consts import (
 )
 from testrange.networks.base import BuildNic, NetworkAddressing, Switch
 from testrange.networks.sidecar import _uplink_network_name
-from testrange.orchestrator._parallel import parallel_map
 from testrange.orchestrator.artifacts import (
     built_artifact_name,
     built_artifact_roles,
     data_disk_role,
 )
 from testrange.orchestrator.build import resolve_build_switch
-from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.context import GraphContext
 from testrange.orchestrator.dashboard_state import VMStage
 from testrange.orchestrator.provision import materialize_sidecar_for, provision_switch
-from testrange.plan import Plan
-from testrange.state.schema import PHASE_BUILD
-from testrange.vms.nested import GuestHypervisor, reject_unsupported_nesting
 from testrange.vms.recipe import VMRecipe
 
 _log = get_logger(__name__)
 
 # Build VMs' serial console output is streamed here, one line per record, as it
 # arrives — run with ``--verbose`` to watch a build provision live in the tail.
-# A dedicated child logger so it routes independently of the phase's own INFO
+# A dedicated child logger so it routes independently of the module's own INFO
 # progress lines: it is pinned above the operator log level (CORE-50) so a plain
 # ``--log-level debug`` run does not dump this raw-guest-output firehose through
 # the stderr handler; only the ``--verbose`` live tail lowers it to DEBUG.
@@ -80,8 +80,14 @@ BUILD_POOL_NAME = "__build"
 
 
 @dataclass
-class _VMBuildPlan:
-    """A VM's resolved build inputs, plus its cache-probe outcome."""
+class VMBuildProbe:
+    """A VM's resolved build inputs, plus its cache-probe outcome.
+
+    Produced once per VM node by the executor's serial key walk
+    (``VMNode.cache_key`` -> :func:`probe_vm`) and stored in
+    ``ctx.vm_probes``, so the cache key and the seed render see identical
+    inputs on every path that consumes them.
+    """
 
     vm: VMRecipe
     builder: Builder
@@ -92,32 +98,45 @@ class _VMBuildPlan:
     # time so config_hash (the cache key) and render_seed see the identical value.
     # None unless the VM uses a NativeCommunicator.
     native_agent: NativeAgentProvision | None
+    # Whether this VM's OS disk comes from an installer boot medium (blank OS
+    # disk the installer partitions) instead of an image base (upload+grow).
+    installer_origin: bool
     # Image-origin: the local path of the OS base to upload+grow. Installer-
-    # origin: None (the OS disk is materialized blank; the install medium is
-    # ``boot_media_path`` instead).
+    # origin: None (the install medium is ``boot_media_path`` instead). Only
+    # populated when the probe materialized what it resolved (paths_resolved).
     base_path: Path | None
     boot_media_path: Path | None
     roles: tuple[str, ...]
-    # role -> cached path on a full hit; None when any role misses (whole-VM miss).
+    # role -> cached path on a full hit; None when any role misses (whole-VM
+    # miss). A metadata-only probe (paths_resolved=False) reports a full hit as
+    # an EMPTY dict — presence is known, local paths are not.
     cached_paths: dict[str, Path] | None
+    # False for a metadata-only probe (ctx.probe_fetch=False, the read-only
+    # inspection path): origin shas are resolved but nothing is materialized,
+    # so this probe can answer hit/miss questions and never feed a build.
+    paths_resolved: bool = True
 
     def __post_init__(self) -> None:
         # Exactly one OS-disk origin: an image base (upload+grow) XOR an installer
-        # boot medium (blank disk the installer partitions). installer_origin reads
-        # base_path alone, so a plan with *both* set would silently drop the boot
-        # medium and one with *neither* would yield a blank, unbootable disk.
-        # _probe_vm constructs these mutually exclusive; this backstops a future
-        # edit (or a test) that doesn't.
-        if (self.base_path is None) == (self.boot_media_path is None):
+        # boot medium (blank disk the installer partitions). A plan with *both*
+        # set would silently drop the boot medium and one with *neither* would
+        # yield a blank, unbootable disk. probe_vm constructs these mutually
+        # exclusive; this backstops a future edit (or a test) that doesn't.
+        # Path presence is only checkable when the probe materialized them.
+        if self.paths_resolved:
+            if self.installer_origin and self.boot_media_path is None:
+                raise OrchestratorError(
+                    f"vm {self.vm.name!r}: installer-origin VMBuildProbe has no boot medium"
+                )
+            if not self.installer_origin and self.base_path is None:
+                raise OrchestratorError(
+                    f"vm {self.vm.name!r}: image-origin VMBuildProbe has no base path"
+                )
+        if self.base_path is not None and self.boot_media_path is not None:
             raise OrchestratorError(
-                f"vm {self.vm.name!r}: _VMBuildPlan needs exactly one OS-disk origin "
-                f"(base_path xor boot_media_path); got base_path={self.base_path!r}, "
-                f"boot_media_path={self.boot_media_path!r}"
+                f"vm {self.vm.name!r}: VMBuildProbe needs exactly one OS-disk origin "
+                f"(base_path xor boot_media_path); got both"
             )
-
-    @property
-    def installer_origin(self) -> bool:
-        return self.base_path is None
 
 
 # Host offsets a build NIC may take on the build switch, in allocation order:
@@ -142,7 +161,7 @@ def _build_ip_offset(vm_index: int) -> int:
     return _BUILD_IP_SLOTS[vm_index]
 
 
-def _build_nic_for(ctx: RunContext, build_switch: Switch, vm: VMRecipe, vm_index: int) -> BuildNic:
+def build_nic_for(ctx: GraphContext, build_switch: Switch, vm: VMRecipe, vm_index: int) -> BuildNic:
     """Synthesize the dedicated build NIC for one VM (ADR-0017).
 
     One transient NIC on the build switch, statically addressed. The host offset
@@ -175,165 +194,29 @@ def _build_nic_for(ctx: RunContext, build_switch: Switch, vm: VMRecipe, vm_index
     )
 
 
-def build_phase(ctx: RunContext) -> None:
-    """Warm the cache for every VM; build only the misses.
+def resolve_sidecar_sha(ctx: GraphContext) -> str:
+    """The build sidecar image's content sha — a build input for every VM (CI-1).
 
-    Nested hypervisors (``GuestHypervisor``) build like any VM here for their own
-    L0 disk; their *inner* VM disks are warmed afterward on the same L0 backend
-    (:func:`build_nested_inner_vms`, ADR-0021 — "build on L0"), so the later inner
-    run is a pure cache hit and needs no nested build boot.
+    ``fetch=False`` keeps this to a metadata read (the bytes are only needed if
+    a VM actually builds).
     """
-    # Refuse depth-2+ nesting before any backend work (ADR-0021): build recursion
-    # is depth-agnostic, but a depth-2 inner run can't be reached, so fail loud
-    # rather than build three disk sets and time out opaquely later.
-    reject_unsupported_nesting(ctx.plan.hypervisor)
-    ctx.store.set_phase(PHASE_BUILD)
-
-    misses, hits = _probe_all(ctx)
-    ctx.built_disk_paths.update(hits)
-    if not misses:
-        _log.info("build: full cache hit; no backend resources needed")
-        build_nested_inner_vms(ctx)
-        return
-
-    # At least one miss: stand up the ephemeral build infra (ADR-0010 §2/§9).
-    build_pool_backend = _create_build_pool(ctx, misses)
-    # The build switch is portable topology on the Hypervisor now (ADR-0016);
-    # it is realized exactly like a run-phase switch.
-    build_switch = resolve_build_switch(ctx.plan.hypervisor.build_switch)
-    provision_switch(ctx, build_switch, kind_prefix="build_")
-    build_net_backend = ctx.network_backends[build_switch.networks[0].name]
-    materialize_sidecar_for(
-        ctx,
-        build_switch,
-        kind_prefix="build_",
-        pool_backend=build_pool_backend,
-        pool_name=BUILD_POOL_NAME,
-    )
-
-    # Build the misses concurrently, driving the one shared, thread-safe driver
-    # connection (ADR-0023): the base upload and the multi-GB capture download
-    # are blocking I/O that overlaps across VMs. Each build VM has a distinct,
-    # deterministic build IP (_build_ip_offset) so they coexist on the one build
-    # switch stood up above.
-    parallel_map(
-        lambda bp: _guard_build(ctx, bp, build_pool_backend, build_net_backend),
-        misses,
-        jobs=ctx.jobs,
-    )
-
-    teardown_build_phase(ctx, build_switch, build_pool_backend)
-
-    build_nested_inner_vms(ctx)
+    return ctx.cache.resolve(CacheEntry(SIDECAR_CACHE_NAME), fetch=False).sha256
 
 
-def build_nested_inner_vms(ctx: RunContext) -> None:
-    """Warm each nested host's inner VM disks on the **L0** backend (ADR-0021 §3).
+def probe_vm(
+    ctx: GraphContext, vm: VMRecipe, vm_index: int, sidecar_sha: str, build_switch: Switch
+) -> VMBuildProbe:
+    """Resolve one VM's build inputs and probe the cache for its disk set.
 
-    For every ``GuestHypervisor`` in the plan, run the ordinary build phase over
-    its inner plan against the *same* (outer/L0) driver and shared cache: the
-    inner VMs build with real egress through the L0 build switch, and their disks
-    land in the shared cache keyed under the inner plan namespace
-    (``"<outer>.<host>"``). The inner run (``nested_phase``, ``require_cache=True``)
-    then only uploads those cached disks into the guest's pool and boots.
-
-    Single level only: a guest whose inner plan itself contains a
-    ``GuestHypervisor`` is rejected up front by :func:`build_phase`
-    (``reject_unsupported_nesting``), so this never recurses past depth 1.
+    Read-only against the backend (the only I/O is cache resolution, which may
+    fetch a base on a cold local cache — the deliberate ADR-0010 §2 penalty;
+    ``ctx.probe_fetch=False`` suppresses even that, for the inspection path).
+    Called from the executor's *serial* key walk: VMs commonly share one base,
+    so a serial walk fetches it once and the rest hit it.
     """
-    guests = [vm for vm in ctx.plan.hypervisor.vms if isinstance(vm, GuestHypervisor)]
-    for guest in guests:
-        inner_plan = Plan(f"{ctx.plan_name}.{guest.name}", guest.inner)
-        _log.info(
-            "build: warming inner plan %r on L0 for nested host %r", inner_plan.name, guest.name
-        )
-        build_phase(_inner_build_ctx(ctx, inner_plan))
-
-
-def _inner_build_ctx(ctx: RunContext, inner_plan: Plan) -> RunContext:
-    """A RunContext for building ``inner_plan`` on the outer driver + shared cache.
-
-    Shares the outer driver binding, state store, and cache, but gets a distinct
-    run id deterministically derived from the outer run id + inner plan name, so
-    its ``run_id``-composed backend resource names don't collide with the outer
-    run's.
-    """
-    inner_run_id = hashlib.sha256(f"{ctx.run_id}/{inner_plan.name}".encode()).hexdigest()
-    return RunContext(
-        plan=inner_plan,
-        resolved=ctx.resolved,
-        store=ctx.store,
-        cache=ctx.cache,
-        run_id=inner_run_id,
-        plan_name=inner_plan.name,
-        build_timeout_s=ctx.build_timeout_s,
-        lease_timeout_s=ctx.lease_timeout_s,
-        sidecar_ready_timeout_s=ctx.sidecar_ready_timeout_s,
-        agent_ready_timeout_s=ctx.agent_ready_timeout_s,
-        addressing={
-            n.name: NetworkAddressing.from_switch(s)
-            for s in inner_plan.hypervisor.all_switches
-            for n in s.networks
-        },
-        # Honor the operator's worker cap on the inner build too; without this the
-        # inner build_phase falls back to RunContext.jobs=None (8-way default) and
-        # silently ignores `--jobs 1` exactly where heavy nested-virt builds make
-        # throttling most relevant (ORCH-35).
-        jobs=ctx.jobs,
-        # Share the outer dashboard so a nested host's inner-VM builds report
-        # their serial/stage into the same panes (ADR-0029).
-        dashboard=ctx.dashboard,
-    )
-
-
-def probe_misses(ctx: RunContext) -> list[str]:
-    """Resolve + probe every VM; record hits, return the names that miss.
-
-    Read-only against the backend (the only I/O is cache resolution, which
-    may fetch a base on a cold local cache — the deliberate ADR-0010 §2
-    penalty). Used by ``testrange run --require-cache`` to fail fast on a
-    miss without building, and shares the probe path with :func:`build_phase`.
-    """
-    misses, hits = _probe_all(ctx)
-    ctx.built_disk_paths.update(hits)
-    return [bp.vm.name for bp in misses]
-
-
-def _probe_all(
-    ctx: RunContext,
-) -> tuple[list[_VMBuildPlan], dict[str, dict[str, Path]]]:
-    """Probe every VM. Returns (miss plans, {vm_name: {role: path}} for hits)."""
-    # Every build boots on a sidecar-served switch (DHCP/DNS/NAT), so the
-    # sidecar image is a build input for every VM (CI-1). Resolve its content
-    # sha once — fetch=False keeps this to a metadata read (the bytes are only
-    # needed if we actually build) — and fold it into each VM's config_hash.
-    sidecar_sha = ctx.cache.resolve(CacheEntry(SIDECAR_CACHE_NAME), fetch=False).sha256
-    # The build switch is portable topology on the Hypervisor (ADR-0016);
-    # resolving it is pure, so the probe can synthesize each VM's build NIC
-    # (whose MAC + static address now feed config_hash, ADR-0017) without
-    # standing any backend resources up.
-    build_switch = resolve_build_switch(ctx.plan.hypervisor.build_switch)
-    misses: list[_VMBuildPlan] = []
-    hits: dict[str, dict[str, Path]] = {}
-    # Probe stays serial: VMs commonly share one base, so a serial walk fetches
-    # it once into the local cache and the rest hit it — parallel probes would
-    # redundantly fetch the same base and race its content-addressed staging.
-    for vm_index, vm in enumerate(ctx.plan.hypervisor.vms):
-        bp = _probe_vm(ctx, vm, vm_index, sidecar_sha, build_switch)
-        if bp.cached_paths is None:
-            _log.info("vm %s: cache miss on %s; will build", vm.name, bp.config_hash)
-            misses.append(bp)
-        else:
-            _log.info("vm %s: cache hit on %s", vm.name, bp.config_hash)
-            hits[vm.name] = bp.cached_paths
-    return misses, hits
-
-
-def _probe_vm(
-    ctx: RunContext, vm: VMRecipe, vm_index: int, sidecar_sha: str, build_switch: Switch
-) -> _VMBuildPlan:
     builder = vm.builder
     base = builder.os_disk_base()
+    fetch = ctx.probe_fetch
     # OS-disk origin: image-based (a base CacheEntry to upload+grow) or
     # installer-based (no base; the builder supplies the boot medium and the
     # orchestrator materializes a blank OS disk — BUILD-1, ADR-0010 §6). Exactly
@@ -343,9 +226,10 @@ def _probe_vm(
     base_path: Path | None = None
     boot_media_path: Path | None = None
     if base is not None:
-        base_info = ctx.cache.resolve(base)
-        assert base_info.path is not None  # cache.resolve(fetch=True) materializes locally
-        base_path = base_info.path
+        base_info = ctx.cache.resolve(base, fetch=fetch)
+        if fetch:
+            assert base_info.path is not None  # cache.resolve(fetch=True) materializes locally
+            base_path = base_info.path
         origin_sha = base_info.sha256
     else:
         boot_media = builder.boot_media()
@@ -354,14 +238,15 @@ def _probe_vm(
                 f"vm {vm.name!r}: builder {type(builder).__name__} provides neither an "
                 "OS-disk base image (os_disk_base) nor a boot medium (boot_media)"
             )
-        media_info = ctx.cache.resolve(boot_media)
-        assert media_info.path is not None
-        boot_media_path = media_info.path
+        media_info = ctx.cache.resolve(boot_media, fetch=fetch)
+        if fetch:
+            assert media_info.path is not None
+            boot_media_path = media_info.path
         origin_sha = media_info.sha256
     macs = tuple(
         ctx.driver.compose_mac(ctx.plan_name, vm.name, i) for i in range(len(vm.spec.nics))
     )
-    build_nic = _build_nic_for(ctx, build_switch, vm, vm_index)
+    build_nic = build_nic_for(ctx, build_switch, vm, vm_index)
     # CORE-90: a NativeCommunicator VM needs the backend's native agent in the
     # guest. The orchestrator — the only component that knows both the driver
     # (agent identity) and the communicator (agent wanted) — brokers the driver's
@@ -383,35 +268,40 @@ def _probe_vm(
         native_agent=native_agent,
     )
     roles = built_artifact_roles(len(vm.spec.data_drives))
-    cached = _resolve_full_set(ctx, config_hash, roles)
-    return _VMBuildPlan(
+    cached = resolve_full_set(ctx, config_hash, roles, fetch=fetch)
+    return VMBuildProbe(
         vm=vm,
         builder=builder,
         config_hash=config_hash,
         macs=macs,
         build_nic=build_nic,
         native_agent=native_agent,
+        installer_origin=base is None,
         base_path=base_path,
         boot_media_path=boot_media_path,
         roles=roles,
         cached_paths=cached,
+        paths_resolved=fetch,
     )
 
 
-def _resolve_full_set(
-    ctx: RunContext, config_hash: str, roles: tuple[str, ...]
+def resolve_full_set(
+    ctx: GraphContext, config_hash: str, roles: tuple[str, ...], *, fetch: bool = True
 ) -> dict[str, Path] | None:
     """Resolve every role's cached artifact. All present -> dict; any absent -> None.
 
     A partial set (OS present, a data disk missing) is a miss for the whole
     VM (ADR-0010 §4). The manager checks local then HTTP; a hit on the HTTP
-    tier fetches into local before returning.
+    tier fetches into local before returning. Under ``fetch=False`` (the
+    read-only inspection path) presence is checked from metadata alone and a
+    full hit is reported as an EMPTY dict — non-``None`` means present, and no
+    multi-GB artifact moves.
     """
     paths: dict[str, Path] = {}
     for role in roles:
         name = built_artifact_name(config_hash, role)
         try:
-            info = ctx.cache.resolve(name)
+            info = ctx.cache.resolve(name, fetch=fetch)
         except CacheMissError:
             return None
         except CacheError as e:
@@ -419,12 +309,92 @@ def _resolve_full_set(
             # truth; treat as a miss for resilience but log loud enough to notice.
             _log.warning("cache lookup error on %s (%s); treating as build miss", name, e)
             return None
-        assert info.path is not None  # fetch=True guarantees a local path
-        paths[role] = info.path
+        if fetch:
+            assert info.path is not None  # fetch=True guarantees a local path
+            paths[role] = info.path
     return paths
 
 
-def _create_build_pool(ctx: RunContext, misses: list[_VMBuildPlan]) -> str:
+def ensure_build_infra(ctx: GraphContext) -> tuple[str, str]:
+    """Create the shared ephemeral build infra on first use; return its refs.
+
+    Returns ``(build_pool_backend, build_net_backend)``. The first
+    cache-missing VM node creates the pool + switch + sidecar under
+    ``ctx.build_infra.lock`` (VM nodes materialize concurrently); subsequent
+    callers get the existing refs. The pool is sized to the largest missing
+    VM's disk set — the misses are known up front from the executor's key
+    walk (``ctx.vm_probes``). Torn down by :func:`teardown_build_infra` after
+    the materialize walk.
+    """
+    infra = ctx.build_infra
+    with infra.lock:
+        if infra.active:
+            assert infra.pool_backend is not None and infra.net_backend is not None
+            return infra.pool_backend, infra.net_backend
+        misses = [p for p in ctx.vm_probes.values() if p.cached_paths is None]
+        if not misses:
+            raise OrchestratorError(
+                "ensure_build_infra called with no cache-missing VM in the probe "
+                "ledger; a cache-hit VM never needs the build infra"
+            )
+        pool_backend = _create_build_pool(ctx, misses)
+        build_switch = resolve_build_switch(ctx.plan.hypervisor.build_switch)
+        provision_switch(ctx, build_switch, kind_prefix="build_")
+        net_backend = ctx.network_backends[build_switch.networks[0].name]
+        materialize_sidecar_for(
+            ctx,
+            build_switch,
+            kind_prefix="build_",
+            pool_backend=pool_backend,
+            pool_name=BUILD_POOL_NAME,
+        )
+        infra.pool_backend = pool_backend
+        infra.net_backend = net_backend
+        infra.build_switch = build_switch
+        infra.active = True
+        return pool_backend, net_backend
+
+
+def teardown_build_infra(ctx: GraphContext) -> None:
+    """Destroy the build sidecar VM, networks, switch, and pool (LIFO).
+
+    No-op unless :func:`ensure_build_infra` ran. Called by the executor at the
+    end of the materialize walk — the infra never survives the build
+    (ADR-0010 §3).
+    """
+    infra = ctx.build_infra
+    with infra.lock:
+        if not infra.active:
+            return
+        build_switch = infra.build_switch
+        pool_backend = infra.pool_backend
+        assert build_switch is not None and pool_backend is not None
+        sidecar = ctx.sidecar_backends.pop(build_switch.name, None)
+        if sidecar is not None:
+            ctx.driver.destroy_vm(sidecar)
+            ctx.store.forget(sidecar)
+        for net in build_switch.networks:
+            backend = ctx.network_backends.pop(net.name, None)
+            if backend is not None:
+                ctx.driver.destroy_network(backend)
+                ctx.store.forget(backend)
+        # The uplink-facing segment (when nat) is owned by the switch; drop the
+        # ledger entry, destroy_switch tears down the actual segment.
+        ctx.network_backends.pop(_uplink_network_name(build_switch), None)
+        switch_backend = ctx.switch_backends.pop(build_switch.name, None)
+        if switch_backend is not None:
+            ctx.driver.destroy_switch(switch_backend)
+            ctx.store.forget(switch_backend)
+        # The build pool comes up only for the build and never survives it.
+        ctx.driver.destroy_pool(pool_backend)
+        ctx.store.forget(pool_backend)
+        infra.active = False
+        infra.pool_backend = None
+        infra.net_backend = None
+        infra.build_switch = None
+
+
+def _create_build_pool(ctx: GraphContext, misses: list[VMBuildProbe]) -> str:
     """Create the single ephemeral build pool sized to hold the largest VM's disks."""
     size_gb = max(
         bp.vm.spec.os_drive.size_gb + sum(d.size_gb for d in bp.vm.spec.data_drives)
@@ -437,24 +407,9 @@ def _create_build_pool(ctx: RunContext, misses: list[_VMBuildPlan]) -> str:
     return backend
 
 
-def _guard_build(
-    ctx: RunContext, bp: _VMBuildPlan, build_pool_backend: str, build_net_backend: str
-) -> None:
-    """Run one VM's build; tag it FAILED in the dashboard on error, then re-raise.
-
-    ``parallel_map`` is fail-fast — this attributes the failure to the right VM
-    (with the message) for the dashboard before the build phase unwinds.
-    """
-    try:
-        build_one_vm(ctx, bp, build_pool_backend, build_net_backend)
-    except Exception as e:
-        ctx.dashboard.set_vm_stage(bp.vm.name, VMStage.FAILED, detail=str(e))
-        raise
-
-
 def build_one_vm(
-    ctx: RunContext,
-    bp: _VMBuildPlan,
+    ctx: GraphContext,
+    bp: VMBuildProbe,
     build_pool_backend: str,
     build_net_backend: str,
 ) -> None:
@@ -472,6 +427,11 @@ def build_one_vm(
     drv = ctx.driver
     vm = bp.vm
     spec = vm.spec
+    if not bp.paths_resolved:
+        raise OrchestratorError(
+            f"vm {vm.name!r}: cannot build from a metadata-only probe "
+            "(ctx.probe_fetch=False is the read-only inspection path)"
+        )
     ctx.dashboard.set_vm_stage(vm.name, VMStage.BUILDING)
     build_vm_backend = drv.compose_resource_name(ctx.run_id, "build_vm", vm.name)
 
@@ -596,10 +556,11 @@ def build_one_vm(
 
     # --- Delete everything on the backend (ADR-0010 §3). Best-effort: the disks
     # are already captured into the cache, so a single flaky backend delete must
-    # not abort the remaining VMs in the build loop or skip teardown_build_phase
-    # (which reclaims the build pool/switch/sidecar). A delete that fails leaves
-    # its resource recorded in state.json, so the record-before-create ledger
-    # (ADR-0003) still drives teardown/cleanup to retry it.
+    # not abort the remaining VMs in the materialize wave or skip the infra
+    # teardown (which reclaims the build pool/switch/sidecar). A delete that
+    # fails leaves its resource recorded in state.json, so the
+    # record-before-create ledger (ADR-0003) still drives teardown/cleanup to
+    # retry it.
     _best_effort_delete(
         ctx, "build_vm", build_vm_backend, partial(drv.destroy_vm, build_vm_backend)
     )
@@ -615,7 +576,7 @@ def build_one_vm(
 
 
 def _best_effort_delete(
-    ctx: RunContext,
+    ctx: GraphContext,
     kind: str,
     backend_name: str,
     delete: Callable[[], None],
@@ -625,8 +586,8 @@ def _best_effort_delete(
 
     On success the resource is forgotten from ``state.json``; on failure it is
     logged and *left recorded*, so teardown/cleanup reverses it later. Never
-    raises — the caller is mid-loop over multiple VMs and must reach
-    ``teardown_build_phase`` regardless.
+    raises — the caller is mid-walk over multiple VMs and the infra teardown
+    must still be reached.
     """
     try:
         delete()
@@ -642,7 +603,7 @@ def _best_effort_delete(
 
 
 def _capture_disk(
-    ctx: RunContext,
+    ctx: GraphContext,
     drv: HypervisorDriver,
     vol_ref: VolumeRef,
     config_hash: str,
@@ -910,7 +871,7 @@ class _ConsoleStreamer:
 
 
 def wait_for_build_result(
-    ctx: RunContext, backend_name: str, vm_name: str, *, driver: HypervisorDriver | None = None
+    ctx: GraphContext, backend_name: str, vm_name: str, *, driver: HypervisorDriver | None = None
 ) -> None:
     """Live-tail the build VM's serial console until it reports a result.
 
@@ -926,7 +887,7 @@ def wait_for_build_result(
       watchdog, now only for a true wedge that never reports *and* never
       powers off).
 
-    Console output is mirrored to the ``…build_phase.console`` logger at DEBUG
+    Console output is mirrored to the ``…vm_build.console`` logger at DEBUG
     as it streams (see :class:`_ConsoleStreamer`), so a build's provisioning is
     watchable live with ``--log-level debug``.
 
@@ -976,7 +937,7 @@ def wait_for_build_result(
 
 
 def wait_for_poweroff(
-    ctx: RunContext, backend_name: str, vm_name: str, *, driver: HypervisorDriver | None = None
+    ctx: GraphContext, backend_name: str, vm_name: str, *, driver: HypervisorDriver | None = None
 ) -> None:
     """Block until the build VM is actually ``shutoff`` (safe to capture).
 
@@ -1008,37 +969,18 @@ def _raise_or_return(result: BuildResult, vm_name: str) -> None:
     raise BuildFailedError(vm_name, rc=result.rc, cmd=result.cmd, log=result.log)
 
 
-def teardown_build_phase(ctx: RunContext, build_switch: Switch, build_pool_backend: str) -> None:
-    """Destroy build-phase sidecar VM, networks, switch, and the build pool (LIFO)."""
-    sidecar = ctx.sidecar_backends.pop(build_switch.name, None)
-    if sidecar is not None:
-        ctx.driver.destroy_vm(sidecar)
-        ctx.store.forget(sidecar)
-    for net in build_switch.networks:
-        backend = ctx.network_backends.pop(net.name, None)
-        if backend is not None:
-            ctx.driver.destroy_network(backend)
-            ctx.store.forget(backend)
-    # The uplink-facing segment (when nat) is owned by the switch; drop the
-    # ledger entry, destroy_switch tears down the actual segment.
-    ctx.network_backends.pop(_uplink_network_name(build_switch), None)
-    switch_backend = ctx.switch_backends.pop(build_switch.name, None)
-    if switch_backend is not None:
-        ctx.driver.destroy_switch(switch_backend)
-        ctx.store.forget(switch_backend)
-    # The build pool comes up only for the build phase and never survives it.
-    ctx.driver.destroy_pool(build_pool_backend)
-    ctx.store.forget(build_pool_backend)
-
-
 __all__ = [
     "BUILD_POOL_NAME",
     "BuildResult",
+    "VMBuildProbe",
+    "build_nic_for",
     "build_one_vm",
-    "build_phase",
+    "ensure_build_infra",
     "parse_build_result",
-    "probe_misses",
-    "teardown_build_phase",
+    "probe_vm",
+    "resolve_full_set",
+    "resolve_sidecar_sha",
+    "teardown_build_infra",
     "wait_for_build_result",
     "wait_for_poweroff",
 ]

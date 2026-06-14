@@ -12,10 +12,17 @@ from testrange.drivers.base import VolumeRef
 from testrange.drivers.esxi._client import EsxiConn
 from testrange.drivers.esxi.driver import ESXiDriver
 from testrange.exceptions import DriverError
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, Switch
 from testrange.networks.base import BuildNic, NetworkAddressing
 from testrange.vms import VMSpec
 from tests.esxi_fakes import FakeEsxiClient
+
+_POOL = PoolHandle("pool1")
+
+
+def _net(name: str, switch: str = "sw1") -> NetworkHandle:
+    return NetworkHandle(name, switch=switch)
 
 
 def _driver(client: FakeEsxiClient) -> ESXiDriver:
@@ -23,7 +30,7 @@ def _driver(client: FakeEsxiClient) -> ESXiDriver:
 
 
 def _spec(name: str, *extra: Any) -> VMSpec:
-    return VMSpec(name=name, devices=[CPU(2), Memory(1024), OSDrive("pool1", 8), *extra])
+    return VMSpec(name=name, devices=[CPU(2), Memory(1024), OSDrive(_POOL, 8), *extra])
 
 
 def _devtypes(config: object) -> list[str]:
@@ -33,7 +40,7 @@ def _devtypes(config: object) -> list[str]:
 def test_run_vm_assembles_controller_disk_nics_serial() -> None:
     client = FakeEsxiClient()
     d = _driver(client)
-    spec = _spec("web", NetworkIface("netA", addr=StaticAddr("10.0.0.5/24")))
+    spec = _spec("web", NetworkIface(_net("netA"), addr=StaticAddr("10.0.0.5/24")))
     d.create_vm(
         "tr-vm-web",
         spec,
@@ -58,8 +65,8 @@ def test_build_vm_attaches_only_build_nic() -> None:
     d = _driver(client)
     spec = _spec(
         "web",
-        NetworkIface("netA", addr=StaticAddr("10.0.0.5/24")),
-        NetworkIface("netB"),
+        NetworkIface(_net("netA"), addr=StaticAddr("10.0.0.5/24")),
+        NetworkIface(_net("netB")),
     )
     addr = StaticAddr("10.97.99.3/24")
     switch = Switch("build", Network("build-net"), cidr="10.97.99.0/24")
@@ -125,7 +132,7 @@ def test_nic_binds_to_realized_portgroup_not_network_backend_name() -> None:
 def test_data_disks_in_spec_order() -> None:
     client = FakeEsxiClient()
     d = _driver(client)
-    spec = _spec("fs", HardDrive("pool1", 2), HardDrive("pool1", 2))
+    spec = _spec("fs", HardDrive(_POOL, 2), HardDrive(_POOL, 2))
     d.create_vm(
         "tr-vm-fs",
         spec,
@@ -165,9 +172,9 @@ def test_data_disk_bus_selects_per_controller() -> None:
     d = _driver(client)
     spec = _spec(
         "buses",
-        ESXiHardDrive("pool1", 1, bus="scsi"),
-        ESXiHardDrive("pool1", 1, bus="sata"),
-        ESXiHardDrive("pool1", 1, bus="nvme"),
+        ESXiHardDrive(_POOL, 1, bus="scsi"),
+        ESXiHardDrive(_POOL, 1, bus="sata"),
+        ESXiHardDrive(_POOL, 1, bus="nvme"),
     )
     d.create_vm(
         "tr-vm-buses",
@@ -201,7 +208,7 @@ def test_scsi_data_disks_skip_reserved_unit_7() -> None:
 
     client = FakeEsxiClient()
     d = _driver(client)
-    data = [ESXiHardDrive("pool1", 1, bus="scsi") for _ in range(7)]
+    data = [ESXiHardDrive(_POOL, 1, bus="scsi") for _ in range(7)]
     refs = [VolumeRef(f"[datastore1] pool1/d{i}.vmdk") for i in range(7)]
     d.create_vm(
         "tr-vm-many",
@@ -225,7 +232,7 @@ def test_plain_hard_drive_defaults_to_scsi() -> None:
     d = _driver(client)
     d.create_vm(
         "tr-vm-plain",
-        _spec("plain", HardDrive("pool1", 2), HardDrive("pool1", 2)),
+        _spec("plain", HardDrive(_POOL, 2), HardDrive(_POOL, 2)),
         "plan",
         os_disk_ref=VolumeRef("[datastore1] pool1/plain.vmdk"),
         seed_iso_ref=None,
@@ -243,8 +250,7 @@ def test_plain_hard_drive_defaults_to_scsi() -> None:
 def test_installer_origin_boot_order_falls_through_to_cdrom() -> None:
     client = FakeEsxiClient()
     d = _driver(client)
-    spec = _spec("inst")
-    spec = VMSpec(name="inst", devices=[CPU(1), Memory(512), OSDrive("pool1", 8)], firmware="uefi")
+    spec = VMSpec(name="inst", devices=[CPU(1), Memory(512), OSDrive(_POOL, 8)], firmware="uefi")
     d.create_vm(
         "tr-build-inst",
         spec,

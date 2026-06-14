@@ -37,24 +37,21 @@ def _driver(*, pnics: list[str], uplinks: dict[str, str]) -> ESXiDriver:
 def _plan() -> Plan:
     # Isolated run switch (no uplink, no sidecar) so the only uplink in play is the
     # build switch's; installer-origin VM so the qemu-img convert gate stays quiet.
-    return Plan(
-        "p",
-        MockHypervisor(
-            networks=[Switch("lab", Network("lab-net"), cidr="10.50.0.0/24")],
-            pools=[StoragePool("pool1", 8)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="vm",
-                        firmware="bios",
-                        devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
-                    ),
-                    builder=_InstallerBuilder(),
-                    communicator=SSHCommunicator("u"),
-                )
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_switch(Switch("lab", Network("lab-net"), cidr="10.50.0.0/24"))
+    hyp.add_pool(StoragePool("pool1", 8))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="vm",
+                firmware="bios",
+                devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8)],
+            ),
+            builder=_InstallerBuilder(),
+            communicator=SSHCommunicator("u"),
+        )
     )
+    return Plan("p", hyp)
 
 
 # The nested inner binding: 'egress' inherited from the OUTER libvirt profile maps
@@ -123,39 +120,38 @@ def test_uplink_with_nat_still_requires_pnic() -> None:
 def _two_uplink_plan() -> Plan:
     # One NAT switch and one non-NAT switch, each on a distinct mapped uplink, in
     # the same run-phase topology.
-    return Plan(
-        "p",
-        MockHypervisor(
-            networks=[
-                Switch(
-                    "natsw",
-                    Network("nat-net"),
-                    cidr="10.51.0.0/24",
-                    uplink="natlink",
-                    sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-                ),
-                Switch(
-                    "plainsw",
-                    Network("plain-net"),
-                    cidr="10.52.0.0/24",
-                    uplink="plainlink",
-                    sidecar=Sidecar(dhcp=True, dns=True),
-                ),
-            ],
-            pools=[StoragePool("pool1", 8)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="vm",
-                        firmware="bios",
-                        devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
-                    ),
-                    builder=_InstallerBuilder(),
-                    communicator=SSHCommunicator("u"),
-                )
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_switch(
+        Switch(
+            "natsw",
+            Network("nat-net"),
+            cidr="10.51.0.0/24",
+            uplink="natlink",
+            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+        )
     )
+    hyp.add_switch(
+        Switch(
+            "plainsw",
+            Network("plain-net"),
+            cidr="10.52.0.0/24",
+            uplink="plainlink",
+            sidecar=Sidecar(dhcp=True, dns=True),
+        )
+    )
+    hyp.add_pool(StoragePool("pool1", 8))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="vm",
+                firmware="bios",
+                devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8)],
+            ),
+            builder=_InstallerBuilder(),
+            communicator=SSHCommunicator("u"),
+        )
+    )
+    return Plan("p", hyp)
 
 
 def test_mixed_nat_and_non_nat_uplinks_flag_only_nat() -> None:

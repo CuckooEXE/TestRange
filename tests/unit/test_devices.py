@@ -14,6 +14,7 @@ from testrange.devices import (
     StaticAddr,
     StoragePool,
 )
+from testrange.handles import NetworkHandle, PoolHandle
 
 
 class TestCPU:
@@ -40,49 +41,55 @@ class TestMemory:
 
 class TestDisks:
     def test_os_drive(self) -> None:
-        d = OSDrive("pool1", 16)
+        d = OSDrive(PoolHandle("pool1"), 16)
         assert d.pool == "pool1"
         assert d.size_gb == 16
 
     def test_hard_drive(self) -> None:
-        d = HardDrive("pool2", 100)
+        d = HardDrive(PoolHandle("pool2"), 100)
         assert d.size_gb == 100
 
     def test_invalid_pool(self) -> None:
+        # A bare string (even a non-empty one) is rejected at the handle trust
+        # boundary; an empty name can't even become a handle.
+        with pytest.raises(TypeError, match="PoolHandle"):
+            OSDrive("pool1", 8)  # type: ignore[arg-type]
         with pytest.raises(ValueError):
-            OSDrive("", 8)
+            PoolHandle("")
 
     def test_invalid_size(self) -> None:
         with pytest.raises(ValueError):
-            OSDrive("pool1", 0)
+            OSDrive(PoolHandle("pool1"), 0)
 
 
 class TestNICs:
     def test_iface_defaults(self) -> None:
-        n = NetworkIface("netA")
+        n = NetworkIface(NetworkHandle("netA", switch="sw1"))
         assert n.network == "netA"
         assert n.addr is None  # default: unconfigured, not DHCP
         assert isinstance(n, NetworkIface)
 
     def test_invalid_network(self) -> None:
+        with pytest.raises(TypeError, match="NetworkHandle"):
+            NetworkIface("netA")  # type: ignore[arg-type]
         with pytest.raises(ValueError):
-            NetworkIface("")
+            NetworkHandle("", switch="sw1")
 
     def test_dhcp_addr(self) -> None:
-        n = NetworkIface("netA", addr=DHCPAddr())
+        n = NetworkIface(NetworkHandle("netA", switch="sw1"), addr=DHCPAddr())
         assert n.addr == DHCPAddr()
 
     def test_static_addr(self) -> None:
-        n = NetworkIface("netA", addr=StaticAddr("172.31.0.50"))
+        n = NetworkIface(NetworkHandle("netA", switch="sw1"), addr=StaticAddr("172.31.0.50"))
         assert n.addr == StaticAddr("172.31.0.50")
 
     def test_static_addr_base(self) -> None:
-        n = NetworkIface("netA", addr=StaticAddr("10.0.0.5"))
+        n = NetworkIface(NetworkHandle("netA", switch="sw1"), addr=StaticAddr("10.0.0.5"))
         assert n.addr == StaticAddr("10.0.0.5")
 
     def test_rejects_non_address_mode(self) -> None:
         with pytest.raises(TypeError, match="must be DHCPAddr, StaticAddr, or None"):
-            NetworkIface("netA", addr="172.31.0.50")  # type: ignore[arg-type]
+            NetworkIface(NetworkHandle("netA", switch="sw1"), addr="172.31.0.50")  # type: ignore[arg-type]
 
 
 class TestStaticAddr:

@@ -17,6 +17,31 @@ class PlanError(TestRangeError):
     """A user-supplied Plan is structurally invalid (bad references, duplicate names, etc.)."""
 
 
+class GraphError(PlanError):
+    """The finalized :class:`~testrange.graph.build_graph.BuildGraph` is structurally invalid.
+
+    A :class:`PlanError` subclass: a malformed graph is a malformed plan, so the
+    existing invalid-plan exit-code path (and preflight) catches it without a new
+    branch. The concrete subclasses below name the specific defect.
+    """
+
+
+class DuplicateNodeError(GraphError):
+    """Two nodes share a name within one graph — node names must be unique."""
+
+
+class DanglingDependencyError(GraphError):
+    """An edge references a node name that is not present in the graph."""
+
+
+class SelfDependencyError(GraphError):
+    """An edge names the same node as both dependent and dependency (a self-loop)."""
+
+
+class GraphCycleError(GraphError):
+    """The dependency edges form a cycle, so no topological order exists."""
+
+
 class PreflightError(TestRangeError):
     """Preflight surfaced one or more error-level findings."""
 

@@ -330,3 +330,48 @@ class TestConcurrentRMW:
         resources = {r.backend_name: r for r in store.read().resources}
         assert set(resources) == {f"vm-{i:03d}" for i in range(0, n, 2)}
         assert all(r.outcome_at is not None for r in resources.values())
+
+
+class TestNodeLedgerStore:
+    """StateStore's node-completion stamps + the resume reopen path (DAG-9)."""
+
+    def _initialized(self, tmp_path: Path) -> StateStore:
+        store = StateStore(tmp_path / "run")
+        store.initialize(run_id="r1", plan_name="p", driver_class="MockDriver", driver_uri="")
+        return store
+
+    def test_mark_node_stamps_persist(self, tmp_path: Path) -> None:
+        store = self._initialized(tmp_path)
+        store.mark_node_materialized("vm:web")
+        store.mark_node_realized("vm:web")
+        record = store.read().node_record("vm:web")
+        assert record is not None
+        assert record.materialized_at is not None
+        assert record.realized_at is not None
+
+    def test_reopen_requires_existing_state(self, tmp_path: Path) -> None:
+        store = StateStore(tmp_path / "run")
+        with pytest.raises(StateError, match="no state to resume"):
+            store.reopen()
+
+    def test_reopen_takes_over_a_dead_run(self, tmp_path: Path) -> None:
+        first = self._initialized(tmp_path)
+        first.mark_node_realized("vm:web")
+        first.release()  # owner exits; lock drops
+
+        second = StateStore(tmp_path / "run")
+        state = second.reopen()
+        record = state.node_record("vm:web")
+        assert record is not None and record.realized_at is not None
+        # Ownership transferred: the lock is held again.
+        third = StateStore(tmp_path / "run")
+        with pytest.raises(StateLockedError):
+            third.reopen()
+        second.release()
+
+    def test_reopen_refuses_a_live_owner(self, tmp_path: Path) -> None:
+        store = self._initialized(tmp_path)  # lock held by this process
+        other = StateStore(tmp_path / "run")
+        with pytest.raises(StateLockedError):
+            other.reopen()
+        store.release()

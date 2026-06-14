@@ -17,7 +17,10 @@ from testrange.devices.network import NetworkIface
 from testrange.drivers.base import VolumeRef
 from testrange.drivers.proxmox import _naming, _vm
 from testrange.exceptions import DriverError
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.vms import VMSpec
+
+_POOL = PoolHandle("pool1")
 
 
 class _Endpoint:
@@ -150,9 +153,9 @@ def _client() -> Any:
 
 
 def _spec(*, data: int = 0, nics: tuple[str, ...] = ("netA",)) -> VMSpec:
-    devices: list[Any] = [CPU(2), Memory(1024), OSDrive("pool1", 8)]
-    devices += [HardDrive("pool1", 32) for _ in range(data)]
-    devices += [NetworkIface(n) for n in nics]
+    devices: list[Any] = [CPU(2), Memory(1024), OSDrive(_POOL, 8)]
+    devices += [HardDrive(_POOL, 32) for _ in range(data)]
+    devices += [NetworkIface(NetworkHandle(n, switch="sw1")) for n in nics]
     return VMSpec(name="web", devices=devices)
 
 
@@ -198,9 +201,9 @@ class TestCreateVm:
             devices=[
                 CPU(2),
                 Memory(1024),
-                OSDrive("pool1", 8),
-                ProxmoxHardDrive("pool1", 1, bus="scsi"),
-                ProxmoxHardDrive("pool1", 1, bus="virtio"),
+                OSDrive(_POOL, 8),
+                ProxmoxHardDrive(_POOL, 1, bus="scsi"),
+                ProxmoxHardDrive(_POOL, 1, bus="virtio"),
             ],
         )
         refs = [

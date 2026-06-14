@@ -7,6 +7,7 @@ from testrange.cache.entry import CacheEntry
 from testrange.communicators.ssh import SSHCommunicator
 from testrange.devices import CPU, DHCPAddr, Memory, OSDrive, StaticAddr
 from testrange.devices.network import NetworkIface
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, Sidecar, Switch
 from testrange.networks.sidecar import (
     SIDECAR_SWITCH_NIC,
@@ -26,11 +27,18 @@ def _vm(name: str, *nics: NetworkIface) -> VMRecipe:
     return VMRecipe(
         spec=VMSpec(
             name=name,
-            devices=[CPU(1), Memory(512), OSDrive("p1", 8), *nics],
+            devices=[CPU(1), Memory(512), OSDrive(PoolHandle("p1"), 8), *nics],
         ),
         builder=CloudInitBuilder(base=CacheEntry("base")),
         communicator=SSHCommunicator("root"),
     )
+
+
+def _nic(
+    network: str, *, switch: str = "sw", addr: DHCPAddr | StaticAddr | None = None
+) -> NetworkIface:
+    """A NIC on ``network`` via a hand-minted handle (no Hypervisor in these tests)."""
+    return NetworkIface(NetworkHandle(network, switch=switch), addr=addr)
 
 
 def _mac_for(_vm_name: str, idx: int) -> str:
@@ -157,19 +165,19 @@ class TestRenderDnsmasqConf:
 
     def test_static_nic_gets_host_record(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", sidecar=Sidecar(dns=True))
-        vms = [_vm("v1", NetworkIface("a", addr=StaticAddr("10.0.0.100")))]
+        vms = [_vm("v1", _nic("a", addr=StaticAddr("10.0.0.100")))]
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "host-record=v1.a,10.0.0.100" in conf
 
     def test_dhcp_nic_gets_dhcp_host(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
-        vms = [_vm("v1", NetworkIface("a", addr=DHCPAddr()))]
+        vms = [_vm("v1", _nic("a", addr=DHCPAddr()))]
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "dhcp-host=52:54:00:aa:bb:00,v1" in conf
 
     def test_ignores_nics_on_other_switches(self) -> None:
         sw = Switch("sw", Network("a"), cidr="10.0.0.0/24", sidecar=Sidecar(dns=True))
-        vms = [_vm("v1", NetworkIface("b", addr=StaticAddr("10.0.0.50")))]
+        vms = [_vm("v1", _nic("b", switch="other", addr=StaticAddr("10.0.0.50")))]
         conf = render_dnsmasq_conf(sw, vms, _mac_for)
         assert "host-record" not in conf
 

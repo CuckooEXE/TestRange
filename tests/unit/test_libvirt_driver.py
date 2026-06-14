@@ -32,15 +32,27 @@ from testrange.vms import VMRecipe, VMSpec
 _BUILD_SW = resolve_build_switch(None)  # an isolated default build switch
 
 
-def _vm(name: str = "web", *, comm: object | None = None) -> VMRecipe:
+def _hyp(
+    switch: Switch | None = None,
+) -> LibvirtHypervisor:
+    """A fresh container with the standard switch + pool registered."""
+    hyp = LibvirtHypervisor()
+    hyp.add_switch(
+        switch or Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
+    )
+    hyp.add_pool(StoragePool("pool1", 16))
+    return hyp
+
+
+def _vm(hyp: LibvirtHypervisor, name: str = "web", *, comm: object | None = None) -> VMRecipe:
     return VMRecipe(
         spec=VMSpec(
             name=name,
             devices=[
                 CPU(1),
                 Memory(512),
-                OSDrive("pool1", 8),
-                NetworkIface("netA", addr=StaticAddr("10.0.0.150")),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["netA"], addr=StaticAddr("10.0.0.150")),
             ],
         ),
         builder=CloudInitBuilder(
@@ -51,46 +63,32 @@ def _vm(name: str = "web", *, comm: object | None = None) -> VMRecipe:
 
 
 def _plan(comm: object | None = None) -> Plan:
-    return Plan(
-        "t",
-        LibvirtHypervisor(
-            networks=[
-                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
-            ],
-            pools=[StoragePool("pool1", 16)],
-            vms=[_vm(comm=comm)],
-        ),
-    )
+    hyp = _hyp()
+    hyp.add_vm(_vm(hyp, comm=comm))
+    return Plan("t", hyp)
 
 
 def _nested_plan() -> Plan:
     """A plan whose one VM requests CPU(nested=True) (for the nested-KVM probe)."""
-    return Plan(
-        "t",
-        LibvirtHypervisor(
-            networks=[
-                Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))
-            ],
-            pools=[StoragePool("pool1", 16)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="host-a",
-                        devices=[
-                            CPU(2, nested=True),
-                            Memory(2048),
-                            OSDrive("pool1", 20),
-                            NetworkIface("netA", addr=StaticAddr("10.0.0.150")),
-                        ],
-                    ),
-                    builder=CloudInitBuilder(
-                        base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
-                    ),
-                    communicator=SSHCommunicator("u"),
-                )
-            ],
-        ),
+    hyp = _hyp()
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="host-a",
+                devices=[
+                    CPU(2, nested=True),
+                    Memory(2048),
+                    OSDrive(hyp.pools["pool1"], 20),
+                    NetworkIface(hyp.networks["netA"], addr=StaticAddr("10.0.0.150")),
+                ],
+            ),
+            builder=CloudInitBuilder(
+                base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+            ),
+            communicator=SSHCommunicator("u"),
+        )
     )
+    return Plan("t", hyp)
 
 
 class TestConstruction:
@@ -103,7 +101,8 @@ class TestConstruction:
         hyp = LibvirtHypervisor()
         assert is_pinned(hyp) is True
         assert scheme_for_hypervisor(hyp) == "libvirt"
-        assert hyp.networks == () and hyp.pools == () and hyp.vms == ()
+        assert hyp.declared_switches == ()
+        assert hyp.declared_pools == () and hyp.declared_vms == ()
 
     def test_registry_dispatch_by_name_roundtrips_uri(self) -> None:
         drv = LibvirtProfile(uri="qemu:///system").build_driver()
@@ -167,22 +166,17 @@ class TestPreflight:
     def test_unmapped_uplink_is_rejected(self) -> None:
         # ADR-0016: a Switch.uplink the profile doesn't map fails at preflight,
         # even though L2 realization itself is still BACKEND-1.2.
-        plan = Plan(
-            "t",
-            LibvirtHypervisor(
-                networks=[
-                    Switch(
-                        "sw1",
-                        Network("netA"),
-                        cidr="10.0.0.0/24",
-                        uplink="egress",
-                        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-                    )
-                ],
-                pools=[StoragePool("pool1", 16)],
-                vms=[_vm()],
-            ),
+        hyp = _hyp(
+            Switch(
+                "sw1",
+                Network("netA"),
+                cidr="10.0.0.0/24",
+                uplink="egress",
+                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+            )
         )
+        hyp.add_vm(_vm(hyp))
+        plan = Plan("t", hyp)
         report = LibvirtDriver(LibvirtConn()).preflight(
             plan,
             cache_manager=None,  # type: ignore[arg-type]

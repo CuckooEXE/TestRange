@@ -61,3 +61,4 @@ notes/
 
 # live certification run logs (REL e2e)
 *-cert.log
+libvirt-recert-*.log

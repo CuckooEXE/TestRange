@@ -1,4 +1,9 @@
-"""VMHandle — runtime view of a brought-up VM, exposed to test code."""
+"""RunningVM — runtime view of a brought-up VM, exposed to test code.
+
+Distinct from :class:`~testrange.handles.VMHandle`, the plan-construction
+handle ``hyp.add_vm`` returns: a ``RunningVM`` exists only inside a live run,
+carries the bound communicator, and is reached via ``orch.vms["name"]``.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 @dataclass(frozen=True)
-class VMHandle:
+class RunningVM:
     """Test-code-facing view of a running VM.
 
     - ``name`` is the user-facing Plan name (e.g., ``"web"``).

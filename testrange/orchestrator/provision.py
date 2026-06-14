@@ -1,7 +1,7 @@
 """Shared provisioning substrate: switches, sidecars, NIC MACs.
 
 These helpers are used by both the build phase and the run phase. Each
-takes a :class:`RunContext` explicitly and brokers between Plan-time data and
+takes a :class:`GraphContext` explicitly and brokers between Plan-time data and
 the driver/cache/state store.
 
 Every disk reaches the backend by host->pool upload (``upload_to_pool``);
@@ -28,7 +28,7 @@ from testrange.networks.sidecar import (
     sidecar_nic_specs,
 )
 from testrange.orchestrator.build import _sidecar_spec
-from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.context import GraphContext
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -61,12 +61,12 @@ def _effective_switch(switch: Switch, uplink_addrs: Mapping[str, StaticAddr]) ->
     )
 
 
-def mac_for(ctx: RunContext, vm_name: str, idx: int) -> str:
+def mac_for(ctx: GraphContext, vm_name: str, idx: int) -> str:
     return ctx.driver.compose_mac(ctx.plan_name, vm_name, idx)
 
 
 def provision_switch(
-    ctx: RunContext,
+    ctx: GraphContext,
     switch: Switch,
     *,
     kind_prefix: str = "",
@@ -124,7 +124,7 @@ def provision_switch(
 
 
 def materialize_sidecar_for(
-    ctx: RunContext,
+    ctx: GraphContext,
     switch: Switch,
     *,
     kind_prefix: str = "",
@@ -148,11 +148,11 @@ def materialize_sidecar_for(
     # before it is specced/rendered, so a host-NAT'd uplink egresses + resolves.
     switch = _effective_switch(switch, ctx.resolved.uplink_addrs)
     if pool_backend is None:
-        if not ctx.plan.hypervisor.pools:
+        if not ctx.plan.hypervisor.declared_pools:
             raise OrchestratorError(
                 f"switch {switch.name!r} needs a sidecar but the plan has no pools"
             )
-        pool_name = ctx.plan.hypervisor.pools[0].name
+        pool_name = ctx.plan.hypervisor.declared_pools[0].name
         pool_backend = ctx.pool_backends[pool_name]
     assert pool_name is not None, "pool_name must accompany an explicit pool_backend"
     sidecar_spec = _sidecar_spec(switch, pool_name)
@@ -180,7 +180,9 @@ def materialize_sidecar_for(
     sidecar_cfg_name = f"{sidecar_vm_backend}-cfg{drv.volume_suffix('sidecar_config')}"
     sidecar_cfg_ref = drv.compose_volume_ref(pool_backend, sidecar_cfg_name)
     iso_bytes = build_sidecar_config_iso(
-        dnsmasq_conf=render_dnsmasq_conf(switch, ctx.plan.hypervisor.vms, partial(mac_for, ctx)),
+        dnsmasq_conf=render_dnsmasq_conf(
+            switch, ctx.plan.hypervisor.declared_vms, partial(mac_for, ctx)
+        ),
         interfaces=render_sidecar_interfaces(switch),
         nftables_ruleset=render_nftables_ruleset(switch),
         sysctl_conf=render_sysctl_conf(switch),

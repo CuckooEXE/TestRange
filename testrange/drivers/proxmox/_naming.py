@@ -137,7 +137,7 @@ def disk_scsi_index(vol_name: str, vm_backend_name: str) -> int | None:
     """The ``scsiN`` index ``vol_name`` maps to on ``vm_backend_name``, or ``None``.
 
     The orchestrator names a VM's OS disk ``<vm_backend>.<ext>`` and its i-th
-    data disk ``<vm_backend>-data<i>.<ext>`` (see ``build_phase``/``run_phase``);
+    data disk ``<vm_backend>-data<i>.<ext>`` (see ``vm_build``/``vm_run``);
     :meth:`ProxmoxDriver.create_vm` attaches the OS disk at ``scsi0`` and data
     disk ``i`` at ``scsi<i+1>``. This recovers that index so
     ``download_from_pool`` can find the live disk a stable ref now denotes.

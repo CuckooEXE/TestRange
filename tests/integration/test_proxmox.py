@@ -38,6 +38,7 @@ from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network import NetworkIface
 from testrange.drivers.proxmox import ProxmoxDriver
 from testrange.drivers.proxmox._client import ProxmoxConn
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, Switch
 from testrange.vms import VMSpec
 
@@ -149,7 +150,15 @@ def test_vm_lifecycle_and_snapshot(
     name = driver.compose_resource_name(run_tag, "vm", "web")
     pool = driver.compose_resource_name(run_tag, "pool", "p")
     os_ref = driver.compose_volume_ref(pool, f"{name}.qcow2")
-    spec = VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive("p", 2), NetworkIface("net0")])
+    spec = VMSpec(
+        name="web",
+        devices=[
+            CPU(1),
+            Memory(512),
+            OSDrive(PoolHandle("p"), 2),
+            NetworkIface(NetworkHandle("net0", switch="itsw")),
+        ],
+    )
     try:
         driver.upload_to_pool(os_ref, base_qcow2)
         driver.create_vm(

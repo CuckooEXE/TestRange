@@ -4,7 +4,7 @@ Portable plan — it declares topology only and pins no backend. Supply the
 backend at run time with a connection profile:
 
     testrange describe examples/hello_world.py
-    testrange describe examples/hello_world.py --profile mybackend
+    testrange graph examples/hello_world.py --order
     testrange run examples/hello_world.py --profile mybackend
 
 ``--profile mybackend`` reads the ``[mybackend]`` profile from ``./connect.toml``
@@ -32,56 +32,52 @@ from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-hello")
 
-PLAN = Plan(
-    "hello-world",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "switch1",
-                Network("netA"),
-                Network("netB"),
-                cidr="172.31.0.0/24",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="web",
-                    devices=[
-                        CPU(2),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
-                        NetworkIface("netA", addr=StaticAddr("172.31.0.150")),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[
-                        PosixCred("root", password="root"),
-                        PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
-                    ],
-                    packages=[Apt("nginx")],
-                    post_install_commands=("echo hi > /tmp/hi",),
-                ),
-                communicator=SSHCommunicator("myuser"),
-            ),
-        ],
-    ),
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
 )
+
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
+
+hyp.add_switch(
+    Switch(
+        "switch1",
+        Network("netA"),
+        Network("netB"),
+        cidr="172.31.0.0/24",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True),
+    )
+)
+netA = hyp.networks["netA"]
+
+hyp.vm(
+    "web",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(netA, StaticAddr("172.31.0.150"))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[
+            PosixCred("root", password="root"),
+            PosixCred("myuser", password="mypass", ssh_key=_KEY, admin=True),
+        ],
+        packages=[Apt("nginx")],
+        post_install_commands=("echo hi > /tmp/hi",),
+    ),
+    communicator=SSHCommunicator("myuser"),
+)
+
+PLAN = Plan("hello-world", hyp)
 
 
 def nginx_is_installed(orch: OrchestratorHandle) -> None:

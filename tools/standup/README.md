@@ -13,8 +13,8 @@ resources, so they must never be part of a corpus sweep. They live here, not in
 
 | Plan | Node | Standup path |
 |------|------|--------------|
-| `libvirt_node.py` | Debian 13 + qemu/libvirt (`GuestHypervisor.libvirt`) | image-origin cloud-init build |
-| `esxi_node.py` | ESXi 8 (`GuestHypervisor.esxi`) | installer-origin kickstart (`--build-timeout 1800 --lease-timeout 900`; vmk0 MAC-follow spans two boots, ESXI-18) |
+| `libvirt_node.py` | Debian 13 + qemu/libvirt (cloud-init recipe) | image-origin cloud-init build |
+| `esxi_node.py` | ESXi 8 (kickstart recipe) | installer-origin kickstart (`--build-timeout 1800 --lease-timeout 900`; vmk0 MAC-follow spans two boots, ESXI-18) |
 | `pve_node.py` | Proxmox VE 9 (`ProxmoxAnswerBuilder`) | installer-origin answer file (uefi/q35) |
 
 ## Workflow

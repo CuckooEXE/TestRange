@@ -35,6 +35,8 @@ class TestDescribe:
         out = capsys.readouterr().out
         assert "Plan (Hypervisor)" in out  # portable plan (ADR-0015)
         assert "backend: UNBOUND" in out
+        assert "graph:" in out  # the build-graph summary line (ADR-0030)
+        assert "node(s)" in out
         assert "switch1" in out
         assert "netA" in out
         assert "pool1" in out
@@ -114,6 +116,70 @@ class TestDescribe:
         assert "ERROR" not in out.out
 
 
+class TestGraph:
+    """`testrange graph` renders the DAG as a dependency tree (DAG-21)."""
+
+    def test_default_renders_dependency_tree(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["graph", str(EXAMPLES / "hello_world.py")])
+        assert rc == 0
+        out = capsys.readouterr().out
+        # The summary header + the sink target with its dependencies nested under it.
+        assert "node(s)" in out and "wave(s)" in out
+        assert "vm:web" in out
+        assert "pool:pool1" in out
+        assert "network:switch1" in out
+        # Rich tree drawing characters — this is a tree, not the old flat table.
+        assert "└──" in out or "├──" in out
+
+    def test_sink_is_root_with_dependencies_nested(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # multi_tier_app: web.needs(db), so vm:web is the sink (root) and vm:db
+        # nests beneath it — the dependency reads top-down.
+        rc = cli.main(["graph", str(EXAMPLES / "multi_tier_app.py")])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "vm:web" in out and "vm:db" in out
+        assert out.index("vm:web") < out.index("vm:db")  # target above its dependency
+
+    def test_shared_subtree_is_backreferenced(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # Two VMs on one sidecar-carrying switch: both gate on sidecar:sw1, which
+        # carries its own sub-tree (network:sw1 + the first pool — DAG-23). That
+        # shared node is expanded in full under the first VM and back-referenced
+        # under the second, so the render stays linear instead of duplicating the
+        # sub-tree.
+        plan = tmp_path / "two_vm.py"
+        plan.write_text(_TWO_VM_PLAN_SRC)
+        rc = cli.main(["graph", str(plan)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert out.count("sidecar:sw1") == 2  # appears under both VMs
+        assert out.count("shown above") == 1  # but expanded only once
+
+    def test_order_flag_still_prints_waves(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["graph", str(EXAMPLES / "hello_world.py"), "--order"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "wave 0" in out
+
+    def test_dot_flag_still_emits_graphviz(self, capsys: pytest.CaptureFixture[str]) -> None:
+        rc = cli.main(["graph", str(EXAMPLES / "hello_world.py"), "--dot"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "digraph" in out and "->" in out
+
+
+class TestWhyRemoved:
+    def test_why_subcommand_is_gone(self, capsys: pytest.CaptureFixture[str]) -> None:
+        # DAG-22: `why` was deleted; its job is now visible in the graph tree.
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["why", str(EXAMPLES / "hello_world.py"), "web"])
+        assert exc.value.code == 2
+        assert "invalid choice: 'why'" in capsys.readouterr().err
+
+
 class TestRunSubcommand:
     def test_requires_plan(self, capsys: pytest.CaptureFixture[str]) -> None:
         with pytest.raises(SystemExit):
@@ -162,22 +228,19 @@ from testrange.devices.network import NetworkIface
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "portable",
-    Hypervisor(
-        networks=[Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive("pool1", 8),
-                                                 NetworkIface("netA")]),
-                builder=CloudInitBuilder(base=CacheEntry("debian-13"),
-                                         credentials=[PosixCred("u", password="p")]),
-                communicator=SSHCommunicator("u"),
-            ),
-        ],
-    ),
+hyp = Hypervisor()
+hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)))
+hyp.add_vm(
+    VMRecipe(
+        spec=VMSpec(name="web", devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8),
+                                         NetworkIface(hyp.networks["netA"])]),
+        builder=CloudInitBuilder(base=CacheEntry("debian-13"),
+                                 credentials=[PosixCred("u", password="p")]),
+        communicator=SSHCommunicator("u"),
+    )
 )
+PLAN = Plan("portable", hyp)
 
 def t(orch):
     pass
@@ -190,6 +253,38 @@ def _write_generic_plan(tmp_path: Path) -> str:
     p = tmp_path / "portable_plan.py"
     p.write_text(_GENERIC_PLAN_SRC)
     return str(p)
+
+
+# Two VMs on one switch: network:sw1 gains two dependents (web1, web2) and its
+# own dependency (pool1, via the sidecar->first-pool edge) — the shape that
+# exercises the graph tree's expand-once / back-reference path (DAG-21).
+_TWO_VM_PLAN_SRC = """
+from testrange import Hypervisor, Plan
+from testrange.builders import CloudInitBuilder
+from testrange.cache import CacheEntry
+from testrange.communicators import SSHCommunicator
+from testrange.credentials import PosixCred
+from testrange.devices import CPU, Memory, OSDrive, StoragePool
+from testrange.devices.network import NetworkIface
+from testrange.networks import Network, Sidecar, Switch
+
+hyp = Hypervisor()
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(Switch("sw1", Network("netA"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)))
+netA = hyp.networks["netA"]
+for name in ("web1", "web2"):
+    hyp.vm(name, cpu=CPU(1), memory=Memory(512), os_drive=OSDrive(pool1, 8),
+           nics=[NetworkIface(netA)],
+           builder=CloudInitBuilder(base=CacheEntry("debian-13"),
+                                    credentials=[PosixCred("u", password="p")]),
+           communicator=SSHCommunicator("u"))
+PLAN = Plan("two-vm", hyp)
+
+def t(orch):
+    pass
+
+TESTS = [t]
+"""
 
 
 class TestConnectFlag:

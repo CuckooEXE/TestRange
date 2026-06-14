@@ -27,46 +27,40 @@ from tests.mock_driver import MockHypervisor, OriginlessBuilder
 
 
 def _plan_with(builder: Builder, *, firmware: str = "bios") -> Plan:
-    return Plan(
-        "p",
-        MockHypervisor(
-            networks=[Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
-            pools=[StoragePool("pool1", 16)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="vm",
-                        firmware=firmware,
-                        devices=[CPU(1), Memory(512), OSDrive("pool1", 8)],
-                    ),
-                    builder=builder,
-                    communicator=SSHCommunicator("u"),
-                )
-            ],
-        ),
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", 16))
+    hyp.add_switch(Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)))
+    hyp.add_vm(
+        VMRecipe(
+            spec=VMSpec(
+                name="vm",
+                firmware=firmware,
+                devices=[CPU(1), Memory(512), OSDrive(hyp.pools["pool1"], 8)],
+            ),
+            builder=builder,
+            communicator=SSHCommunicator("u"),
+        )
     )
+    return Plan("p", hyp)
 
 
 def _resource_plan(*, vms: list[tuple[str, int, int]], pool_gb: int = 16) -> Plan:
     """A plan whose VMs are ``(name, memory_mb, cpus)`` triples, for resource tests."""
-    return Plan(
-        "p",
-        MockHypervisor(
-            networks=[Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True))],
-            pools=[StoragePool("pool1", pool_gb)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name=name,
-                        devices=[CPU(cpus), Memory(memory_mb), OSDrive("pool1", 8)],
-                    ),
-                    builder=CloudInitBuilder(base=CacheEntry("x")),
-                    communicator=SSHCommunicator("u"),
-                )
-                for name, memory_mb, cpus in vms
-            ],
-        ),
-    )
+    hyp = MockHypervisor()
+    hyp.add_pool(StoragePool("pool1", pool_gb))
+    hyp.add_switch(Switch("sw", Network("n"), cidr="10.0.0.0/24", sidecar=Sidecar(dhcp=True)))
+    for name, memory_mb, cpus in vms:
+        hyp.add_vm(
+            VMRecipe(
+                spec=VMSpec(
+                    name=name,
+                    devices=[CPU(cpus), Memory(memory_mb), OSDrive(hyp.pools["pool1"], 8)],
+                ),
+                builder=CloudInitBuilder(base=CacheEntry("x")),
+                communicator=SSHCommunicator("u"),
+            )
+        )
+    return Plan("p", hyp)
 
 
 class TestBuilderOriginFindings:
@@ -154,12 +148,12 @@ class TestPreflightSwitches:
     def test_concrete_build_switch_is_appended(self) -> None:
         plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")))
         switches = preflight_switches(plan, self._BUILD)
-        assert switches == [*plan.hypervisor.all_switches, self._BUILD]
+        assert switches == [*plan.hypervisor.declared_switches, self._BUILD]
 
     def test_none_build_switch_is_excluded(self) -> None:
         plan = _plan_with(CloudInitBuilder(base=CacheEntry("x")))
         switches = preflight_switches(plan, None)
-        assert switches == list(plan.hypervisor.all_switches)
+        assert switches == list(plan.hypervisor.declared_switches)
         assert self._BUILD not in switches
 
 

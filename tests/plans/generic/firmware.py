@@ -1,6 +1,6 @@
 """generic/firmware: UEFI firmware boot, on every backend.
 
-WHAT: a backend-agnostic guest declared with ``VMSpec(firmware="uefi")``, booted
+WHAT: a backend-agnostic guest declared with ``hyp.vm(..., firmware="uefi")``, booted
 on the backend's UEFI firmware rather than its default BIOS. The tests assert the
 guest came up in UEFI mode — ``/sys/firmware/efi`` is present only when the kernel
 booted via EFI, and the efivars filesystem is populated.
@@ -31,52 +31,45 @@ from testrange.credentials import PosixCred
 from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
-from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "firmware",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.40.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="uefi",
-                    firmware="uefi",
-                    devices=[
-                        CPU(1),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
-                        NetworkIface("lab-net", addr=DHCPAddr()),
-                    ],
-                ),
-                # NativeCommunicator agent auto-provisioned per backend (CORE-90);
-                # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", password="testrange", admin=True)],
-                ),
-                communicator=NativeCommunicator(),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.40.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "uefi",
+    cpu=CPU(1),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    firmware="uefi",
+    # NativeCommunicator agent auto-provisioned per backend (CORE-90);
+    # the PosixCred is for ESXi VMware Tools guest-ops (CORE-60).
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", password="testrange", admin=True)],
+    ),
+    communicator=NativeCommunicator(),
+)
+
+PLAN = Plan("firmware", hyp)
 
 
 def booted_in_uefi_mode(orch: OrchestratorHandle) -> None:

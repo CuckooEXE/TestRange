@@ -24,9 +24,10 @@ from testrange.devices import CPU, Memory, OSDrive
 from testrange.devices.network import NetworkIface, StaticAddr
 from testrange.exceptions import BuildNotReadyError
 from testrange.guest_io import ExecResult
+from testrange.handles import NetworkHandle, PoolHandle
 from testrange.networks import Network, NetworkAddressing, Sidecar, Switch
 from testrange.networks.base import BuildNic
-from testrange.orchestrator.build_phase import parse_build_result
+from testrange.orchestrator.vm_build import parse_build_result
 from testrange.utils import EcdsaKey, SSHKey
 from testrange.vms import VMRecipe, VMSpec
 
@@ -51,7 +52,12 @@ def _spec(*, firmware: str = "bios", disk_gb: int = 40, name: str = "esxi") -> V
     return VMSpec(
         name=name,
         firmware=firmware,
-        devices=[CPU(2), Memory(4096), OSDrive("p1", disk_gb), NetworkIface("netA")],
+        devices=[
+            CPU(2),
+            Memory(4096),
+            OSDrive(PoolHandle("p1"), disk_gb),
+            NetworkIface(NetworkHandle("netA", switch="swA")),
+        ],
     )
 
 
@@ -306,7 +312,7 @@ class TestKickstart:
 
     def test_no_mac_follow_block_in_local_sh(self) -> None:
         # ESXI-18 is solved at the BUILD NIC (the install boot wears the run
-        # NIC's MAC — orchestrator/build_phase._build_nic_for), so the
+        # NIC's MAC — orchestrator/vm_build.build_nic_for), so the
         # live-disproven FollowHardwareMac block must be gone: a reboot restores
         # vmk0's pinned MAC from esx.conf instead of re-creating it. (The
         # one-shot %firstboot reboot that remains exists for local.sh/sshd

@@ -35,6 +35,7 @@ from testrange.devices.pool.base import StoragePool
 from testrange.drivers.libvirt import LibvirtDriver
 from testrange.drivers.libvirt._conn import LibvirtConn
 from testrange.exceptions import DriverError
+from testrange.handles import PoolHandle
 from testrange.networks import Network, Switch
 from testrange.vms import VMSpec
 
@@ -139,7 +140,7 @@ def test_vm_lifecycle_serial_sink_and_snapshots(
     os_ref = driver.compose_volume_ref(pool, f"{name}.qcow2")
     seed_ref = driver.compose_volume_ref(pool, f"{name}-seed.iso")
     # NIC-less: pure host-side lifecycle, no networking / no in-guest agent needed.
-    spec = VMSpec(name="box", devices=[CPU(2), Memory(1024), OSDrive("p1", 4)])
+    spec = VMSpec(name="box", devices=[CPU(2), Memory(1024), OSDrive(PoolHandle("p1"), 4)])
     try:
         driver.create_pool(StoragePool("p1", 8), pool)
         driver.upload_to_pool(os_ref, base_image)

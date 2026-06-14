@@ -32,74 +32,65 @@ from testrange.devices import CPU, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-creds")
 
-PLAN = Plan(
-    "users-credentials",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.40.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="keybox",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface("lab-net", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-                ),
-                communicator=SSHCommunicator("admin"),
-            ),
-            VMRecipe(
-                spec=VMSpec(
-                    name="pwbox",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface(
-                            "lab-net",
-                            addr=StaticAddr("10.40.0.120", gw="10.40.0.1", dns=("9.9.9.9",)),
-                        ),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[
-                        PosixCred("root", password="root"),
-                        PosixCred("ops", ssh_key=_KEY, admin=True),
-                        PosixCred("viewer", password="viewer-pw", groups=("audit",)),
-                    ],
-                ),
-                communicator=SSHCommunicator("viewer"),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.40.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "keybox",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+    ),
+    communicator=SSHCommunicator("admin"),
+)
+hyp.vm(
+    "pwbox",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(
+            lab_net,
+            StaticAddr("10.40.0.120", gw="10.40.0.1", dns=("9.9.9.9",)),
+        )
+    ],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[
+            PosixCred("root", password="root"),
+            PosixCred("ops", ssh_key=_KEY, admin=True),
+            PosixCred("viewer", password="viewer-pw", groups=("audit",)),
+        ],
+    ),
+    communicator=SSHCommunicator("viewer"),
+)
+
+PLAN = Plan("users-credentials", hyp)
 
 
 def key_auth_connects_as_admin(orch: OrchestratorHandle) -> None:

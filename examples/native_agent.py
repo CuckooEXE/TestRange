@@ -24,48 +24,41 @@ from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.drivers.proxmox import ProxmoxHypervisor
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
-PLAN = Plan(
-    "qga-demo",
-    ProxmoxHypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "switch1",
-                Network("netA"),
-                cidr="172.31.0.0/24",
-                uplink="egress",
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="web",
-                    devices=[
-                        CPU(2),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
-                        NetworkIface("netA", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    packages=[Apt("nginx")],
-                ),
-                communicator=NativeCommunicator(),
-            ),
-        ],
-    ),
+hyp = ProxmoxHypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
 )
+
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
+
+hyp.add_switch(
+    Switch(
+        "switch1",
+        Network("netA"),
+        cidr="172.31.0.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+netA = hyp.networks["netA"]
+
+hyp.vm(
+    "web",
+    cpu=CPU(2),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(netA, DHCPAddr())],
+    builder=CloudInitBuilder(base=CacheEntry("debian-13"), packages=[Apt("nginx")]),
+    communicator=NativeCommunicator(),
+)
+
+PLAN = Plan("qga-demo", hyp)
 
 
 def nginx_is_installed(orch: OrchestratorHandle) -> None:

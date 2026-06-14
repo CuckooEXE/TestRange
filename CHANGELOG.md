@@ -7,6 +7,43 @@ and this project follows [Semantic Versioning](https://semver.org/) from 1.0.0.
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-06-14
+
+TestRange 2.0 converts the engine to an explicit **build graph (DAG)**. This is a
+breaking release: the v0 declarative `Plan(*hypervisors)` form factor and its
+fixed five-phase pipeline are gone, replaced by an imperative builder that freezes
+into a `BuildGraph` of typed `Node`s and kinded `Edge`s, walked by one
+topo-sorting executor with per-node content-addressed caching (ADR-0030).
+
+### Added
+
+- `testrange graph <plan>` renders the build graph as a dependency tree, with
+  `--order` (execution waves), `--dot` (Graphviz), and `--cache` (per-node
+  content-key hit/miss) views; and `run --resume <run-id>` continues a dead run,
+  skipping graph nodes already completed in its ledger.
+- `hyp.vm(...)` hardware-façade helper for plan construction.
+- `SidecarNode` — each switch's DHCP/DNS/NAT sidecar is its own graph node, so its
+  storage-pool dependency attaches to the sidecar rather than the L2 switch
+  (DAG-23). `testrange graph` no longer renders a switch depending on a storage
+  pool, and a VM gates on the sidecar's serving barrier via an explicit
+  `vm → sidecar` edge.
+
+### Changed
+
+- **BREAKING:** the engine is a `BuildGraph` of typed `Node`s and kinded `Edge`s.
+  `Plan(name, hyp)` freezes a single `Hypervisor` container into the graph; the v0
+  `Plan(*hypervisors)` varargs form factor and the five-phase pipeline are removed.
+  Per-node content-addressed cache keys generalize the v0 `config_hash`
+  (byte-identical for an equivalent VM, so existing cache entries are not busted on
+  upgrade).
+
+### Removed
+
+- The `testrange why` subcommand — a node's dependencies, dependents, and wave are
+  now visible in the `graph` dependency tree.
+- The nested-virtualization surface (`GuestHypervisor`, the recursive
+  orchestrator). It returns post-MVP as a `HypervisorNode` graph kind.
+
 ## [1.1.1] — 2026-06-09
 
 ### Fixed

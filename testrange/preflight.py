@@ -176,7 +176,7 @@ def resource_findings(plan: Plan, capacity: HostCapacity) -> tuple[PreflightFind
     normal; *more vCPUs than the host has logical CPUs* is the impossible case).
     Storage is per-pool against the backing store's free space.
     """
-    vms = plan.hypervisor.vms
+    vms = plan.hypervisor.declared_vms
     out: list[PreflightFinding] = []
 
     if capacity.memory_mb is not None:
@@ -229,7 +229,7 @@ def resource_findings(plan: Plan, capacity: HostCapacity) -> tuple[PreflightFind
                 )
 
     if capacity.storage_free_gb is not None:
-        for pool in plan.hypervisor.pools:
+        for pool in plan.hypervisor.declared_pools:
             if pool.size_gb > capacity.storage_free_gb:
                 out.append(
                     PreflightFinding(
@@ -269,7 +269,7 @@ def preflight_switches(plan: Plan, build_switch: Switch | None) -> list[Switch]:
     preflight check. A concrete build switch is appended exactly as before.
     """
     extra = [build_switch] if build_switch is not None else []
-    return [*plan.hypervisor.all_switches, *extra]
+    return [*plan.hypervisor.declared_switches, *extra]
 
 
 def unknown_uplink_findings(
@@ -303,7 +303,7 @@ def builder_origin_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
     image (:meth:`Builder.os_disk_base`) nor a boot medium
     (:meth:`Builder.boot_media`) — it has no way to produce an OS disk."""
     out: list[PreflightFinding] = []
-    for vm in plan.hypervisor.vms:
+    for vm in plan.hypervisor.declared_vms:
         builder = vm.builder
         if builder.os_disk_base() is None and builder.boot_media() is None:
             out.append(
@@ -330,7 +330,7 @@ def unsupported_firmware_findings(
     (the firmware set the ``driver_name`` backend can realize)."""
     supported_set = frozenset(supported)
     out: list[PreflightFinding] = []
-    for vm in plan.hypervisor.vms:
+    for vm in plan.hypervisor.declared_vms:
         fw = vm.spec.firmware
         if fw not in supported_set:
             out.append(
@@ -366,6 +366,6 @@ def mgmt_unsupported_findings(plan: Plan) -> tuple[PreflightFinding, ...]:
                 "static/DHCP addresses"
             ),
         )
-        for sw in plan.hypervisor.all_switches
+        for sw in plan.hypervisor.declared_switches
         if sw.mgmt
     )

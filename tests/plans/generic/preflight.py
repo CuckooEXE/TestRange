@@ -31,73 +31,61 @@ from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
 from testrange.preflight import resource_findings
 from testrange.utils import SSHKey
-from testrange.vms import VMRecipe, VMSpec
 
 _KEY = SSHKey.generate(comment="testrange-preflight")
 
-PLAN = Plan(
-    "preflight",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "lab",
-                Network("lab-net"),
-                cidr="10.42.0.0/24",
-                uplink="egress",
-                mgmt=True,
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 16)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="probe",
-                    devices=[
-                        CPU(1),
-                        Memory(1024),
-                        OSDrive("pool1", 8),
-                        NetworkIface("lab-net", addr=DHCPAddr()),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
-                ),
-                communicator=SSHCommunicator("admin"),
-            ),
-        ],
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
     ),
 )
+pool1 = hyp.add_pool(StoragePool("pool1", 16))
+hyp.add_switch(
+    Switch(
+        "lab",
+        Network("lab-net"),
+        cidr="10.42.0.0/24",
+        uplink="egress",
+        mgmt=True,
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+lab_net = hyp.networks["lab-net"]
+hyp.vm(
+    "probe",
+    cpu=CPU(1),
+    memory=Memory(1024),
+    os_drive=OSDrive(pool1, 8),
+    nics=[NetworkIface(lab_net, DHCPAddr())],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        credentials=[PosixCred("admin", ssh_key=_KEY, admin=True)],
+    ),
+    communicator=SSHCommunicator("admin"),
+)
+
+PLAN = Plan("preflight", hyp)
 
 
 def _oversized_plan(memory_mb: int) -> Plan:
     """A throwaway single-VM plan asking ``memory_mb`` — never realized, only fed
     to the resource gate alongside the live capacity."""
-    return Plan(
-        "preflight-oversized",
-        Hypervisor(
-            networks=[Switch("lab", Network("lab-net"), cidr="10.42.0.0/24")],
-            pools=[StoragePool("pool1", 16)],
-            vms=[
-                VMRecipe(
-                    spec=VMSpec(
-                        name="toobig",
-                        devices=[CPU(1), Memory(memory_mb), OSDrive("pool1", 8)],
-                    ),
-                    builder=CloudInitBuilder(base=CacheEntry("debian-13")),
-                    communicator=SSHCommunicator("admin"),
-                ),
-            ],
-        ),
+    big = Hypervisor()
+    pool1 = big.add_pool(StoragePool("pool1", 16))
+    big.add_switch(Switch("lab", Network("lab-net"), cidr="10.42.0.0/24"))
+    big.vm(
+        "toobig",
+        cpu=CPU(1),
+        memory=Memory(memory_mb),
+        os_drive=OSDrive(pool1, 8),
+        builder=CloudInitBuilder(base=CacheEntry("debian-13")),
+        communicator=SSHCommunicator("admin"),
     )
+    return Plan("preflight-oversized", big)
 
 
 def host_capacity_reports_a_usable_ceiling(orch: OrchestratorHandle) -> None:

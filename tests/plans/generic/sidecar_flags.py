@@ -36,6 +36,25 @@ from testrange.devices.network import DHCPAddr, NetworkIface
 from testrange.networks import Network, Sidecar, Switch
 from testrange.vms import VMRecipe, VMSpec
 
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    ),
+)
+hyp.add_pool(StoragePool("pool1", 24))
+hyp.add_switch(
+    Switch(
+        "flags",
+        Network("flags-net"),
+        cidr="10.63.0.0/24",
+        sidecar=Sidecar(dhcp=True),
+    )
+)
+
 
 def _peer(name: str) -> VMRecipe:
     return VMRecipe(
@@ -44,8 +63,8 @@ def _peer(name: str) -> VMRecipe:
             devices=[
                 CPU(1),
                 Memory(512),
-                OSDrive("pool1", 8),
-                NetworkIface("flags-net", addr=DHCPAddr()),
+                OSDrive(hyp.pools["pool1"], 8),
+                NetworkIface(hyp.networks["flags-net"], addr=DHCPAddr()),
             ],
         ),
         builder=CloudInitBuilder(
@@ -59,28 +78,10 @@ def _peer(name: str) -> VMRecipe:
     )
 
 
-PLAN = Plan(
-    "sidecar-flags",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "flags",
-                Network("flags-net"),
-                cidr="10.63.0.0/24",
-                sidecar=Sidecar(dhcp=True),
-            ),
-        ],
-        pools=[StoragePool("pool1", 24)],
-        vms=[_peer("peer-1"), _peer("peer-2")],
-    ),
-)
+hyp.add_vm(_peer("peer-1"))
+hyp.add_vm(_peer("peer-2"))
+
+PLAN = Plan("sidecar-flags", hyp)
 
 
 def _leased_addr(orch: OrchestratorHandle, name: str) -> str:

@@ -1,11 +1,13 @@
 """Orchestrator runtime.
 
-Drives the lifecycle: preflight -> build -> run -> test -> cleanup. The
+Drives the lifecycle over the plan's frozen build graph (ADR-0030): preflight
+-> materialize walk (build) -> realize walk (run) -> tests -> teardown. The
 Orchestrator brokers between Plan-time data and the driver/cache, respecting
-the stovepipe rule — nothing in `testrange.builders`,
-`testrange.communicators`, or `testrange.credentials` reaches into the
-others. The Orchestrator pulls what each consumer needs from the VMRecipe
-and hands it over.
+the stovepipe rule — nothing in ``testrange.builders``,
+``testrange.communicators``, or ``testrange.credentials`` reaches into the
+others. Node hooks pull what each consumer needs from the
+:class:`~testrange.orchestrator.context.GraphContext` the Orchestrator
+assembles here.
 """
 
 from __future__ import annotations
@@ -14,15 +16,15 @@ import contextlib
 import signal
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import FrameType, TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from testrange._log import get_logger
 from testrange.cache.manager import CacheManager
 from testrange.connect import BackendProfile
 from testrange.drivers.base import HypervisorDriver
-from testrange.exceptions import BuildRequiredError, PreflightError
+from testrange.exceptions import BuildRequiredError, PreflightError, StateError
 from testrange.networks.base import NetworkAddressing
 from testrange.orchestrator.backend import (
     ResolvedBackend,
@@ -30,28 +32,21 @@ from testrange.orchestrator.backend import (
     resolve_backend,
 )
 from testrange.orchestrator.build import resolve_build_switch
-from testrange.orchestrator.build_phase import build_phase, probe_misses
-from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.context import GraphContext
 from testrange.orchestrator.dashboard_state import DashboardState
-from testrange.orchestrator.nested_phase import (
-    NestedHandle,
-    NestedRun,
-    run_nested_phase,
-    teardown_nested,
-)
-from testrange.orchestrator.run_phase import (
-    await_guest_readiness,
-    bind_communicators,
-    run_phase,
-    wait_communicators_ready,
-    wait_dhcp_leases,
+from testrange.orchestrator.executor import (
+    materialize_graph,
+    probe_misses,
+    realize_graph,
 )
 from testrange.orchestrator.teardown import teardown
-from testrange.plan import Plan
 from testrange.preflight import PreflightReport
 from testrange.state.schema import PHASE_LEAKED
 from testrange.state.store import StateStore, new_run_id, run_dir_for
-from testrange.vms.handle import VMHandle
+from testrange.vms.handle import RunningVM
+
+if TYPE_CHECKING:  # pragma: no cover
+    from testrange.plan import Plan
 
 _log = get_logger(__name__)
 
@@ -61,7 +56,7 @@ class OrchestratorHandle:
     """Test-code-facing handle.
 
     Exposes the run id, the live hypervisor driver, and the per-VM bound
-    handles. Test code can reach the driver via ``orch.driver`` for
+    views. Test code can reach the driver via ``orch.driver`` for
     backend-level operations not surfaced through a VM's communicator
     (e.g., snapshot, power-state queries).
 
@@ -72,20 +67,17 @@ class OrchestratorHandle:
 
     run_id: str
     driver: HypervisorDriver
-    vms: Mapping[str, VMHandle]
+    vms: Mapping[str, RunningVM]
     leak: Callable[[], None]
-    # Brought-up nested hypervisors, keyed by the host (guest) name (ADR-0021).
-    # Empty unless the plan declares a GuestHypervisor. Reach an inner VM via
-    # ``orch.nested["host-a"].vms["webapp"]``.
-    nested: Mapping[str, NestedHandle] = field(default_factory=dict)
 
 
 class Orchestrator:
     """Lifecycle context manager.
 
     ``with Orchestrator(plan) as orch:`` brings the range up
-    (preflight -> build -> run) and tears it down on `__exit__`. Every
-    exception path goes through cleanup unless ``leak()`` has been called.
+    (preflight -> materialize -> realize) and tears it down on ``__exit__``.
+    Every exception path goes through cleanup unless ``leak()`` has been
+    called.
     """
 
     def __init__(
@@ -102,15 +94,18 @@ class Orchestrator:
         profile: BackendProfile | None = None,
         jobs: int | None = None,
         dashboard: DashboardState | None = None,
+        resume: bool = False,
     ) -> None:
         self.plan = plan
         self._require_cache = require_cache
+        if resume and run_id is None:
+            raise ValueError("resume=True requires the run_id of the run to resume")
         # Fold the Plan entry + optional connection profile into the single
         # backend binding (CORE-10). A pin/driver mismatch or a backend-agnostic
         # plan with no profile raises here, at construction.
         self._resolved: ResolvedBackend = resolve_backend(plan, profile)
         run_id = run_id or new_run_id()
-        self.ctx = RunContext(
+        self.ctx = GraphContext(
             plan=plan,
             resolved=self._resolved,
             store=StateStore(run_dir_for(run_id)),
@@ -123,22 +118,20 @@ class Orchestrator:
             agent_ready_timeout_s=agent_ready_timeout_s,
             addressing={
                 n.name: NetworkAddressing.from_switch(s)
-                for s in plan.hypervisor.all_switches
+                for s in plan.hypervisor.declared_switches
                 for n in s.networks
             },
             jobs=jobs,
+            resume=resume,
             # The CLI owns the dashboard so it can render the same state the
-            # phases write; a library call with no dashboard gets a fresh one.
+            # node hooks write; a library call with no dashboard gets a fresh one.
             dashboard=dashboard if dashboard is not None else DashboardState(),
         )
         # Register every run VM up front so the dashboard shows them PENDING
         # before bring-up touches them (in plan order).
-        self.ctx.dashboard.seed_vms(vm.name for vm in plan.hypervisor.vms)
+        self.ctx.dashboard.seed_vms(vm.name for vm in plan.hypervisor.declared_vms)
         self._handle: OrchestratorHandle | None = None
         self._leak = False
-        # Entered inner orchestrators (one per GuestHypervisor), torn down LIFO
-        # before the outer teardown destroys their guest VMs (ADR-0021).
-        self._nested_runs: list[NestedRun] = []
 
     @property
     def run_id(self) -> str:
@@ -168,10 +161,6 @@ class Orchestrator:
         """Run read-only preflight (abort on error) and open the state file."""
         # A cache-only run (require_cache) never builds, so it never realizes the
         # build switch — pass None so preflight skips its live checks (CORE-65).
-        # A nested inner run is the motivating case: its build switch was realized
-        # on L0/libvirt during build_nested_inner_vms, and the manufactured inner
-        # profile carries the *outer* backend's uplink vocabulary, which an ESXi
-        # inner would otherwise mis-validate as a vmnic.
         build_switch = (
             None if self._require_cache else resolve_build_switch(self.plan.hypervisor.build_switch)
         )
@@ -190,17 +179,38 @@ class Orchestrator:
         )
         if not report:
             raise PreflightError(report.render())
-        self.ctx.store.initialize(
-            run_id=self.ctx.run_id,
-            plan_name=self.ctx.plan_name,
-            driver_class=self.ctx.driver.DRIVER_NAME,
-            driver_uri=self._resolved.driver_uri,
-        )
+        if self.ctx.resume:
+            state = self.ctx.store.reopen()
+            if state.plan_name != self.ctx.plan_name:
+                raise StateError(
+                    f"run {self.ctx.run_id} was created from plan {state.plan_name!r}; "
+                    f"refusing to resume it with plan {self.ctx.plan_name!r}"
+                )
+            # Seed the in-memory completion mirror from the reopened ledger so
+            # node hooks can skip / reattach what already finished (DAG-9).
+            for record in state.nodes:
+                if record.materialized_at is not None:
+                    self.ctx.materialized_nodes.add(record.name)
+                if record.realized_at is not None:
+                    self.ctx.realized_nodes.add(record.name)
+            _log.info(
+                "resume %s: %d node(s) materialized, %d realized",
+                self.ctx.run_id,
+                len(self.ctx.materialized_nodes),
+                len(self.ctx.realized_nodes),
+            )
+        else:
+            self.ctx.store.initialize(
+                run_id=self.ctx.run_id,
+                plan_name=self.ctx.plan_name,
+                driver_class=self.ctx.driver.DRIVER_NAME,
+                driver_uri=self._resolved.driver_uri,
+            )
 
     def build(self) -> None:
-        """Warm the cache only: preflight + build phase, no run VMs, no tests.
+        """Warm the cache only: preflight + materialize walk, no run VMs, no tests.
 
-        The ``testrange build`` verb. The build phase tears down its own
+        The ``testrange build`` verb. The materialize walk tears down its own
         ephemeral infra; on success the backend holds nothing and the state
         file is drained and removed. On failure, in-flight build resources are
         torn down before the error propagates.
@@ -210,12 +220,12 @@ class Orchestrator:
         try:
             self._preflight_and_initialize()
             try:
-                build_phase(self.ctx)
+                materialize_graph(self.ctx, self.plan.graph)
             except Exception:
                 _log.exception("build failed; tearing down")
                 teardown(self.ctx)
                 raise
-            teardown(self.ctx)  # drain bookkeeping; build_phase already destroyed its infra
+            teardown(self.ctx)  # drain bookkeeping; the walk already destroyed its infra
         finally:
             self._restore_signal_handlers()
             self.ctx.driver.disconnect()
@@ -229,38 +239,30 @@ class Orchestrator:
                 if self._require_cache:
                     # Verify the cache instead of building: a miss fails fast so
                     # CI keeps build and run as distinct invocations (ADR-0010 §1).
-                    misses = probe_misses(self.ctx)
+                    misses = probe_misses(self.ctx, self.plan.graph)
                     if misses:
                         raise BuildRequiredError(
-                            f"{len(misses)} VM(s) not in cache: {', '.join(sorted(misses))}; "
+                            f"{len(misses)} VM(s) not in cache: {', '.join(misses)}; "
                             f"run `testrange build` first (or drop --require-cache)"
                         )
+                    materialize_graph(self.ctx, self.plan.graph)  # ledger the hits
                 else:
-                    build_phase(self.ctx)  # auto-build any cache miss
-                run_phase(self.ctx)
-                bind_communicators(self.ctx)
-                wait_communicators_ready(self.ctx)
-                wait_dhcp_leases(self.ctx)
-                await_guest_readiness(self.ctx)
-                # Recurse into each GuestHypervisor (ADR-0021); built last so the
-                # returned handle carries the nested map. run_nested_phase tears
-                # down any inner it entered if a later one fails.
-                self._nested_runs, nested = run_nested_phase(self.ctx)
-                self._handle = self._build_handle(nested)
+                    materialize_graph(self.ctx, self.plan.graph)  # auto-build any miss
+                realize_graph(self.ctx, self.plan.graph)
+                self._handle = self._build_handle()
             except BaseException:
                 # BaseException, not Exception: a Ctrl-C / SIGTERM lands as
                 # KeyboardInterrupt (BaseException), and it fires inside __enter__
-                # — so Python never calls __exit__ (where the run-phase teardown
-                # lives). If this handler only caught Exception the interrupt would
-                # slip past and leak every resource the build phase created. We
-                # tear down and re-raise (never swallow), so the operator still
-                # sees the interrupt.
+                # — so Python never calls __exit__ (where the teardown lives). If
+                # this handler only caught Exception the interrupt would slip past
+                # and leak every resource the walks created. We tear down and
+                # re-raise (never swallow), so the operator still sees the
+                # interrupt.
                 _log.exception("bring-up failed or interrupted; tearing down")
                 # parallel_map is fail-fast: the worker that raised tagged its
                 # own VM FAILED; sweep any sibling left mid-stage so the final
                 # dashboard frame is truthful rather than frozen at e.g. booting.
                 self.ctx.dashboard.abort_unfinished()
-                teardown_nested(self._nested_runs)
                 teardown(self.ctx)
                 raise
             return self._handle
@@ -285,15 +287,12 @@ class Orchestrator:
         del exc_val, exc_tb
         try:
             if self._leak:
-                _log.warning("leak: skipping teardown; run state retained (incl. nested)")
+                _log.warning("leak: skipping teardown; run state retained")
                 self.ctx.store.set_phase(PHASE_LEAKED)
                 self.ctx.store.release()
             else:
                 if exc_type is not None:
                     _log.info("tearing down after %s", exc_type.__name__)
-                # Inner orchestrators first (LIFO): tear each nested plan down
-                # before the outer teardown destroys its guest VM (ADR-0021).
-                teardown_nested(self._nested_runs)
                 teardown(self.ctx)
         finally:
             self._restore_signal_handlers()
@@ -337,21 +336,20 @@ class Orchestrator:
             with contextlib.suppress(ValueError, OSError):
                 signal.signal(sig, prior)
 
-    def _build_handle(self, nested: Mapping[str, NestedHandle]) -> OrchestratorHandle:
-        vms_map: dict[str, VMHandle] = {
-            vm.name: VMHandle(
+    def _build_handle(self) -> OrchestratorHandle:
+        vms_map: dict[str, RunningVM] = {
+            vm.name: RunningVM(
                 name=vm.name,
                 backend_name=self.ctx.driver.compose_resource_name(self.ctx.run_id, "vm", vm.name),
                 communicator=vm.communicator,
             )
-            for vm in self.plan.hypervisor.vms
+            for vm in self.plan.hypervisor.declared_vms
         }
         return OrchestratorHandle(
             run_id=self.ctx.run_id,
             driver=self.ctx.driver,
             vms=vms_map,
             leak=self.leak,
-            nested=nested,
         )
 
 

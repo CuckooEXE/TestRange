@@ -9,7 +9,7 @@ import pytest
 
 from testrange.exceptions import StateError
 from testrange.orchestrator.backend import ResolvedBackend
-from testrange.orchestrator.context import RunContext
+from testrange.orchestrator.context import GraphContext
 from testrange.orchestrator.teardown import teardown
 from testrange.state.schema import PHASE_CLEANUP
 from testrange.state.store import StateStore
@@ -36,9 +36,9 @@ class _FlakyDriver(_FakeDriver):
         super().destroy(kind, backend_name, **metadata)
 
 
-def _ctx(store: StateStore, driver: _FakeDriver) -> RunContext:
+def _ctx(store: StateStore, driver: _FakeDriver) -> GraphContext:
     # teardown() only touches store/driver/run_id; plan and cache are unused.
-    return RunContext(
+    return GraphContext(
         plan=cast(Any, None),
         resolved=ResolvedBackend(driver=cast(Any, driver), driver_uri=""),
         store=store,

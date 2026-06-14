@@ -35,4 +35,5 @@ context, the decision, and the consequences. Listed oldest-first.
 0027-bare-metal-provisioning
 0028-release-validation-strategy
 0029-rich-terminal-output
+0030-build-graph-dag
 ```

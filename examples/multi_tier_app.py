@@ -4,9 +4,12 @@ Two guests across two switches. ``web`` is multi-homed — a DHCP NIC on the NAT
 ``edge`` switch (its default route + internet) and a static NIC on the isolated
 ``backend`` switch. ``db`` sits alone on ``backend``: no uplink, no sidecar, so it
 has internal L2 to ``web`` but no path off-segment. ``db`` also carries a data
-disk (a second ``HardDrive`` beside its OS drive). The tests assert the tier
-boundary: ``web`` egresses, ``db`` does not, ``web`` reaches ``db`` internally, and
-``db`` sees its extra disk.
+disk (a second ``HardDrive`` beside its OS drive). ``web.needs(db)`` is an
+explicit ordering edge: the executor brings ``db`` fully up before ``web``
+starts, so web's first test can hit the backend tier immediately — run
+``testrange graph examples/multi_tier_app.py --order`` to see the waves. The
+tests assert the tier boundary: ``web`` egresses, ``db`` does not, ``web``
+reaches ``db`` internally, and ``db`` sees its extra disk.
 
 Portable plan — bind a backend at run time:
 
@@ -34,74 +37,68 @@ from testrange.devices import CPU, HardDrive, Memory, OSDrive, StoragePool
 from testrange.devices.network import DHCPAddr, NetworkIface, StaticAddr
 from testrange.networks import Network, Sidecar, Switch
 from testrange.packages import Apt
-from testrange.vms import VMRecipe, VMSpec
 
 _DB_IP = "10.40.0.101"
 
-
-PLAN = Plan(
-    "multi-tier-app",
-    Hypervisor(
-        build_switch=Switch(
-            "build",
-            Network("build-net"),
-            cidr="10.97.99.0/24",
-            uplink="egress",
-            sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-        ),
-        networks=[
-            Switch(
-                "edge",
-                Network("edge-net"),
-                cidr="10.30.0.0/24",
-                uplink="egress",
-                sidecar=Sidecar(dhcp=True, dns=True, nat=True),
-            ),
-            Switch("backend", Network("backend-net"), cidr="10.40.0.0/24"),
-        ],
-        pools=[StoragePool("pool1", 32)],
-        vms=[
-            VMRecipe(
-                spec=VMSpec(
-                    name="web",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        NetworkIface("edge-net", addr=DHCPAddr()),
-                        NetworkIface("backend-net", addr=StaticAddr("10.40.0.100")),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    packages=[Apt("curl")],
-                ),
-                communicator=NativeCommunicator(),
-            ),
-            VMRecipe(
-                spec=VMSpec(
-                    name="db",
-                    devices=[
-                        CPU(1),
-                        Memory(512),
-                        OSDrive("pool1", 8),
-                        HardDrive("pool1", 4),
-                        NetworkIface("backend-net", addr=StaticAddr(_DB_IP)),
-                    ],
-                ),
-                builder=CloudInitBuilder(
-                    base=CacheEntry("debian-13"),
-                    packages=[Apt("nginx")],
-                    post_install_commands=(
-                        "sh -c 'echo backend-tier-online > /var/www/html/index.html'",
-                        "systemctl enable --now nginx",
-                    ),
-                ),
-                communicator=NativeCommunicator(),
-            ),
-        ],
-    ),
+hyp = Hypervisor(
+    build_switch=Switch(
+        "build",
+        Network("build-net"),
+        cidr="10.97.99.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
 )
+
+pool1 = hyp.add_pool(StoragePool("pool1", 32))
+
+hyp.add_switch(
+    Switch(
+        "edge",
+        Network("edge-net"),
+        cidr="10.30.0.0/24",
+        uplink="egress",
+        sidecar=Sidecar(dhcp=True, dns=True, nat=True),
+    )
+)
+hyp.add_switch(Switch("backend", Network("backend-net"), cidr="10.40.0.0/24"))
+edge_net = hyp.networks["edge-net"]
+backend_net = hyp.networks["backend-net"]
+
+web = hyp.vm(
+    "web",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    nics=[
+        NetworkIface(edge_net, DHCPAddr()),
+        NetworkIface(backend_net, StaticAddr("10.40.0.100")),
+    ],
+    builder=CloudInitBuilder(base=CacheEntry("debian-13"), packages=[Apt("curl")]),
+    communicator=NativeCommunicator(),
+)
+
+db = hyp.vm(
+    "db",
+    cpu=CPU(1),
+    memory=Memory(512),
+    os_drive=OSDrive(pool1, 8),
+    data_disks=[HardDrive(pool1, 4)],
+    nics=[NetworkIface(backend_net, StaticAddr(_DB_IP))],
+    builder=CloudInitBuilder(
+        base=CacheEntry("debian-13"),
+        packages=[Apt("nginx")],
+        post_install_commands=(
+            "sh -c 'echo backend-tier-online > /var/www/html/index.html'",
+            "systemctl enable --now nginx",
+        ),
+    ),
+    communicator=NativeCommunicator(),
+)
+
+web.needs(db)
+
+PLAN = Plan("multi-tier-app", hyp)
 
 
 def web_egresses_through_nat(orch: OrchestratorHandle) -> None:

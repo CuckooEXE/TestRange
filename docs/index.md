@@ -30,6 +30,7 @@ user/running-tests
 
 dev/contributing
 dev/architecture
+dev/graph
 dev/extending/index
 dev/bugfixing
 ```
