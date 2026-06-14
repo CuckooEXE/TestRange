@@ -76,7 +76,9 @@ the graph first-class and lets a single executor walk it.
 - **`Node`** (kinded ABC) — a unit of materializable state with (a) a typed
   handle, (b) a content-addressed cache key, (c) `materialize` (build/cache the
   disk-set) and `realize` (bring up) hooks. MVP kinds: `PoolNode`,
-  `NetworkNode` (carries the sidecar), `VMNode` (built by a `Builder`).
+  `NetworkNode` (the L2 fabric), `SidecarNode` (a switch's DHCP/DNS/NAT sidecar —
+  split out so its storage-pool dependency attaches to the sidecar, not the L2
+  switch; DAG-23), `VMNode` (built by a `Builder`).
   *Deferred kinds (seams only):* `ApplianceNode` (deploy-through-an-endpoint),
   `HypervisorNode` (nested — recurses an inner `BuildGraph`).
 - **`Edge`** (kinded) — a directed dependency `B → A` ("B needs A"). MVP edge

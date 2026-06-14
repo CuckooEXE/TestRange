@@ -7,7 +7,7 @@ from testrange.orchestrator.runner import TestResult, run_tests
 from testrange.orchestrator.runtime import Orchestrator, OrchestratorHandle
 from testrange.plan import Plan
 
-__version__ = "1.1.1"
+__version__ = "2.0.0"
 
 __all__ = [
     "Hypervisor",

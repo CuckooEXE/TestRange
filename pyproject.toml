@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "testrange"
-version = "1.1.1"
+version = "2.0.0"
 description = "Declarative Python plans → VM test-ranges → user test functions"
 readme = "README.md"
 requires-python = ">=3.11"

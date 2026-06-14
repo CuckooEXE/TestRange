@@ -64,7 +64,11 @@ validated `BuildGraph`, and walked by one executor.
   deterministic backend resource name and the `--resume` skip key), (b) a coarse
   `kind` tag for display/dispatch, (c) a content-addressed `cache_key`
   contract, and (d) `materialize` / `realize` hooks. MVP kinds (DAG-3):
-  `PoolNode`, `NetworkNode` (carries the sidecar), `VMNode` (wraps a `VMRecipe`).
+  `PoolNode`, `NetworkNode` (the L2 fabric), `VMNode` (wraps a `VMRecipe`), and
+  `SidecarNode` (a switch's DHCP/DNS/NAT sidecar). The sidecar was originally
+  folded into `NetworkNode`; DAG-23 split it into its own kind — exercising this
+  ADR's "new kinds, not a reshape" seam (DAG-19/20) — so the sidecar's
+  storage-pool dependency attaches to the sidecar, not the L2 switch.
   *Deferred kinds, seams only:* `ApplianceNode` (deploy-through-an-endpoint) and
   `HypervisorNode` (nested — recurses an inner graph).
 

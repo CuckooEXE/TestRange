@@ -91,11 +91,59 @@ class TestNodeIdentity:
     def test_kinds_and_names(self) -> None:
         plan = _plan()
         g = plan.graph
+        # sw1 carries a sidecar, so it gets its own SidecarNode (DAG-23). The
+        # L2 fabric (network:sw1) has no deps now, so it shares wave 0 with the
+        # pool; the sidecar gates on both, and the VM gates on the sidecar.
         assert [(n.name, n.kind) for n in g.topological_order()] == [
-            ("pool:pool1", "pool"),
             ("network:sw1", "network"),
+            ("pool:pool1", "pool"),
+            ("sidecar:sw1", "sidecar"),
             ("vm:web", "vm"),
         ]
+
+    def test_sidecar_owns_the_pool_and_network_edges(self) -> None:
+        """DAG-23: the storage-pool dependency lands on the sidecar, not the L2
+        switch; the VM gates on the sidecar (the barrier), which gates on the
+        fabric + pool. The network node depends on nothing."""
+        g = _plan().graph
+
+        def deps(name: str) -> set[str]:
+            return {d.name for d in g.dependencies_of(name)}
+
+        assert deps("network:sw1") == set()  # L2 fabric needs no storage
+        assert deps("sidecar:sw1") == {"network:sw1", "pool:pool1"}
+        # VM keeps its direct NIC->network and OS-disk->pool edges, plus the
+        # sidecar barrier edge.
+        assert deps("vm:web") == {"network:sw1", "sidecar:sw1", "pool:pool1"}
+
+    def test_sidecarless_switch_has_no_sidecar_node(self) -> None:
+        """An air-gapped switch (no sidecar) gets no SidecarNode; the VM's NIC
+        edge targets the network node directly, and no pool edge is invented."""
+        hyp = MockHypervisor()
+        hyp.add_pool(StoragePool("pool1", 32))
+        hyp.add_switch(Switch("air", Network("netA"), cidr="10.9.0.0/24"))  # no sidecar
+        hyp.add_vm(
+            VMRecipe(
+                spec=VMSpec(
+                    name="iso",
+                    devices=[
+                        CPU(1),
+                        Memory(512),
+                        OSDrive(hyp.pools["pool1"], 8),
+                        NetworkIface(hyp.networks["netA"], addr=StaticAddr("10.9.0.5")),
+                    ],
+                ),
+                builder=CloudInitBuilder(
+                    base=CacheEntry("debian-13"), credentials=[PosixCred("u", password="p")]
+                ),
+                communicator=SSHCommunicator("u"),
+            )
+        )
+        g = Plan("airgap", hyp).graph
+        assert "sidecar:air" not in g
+        assert {n.kind for n in g.nodes} == {"pool", "network", "vm"}
+        assert {d.name for d in g.dependencies_of("network:air")} == set()
+        assert {d.name for d in g.dependencies_of("vm:iso")} == {"network:air", "pool:pool1"}
 
     def test_infra_keys_are_pure_declaration(self, ctx: GraphContext) -> None:
         pool = PoolNode(StoragePool("pool1", 32))

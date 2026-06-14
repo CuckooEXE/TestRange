@@ -64,7 +64,7 @@ class TestPlanBasics:
         plan = Plan("t", hyp)
         assert plan.hypervisor is hyp
         assert plan.name == "t"
-        assert plan.graph.names == ("pool:pool1", "network:sw1", "vm:web")
+        assert plan.graph.names == ("pool:pool1", "network:sw1", "sidecar:sw1", "vm:web")
 
     def test_empty_name_rejected(self) -> None:
         with pytest.raises(ValueError, match="non-empty name"):
@@ -83,9 +83,12 @@ class TestPlanBasics:
 
 class TestImplicitInfraEdges:
     def test_vm_depends_on_its_pool_and_network(self) -> None:
+        # The NIC's direct edge to network:sw1 and the OS-disk edge to pool:pool1
+        # are kept; on a sidecar-carrying switch the VM also gates on the sidecar
+        # barrier (DAG-23).
         plan = Plan("t", _populated())
         deps = {n.name for n in plan.graph.dependencies_of("vm:web")}
-        assert deps == {"pool:pool1", "network:sw1"}
+        assert deps == {"pool:pool1", "network:sw1", "sidecar:sw1"}
 
     def test_data_drive_pool_becomes_an_edge(self) -> None:
         hyp = MockHypervisor()
@@ -99,12 +102,14 @@ class TestImplicitInfraEdges:
         deps = {n.name for n in plan.graph.dependencies_of("vm:web")}
         assert "pool:pool2" in deps
 
-    def test_sidecar_switch_depends_on_first_pool(self) -> None:
-        # The sidecar VM's disk lands in the first declared pool (the v0
-        # placement, preserved), so the switch node orders after that pool.
+    def test_sidecar_node_owns_the_pool_and_network_edges(self) -> None:
+        # DAG-23: the sidecar's disk lands in the first declared pool and it
+        # reads the switch's network backends, so the pool + network edges
+        # attach to the SIDECAR node — the L2 fabric itself needs no storage.
         plan = Plan("t", _populated())
-        deps = {n.name for n in plan.graph.dependencies_of("network:sw1")}
-        assert deps == {"pool:pool1"}
+        assert plan.graph.dependencies_of("network:sw1") == ()
+        deps = {n.name for n in plan.graph.dependencies_of("sidecar:sw1")}
+        assert deps == {"pool:pool1", "network:sw1"}
 
     def test_sidecarless_switch_is_a_root(self) -> None:
         hyp = MockHypervisor()
@@ -129,10 +134,15 @@ class TestExplicitEdges:
         hyp.vms["web"].needs(db)
         plan = Plan("t", hyp)
         waves = [[n.name for n in wave] for wave in plan.graph.waves()]
-        assert waves == [["pool:pool1"], ["network:sw1"], ["vm:db"], ["vm:web"]]
+        assert waves == [
+            ["network:sw1", "pool:pool1"],
+            ["sidecar:sw1"],
+            ["vm:db"],
+            ["vm:web"],
+        ]
         # Builds stay concurrent: ordering edges don't gate materialize.
         assert [[n.name for n in w] for w in plan.graph.content_waves()] == [
-            ["network:sw1", "pool:pool1", "vm:db", "vm:web"]
+            ["network:sw1", "pool:pool1", "sidecar:sw1", "vm:db", "vm:web"]
         ]
 
     def test_needs_cycle_rejected_at_plan(self) -> None:

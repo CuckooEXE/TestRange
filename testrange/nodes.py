@@ -12,14 +12,16 @@ them.
 :func:`assemble_graph` is what ``Plan(name, hyp)`` calls to freeze a
 :class:`~testrange.hypervisor.Hypervisor` container into the validated
 :class:`~testrange.graph.build_graph.BuildGraph`: one node per registered
-pool/switch/VM, plus the **implicit infra edges** inferred from the typed
-handle references in each VM's spec (VM -> its disks' pools, VM -> its NICs'
-switches, a sidecar-carrying switch -> the first declared pool) and the
-explicit ordering edges recorded by ``handle.needs()``.
+pool/switch/VM (plus a ``SidecarNode`` for each sidecar-carrying switch), plus
+the **implicit infra edges** inferred from the typed handle references in each
+VM's spec (VM -> its disks' pools; VM -> its NICs' switch and, when that switch
+has a sidecar, that sidecar too — so the v0 sidecar barrier is preserved; a
+sidecar -> its switch's network and the first declared pool, its disk's home)
+and the explicit ordering edges recorded by ``handle.needs()``.
 
 Node names are kind-qualified (``pool:pool1``, ``network:switch1``,
-``vm:web``) so a pool and a VM sharing a plan-level name can never collide on
-graph identity.
+``sidecar:switch1``, ``vm:web``) so a pool and a VM sharing a plan-level name
+can never collide on graph identity.
 """
 
 from __future__ import annotations
@@ -141,14 +143,16 @@ class PoolNode(Node):
 
 
 class NetworkNode(Node):
-    """One switch's L2 unit: fabric + bindable networks + optional sidecar.
+    """One switch's L2 unit: fabric + bindable networks.
 
-    A switch and its networks realize together (the sidecar reads the switch's
-    own network backends), so they are ONE node; ``hyp.networks["netA"]``
-    handles resolve onto the owning switch's node. Realize provisions the
-    fabric, materializes the sidecar, and does not return until the sidecar is
-    *serving* — so a VM node depending on this network never boots before
-    DHCP/DNS/NAT is live (the v0 sidecar barrier, per-node).
+    A switch and its networks realize together, so they are ONE node;
+    ``hyp.networks["netA"]`` handles resolve onto the owning switch's node.
+    Realize provisions the fabric only — no storage is involved, so this node
+    carries no pool dependency. The optional sidecar is a separate
+    :class:`SidecarNode` (DAG-23): its storage-pool dependency belongs to the
+    sidecar, not to the L2 fabric, and the per-node sidecar barrier moves with
+    it (a VM on a sidecar-carrying switch depends on the sidecar node, which
+    depends on this one).
     """
 
     def __init__(self, switch: Switch) -> None:
@@ -167,8 +171,7 @@ class NetworkNode(Node):
         return "network"
 
     def cache_key(self, ctx: NodeContext, dependency_keys: Mapping[str, str]) -> str:
-        del ctx  # a switch's key is pure declaration
-        sc = self._switch.sidecar
+        del ctx  # a switch's key is pure declaration (the sidecar keys itself)
         own = _hash_inputs(
             "network",
             self._switch.name,
@@ -176,7 +179,6 @@ class NetworkNode(Node):
             self._switch.uplink or "",
             str(self._switch.mgmt),
             ",".join(n.name for n in self._switch.networks),
-            "" if sc is None else f"dhcp={sc.dhcp},dns={sc.dns},nat={sc.nat},addr={sc.addr}",
         )
         return _fold_dependency_keys(own, dependency_keys)
 
@@ -186,11 +188,10 @@ class NetworkNode(Node):
     def realize(self, ctx: NodeContext) -> None:
         rt = _graph_ctx(ctx)
         if rt.resume and self.name in rt.realized_nodes:
-            # Reattach (DAG-9): fabric + sidecar exist from the resumed run;
-            # rebuild the in-memory ledgers from the deterministic backend
-            # names (the uplink segment entry is only consumed at sidecar
-            # creation, so it needs no reconstruction), then re-verify the
-            # sidecar is still serving before dependents proceed.
+            # Reattach (DAG-9): the fabric exists from the resumed run; rebuild
+            # the switch + per-network backend ledgers from the deterministic
+            # backend names. The sidecar (if any) is a separate SidecarNode with
+            # its own reattach.
             sw = self._switch
             with rt.ledger_lock:
                 rt.switch_backends[sw.name] = rt.driver.compose_resource_name(
@@ -200,15 +201,68 @@ class NetworkNode(Node):
                     rt.network_backends[net.name] = rt.driver.compose_resource_name(
                         rt.run_id, "network", net.name
                     )
-                if sw.needs_sidecar:
-                    rt.sidecar_backends[sw.name] = rt.driver.compose_resource_name(
-                        rt.run_id, "sidecar_vm", sw.name
-                    )
-            wait_sidecar_ready(rt, sw)
             return
         provision_switch(rt, self._switch)
-        materialize_sidecar_for(rt, self._switch)
-        wait_sidecar_ready(rt, self._switch)
+
+
+class SidecarNode(Node):
+    """One switch's sidecar VM: its DHCP/DNS/NAT services (DAG-23).
+
+    Split out of :class:`NetworkNode` so the sidecar's real dependencies attach
+    where they belong: its OS disk lands in the first declared pool
+    (``sidecar:<sw> -> pool:<first>``), and it reads the switch's per-network
+    backends (``sidecar:<sw> -> network:<sw>``). The L2 fabric itself needs no
+    storage, so the network node no longer carries a spurious pool edge — which
+    is what ``testrange graph`` was rendering as a lie.
+
+    Realize materializes the sidecar and does not return until it is *serving*,
+    so a VM depending on this node never boots before DHCP/DNS/NAT is live (the
+    v0 sidecar barrier, per-node — preserved, just moved off the network node).
+    """
+
+    def __init__(self, switch: Switch) -> None:
+        self._switch = switch
+
+    @property
+    def switch(self) -> Switch:
+        return self._switch
+
+    @property
+    def name(self) -> str:
+        return f"sidecar:{self._switch.name}"
+
+    @property
+    def kind(self) -> str:
+        return "sidecar"
+
+    def cache_key(self, ctx: NodeContext, dependency_keys: Mapping[str, str]) -> str:
+        del ctx  # a sidecar's key is pure declaration (its services config)
+        sc = self._switch.sidecar
+        own = _hash_inputs(
+            "sidecar",
+            self._switch.name,
+            "" if sc is None else f"dhcp={sc.dhcp},dns={sc.dns},nat={sc.nat},addr={sc.addr}",
+        )
+        return _fold_dependency_keys(own, dependency_keys)
+
+    def materialize(self, ctx: NodeContext) -> None:
+        del ctx  # the sidecar disk is the cached base image, pushed at realize
+
+    def realize(self, ctx: NodeContext) -> None:
+        rt = _graph_ctx(ctx)
+        sw = self._switch
+        if rt.resume and self.name in rt.realized_nodes:
+            # Reattach (DAG-9): the sidecar exists from the resumed run; rebuild
+            # its backend ledger entry from the deterministic name, then
+            # re-verify it is still serving before dependents proceed.
+            with rt.ledger_lock:
+                rt.sidecar_backends[sw.name] = rt.driver.compose_resource_name(
+                    rt.run_id, "sidecar_vm", sw.name
+                )
+            wait_sidecar_ready(rt, sw)
+            return
+        materialize_sidecar_for(rt, sw)
+        wait_sidecar_ready(rt, sw)
 
 
 class VMNode(Node):
@@ -311,19 +365,29 @@ def assemble_graph(name: str, hyp: Hypervisor) -> BuildGraph:
     first_pool = hyp.declared_pools[0] if hyp.declared_pools else None
     for pool in hyp.declared_pools:
         nodes.append(PoolNode(pool))
+    # Map a switch's network-node name to the switch so a VM's NIC edge can
+    # target the switch's sidecar (when it has one) instead of the bare fabric.
+    # Every Network on a switch resolves to that one NetworkNode, so the NIC
+    # handle's ``node_name`` (``network:<switch>``) keys this directly.
+    switch_by_network_node: dict[str, Switch] = {}
     for switch in hyp.declared_switches:
         node = NetworkNode(switch)
         nodes.append(node)
+        switch_by_network_node[node.name] = switch
         if switch.needs_sidecar:
-            # The sidecar VM's disk lands in the first declared pool (the v0
-            # placement, preserved), so a sidecar-carrying switch realizes
-            # only after that pool exists.
+            # The sidecar is its own node (DAG-23): its disk lands in the first
+            # declared pool (the v0 placement, preserved) and it reads the
+            # switch's per-network backends — so the pool + network dependencies
+            # attach to the SIDECAR, not the L2 fabric.
             if first_pool is None:
                 raise OrchestratorError(
                     f"switch {switch.name!r} needs a sidecar but the plan declares no "
                     "pools; the sidecar's disk lands in the first declared pool"
                 )
-            add_edge(node.name, f"pool:{first_pool.name}")
+            sidecar = SidecarNode(switch)
+            nodes.append(sidecar)
+            add_edge(sidecar.name, node.name)
+            add_edge(sidecar.name, f"pool:{first_pool.name}")
     for index, vm in enumerate(hyp.declared_vms):
         vm_node = VMNode(vm, index)
         nodes.append(vm_node)
@@ -331,7 +395,17 @@ def assemble_graph(name: str, hyp: Hypervisor) -> BuildGraph:
         for hd in vm.spec.data_drives:
             add_edge(vm_node.name, hd.pool.node_name)
         for nic in vm.spec.nics:
+            # The NIC attaches to the network — a direct data dependency, kept
+            # explicit (the same way the OS-disk edge to its pool is kept even
+            # though the sidecar also edges that pool).
             add_edge(vm_node.name, nic.network.node_name)
+            # When the NIC's switch carries a sidecar, also gate the VM on it:
+            # the sidecar-serving barrier (DHCP/DNS/NAT live before boot) moved
+            # off the network node onto the sidecar node (DAG-23), so the VM must
+            # wait for the sidecar, not just the fabric.
+            sw = switch_by_network_node.get(nic.network.node_name)
+            if sw is not None and sw.needs_sidecar:
+                add_edge(vm_node.name, f"sidecar:{sw.name}")
     for dependent, dependency in hyp.explicit_edges:
         add_edge(dependent, dependency)
 
@@ -341,6 +415,7 @@ def assemble_graph(name: str, hyp: Hypervisor) -> BuildGraph:
 __all__ = [
     "NetworkNode",
     "PoolNode",
+    "SidecarNode",
     "VMNode",
     "assemble_graph",
 ]

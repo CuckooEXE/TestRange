@@ -413,9 +413,13 @@ on 2026-06-06.
 
   > GATE: full e2e suite green on hosted libvirt + Proxmox + ESXi (REL-14/15/16 all clean). Then: capture an `/api-diff` baseline + freeze the public surface (testrange.__init__ exports, the driver ABC, the CLI); flip `major_version_zero = false` in pyproject so commitizen enforces SemVer major-on-break; `/release-notes` -> CHANGELOG since the last tag; `cz bump` to 1.0.0 + tag v1.0.0. Push is the user's call (never auto-push).
 
-## Done (410)
+## Done (411)
 
 ### DAG
+
+- [x] **DAG-23** · `chore` — split the sidecar into its own node so the pool dependency lands on the sidecar, not the switch _(done: 2026-06-14)_
+
+  > DONE 2026-06-14: added a 4th node kind `SidecarNode` (the ADR-0030 "new kinds, not a reshape" seam, DAG-19/20). `NetworkNode.realize` is now fabric+networks only; `materialize_sidecar_for` + the `wait_sidecar_ready` barrier moved to `SidecarNode.realize`. Edges: `sidecar:<sw> → network:<sw>` + `sidecar:<sw> → pool:<first>` — the pool edge moved OFF the L2 switch, so `testrange graph` no longer renders a switch depending on storage. VMs keep their direct NIC→network + OS-disk→pool edges and gain a `vm → sidecar:<sw>` barrier edge (no VM boots before its subnet is served). `--resume` reattach split (sidecar_backends → SidecarNode); VM `config_hash` parity holds (ordering edges only). ADR-0030 + PLAN.md updated; unit gate (ruff/format/mypy/pytest 1363) + libvirt hello_world smoke green; corpus realized-infra byte-identical. Shipped in 2.0.0.
 
 - [x] **DAG** · `EPIC` — TestRange 2.0: convert the codebase to an explicit build graph (DAG) _(done: 2026-06-12)_
 

@@ -596,7 +596,7 @@ def _node_label(node: Node, keys: dict[str, str], misses: set[str], show_cache: 
 
 def _render_dot(g: BuildGraph) -> str:
     """Graphviz text for ``graph --dot``. An edge ``A -> B`` reads "A needs B"."""
-    shapes = {"pool": "cylinder", "network": "diamond", "vm": "box"}
+    shapes = {"pool": "cylinder", "network": "diamond", "sidecar": "component", "vm": "box"}
     lines = [f'digraph "{g.name}" {{']
     lines.append("  rankdir=BT;  // dependencies below their dependents")
     for n in g.topological_order():

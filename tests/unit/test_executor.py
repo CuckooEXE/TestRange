@@ -142,7 +142,7 @@ class TestCompletionLedger:
         mgr, _ = populated_cache
         o = Orchestrator(_two_tier_plan(), cache_manager=mgr)
         with o:
-            expected = {"pool:pool1", "network:sw1", "vm:db", "vm:web"}
+            expected = {"pool:pool1", "network:sw1", "sidecar:sw1", "vm:db", "vm:web"}
             assert o.ctx.materialized_nodes == expected
             assert o.ctx.realized_nodes == expected
             state = o.ctx.store.read()

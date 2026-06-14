@@ -156,7 +156,7 @@ def wait_sidecar_ready(ctx: GraphContext, switch: Switch) -> None:
     A sidecar is **ready** when its native guest agent answers *and* the
     orchestrator can read back the dnsmasq config it delivered — proof the
     sidecar has booted, the agent is up, and the config has been applied, so
-    DHCP/DNS/NAT is live before any VM on this switch boots (the network
+    DHCP/DNS/NAT is live before any VM on this switch boots (the sidecar
     node's realize does not return until this clears). Sidecars are driven
     only through the driver's native guest channel; the orchestrator never
     routes IP traffic to one. A sidecar whose agent never answers fails loud.
@@ -264,7 +264,7 @@ def discover_ip(ctx: GraphContext, vm: VMRecipe, nic_idx: int | None = None) -> 
     from ``(plan_name, vm_name, nic_idx)`` until ``lease_timeout_s`` elapses.
     The orchestrator brokers: it combines the driver's guest-file read
     transport with the sidecar's lease-file path and parser. The sidecar
-    readiness gate (:func:`wait_sidecar_ready`, run by the network node this VM
+    readiness gate (:func:`wait_sidecar_ready`, run by the sidecar node this VM
     depends on) has already confirmed the agent is up, so the
     ``GuestAgentError`` catch below is now only a guard against a transient
     blip while the lease itself is being written — not the agent-up race.

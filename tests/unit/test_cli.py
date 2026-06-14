@@ -145,16 +145,17 @@ class TestGraph:
     def test_shared_subtree_is_backreferenced(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        # Two VMs on one switch: network:sw1 has two dependents *and* its own
-        # dependency (pool, via the sidecar->first-pool edge). It is expanded in
-        # full under the first VM and back-referenced under the second, so the
-        # render stays linear in the graph instead of duplicating the sub-tree.
+        # Two VMs on one sidecar-carrying switch: both gate on sidecar:sw1, which
+        # carries its own sub-tree (network:sw1 + the first pool — DAG-23). That
+        # shared node is expanded in full under the first VM and back-referenced
+        # under the second, so the render stays linear instead of duplicating the
+        # sub-tree.
         plan = tmp_path / "two_vm.py"
         plan.write_text(_TWO_VM_PLAN_SRC)
         rc = cli.main(["graph", str(plan)])
         assert rc == 0
         out = capsys.readouterr().out
-        assert out.count("network:sw1") == 2  # appears under both VMs
+        assert out.count("sidecar:sw1") == 2  # appears under both VMs
         assert out.count("shown above") == 1  # but expanded only once
 
     def test_order_flag_still_prints_waves(self, capsys: pytest.CaptureFixture[str]) -> None:
